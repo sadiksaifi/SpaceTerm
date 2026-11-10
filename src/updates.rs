@@ -544,7 +544,8 @@ pub(crate) struct ApplicationUpdates {
     /// finished download, a current SpaceTerm or the person's own try ends it.
     retrying_since: Option<u64>,
     /// A download the person started failed. That failure is theirs to see until a download
-    /// finishes, SpaceTerm is current or they dismiss it, so no later try dates it.
+    /// finishes, SpaceTerm is current, a different release is found, or they dismiss it or
+    /// stop a try, so no later try dates it.
     own_download_failed: bool,
     download_requested: bool,
     /// The person chose Relaunch before the release was ready, so it relaunches once it is.
@@ -920,6 +921,7 @@ impl ApplicationUpdates {
     pub(crate) fn cancel(&mut self, cx: &mut Context<Self>) {
         self.relaunch_requested = false;
         self.retrying_since = None;
+        self.own_download_failed = false;
         if self.model.cycle_active && !self.model.install_authorized {
             self.model.cancelling = true;
             self.model.confirmation_open = false;
@@ -1074,12 +1076,23 @@ impl ApplicationUpdates {
             self.reminder = None;
             self.save_history();
         }
-        if matches!(event, UpdateEvent::Failed(UpdateError::Download)) {
-            if !self.automatic_download {
-                self.own_download_failed = true;
-            } else if !self.own_download_failed {
-                self.retrying_since.get_or_insert(time);
-            }
+        // A different release starts over: the failure the person saw was of another one.
+        if let UpdateEvent::Available(version) = &event
+            && self.model.version.as_ref() != Some(version)
+        {
+            self.own_download_failed = false;
+        }
+        let downloading = matches!(
+            self.model.state,
+            UpdateState::Downloading { .. } | UpdateState::Verifying { .. }
+        );
+        if matches!(event, UpdateEvent::Failed(_)) && downloading && !self.automatic_download {
+            self.own_download_failed = true;
+        } else if matches!(event, UpdateEvent::Failed(UpdateError::Download))
+            && self.automatic_download
+            && !self.own_download_failed
+        {
+            self.retrying_since.get_or_insert(time);
         }
         if ready || current {
             self.retrying_since = None;
@@ -2037,6 +2050,63 @@ mod tests {
         service.update(cx, |updates, cx| updates.dismiss_failure(cx));
         fail_an_automatic_download(&adapter, &service, cx);
         assert!(retries(&service, cx));
+    }
+
+    /// A person's failed download stops standing when that release's story ends: a download
+    /// finishes, SpaceTerm is current, the person stops their own try again, or a different
+    /// release is found. SpaceTerm's next failure by itself is then quiet again.
+    #[gpui::test]
+    fn a_persons_failed_download_ends_with_its_release(cx: &mut gpui::TestAppContext) {
+        let (adapter, service) = clocked_fixture(cx);
+        let fail_a_persons_download = |error, cx: &mut gpui::TestAppContext| {
+            service.update(cx, |updates, cx| updates.check(false, cx));
+            service.update(cx, |updates, cx| updates.download_now(cx));
+            adapter.emit(UpdateEvent::Available("0.1.1".into()));
+            adapter.emit(UpdateEvent::Failed(error));
+            adapter.emit(UpdateEvent::Finished);
+            cx.run_until_parked();
+        };
+        let finish = |cx: &mut gpui::TestAppContext| {
+            adapter.emit(UpdateEvent::Finished);
+            cx.run_until_parked();
+        };
+        let quiet_again = |cx: &mut gpui::TestAppContext, why: &str| {
+            fail_an_automatic_download(&adapter, &service, cx);
+            assert!(retries(&service, cx), "{why}");
+            service.update(cx, |updates, cx| updates.dismiss_failure(cx));
+        };
+
+        // Any failure of the person's download stands, not only a download that broke off.
+        fail_a_persons_download(UpdateError::Verification, cx);
+        fail_an_automatic_download(&adapter, &service, cx);
+        assert!(!retries(&service, cx));
+        service.update(cx, |updates, cx| updates.dismiss_failure(cx));
+
+        fail_a_persons_download(UpdateError::Download, cx);
+        service.update(cx, |updates, cx| updates.check(false, cx));
+        adapter.emit(UpdateEvent::Available("0.1.1".into()));
+        adapter.emit(UpdateEvent::Ready);
+        finish(cx);
+        quiet_again(cx, "a download finished");
+
+        fail_a_persons_download(UpdateError::Download, cx);
+        service.update(cx, |updates, cx| updates.check(false, cx));
+        adapter.emit(UpdateEvent::UpToDate);
+        finish(cx);
+        quiet_again(cx, "SpaceTerm is current");
+
+        fail_a_persons_download(UpdateError::Download, cx);
+        service.update(cx, |updates, cx| updates.download_now(cx));
+        service.update(cx, |updates, cx| updates.cancel(cx));
+        finish(cx);
+        quiet_again(cx, "the person stopped their own try");
+
+        fail_a_persons_download(UpdateError::Download, cx);
+        service.update(cx, |updates, cx| updates.check(false, cx));
+        adapter.emit(UpdateEvent::Available("0.1.2".into()));
+        adapter.emit(UpdateEvent::Failed(UpdateError::Download));
+        finish(cx);
+        assert!(retries(&service, cx), "a different release");
     }
 
     /// The quiet retry ends when the person acts on the release, when the download works, when

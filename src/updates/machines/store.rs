@@ -317,13 +317,21 @@ impl MachineUpdates {
         let revision = update
             .and_then(|update| update.facts.as_ref())
             .map(|facts| facts.revision);
-        self.tried.insert(machine, revision);
-        // A request the Core refused ran no work of the person's. An operation its facts
-        // report is the Core's own.
-        if outcome.is_err() {
+        // A request the Core refused, or that never reached it, ran no work of the person's.
+        // An operation the Core's facts report, and the result that follows, are the Core's own.
+        if matches!(
+            outcome,
+            Err(ActionFailure::Busy
+                | ActionFailure::Unavailable(_)
+                | ActionFailure::Unreachable
+                | ActionFailure::RelaunchRequired
+                | ActionFailure::Changed
+                | ActionFailure::LoginItemOff)
+        ) {
             self.asked.remove(index);
             return;
         }
+        self.tried.insert(machine, revision);
         // This Mac or This Computer has no route to try again.
         let unreachable = update
             .filter(|update| !update.local)
@@ -331,7 +339,7 @@ impl MachineUpdates {
             .filter(|link| !matches!(link, MachineLink::Connected | MachineLink::Incompatible(_)));
         let work = &mut self.asked[index];
         work.phase = match unreachable {
-            Some(link) if asked == Asked::Check => {
+            Some(link) if asked == Asked::Check && outcome.is_ok() => {
                 let serial = work.serial;
                 cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(RECONNECT_WAIT).await;
@@ -873,6 +881,73 @@ mod tests {
             store.read_with(cx, |store, _| store.machines()[0].asked),
             None
         );
+
+        // The Core's own download then fails. That failure is not the person's either.
+        let mut failed = penguin;
+        let facts = failed.facts.as_mut().unwrap();
+        facts.revision = 2;
+        facts.last_failure = Some(UpdateFailure {
+            id: 1,
+            at: 500,
+            version: Version::parse("0.9.0").unwrap(),
+            kind: FailureKind::Install(InstallFailure::Download),
+        });
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(failed)));
+        cx.run_until_parked();
+        assert!(
+            store
+                .read_with(cx, |store, _| store.machines()[0].retrying_since)
+                .is_some()
+        );
+    }
+
+    /// An install that ran and failed keeps its mark until the Core's facts end the operation,
+    /// and its failure is the person's own.
+    #[gpui::test]
+    fn an_install_that_ran_and_failed_keeps_its_mark_until_the_facts_end_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (adapter, store) = installed(cx);
+        let penguin = update("0.8.0", None);
+        let machine = penguin.machine;
+        let mut installing = penguin.clone();
+        installing.facts.as_mut().unwrap().operation = Some(Operation::Installing {
+            version: Version::parse("0.9.0").unwrap(),
+            received: 1,
+            total: 2,
+        });
+        let mut failed = penguin.clone();
+        let facts = failed.facts.as_mut().unwrap();
+        facts.revision = 2;
+        facts.last_failure = Some(UpdateFailure {
+            id: 1,
+            at: 500,
+            version: Version::parse("0.9.0").unwrap(),
+            kind: FailureKind::Install(InstallFailure::Download),
+        });
+        adapter.emit(MachineUpdatesEvent::Machines(vec![penguin]));
+        cx.run_until_parked();
+        store.update(cx, |store, cx| {
+            store.perform(machine, MachineAction::Install, Surface::Window, cx);
+        });
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(installing)));
+        adapter.emit(MachineUpdatesEvent::Finished {
+            machine,
+            action: MachineAction::Install,
+            outcome: Err(ActionFailure::Failed),
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            store.read_with(cx, |store, _| store.machines()[0].asked),
+            Some(Asked::Install)
+        );
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(failed)));
+        cx.run_until_parked();
+        let (asked, since) = store.read_with(cx, |store, _| {
+            let update = &store.machines()[0];
+            (update.asked, update.retrying_since)
+        });
+        assert_eq!((asked, since), (None, None));
     }
 
     /// A mark ends with its Machine: when the Machine goes out of reach after the request
