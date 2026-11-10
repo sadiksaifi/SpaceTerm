@@ -681,6 +681,26 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_or_pending_read_of_the_pinned_directory_moves_no_tab() {
+        let mut state = workspace_in("/repo");
+        pin(&mut state, Some("/repo"));
+        state.reconcile_worktrees(&reads());
+        open_in_feature(&mut state);
+        let mut failed = reads();
+        failed.directories.push(DirectoryFacts {
+            failure: Some(RepositoryReadError::Unavailable),
+            ..outside("/slow")
+        });
+
+        for directory in ["/slow", "/never-read"] {
+            pin(&mut state, Some(directory));
+            state.reconcile_worktrees(&failed);
+
+            assert_eq!(worktrees(&state), [Some("/repo"), Some("/feature")]);
+        }
+    }
+
+    #[test]
     fn a_failed_or_pending_read_moves_no_tab() {
         let mut state = workspace_in("/repo");
         state.reconcile_worktrees(&reads());
