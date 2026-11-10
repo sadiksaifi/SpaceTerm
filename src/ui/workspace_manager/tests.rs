@@ -13221,6 +13221,68 @@ mod workspace_repositories {
         );
     }
 
+    /// A Core older than ADR 0020's one-repository rule lets the Root Tab follow into another
+    /// repository while a second Tab stays in the first. The Workspace lists the Root Tab's
+    /// repository, and its row shows the Tab the listing has no row for.
+    #[gpui::test]
+    fn a_tab_an_older_core_left_in_another_repository_should_show_with_the_workspace_row(
+        cx: &mut TestAppContext,
+    ) {
+        let mut older = published(1, "main", false);
+        let workspace = &mut older.workspaces[0];
+        workspace.tabs[0].worktree = Some(ORBIT_ROOT.into());
+        workspace.tabs[0].worktree_repository = Some(ORBIT_ROOT.into());
+        workspace.tabs[0].panes = vec![pane(ROOT_PANE, ORBIT_ROOT)];
+        workspace.tabs[1].worktree = Some(MAIN_ROOT.into());
+        workspace.tabs[1].panes = vec![pane(FEATURE_PANE, MAIN_ROOT)];
+        if let Some(snapshot) = &mut older.repositories {
+            snapshot
+                .directories
+                .push(facts_within(ORBIT_ROOT, ORBIT_ROOT, "trunk"));
+        }
+        let (harness, cx) = harness(cx, older);
+        let active_worktree = |cx: &mut VisualTestContext| {
+            harness.manager.read_with(cx, |manager, cx| {
+                manager
+                    .workspaces
+                    .workspace(harness.binding)
+                    .and_then(|workspace| workspace.payload().read(cx).active_worktree())
+            })
+        };
+
+        let rows = harness
+            .row(cx)
+            .worktrees
+            .expect("the Root Tab's Worktree keeps a row beside the Tab outside its repository")
+            .rows()
+            .map(|row| (row.name.to_string(), row.worktree_id))
+            .collect::<Vec<_>>();
+        let listed = active_worktree(cx);
+        cx.update(|window, cx| {
+            harness.manager.update(cx, |manager, cx| {
+                manager.handle_sidebar_event(
+                    SidebarEvent::Activate {
+                        workspace_id: harness.binding,
+                        focus_pane: false,
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        let [(name, orbit)] = rows.as_slice() else {
+            panic!("one Worktree row, got {rows:?}");
+        };
+        assert_eq!(name, "orbit");
+        assert_eq!(
+            (listed, active_worktree(cx)),
+            (Some(*orbit), None),
+            "the Workspace row shows the Tab in the repository it does not list"
+        );
+    }
+
     /// A pinned Workspace in a repository with only its Main Worktree keeps its Pinned Directory
     /// on its row while its Pane is elsewhere in the Worktree.
     #[gpui::test]
