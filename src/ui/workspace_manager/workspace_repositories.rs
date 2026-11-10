@@ -388,6 +388,8 @@ mod core_repositories {
                     WorktreeRemoval::CheckingPinnedDirectories
                 } else if matches!(pin_check, Some(PinCheckState::Unavailable)) {
                     WorktreeRemoval::PinnedDirectoriesUnavailable
+                } else if self.sidebar_worktrees.removal_running() {
+                    WorktreeRemoval::RemovalRunning
                 } else {
                     WorktreeRemoval::Allowed
                 };

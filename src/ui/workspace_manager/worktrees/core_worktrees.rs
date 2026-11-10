@@ -299,6 +299,8 @@ impl WorkspaceManager {
             self.sidebar_worktrees.removal_generation.wrapping_add(1);
         let generation = self.sidebar_worktrees.removal_generation;
         self.sidebar_worktrees.removal = Some(generation);
+        // Remove is unavailable on every row until this removal ends.
+        cx.notify();
         let name = sanitize_for_display(&directory_name(&path), MAXIMUM_NAME_CHARS);
         let read = client.read(Read::CheckRemoval { root, path }, cx);
         let handle = window.window_handle().downcast::<WorkspaceManager>();
@@ -322,6 +324,7 @@ impl WorkspaceManager {
                     ),
                     _ => {
                         manager.sidebar_worktrees.removal = None;
+                        cx.notify();
                         let error = result.err().unwrap_or(Error::Unavailable);
                         if !client.availability().0 {
                             Self::show_refusal(
@@ -499,6 +502,7 @@ impl WorkspaceManager {
                 manager.sidebar_worktrees.core_review = None;
                 if !confirmed {
                     manager.sidebar_worktrees.removal = None;
+                    cx.notify();
                     return;
                 }
                 let write = client.write(operation.clone(), cx);

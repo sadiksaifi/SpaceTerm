@@ -1930,6 +1930,7 @@ fn remove_worktree_entry<A: Clone>(
         WorktreeRemoval::PinnedDirectoriesUnavailable => {
             Some("Pinned Directories Couldn\u{2019}t Be Checked")
         }
+        WorktreeRemoval::RemovalRunning => Some("Removing a Worktree\u{2026}"),
         WorktreeRemoval::Unlisted => return None,
     };
     let label = match (reason, name) {

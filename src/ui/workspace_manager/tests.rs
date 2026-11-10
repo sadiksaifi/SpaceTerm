@@ -11994,6 +11994,68 @@ mod workspace_repositories {
         );
     }
 
+    /// While Git removes one Worktree, Remove is unavailable on every Worktree row, because one
+    /// removal runs at a time.
+    #[gpui::test]
+    fn remove_should_be_unavailable_while_another_removal_runs(cx: &mut TestAppContext) {
+        let close = spaceterm_core::hierarchy::CloseInventory {
+            boot: [1; 32],
+            sessions: Vec::new(),
+            controls: Vec::new(),
+        };
+        let mut initial = published(1, "main", true);
+        initial.close = Some(close.clone());
+        let (harness, edits, reads, cx) = paired_harness(cx, initial.clone());
+        reads.review_removals_as(spaceterm_core::worktree::Removal {
+            boot: close.boot,
+            confirmation: [5; 32],
+            root: MAIN_ROOT.into(),
+            path: FEATURE_ROOT.into(),
+            changes: false,
+            submodules: false,
+            tabs: initial.affected_worktree_tabs(
+                std::path::Path::new(MAIN_ROOT),
+                std::path::Path::new(FEATURE_ROOT),
+            ),
+        });
+        let removal = |cx: &mut VisualTestContext| {
+            harness
+                .row(cx)
+                .worktrees
+                .and_then(|section| {
+                    section
+                        .rows()
+                        .find(|row| row.name.as_ref() == "app-feature")
+                        .map(|row| (row.worktree_id, row.removal))
+                })
+                .expect("the feature Worktree has a row")
+        };
+        let (feature, before) = removal(cx);
+        cx.update(|window, cx| {
+            window.activate_window();
+            harness.manager.update(cx, |manager, cx| {
+                manager.request_machine_worktree_removal(harness.binding, feature, window, cx);
+            })
+        });
+        cx.run_until_parked();
+
+        click("modal-action-worktree-removal-confirm", cx);
+        let running = removal(cx).1;
+        edits.answer(spaceterm_core::hierarchy::Outcome::Accepted { target: [1; 32] });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(100));
+        cx.run_until_parked();
+
+        assert_eq!(
+            (before, running, removal(cx).1),
+            (
+                WorktreeRemoval::Allowed,
+                WorktreeRemoval::RemovalRunning,
+                WorktreeRemoval::Allowed
+            )
+        );
+    }
+
     /// New Worktree and Remove Worktree on a paired server's Workspace ask that server, over its
     /// own route, about its own paths. This computer's server is never asked and no client-local
     /// Git or filesystem check runs on the other computer's paths.
