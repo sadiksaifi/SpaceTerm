@@ -244,6 +244,8 @@ pub(super) fn prepare(
                 .root
                 .clone();
             let force = approval.review.changes || approval.review.submodules;
+            // Git checks the Worktree again after the reviewed Tabs close.
+            let closes_tabs = !approval.review.tabs.is_empty();
             let expected = approval.expected;
             let removal = RemovalPlan {
                 pins: pins(&inventory),
@@ -263,7 +265,10 @@ pub(super) fn prepare(
                         &expected,
                         &CancellationToken::default(),
                     )
-                    .map_err(removal_error)?;
+                    .map_err(|error| match removal_error(error) {
+                        Error::Changed if closes_tabs => Error::ChangedAfterClosing,
+                        error => error,
+                    })?;
                     Ok(None)
                 }),
             })))

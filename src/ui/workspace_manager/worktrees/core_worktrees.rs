@@ -412,11 +412,11 @@ impl WorkspaceManager {
         let message = if let Some(branch) = branch.as_ref().filter(|_| specific) {
             match &machine {
                 Some(machine) => format!(
-                    "This deletes its uncommitted changes and untracked files on \u{201C}{}\u{201D}, closes {tabs} Tabs, and ends {sessions} Terminal Sessions for every client. The branch \u{201C}{branch}\u{201D} is kept.",
+                    "This deletes its uncommitted changes, untracked files, and submodule directories on \u{201C}{}\u{201D}, closes {tabs} Tabs, and ends {sessions} Terminal Sessions for every client. The branch \u{201C}{branch}\u{201D} is kept.",
                     sanitize_for_display(machine, MAXIMUM_NAME_CHARS)
                 ),
                 None => format!(
-                    "This deletes its uncommitted changes and untracked files, closes {tabs} Tabs, and ends {sessions} Terminal Sessions for every client. The branch \u{201C}{branch}\u{201D} is kept."
+                    "This deletes its uncommitted changes, untracked files, and submodule directories, closes {tabs} Tabs, and ends {sessions} Terminal Sessions for every client. The branch \u{201C}{branch}\u{201D} is kept."
                 ),
             }
         } else {
@@ -770,6 +770,9 @@ impl WorkspaceManager {
             Error::Changed => {
                 "Nothing was removed. Review the updated Worktree and Terminal Sessions before removing it."
             }
+            Error::ChangedAfterClosing => {
+                "Git kept the Worktree because it changed after its Tabs closed and their Terminal Sessions ended. Review it before removing it."
+            }
             Error::Main => "The Main Worktree cannot be removed.",
             Error::Locked => "Unlock the Worktree with Git before removing it.",
             Error::Pinned => "Unpin the directory before removing it.",
@@ -794,7 +797,7 @@ impl WorkspaceManager {
             Error::Unavailable => "Review the Worktrees in the sidebar before trying again.",
         };
         let mut actions = Vec::new();
-        if error == Error::Changed && review.is_some() {
+        if matches!(error, Error::Changed | Error::ChangedAfterClosing) && review.is_some() {
             actions.push(
                 ModalAction::new(
                     true,

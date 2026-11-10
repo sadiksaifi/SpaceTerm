@@ -117,6 +117,9 @@ pub enum Error {
     Locked,
     Pinned,
     Changed,
+    /// The Worktree changed after its reviewed Tabs closed and their Terminal Sessions ended, so
+    /// Git kept it.
+    ChangedAfterClosing,
     Location,
     /// Git could not finish creating the Worktree.
     Branch,

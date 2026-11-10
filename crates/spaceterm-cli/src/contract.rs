@@ -1128,7 +1128,7 @@ pub fn from_worktree_error(error: worktree::Error) -> Failure {
         worktree::Error::Main => Code::MainWorktree,
         worktree::Error::Locked => Code::WorktreeLocked,
         worktree::Error::Pinned => Code::WorktreePinned,
-        worktree::Error::Changed => Code::Changed,
+        worktree::Error::Changed | worktree::Error::ChangedAfterClosing => Code::Changed,
         worktree::Error::Location => Code::InvalidLocation,
         worktree::Error::Branch => Code::GitFailed,
         worktree::Error::InvalidName => Code::InvalidBranchName,
