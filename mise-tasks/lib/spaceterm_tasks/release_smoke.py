@@ -25,7 +25,7 @@ def run():
             shutil.copyfile(private, tree / "artifact.tar.gz")
             shutil.copyfile(raw, tree / "artifact.sig")
             environment = compatibility._environment(directory / "account")
-            compatibility.install(tree, environment, ["--network", "127.0.0.1"])
+            compatibility.install(tree, environment, "127.0.0.1")
             compatibility.exercise(
                 compatibility.LAUNCHER, environment, {"list": "ok", "status": "ok"}
             )

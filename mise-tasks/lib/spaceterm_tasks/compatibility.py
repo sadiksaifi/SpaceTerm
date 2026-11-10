@@ -203,7 +203,7 @@ def pair(tag, candidate, path=RELEASES, *, release_tag=None):
         allowed = expected(candidate, protocols)
         environment = _environment(directory / "account")
         if candidate == "client":
-            install(published, environment)
+            install(published, environment, "off")
             exercise(built, environment, allowed)
         else:
             set_up_account(environment)
@@ -301,14 +301,17 @@ def fetch(tag, destination):
     return tree, protocols
 
 
-def install(tree, environment, setup=()):
+def install(tree, environment, network):
     """Install and start a release Core through its own installer steps: retain, then setup.
 
     Setup starts the Core as a systemd user service, which needs boot startup already
-    authorized for the account. `setup` adds options to the setup command.
+    authorized for the account. `network` is setup's `--network` value. Without one, setup needs
+    a person at a terminal, and this harness has none, so setup refuses with
+    `interaction_required`.
     """
     _checked([str(tree / "bin/spaceterm"), "internal", "retain", str(tree)], "retain", environment)
-    if (outcome := _outcome(LAUNCHER, ["setup", *setup], environment)) != "ok":
+    setup = ["setup", "--network", network]
+    if (outcome := _outcome(LAUNCHER, setup, environment)) != "ok":
         raise TaskError(f"the release Core's setup failed ({outcome})")
 
 
@@ -361,7 +364,7 @@ def update(tag, archive, signature):
         directory = Path(temporary)
         published, _ = fetch(f"v{floor}", directory / "floor")
         environment = _environment(directory / "account")
-        install(published, environment, ["--network", "127.0.0.1"])
+        install(published, environment, "127.0.0.1")
         _envelope(LAUNCHER, ["workspace", "create", WORKSPACE], environment)
         pair_with_self(environment)
         updated = _envelope(
