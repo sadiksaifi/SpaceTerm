@@ -1495,4 +1495,73 @@ mod tests {
         );
         host.shutdown().unwrap();
     }
+
+    /// The shell in the reviewed Tab writes a file as its Session ends, so Git finds the
+    /// Worktree changed only after the removal closed its Tab.
+    #[test]
+    fn a_change_after_the_reviewed_tabs_close_fails_as_changed_after_closing() {
+        use crate::runtime::core_host::tests::{await_text, command};
+        let git = GitFixture::new();
+        let tree = git.0.join("linked");
+        git.git(&["worktree", "add", "-b", "feature", tree.to_str().unwrap()]);
+        let mut prototype = host();
+        prototype.directory = git.0.clone();
+        let mut host = WorkspaceHost::new(prototype);
+        let workspace = create_workspace(&mut host, 1);
+        let Outcome::Accepted { target: tab } = finish_write(
+            &mut host,
+            2,
+            Operation::OpenTab {
+                workspace,
+                root: git.0.clone(),
+                path: tree.clone(),
+                source: None,
+                control: spaceterm_core::hierarchy::CreateControl::Creator,
+            },
+        ) else {
+            panic!("open Worktree");
+        };
+        let pane = host.state.inventory.workspaces[0]
+            .tabs
+            .iter()
+            .find(|t| t.id == tab)
+            .unwrap()
+            .root_pane;
+        let Reply::Attached { lease } = host.request(
+            [1; 32],
+            [2; 32],
+            Request::SelectPane {
+                pane,
+                explicit: true,
+                size: size(),
+                style: None,
+            },
+        ) else {
+            panic!("explicit shell");
+        };
+        command(
+            &mut host,
+            2,
+            lease,
+            "trap 'touch \"$PWD/late\"; exit' HUP TERM; printf '\\nTRAP-%s\\n' SET\n",
+        );
+        await_text(&mut host, lease, "TRAP-SET");
+        let review = review_removal(&mut host, &git.0, &tree);
+        assert!(!review.changes && !review.tabs.is_empty());
+
+        let outcome = finish_write(
+            &mut host,
+            3,
+            Operation::Remove {
+                root: git.0.clone(),
+                path: tree.clone(),
+                boot: review.boot,
+                confirmation: review.confirmation,
+            },
+        );
+
+        assert_eq!(outcome, Outcome::WorktreeFailed(Error::ChangedAfterClosing));
+        assert!(tree.join("late").exists(), "the shell wrote as it ended");
+        host.shutdown().unwrap();
+    }
 }
