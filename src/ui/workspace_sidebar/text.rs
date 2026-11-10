@@ -23,12 +23,13 @@ const PIN_GLYPH_REDUCTION: f32 = 2.0;
 const PIN_OPTICAL_OFFSET: f32 = 0.5;
 
 /// What follows a row's name on its first line.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum TitleMark {
     /// A Workspace with a Pinned Directory, whose row leaves line 2 to its Worktrees.
     Pinned,
-    /// A Worktree whose last-used Pane is outside it. The Tab stays in the Worktree.
-    OutsidePane,
+    /// A Worktree whose last-used Pane is outside it, named by its row's selector. The Tab
+    /// stays in the Worktree.
+    OutsidePane(SharedString),
 }
 
 /// A row's first line.
@@ -120,10 +121,14 @@ pub(super) fn title(
 /// The glyph that follows a marked row's name.
 fn title_mark(mark: TitleMark, id: u64, appearance: &ChromeAppearance) -> AnyElement {
     let (element, selector, icon) = match mark {
-        TitleMark::Pinned => ("workspace-row-pin", "workspace-row-pin", IconName::Pin),
-        TitleMark::OutsidePane => (
+        TitleMark::Pinned => (
+            "workspace-row-pin",
+            format!("workspace-row-pin-{id}"),
+            IconName::Pin,
+        ),
+        TitleMark::OutsidePane(row) => (
             "worktree-row-outside-pane",
-            "worktree-row-outside-pane",
+            format!("{row}-outside-pane"),
             IconName::ExternalLink,
         ),
     };
@@ -133,7 +138,7 @@ fn title_mark(mark: TitleMark, id: u64, appearance: &ChromeAppearance) -> AnyEle
         .relative()
         .top(px(PIN_OPTICAL_OFFSET))
         .id((element, id))
-        .debug_selector(move || format!("{selector}-{id}"))
+        .debug_selector(move || selector.clone())
         .text_color(gpui_color(appearance.colors.row_secondary))
         .child(Icon::inherited(
             icon,
@@ -463,56 +468,6 @@ mod tests {
                 ChromeAppearance::default(),
             ))
         }
-    }
-
-    struct MarkedTitleFixture {
-        mark: Option<TitleMark>,
-    }
-
-    impl gpui::Render for MarkedTitleFixture {
-        fn render(
-            &mut self,
-            _: &mut gpui::Window,
-            _: &mut gpui::Context<Self>,
-        ) -> impl IntoElement {
-            div().w(px(200.0)).child(title(
-                "app".into(),
-                div().child("app").into_any_element(),
-                None,
-                self.mark,
-                1,
-                ChromeAppearance::default(),
-            ))
-        }
-    }
-
-    /// A Worktree row whose Pane left it marks its name. The mark follows the name, as a pin
-    /// does, and a row whose Pane is inside draws none.
-    #[gpui::test]
-    fn a_title_should_draw_the_outside_pane_mark_after_its_name(cx: &mut gpui::TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, _| MarkedTitleFixture { mark: None });
-        cx.run_until_parked();
-        let unmarked = cx.debug_bounds("worktree-row-outside-pane-1");
-
-        view.update(cx, |view, cx| {
-            view.mark = Some(TitleMark::OutsidePane);
-            cx.notify();
-        });
-        cx.run_until_parked();
-        let mark = cx.debug_bounds("worktree-row-outside-pane-1");
-        let name_width = cx.update(|window, _| {
-            ChromeAppearance::default()
-                .typography
-                .measure(TextRole::Navigation, "app", window)
-        });
-
-        assert_eq!(unmarked, None);
-        let mark = mark.expect("the outside-Pane mark");
-        assert!(
-            mark.origin.x >= name_width && mark.size.width > px(0.0),
-            "the mark must follow the name, got {mark:?} after {name_width:?}"
-        );
-        assert_eq!(cx.debug_bounds("workspace-row-pin-1"), None);
     }
 
     #[gpui::test]

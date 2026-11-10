@@ -1729,7 +1729,7 @@ impl WorkspaceSidebar {
                         worktree
                             .outside_pane_directory
                             .is_some()
-                            .then_some(text::TitleMark::OutsidePane),
+                            .then(|| text::TitleMark::OutsidePane(selector.clone().into())),
                         text_id,
                         text_appearance.clone(),
                     ))

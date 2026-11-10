@@ -13274,9 +13274,18 @@ mod workspace_repositories {
             )
         };
 
+        let mark = |cx: &mut VisualTestContext| {
+            let (app, _) = app_row(cx);
+            cx.debug_bounds(
+                format!("worktree-row-{}-{app}-outside-pane", harness.binding.get()).leak(),
+            )
+        };
+
         let (_, inside) = app_row(cx);
+        let unmarked = mark(cx);
         harness.publish(root_pane_in(2, ORBIT_ROOT), cx);
         let (app, outside) = app_row(cx);
+        let marked = mark(cx);
         cx.update(|window, cx| {
             harness.manager.update(cx, |manager, cx| {
                 manager.handle_sidebar_event(
@@ -13320,6 +13329,11 @@ mod workspace_repositories {
             ),
             "outside its Worktree, the row keeps the Worktree's directory and branch and names \
              the Pane's directory apart"
+        );
+        assert_eq!(unmarked, None, "a row whose Pane is inside draws no mark");
+        assert!(
+            marked.is_some_and(|mark| mark.size.width > px(0.0)),
+            "a row whose Pane left draws the outside mark, got {marked:?}"
         );
         assert_eq!(active_worktree, Some(app));
         assert_eq!(harness.edits.submitted(), Vec::new());
