@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # SpaceTerm release
 
-Input: `major`, `minor`, or `patch`. Ask when it is missing. Running this skill authorizes publishing the release and every fix below. Allow eight attempts. Each dispatch and each rerun is one attempt.
+Input: `major`, `minor`, or `patch`, and an optional maximum number of attempts, 3 by default. Ask for the bump when it is missing. Running this skill authorizes publishing the release and every fix below. Each dispatch and each rerun is one attempt.
 
 `.github/workflows/release.yml` validates, builds, signs, verifies, tags, publishes, and updates the Homebrew cask. You dispatch it and drive it to a published release. When a job fails, read `docs/adr/0009-distribute-tagged-releases-with-signed-updates.md` for how the jobs depend on each other.
 
@@ -17,4 +17,4 @@ Input: `major`, `minor`, or `patch`. Ask when it is missing. Running this skill 
    - Transient, such as a lost runner, a timeout, or a GitHub or Apple outage: run `gh run rerun <run-id> --failed`, which resumes notarization and uploads from the earlier attempt. Follow the run again.
    - Defect in the source or the workflow: fix it in a PR, validated through `mise run` and a fresh adversarial review with its material findings addressed. Squash-merge, delete the branch, and sync `main`. If the failed run pushed `v<version>` and published nothing, delete that tag and its draft release. Return to step 2.
 
-After eight failed attempts, stop and lead with the conclusion that the release failed after eight attempts. Stop and report any blocker that needs missing credentials, more authority, or a product decision.
+When the last allowed attempt fails, stop and lead with the conclusion that the release failed after that many attempts. Stop and report any blocker that needs missing credentials, more authority, or a product decision.
