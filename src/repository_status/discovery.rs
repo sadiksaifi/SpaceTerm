@@ -23,7 +23,12 @@ const MAXIMUM_CONFIG_RECORD_BYTES: usize = 64 * 1024;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Discovery {
     NotRepository,
-    /// Bare, inside a git directory, or rooted at home while the directory is below home.
+    /// Inside a work tree repository's git directory, such as `.git/hooks`.
+    GitDirectory,
+    /// In a bare repository.
+    Bare,
+    /// Rooted at home while the directory is below home, or inside a git directory of a git that
+    /// stops before reporting whether the repository is bare.
     Hidden,
     Repository(DiscoveredRepository),
 }
@@ -62,9 +67,16 @@ pub(crate) fn parse_discovery(
     }
     let output = std::str::from_utf8(output).map_err(|_| RepositoryReadError::InvalidResponse)?;
     let mut lines = output.split('\n');
-    // Inside a git directory, git stops before reporting whether the repository is bare.
-    if boolean(lines.next())? || boolean(lines.next())? {
-        return Ok(Discovery::Hidden);
+    let inside_git_directory = boolean(lines.next())?;
+    // Inside a git directory, some git versions stop before reporting whether the repository is
+    // bare.
+    match (inside_git_directory, lines.next()) {
+        (_, Some("true")) => return Ok(Discovery::Bare),
+        (true, Some("false")) => return Ok(Discovery::GitDirectory),
+        (true, _) => return Ok(Discovery::Hidden),
+        (false, line) => {
+            boolean(line)?;
+        }
     }
     let mut path = || match lines.next() {
         Some(line) if !line.is_empty() => Ok(line),
@@ -350,19 +362,19 @@ mod tests {
     }
 
     #[test]
-    fn git_directories_and_bare_repositories_should_be_hidden() {
-        for output in [
-            "true\nfalse\n/src/app/.git\n.\n",
-            "true\nfalse\n/src/app/.git\n/src/app/.git\n",
-            "true\ntrue\n/src/bare.git\n.\n",
-            "false\ntrue\n/src/bare.git\n.\n",
-            "true\n",
+    fn git_directories_and_bare_repositories_should_be_told_apart() {
+        for (output, expected) in [
+            ("true\nfalse\n/src/app/.git\n.\n", Discovery::GitDirectory),
+            (
+                "true\nfalse\n/src/app/.git\n/src/app/.git\n",
+                Discovery::GitDirectory,
+            ),
+            ("true\ntrue\n/src/bare.git\n.\n", Discovery::Bare),
+            ("false\ntrue\n/src/bare.git\n.\n", Discovery::Bare),
+            // A git that stops after the first line leaves a bare repository indistinguishable.
+            ("true\n", Discovery::Hidden),
         ] {
-            assert_eq!(
-                discover(output, "/src"),
-                Ok(Discovery::Hidden),
-                "{output:?}"
-            );
+            assert_eq!(discover(output, "/src"), Ok(expected), "{output:?}");
         }
     }
 

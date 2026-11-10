@@ -27,6 +27,7 @@ pub(crate) fn fixture() -> Snapshot {
         pinned_worktrees: Vec::new(),
         pin_check: repository::PinCheckState::Ready,
         directories: vec![repository::DirectoryFacts {
+            inside_git_directory: false,
             directory: "/repo".into(),
             repository: None,
             failure: None,

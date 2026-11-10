@@ -651,6 +651,54 @@ fn a_fixed_root_tab_leaves_its_worktree_only_after_reading_outside_the_repositor
     }
 }
 
+/// `cd .git/hooks` stays inside the repository, so the Root Tab keeps its Worktree. A bare
+/// repository and a directory outside Git end membership, as before.
+#[test]
+fn a_root_tab_keeps_its_worktree_only_inside_its_git_directory() {
+    let git = GitFixture::new();
+    let hooks = git.0.join(".git/hooks");
+    let bare = git.0.join("app.git");
+    git.git(&["clone", "--quiet", "--bare", ".", bare.to_str().unwrap()]);
+    let outside = GitFixture::new();
+    std::fs::remove_dir_all(outside.0.join(".git")).unwrap();
+    let mut reading = Reading::start(
+        [hooks.clone(), bare.clone(), outside.0.clone()].into(),
+        Arc::new(DeadlineRunner),
+        git.0.join("unused-home"),
+    );
+    for workspace in &mut reading.state.inventory.workspaces {
+        let tab = &mut workspace.tabs[0];
+        tab.worktree = Some(git.0.clone());
+        tab.worktree_repository = Some(git.0.clone());
+    }
+    let read = |snapshot: &Snapshot, directory: &Path| {
+        snapshot
+            .directories
+            .iter()
+            .any(|facts| facts.directory == directory && facts.failure.is_none())
+    };
+    wait(&mut reading, "directory reads did not finish", |snapshot| {
+        [&hooks, &bare, &outside.0]
+            .into_iter()
+            .all(|directory| read(snapshot, directory))
+    });
+    reading.poll();
+
+    let membership = |directory: &Path| {
+        let workspace = reading
+            .state
+            .inventory
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.tabs[0].panes[0].repository_directory() == directory)
+            .unwrap();
+        workspace.tabs[0].worktree.clone()
+    };
+    assert_eq!(membership(&hooks), Some(git.0.clone()));
+    assert_eq!(membership(&bare), None);
+    assert_eq!(membership(&outside.0), None);
+}
+
 #[test]
 fn slow_count_publishes_branch_worktrees_other_sources_and_progress_before_completion() {
     let git = GitFixture::new();

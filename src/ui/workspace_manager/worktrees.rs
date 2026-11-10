@@ -25,6 +25,13 @@ pub(super) struct SidebarWorktrees {
     core_review: Option<core_worktrees::RemovalReview>,
 }
 
+impl SidebarWorktrees {
+    /// Whether a removal is being checked, confirmed, or run.
+    pub(super) const fn removal_running(&self) -> bool {
+        self.removal.is_some()
+    }
+}
+
 impl WorkspaceManager {
     /// Shows the Tabs outside every Worktree, which an expanded Workspace row stands for once its
     /// Workspace has left a repository. Returns whether the Active Tab changed.

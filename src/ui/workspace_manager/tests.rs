@@ -128,6 +128,7 @@ fn a_pull_request_should_end_its_row_and_open_in_the_browser(cx: &mut TestAppCon
             patch: 0,
         }),
         directories: vec![DirectoryFacts {
+            inside_git_directory: false,
             directory: directory.clone(),
             repository: Some(Repository {
                 root: directory,
@@ -10711,6 +10712,7 @@ mod workspace_repositories {
 
     fn facts(directory: &str, branch: &str, listed: &[WorktreeRecord]) -> DirectoryFacts {
         DirectoryFacts {
+            inside_git_directory: false,
             directory: directory.into(),
             repository: Some(Repository {
                 root: directory.into(),
@@ -10812,6 +10814,7 @@ mod workspace_repositories {
             vec![
                 facts(MAIN_ROOT, "main", main_listing),
                 DirectoryFacts {
+                    inside_git_directory: false,
                     directory: FEATURE_ROOT.into(),
                     repository: None,
                     worktrees: None,
@@ -11897,6 +11900,286 @@ mod workspace_repositories {
         );
     }
 
+    /// The removal alert for the feature Worktree is open when the Root Pane runs `cd` into
+    /// another repository. The feature Worktree still exists, so the alert stays.
+    #[gpui::test]
+    fn an_open_removal_alert_should_survive_the_root_pane_leaving_the_repository(
+        cx: &mut TestAppContext,
+    ) {
+        let close = spaceterm_core::hierarchy::CloseInventory {
+            boot: [1; 32],
+            sessions: Vec::new(),
+            controls: Vec::new(),
+        };
+        let mut initial = published(1, "main", true);
+        initial.close = Some(close.clone());
+        let (harness, edits, reads, cx) = paired_harness(cx, initial.clone());
+        reads.review_removals_as(spaceterm_core::worktree::Removal {
+            boot: close.boot,
+            confirmation: [5; 32],
+            root: MAIN_ROOT.into(),
+            path: FEATURE_ROOT.into(),
+            changes: false,
+            submodules: false,
+            tabs: initial.affected_worktree_tabs(
+                std::path::Path::new(MAIN_ROOT),
+                std::path::Path::new(FEATURE_ROOT),
+            ),
+        });
+        let feature = harness
+            .row(cx)
+            .worktrees
+            .and_then(|section| {
+                section
+                    .rows()
+                    .find(|row| row.name.as_ref() == "app-feature")
+                    .map(|row| row.worktree_id)
+            })
+            .expect("the feature Worktree has a row");
+        cx.update(|window, cx| {
+            window.activate_window();
+            harness.manager.update(cx, |manager, cx| {
+                manager.request_machine_worktree_removal(harness.binding, feature, window, cx);
+            })
+        });
+        cx.run_until_parked();
+        let asked = cx
+            .debug_bounds("modal-action-worktree-removal-confirm")
+            .is_some();
+
+        let mut moved = published(2, "main", true);
+        moved.close = Some(close);
+        moved.workspaces[0].tabs[0].panes[0].repository_directory = Some("/srv/other".into());
+        if let Some(snapshot) = &mut moved.repositories {
+            let mut other = facts("/srv/other", "main", &[record("/srv/other", "main", false)]);
+            other.worktrees.as_mut().unwrap().main_root = "/srv/other".into();
+            snapshot.directories.push(other);
+        }
+        edits.set_inventory(moved);
+        cx.update(|window, cx| {
+            harness.manager.update(cx, |manager, cx| {
+                for key in manager.binding.keys() {
+                    manager.sync_workspaces(key, window, cx);
+                }
+            })
+        });
+        cx.run_until_parked();
+
+        assert!(asked, "the removal alert opened");
+        assert!(
+            cx.debug_bounds("modal-action-worktree-removal-confirm")
+                .is_some(),
+            "the alert stays open"
+        );
+        assert!(
+            cx.debug_bounds("modal-action-worktree-removal-failed-ok")
+                .is_none(),
+            "nothing says the Worktree was removed"
+        );
+
+        // Git then removes the feature Worktree, so the alert closes and says so.
+        let mut removed = published(3, "main", false);
+        removed.close = initial.close;
+        edits.set_inventory(removed);
+        cx.update(|window, cx| {
+            harness.manager.update(cx, |manager, cx| {
+                for key in manager.binding.keys() {
+                    manager.sync_workspaces(key, window, cx);
+                }
+            })
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("modal-action-worktree-removal-confirm")
+                .is_none()
+        );
+        assert!(
+            cx.debug_bounds("modal-action-worktree-removal-failed-ok")
+                .is_some()
+        );
+    }
+
+    /// While Git removes one Worktree, Remove is unavailable on every Worktree row, because one
+    /// removal runs at a time.
+    #[gpui::test]
+    fn remove_should_be_unavailable_while_another_removal_runs(cx: &mut TestAppContext) {
+        let close = spaceterm_core::hierarchy::CloseInventory {
+            boot: [1; 32],
+            sessions: Vec::new(),
+            controls: Vec::new(),
+        };
+        let mut initial = published(1, "main", true);
+        initial.close = Some(close.clone());
+        let (harness, edits, reads, cx) = paired_harness(cx, initial.clone());
+        reads.review_removals_as(spaceterm_core::worktree::Removal {
+            boot: close.boot,
+            confirmation: [5; 32],
+            root: MAIN_ROOT.into(),
+            path: FEATURE_ROOT.into(),
+            changes: false,
+            submodules: false,
+            tabs: initial.affected_worktree_tabs(
+                std::path::Path::new(MAIN_ROOT),
+                std::path::Path::new(FEATURE_ROOT),
+            ),
+        });
+        let removal = |cx: &mut VisualTestContext| {
+            harness
+                .row(cx)
+                .worktrees
+                .and_then(|section| {
+                    section
+                        .rows()
+                        .find(|row| row.name.as_ref() == "app-feature")
+                        .map(|row| (row.worktree_id, row.removal))
+                })
+                .expect("the feature Worktree has a row")
+        };
+        let (feature, before) = removal(cx);
+        cx.update(|window, cx| {
+            window.activate_window();
+            harness.manager.update(cx, |manager, cx| {
+                manager.request_machine_worktree_removal(harness.binding, feature, window, cx);
+            })
+        });
+        cx.run_until_parked();
+
+        click("modal-action-worktree-removal-confirm", cx);
+        let running = removal(cx).1;
+        edits.answer(spaceterm_core::hierarchy::Outcome::Accepted { target: [1; 32] });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(100));
+        cx.run_until_parked();
+
+        assert_eq!(
+            (before, running, removal(cx).1),
+            (
+                WorktreeRemoval::Allowed,
+                WorktreeRemoval::RemovalRunning,
+                WorktreeRemoval::Allowed
+            )
+        );
+    }
+
+    /// A removal that discards changes and submodules and closes Tabs in other Workspaces gets
+    /// the specific confirmation. It names everything `--force` deletes.
+    #[gpui::test]
+    fn the_specific_removal_confirmation_should_name_submodule_directories(
+        cx: &mut TestAppContext,
+    ) {
+        use spaceterm_core::hierarchy::ConfirmedPane;
+        use spaceterm_core::worktree::AffectedTab;
+
+        let close = spaceterm_core::hierarchy::CloseInventory {
+            boot: [1; 32],
+            sessions: Vec::new(),
+            controls: Vec::new(),
+        };
+        let mut initial = published(1, "main", true);
+        initial.close = Some(close.clone());
+        let (harness, _, reads, cx) = paired_harness(cx, initial);
+        // Tabs in two Workspaces this window doesn't present, each with a running Session.
+        let tab = |id: u8| AffectedTab {
+            workspace: [id; 32],
+            tab: [id; 32],
+            panes: vec![ConfirmedPane {
+                id: [id; 32],
+                session: Some([id; 32]),
+            }],
+        };
+        reads.review_removals_as(spaceterm_core::worktree::Removal {
+            boot: close.boot,
+            confirmation: [5; 32],
+            root: MAIN_ROOT.into(),
+            path: FEATURE_ROOT.into(),
+            changes: true,
+            submodules: true,
+            tabs: vec![tab(40), tab(41)],
+        });
+        let feature = harness
+            .row(cx)
+            .worktrees
+            .and_then(|section| {
+                section
+                    .rows()
+                    .find(|row| row.name.as_ref() == "app-feature")
+                    .map(|row| row.worktree_id)
+            })
+            .expect("the feature Worktree has a row");
+
+        cx.update(|window, cx| {
+            window.activate_window();
+            harness.manager.update(cx, |manager, cx| {
+                manager.request_machine_worktree_removal(harness.binding, feature, window, cx);
+            })
+        });
+        cx.run_until_parked();
+
+        assert!(form_reports(
+            "This deletes its uncommitted changes, untracked files, and submodule directories on \u{201C}penguin\u{201D}, closes 2 Tabs, and ends 2 Terminal Sessions for every client. The branch \u{201C}feature\u{201D} is kept.",
+            cx
+        ));
+    }
+
+    /// Git found changes after the removal closed the feature Worktree's Tabs. The alert says
+    /// the Tabs closed instead of saying nothing was removed.
+    #[gpui::test]
+    fn a_removal_that_failed_after_closing_tabs_should_say_they_closed(cx: &mut TestAppContext) {
+        let close = spaceterm_core::hierarchy::CloseInventory {
+            boot: [1; 32],
+            sessions: Vec::new(),
+            controls: Vec::new(),
+        };
+        let mut initial = published(1, "main", true);
+        initial.close = Some(close.clone());
+        let (harness, edits, reads, cx) = paired_harness(cx, initial.clone());
+        let tabs = initial.affected_worktree_tabs(
+            std::path::Path::new(MAIN_ROOT),
+            std::path::Path::new(FEATURE_ROOT),
+        );
+        assert!(!tabs.is_empty(), "the feature Worktree has a Tab");
+        reads.review_removals_as(spaceterm_core::worktree::Removal {
+            boot: close.boot,
+            confirmation: [5; 32],
+            root: MAIN_ROOT.into(),
+            path: FEATURE_ROOT.into(),
+            changes: false,
+            submodules: false,
+            tabs,
+        });
+        let feature = harness
+            .row(cx)
+            .worktrees
+            .and_then(|section| {
+                section
+                    .rows()
+                    .find(|row| row.name.as_ref() == "app-feature")
+                    .map(|row| row.worktree_id)
+            })
+            .expect("the feature Worktree has a row");
+        cx.update(|window, cx| {
+            window.activate_window();
+            harness.manager.update(cx, |manager, cx| {
+                manager.request_machine_worktree_removal(harness.binding, feature, window, cx);
+            })
+        });
+        cx.run_until_parked();
+        click("modal-action-worktree-removal-confirm", cx);
+
+        answer_worktree(
+            &edits,
+            spaceterm_core::worktree::Error::ChangedAfterClosing,
+            cx,
+        );
+
+        assert!(form_reports(
+            "Git kept the Worktree because it changed after its Tabs closed and their Terminal Sessions ended. Review it before removing it.",
+            cx
+        ));
+        assert!(!form_reports("Nothing was removed.", cx));
+    }
+
     /// New Worktree and Remove Worktree on a paired server's Workspace ask that server, over its
     /// own route, about its own paths. This computer's server is never asked and no client-local
     /// Git or filesystem check runs on the other computer's paths.
@@ -12953,6 +13236,7 @@ mod workspace_repositories {
             ..facts
         };
         let outside = DirectoryFacts {
+            inside_git_directory: false,
             directory: OUTSIDE.into(),
             repository: None,
             worktrees: None,

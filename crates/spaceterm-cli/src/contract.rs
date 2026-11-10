@@ -1004,6 +1004,7 @@ codes! {
     BranchExists = "branch_exists", Target, false, "A branch with this name already exists.";
     BranchCheckedOut = "branch_checked_out", Target, false, "Another Worktree has this branch checked out.";
     GitUnavailable = "git_unavailable", Unavailable, false, "Git is unavailable on that machine.";
+    WorktreeChangedAfterClosing = "worktree_changed_after_closing", Target, false, "Git kept the Worktree because it changed after its Tabs closed and their Terminal Sessions ended. Review it before removing it.";
     WorktreeInterrupted = "worktree_interrupted", Unconfirmed, false, "SpaceTerm couldn\u{2019}t confirm the Worktree change finished.";
     // Fatal.
     Stopping = "stopping", Unavailable, true, "SpaceTerm Core is stopping.";
@@ -1129,6 +1130,7 @@ pub fn from_worktree_error(error: worktree::Error) -> Failure {
         worktree::Error::Locked => Code::WorktreeLocked,
         worktree::Error::Pinned => Code::WorktreePinned,
         worktree::Error::Changed => Code::Changed,
+        worktree::Error::ChangedAfterClosing => Code::WorktreeChangedAfterClosing,
         worktree::Error::Location => Code::InvalidLocation,
         worktree::Error::Branch => Code::GitFailed,
         worktree::Error::InvalidName => Code::InvalidBranchName,
@@ -2633,6 +2635,7 @@ mod tests {
             (E::Locked, "worktree_locked", 1),
             (E::Pinned, "worktree_pinned", 4),
             (E::Changed, "changed", 4),
+            (E::ChangedAfterClosing, "worktree_changed_after_closing", 4),
             (E::Location, "invalid_location", 1),
             (E::Branch, "git_failed", 1),
             (E::InvalidName, "invalid_branch_name", 1),

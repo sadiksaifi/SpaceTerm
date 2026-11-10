@@ -139,6 +139,8 @@ pub(super) enum WorktreeRemoval {
     CheckingPinnedDirectories,
     /// The owning server couldn't resolve where its Workspaces' Pinned Directories are.
     PinnedDirectoriesUnavailable,
+    /// Another removal is being checked or run. One runs at a time.
+    RemovalRunning,
     /// The repository the Workspace reads doesn't list the Worktree, so only its Tabs remain.
     Unlisted,
     /// This client has no writer for the owning server, or shared edits wait for a connection

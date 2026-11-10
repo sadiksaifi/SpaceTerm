@@ -294,6 +294,18 @@ pub(crate) struct FormBackend {
     pub machine: Option<String>,
     /// The last Create's answer, which the form presents itself unless it releases it.
     pub owner: std::cell::RefCell<Option<OutcomeOwner>>,
+    /// Where the last Create is. The form creates one at a time.
+    pub stage: Rc<std::cell::Cell<CreateStage>>,
+}
+/// Where a form's Create is. Only one that has not started its write can stop.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum CreateStage {
+    #[default]
+    Idle,
+    /// The owning server is checking the location. Nothing is written yet.
+    Checking,
+    /// The person cancelled while the location was checked.
+    Cancelled,
 }
 impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
     fn machine(&self) -> Option<&str> {
@@ -317,6 +329,8 @@ impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
         let owner = client.source.owner();
         let ticket = owner.ticket();
         *self.owner.borrow_mut() = Some(owner);
+        let stage = Rc::clone(&self.stage);
+        stage.set(CreateStage::Checking);
         // The owning server checks the final location; the desktop never probes its filesystem.
         let read = client.read(
             Read::Location {
@@ -327,6 +341,11 @@ impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
         );
         cx.spawn(async move |cx| {
             let checked = read.await;
+            if stage.replace(CreateStage::Idle) == CreateStage::Cancelled {
+                return Err(crate::worktrees::git::WorktreeCreateError::NotSubmitted(
+                    "The Worktree was not created.",
+                ));
+            }
             let Ok(ReadReply::Location(path)) = checked else {
                 return Err(create_error(match checked.err().unwrap_or(Error::Location) {
                     Error::Unavailable => return Err(crate::worktrees::git::WorktreeCreateError::NotSubmitted(if client.availability().0 {"SpaceTerm could not check the Worktree location. Review it before trying again."} else {creation_refusal(WorkspaceRefusalReason::Offline)})),
@@ -366,6 +385,13 @@ impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
                 })
                 .unwrap_or(path))
         })
+    }
+    fn cancel(&self) -> bool {
+        let checking = self.stage.get() == CreateStage::Checking;
+        if checking {
+            self.stage.set(CreateStage::Cancelled);
+        }
+        checking
     }
     fn presented(&self) {
         if let Some(owner) = self.owner.borrow_mut().take() {
@@ -419,6 +445,8 @@ pub(crate) mod testing {
         git: Mutex<GitToolStatus>,
         /// Folders the server's account can't write to.
         unwritable: Mutex<Vec<String>>,
+        /// The removal check this server answers, else it can't check.
+        removal: Mutex<Option<spaceterm_core::worktree::Removal>>,
     }
 
     impl ScriptedReads {
@@ -431,7 +459,13 @@ pub(crate) mod testing {
                 reads: Mutex::default(),
                 git: Mutex::default(),
                 unwritable: Mutex::default(),
+                removal: Mutex::default(),
             })
+        }
+
+        /// Answers each removal check with `review`.
+        pub(crate) fn review_removals_as(&self, review: spaceterm_core::worktree::Removal) {
+            *self.removal.lock().unwrap() = Some(review);
         }
 
         /// Every read this server was asked, oldest first.
@@ -480,6 +514,13 @@ pub(crate) mod testing {
                     },
                 }),
                 Read::Location { location, .. } => Ok(ReadReply::Location(location.into())),
+                Read::CheckRemoval { .. } => self
+                    .removal
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .map(ReadReply::Removal)
+                    .ok_or(Error::Unavailable),
                 _ => Err(Error::Unavailable),
             }
         }
@@ -569,6 +610,49 @@ mod tests {
                 &replaced.controls
             ));
         });
+    }
+
+    /// The person clicks Create, then Cancel while the owning server checks the location.
+    #[gpui::test]
+    fn cancel_during_the_location_check_should_create_nothing(cx: &mut gpui::TestAppContext) {
+        use crate::ui::worktree_form::WorktreeFormBackend as _;
+        let edits = Rc::new(ScriptedEdits::new(None));
+        let backend = FormBackend {
+            client: Client {
+                core: MachineConnection::for_identity("spaceterm-development").unwrap(),
+                controls: Arc::default(),
+                source: WorkspaceEditSource::new(edits.clone()),
+                edits: edits.clone(),
+                reads: testing::ScriptedReads::new("~/{branch}"),
+            },
+            root: "/srv/app".into(),
+            workspace: [1; 32],
+            branches: crate::worktrees::git::BranchList::default(),
+            machine: None,
+            owner: RefCell::default(),
+            stage: Rc::default(),
+        };
+        let create = cx.update(|cx| {
+            backend.create(
+                "/srv/home/topic".into(),
+                crate::worktrees::git::WorktreeBranch::Existing {
+                    name: "topic".into(),
+                },
+                cx,
+            )
+        });
+
+        let stopped = backend.cancel();
+        cx.run_until_parked();
+
+        assert!(stopped, "nothing was written yet");
+        assert_eq!(edits.submitted(), Vec::new());
+        assert_eq!(
+            cx.foreground_executor().block_test(create),
+            Err(crate::worktrees::git::WorktreeCreateError::NotSubmitted(
+                "The Worktree was not created."
+            ))
+        );
     }
 
     #[gpui::test]

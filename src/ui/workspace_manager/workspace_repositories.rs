@@ -388,6 +388,8 @@ mod core_repositories {
                     WorktreeRemoval::CheckingPinnedDirectories
                 } else if matches!(pin_check, Some(PinCheckState::Unavailable)) {
                     WorktreeRemoval::PinnedDirectoriesUnavailable
+                } else if self.sidebar_worktrees.removal_running() {
+                    WorktreeRemoval::RemovalRunning
                 } else {
                     WorktreeRemoval::Allowed
                 };
@@ -659,7 +661,7 @@ mod core_repositories {
     ) -> Option<&'a WorktreeInventory> {
         repositories
             .worktrees(root)
-            .or_else(|| repositories.worktrees(saved?))
+            .or_else(|| repositories.repository_worktrees(saved?))
     }
 
     /// The record a Worktree this window never saw listed presents: the server's listing of it

@@ -127,6 +127,7 @@ impl WorkspaceManager {
                     branches,
                     machine,
                     owner: std::cell::RefCell::default(),
+                    stage: Rc::default(),
                 });
                 let form = cx.new(|cx| WorktreeForm::new(backend, context, window, cx));
                 cx.subscribe_in(
@@ -298,6 +299,8 @@ impl WorkspaceManager {
             self.sidebar_worktrees.removal_generation.wrapping_add(1);
         let generation = self.sidebar_worktrees.removal_generation;
         self.sidebar_worktrees.removal = Some(generation);
+        // Remove is unavailable on every row until this removal ends.
+        cx.notify();
         let name = sanitize_for_display(&directory_name(&path), MAXIMUM_NAME_CHARS);
         let read = client.read(Read::CheckRemoval { root, path }, cx);
         let handle = window.window_handle().downcast::<WorkspaceManager>();
@@ -321,6 +324,7 @@ impl WorkspaceManager {
                     ),
                     _ => {
                         manager.sidebar_worktrees.removal = None;
+                        cx.notify();
                         let error = result.err().unwrap_or(Error::Unavailable);
                         if !client.availability().0 {
                             Self::show_refusal(
@@ -377,7 +381,9 @@ impl WorkspaceManager {
         let title = format!("Remove Worktree \u{201C}{name}\u{201D}?");
         let machine = self.owning_machine(workspace);
         let branch = self
-            .workspace_inventory(workspace)
+            .binding
+            .owning(workspace)
+            .and_then(|binding| binding.repositories().repository_worktrees(&review.root))
             .and_then(|i| i.worktrees.iter().find(|r| r.root == review.path))
             .and_then(|r| match &r.head {
                 WorktreeHead::Branch(branch) => {
@@ -406,11 +412,11 @@ impl WorkspaceManager {
         let message = if let Some(branch) = branch.as_ref().filter(|_| specific) {
             match &machine {
                 Some(machine) => format!(
-                    "This deletes its uncommitted changes and untracked files on \u{201C}{}\u{201D}, closes {tabs} Tabs, and ends {sessions} Terminal Sessions for every client. The branch \u{201C}{branch}\u{201D} is kept.",
+                    "This deletes its uncommitted changes, untracked files, and submodule directories on \u{201C}{}\u{201D}, closes {tabs} Tabs, and ends {sessions} Terminal Sessions for every client. The branch \u{201C}{branch}\u{201D} is kept.",
                     sanitize_for_display(machine, MAXIMUM_NAME_CHARS)
                 ),
                 None => format!(
-                    "This deletes its uncommitted changes and untracked files, closes {tabs} Tabs, and ends {sessions} Terminal Sessions for every client. The branch \u{201C}{branch}\u{201D} is kept."
+                    "This deletes its uncommitted changes, untracked files, and submodule directories, closes {tabs} Tabs, and ends {sessions} Terminal Sessions for every client. The branch \u{201C}{branch}\u{201D} is kept."
                 ),
             }
         } else {
@@ -496,6 +502,7 @@ impl WorkspaceManager {
                 manager.sidebar_worktrees.core_review = None;
                 if !confirmed {
                     manager.sidebar_worktrees.removal = None;
+                    cx.notify();
                     return;
                 }
                 let write = client.write(operation.clone(), cx);
@@ -525,7 +532,10 @@ impl WorkspaceManager {
                     presentation,
                 })
             }
-            Err(_) => self.sidebar_worktrees.removal = None,
+            Err(_) => {
+                self.sidebar_worktrees.removal = None;
+                cx.notify();
+            }
         }
     }
     pub(in crate::ui::workspace_manager) fn revalidate_machine_removal(
@@ -543,8 +553,15 @@ impl WorkspaceManager {
         else {
             return;
         };
+        // The reviewed repository decides, whichever repository the row reads now.
         let missing = self
-            .workspace_inventory(review.workspace)
+            .binding
+            .owning(review.workspace)
+            .and_then(|binding| {
+                binding
+                    .repositories()
+                    .repository_worktrees(&review.review.root)
+            })
             .is_some_and(|i| !i.worktrees.iter().any(|r| r.root == review.review.path));
         if missing || !review.review.matches_inventory(inventory) {
             let Some(review) = self.sidebar_worktrees.core_review.take() else {
@@ -760,6 +777,9 @@ impl WorkspaceManager {
             Error::Changed => {
                 "Nothing was removed. Review the updated Worktree and Terminal Sessions before removing it."
             }
+            Error::ChangedAfterClosing => {
+                "Git kept the Worktree because it changed after its Tabs closed and their Terminal Sessions ended. Review it before removing it."
+            }
             Error::Main => "The Main Worktree cannot be removed.",
             Error::Locked => "Unlock the Worktree with Git before removing it.",
             Error::Pinned => "Unpin the directory before removing it.",
@@ -784,7 +804,7 @@ impl WorkspaceManager {
             Error::Unavailable => "Review the Worktrees in the sidebar before trying again.",
         };
         let mut actions = Vec::new();
-        if error == Error::Changed && review.is_some() {
+        if matches!(error, Error::Changed | Error::ChangedAfterClosing) && review.is_some() {
             actions.push(
                 ModalAction::new(
                     true,

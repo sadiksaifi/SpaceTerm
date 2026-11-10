@@ -1,6 +1,10 @@
 //! Bounded Git facts from the owning server. Paths describe that server and grant no local authority.
 use serde::{Deserialize, Serialize};
-use std::{fmt, path::PathBuf, sync::Arc};
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use thiserror::Error;
 
 /// What `HEAD` names.
@@ -208,6 +212,16 @@ pub struct DirectoryFacts {
     pub repository: Option<Repository>,
     pub worktrees: Option<WorktreeInventory>,
     pub failure: Option<RepositoryReadError>,
+    /// The directory is inside a work tree repository's Git directory, such as `.git/hooks`.
+    /// Repository Status shows nothing there, but the directory is inside its repository.
+    pub inside_git_directory: bool,
+}
+impl DirectoryFacts {
+    /// Whether a successful read placed the directory outside any repository. Only then does an
+    /// unpinned Root Tab leave its Worktree (ADR 0020).
+    pub fn outside_repository(&self) -> bool {
+        self.failure.is_none() && self.repository.is_none() && !self.inside_git_directory
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Repository {
@@ -251,6 +265,50 @@ pub struct Snapshot {
     /// The owning server resolves symbolic links; clients grant no local file authority.
     pub pinned_worktrees: Vec<PathBuf>,
     pub pin_check: PinCheckState,
+}
+
+impl Snapshot {
+    /// The facts the server read for one directory it reported.
+    pub fn facts(&self, directory: &Path) -> Option<&DirectoryFacts> {
+        self.directories
+            .iter()
+            .find(|facts| facts.directory == directory)
+    }
+
+    /// The Worktrees of the repository containing one directory, as git on the server lists them.
+    ///
+    /// A failed read keeps the directory's last listing, which a removed Worktree would keep
+    /// forever. Another directory in the same repository that the server still reads lists its
+    /// current Worktrees instead. Without one, the last listing stays.
+    pub fn directory_worktrees(&self, directory: &Path) -> Option<&WorktreeInventory> {
+        let facts = self.facts(directory)?;
+        let last = facts.worktrees.as_ref()?;
+        if facts.failure.is_none() {
+            return Some(last);
+        }
+        self.current_worktrees(&last.main_root).or(Some(last))
+    }
+
+    /// The Worktrees of the repository whose Main Worktree is `main_root`.
+    ///
+    /// The Main Worktree's own reading comes first. A bare Main Worktree has no work tree, so the
+    /// server reads no Worktrees there; any directory whose read lists its repository does.
+    pub fn repository_worktrees(&self, main_root: &Path) -> Option<&WorktreeInventory> {
+        self.directory_worktrees(main_root)
+            .or_else(|| self.current_worktrees(main_root))
+    }
+
+    /// The listing of the repository whose Main Worktree is `main_root` from a directory whose
+    /// latest read succeeded. The first by path is chosen so every reading picks the same one.
+    fn current_worktrees(&self, main_root: &Path) -> Option<&WorktreeInventory> {
+        self.directories
+            .iter()
+            .filter(|facts| facts.failure.is_none())
+            .filter_map(|facts| Some((&facts.directory, facts.worktrees.as_ref()?)))
+            .filter(|(_, inventory)| inventory.main_root == main_root)
+            .min_by_key(|(directory, _)| *directory)
+            .map(|(_, inventory)| inventory)
+    }
 }
 
 /// Physical removal eligibility is resolved independently of Git and the terminal request lock.

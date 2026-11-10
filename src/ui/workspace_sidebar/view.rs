@@ -1930,6 +1930,8 @@ fn remove_worktree_entry<A: Clone>(
         WorktreeRemoval::PinnedDirectoriesUnavailable => {
             Some("Pinned Directories Couldn\u{2019}t Be Checked")
         }
+        // The removal may still be checking, so the label names no Git step.
+        WorktreeRemoval::RemovalRunning => Some("Removal in Progress\u{2026}"),
         WorktreeRemoval::Unlisted => return None,
     };
     let label = match (reason, name) {

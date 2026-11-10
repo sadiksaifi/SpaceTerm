@@ -178,9 +178,6 @@ fn read_git(
         Read::Context { root } => {
             list(&git, &root, token)?;
             let branches = git.branches(&root, token).map_err(|_| Error::Unavailable)?;
-            if branches.local.len() + branches.remote.len() > 4096 {
-                return Err(Error::Unavailable);
-            }
             ReadReply::Context {
                 settings,
                 home,

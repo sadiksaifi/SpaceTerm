@@ -49,6 +49,11 @@ pub(crate) trait WorktreeFormBackend {
         branch: WorktreeBranch,
         cx: &mut App,
     ) -> Task<Result<PathBuf, WorktreeCreateError>>;
+    /// Stops the last Create if it has not started its write yet. Returns whether it stopped it.
+    /// A started write runs to its end.
+    fn cancel(&self) -> bool {
+        false
+    }
     /// The person answered the form after it showed the answer to its last Create, so nothing
     /// presents it again.
     fn presented(&self) {}
@@ -504,6 +509,8 @@ impl WorktreeForm {
         self.answered();
         match action {
             FormAction::Cancel if self.pending && !self.backend.connected() => {
+                // A Create that has not written yet must not write once the connection returns.
+                self.backend.cancel();
                 DialogCloseDecision::Allow
             }
             FormAction::Cancel if self.pending => {
@@ -511,6 +518,9 @@ impl WorktreeForm {
                     return DialogCloseDecision::Deny {
                         first_invalid: None,
                     };
+                }
+                if self.backend.cancel() {
+                    return DialogCloseDecision::Allow;
                 }
                 // A started write runs to its end; Cancel waits for it.
                 self.pending_cancel = Some(completion);
@@ -1220,6 +1230,8 @@ mod tests {
         presentations: Cell<usize>,
         /// How many times the form left its answer to the Workspace Window.
         releases: Cell<usize>,
+        /// Whether the held Create has not started its write, so Cancel stops it.
+        stoppable: Cell<bool>,
     }
 
     impl WorktreeFormBackend for ScriptedBackend {
@@ -1259,6 +1271,10 @@ mod tests {
                     .unwrap_or(Ok(()))
                     .map(|()| path),
             )
+        }
+
+        fn cancel(&self) -> bool {
+            self.stoppable.replace(false)
         }
 
         fn presented(&self) {
@@ -1597,6 +1613,26 @@ mod tests {
         assert!(!held.form.read_with(cx, |form, _| form.is_open()));
     }
 
+    /// The connection drops while the location is checked. Cancel closes the form at once, and
+    /// the Create must not write once the connection returns.
+    #[gpui::test]
+    fn cancel_while_offline_should_stop_a_create_that_has_not_written(cx: &mut TestAppContext) {
+        let (held, cx) = create_and_hold(cx);
+        held.backend.stoppable.set(true);
+        held.backend.disconnected.set(true);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(150));
+        cx.run_until_parked();
+
+        click("modal-action-new-worktree-cancel", cx);
+
+        assert!(!held.form.read_with(cx, |form, _| form.is_open()));
+        assert!(
+            !held.backend.stoppable.get(),
+            "Cancel stopped the Create before its write"
+        );
+    }
+
     #[gpui::test]
     fn cancel_should_wait_for_the_started_create(cx: &mut TestAppContext) {
         let (held, cx) = create_and_hold(cx);
@@ -1616,6 +1652,20 @@ mod tests {
                 "/Users/person/.worktrees/app/fresh"
             ))]
         );
+    }
+
+    #[gpui::test]
+    fn cancel_before_the_write_starts_should_close_at_once(cx: &mut TestAppContext) {
+        let (held, cx) = create_and_hold(cx);
+        held.backend.stoppable.set(true);
+
+        click("modal-action-new-worktree-cancel", cx);
+        // An answer that arrives after Cancel stopped the Create opens nothing.
+        let _ = held.answer.try_send(Ok(()));
+        cx.run_until_parked();
+
+        assert!(!held.form.read_with(cx, |form, _| form.is_open()));
+        assert_eq!(*held.events.borrow(), [WorktreeFormEvent::Cancelled]);
     }
 
     #[gpui::test]
