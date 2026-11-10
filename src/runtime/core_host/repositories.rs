@@ -342,7 +342,7 @@ impl CoreRepositories {
             !self.subscribers.is_empty(),
             &self.ring,
         );
-        reconcile_membership(state, &self.snapshot);
+        state.reconcile_worktrees(&self.snapshot);
         if !self.subscribers.is_empty()
             && self.worker.is_none()
             && self.start.is_some_and(|start| Instant::now() >= start)
@@ -391,95 +391,6 @@ pub(super) fn workspace_directory(
             .find(|pane| pane.id == tab.root_pane)
             .map(pane_directory)
     })
-}
-fn reconcile_membership(state: &mut State, snapshot: &Snapshot) -> bool {
-    let mut changed = false;
-    for workspace in &mut state.inventory.workspaces {
-        let workspace_current = workspace_directory(workspace)
-            .and_then(|directory| current_worktree(snapshot, directory));
-        let follows_root = workspace.pinned_directory.is_none();
-        for tab in &mut workspace.tabs {
-            let follows = follows_root && tab.id == workspace.root_tab;
-            // Outside is authoritative only after a successful read. Pending reads and
-            // unavailable directories preserve the saved membership for recovery. Leaving the
-            // repository also ends Opened and Repaired membership, so the Root Tab follows its
-            // next repository.
-            if follows
-                && tab
-                    .panes
-                    .iter()
-                    .find(|pane| pane.id == tab.root_pane)
-                    .is_some_and(|pane| {
-                        snapshot.directories.iter().any(|facts| {
-                            facts.directory == pane_directory(pane) && facts.outside_repository()
-                        })
-                    })
-            {
-                changed |= tab.worktree.take().is_some();
-                changed |= tab.worktree_repository.take().is_some();
-                changed |=
-                    std::mem::take(&mut tab.worktree_membership) != WorktreeMembership::Following;
-                continue;
-            }
-            // Membership belongs to the saved Tab, not its focused Pane or a later cd in any
-            // non-Root Tab. Only the unpinned Root Tab follows the Workspace's directory.
-            if tab.worktree_membership != WorktreeMembership::Following
-                || (tab.worktree.is_some() && !follows)
-            {
-                // Older Development records gain a locator without changing saved membership.
-                if let Some(main) = snapshot.directories.iter().find_map(|facts| {
-                    let list = facts
-                        .worktrees
-                        .as_ref()
-                        .filter(|_| facts.failure.is_none())?;
-                    list.worktrees
-                        .iter()
-                        .any(|record| Some(&record.root) == tab.worktree.as_ref())
-                        .then_some(&list.main_root)
-                }) && tab.worktree_repository.as_ref() != Some(main)
-                {
-                    tab.worktree_repository = Some(main.clone());
-                    changed = true;
-                }
-                continue;
-            }
-            let current = tab
-                .panes
-                .iter()
-                .find(|pane| pane.id == tab.root_pane)
-                .and_then(|pane| current_worktree(snapshot, pane_directory(pane)))
-                .or_else(|| {
-                    tab.worktree
-                        .is_none()
-                        .then_some(workspace_current)
-                        .flatten()
-                });
-            if let Some((root, main)) = current {
-                if tab.worktree.as_deref() != Some(root) {
-                    tab.worktree = Some(root.to_owned());
-                    changed = true;
-                }
-                if tab.worktree_repository.as_deref() != Some(main) {
-                    tab.worktree_repository = Some(main.to_owned());
-                    changed = true;
-                }
-            }
-        }
-    }
-    if changed {
-        state.inventory.revision = state.inventory.revision.saturating_add(1);
-    }
-    changed
-}
-fn current_worktree<'a>(snapshot: &'a Snapshot, directory: &Path) -> Option<(&'a Path, &'a Path)> {
-    let facts = snapshot
-        .directories
-        .iter()
-        .find(|facts| facts.directory == directory && facts.failure.is_none())?;
-    let list = facts.worktrees.as_ref()?;
-    let record = list.worktrees.get(list.current?)?;
-    (!record.missing && record.head != WorktreeHead::Bare)
-        .then_some((record.root.as_path(), list.main_root.as_path()))
 }
 /// Existing readers already bound their parsers and honor cancellation. This adapter also gives
 /// every server read a deadline, including filters and fsmonitor helpers under account Git config.

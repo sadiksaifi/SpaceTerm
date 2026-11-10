@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub type Id = [u8; 32];
+mod membership;
+
 pub const MAX_WORKSPACES: usize = 64;
 pub const MAX_TABS: usize = 128;
 pub const MAX_PANES: usize = 128;
@@ -331,34 +333,31 @@ impl Workspace {
         Ok(moved)
     }
 
-    /// Makes the first Tab the Root Tab once the Root Tab is gone.
+    /// Makes the first Tab the Root Tab once the Root Tab is gone. It stays in its Worktree.
     fn promote_root_tab(&mut self) {
         if let Some(t) = self.tabs.first_mut()
             && t.id != self.root_tab
         {
-            // A promoted Root Tab follows its Root Pane, not the Worktree it opened in.
-            if t.worktree_membership == WorktreeMembership::Opened {
-                t.worktree_membership = WorktreeMembership::Following;
-            }
             self.root_tab = t.id;
         }
     }
 }
-/// Whether directory changes may move a Tab to a different Worktree, and why not.
+/// Whether a Tab's shell may take the Tab, and its Workspace, to a different Worktree.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorktreeMembership {
-    /// Directory reads assign membership under the Root Tab rule.
+    /// The Tab follows its shell while it leads its Workspace: as the only Tab, or as the Root
+    /// Tab of a Workspace in no repository.
     #[default]
     Following,
-    /// The Tab opened in its Worktree. Promotion to Root Tab ends this.
+    /// The Tab stays in its Worktree. A `cd` as its Workspace's only Tab ends this.
     Opened,
-    /// Directory repair kept the Tab's Worktree. Promotion to Root Tab keeps this.
+    /// Directory repair kept the Tab's Worktree. Only leaving every repository as its
+    /// Workspace's only Tab ends this.
     Repaired,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Tab {
-    /// An unpinned Root Tab whose Root Pane reads outside any repository returns to Following.
     pub worktree_membership: WorktreeMembership,
     /// Saved membership, retained even when Git no longer lists the directory.
     pub worktree: Option<PathBuf>,
@@ -1127,6 +1126,14 @@ impl State {
                 let Some(source) = source else {
                     return Ok(Outcome::Missing);
                 };
+                // The new Tab opens in its source Tab's Worktree and stays there.
+                let (worktree, worktree_repository) = w
+                    .tabs
+                    .iter()
+                    .find(|t| t.panes.iter().any(|p| p.id == source.id))
+                    .filter(|t| t.worktree.is_some() && t.worktree_repository.is_some())
+                    .map(|t| (t.worktree.clone(), t.worktree_repository.clone()))
+                    .unwrap_or_default();
                 let start = w.pinned_directory.clone().unwrap_or_else(|| {
                     source
                         .confirmed_directory
@@ -1140,9 +1147,13 @@ impl State {
                 let id = new_id()?;
                 let pane = new_id()?;
                 w.tabs.push(Tab {
-                    worktree: None,
-                    worktree_membership: WorktreeMembership::Following,
-                    worktree_repository: None,
+                    worktree_membership: if worktree.is_some() {
+                        WorktreeMembership::Opened
+                    } else {
+                        WorktreeMembership::Following
+                    },
+                    worktree,
+                    worktree_repository,
                     id,
                     root_pane: pane,
                     panes: vec![Pane {
@@ -1398,16 +1409,24 @@ impl State {
     }
     pub fn confirm_directory(&mut self, id: Id, path: PathBuf) {
         for w in &mut self.inventory.workspaces {
-            for t in &mut w.tabs {
-                if let Some(p) = t.panes.iter_mut().find(|p| p.id == id) {
-                    if p.confirmed_directory.as_ref() != Some(&path) {
-                        p.confirmed_directory = Some(path);
-                        self.recalculate_names();
-                        self.inventory.revision += 1;
-                    }
-                    return;
+            let Some(p) = w
+                .tabs
+                .iter_mut()
+                .flat_map(|t| &mut t.panes)
+                .find(|p| p.id == id)
+            else {
+                continue;
+            };
+            if p.confirmed_directory.as_ref() != Some(&path) {
+                let before = p.repository_directory().to_owned();
+                p.confirmed_directory = Some(path);
+                if p.repository_directory() != before {
+                    w.shell_moved(id);
                 }
+                self.recalculate_names();
+                self.inventory.revision += 1;
             }
+            return;
         }
     }
     /// Publish presentation in memory. The retained Organization excludes these facts.
@@ -1444,15 +1463,20 @@ impl State {
     /// live OSC 7 display and confirmed restoration authority.
     pub fn present_repository_directory(&mut self, id: Id, path: PathBuf) {
         for workspace in &mut self.inventory.workspaces {
-            for tab in &mut workspace.tabs {
-                if let Some(pane) = tab.panes.iter_mut().find(|pane| pane.id == id) {
-                    if pane.repository_directory() != path {
-                        pane.repository_directory = Some(path);
-                        self.inventory.revision += 1;
-                    }
-                    return;
-                }
+            let Some(pane) = workspace
+                .tabs
+                .iter_mut()
+                .flat_map(|tab| &mut tab.panes)
+                .find(|pane| pane.id == id)
+            else {
+                continue;
+            };
+            if pane.repository_directory() != path {
+                pane.repository_directory = Some(path);
+                workspace.shell_moved(id);
+                self.inventory.revision += 1;
             }
+            return;
         }
     }
     /// The allocation policy from domain/workspace_collection/naming.rs, at the local owner.
@@ -1475,10 +1499,13 @@ impl State {
                 .iter()
                 .find(|t| t.id == workspace.root_tab)
                 .and_then(|t| t.panes.iter().find(|p| p.id == t.root_pane));
-            let directory = workspace
-                .pinned_directory
-                .as_deref()
-                .or_else(|| root.map(Pane::presented_directory));
+            // A Workspace in a repository is named for it, wherever its shells are.
+            let directory = workspace.repository().or_else(|| {
+                workspace
+                    .pinned_directory
+                    .as_deref()
+                    .or_else(|| root.map(Pane::presented_directory))
+            });
             let mut base = match directory {
                 Some(directory) if Some(directory) != self.home_directory.as_deref() => directory
                     .file_name()
@@ -2559,9 +2586,10 @@ mod tests {
         );
         assert_eq!(state.inventory.workspaces[0].root_tab, survivor);
         assert_eq!(state.inventory.workspaces[0].tabs.len(), 1);
+        // Promotion to Root Tab moves no Tab out of its Worktree.
         assert_eq!(
             state.inventory.workspaces[0].tabs[0].worktree_membership,
-            WorktreeMembership::Following
+            WorktreeMembership::Opened
         );
         assert_eq!(
             state
