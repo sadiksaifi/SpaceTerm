@@ -1,24 +1,20 @@
 ---
 name: spaceterm-release
-description: Use when the user asks to release SpaceTerm with a major, minor, or patch bump.
+description: Publish a SpaceTerm release with a major, minor, or patch bump.
+disable-model-invocation: true
 ---
 
 # SpaceTerm release
 
-Input: `major|minor|patch`, for example `$spaceterm-release minor`. Ask when omitted.
-An explicit request to run this skill authorizes publishing the release and the fix loop below.
-Allow at most eight attempts per invocation, counting each dispatch and each rerun as one attempt.
+Input: `major`, `minor`, or `patch`. Ask when it is missing. Running this skill authorizes publishing the release and every fix below. Allow eight attempts. Each dispatch and each rerun is one attempt.
 
-The release workflow, `.github/workflows/release.yml`, validates, builds, signs, verifies, pushes the tag, publishes the GitHub release and updates the Homebrew cask. `docs/adr/0009-distribute-tagged-releases-with-signed-updates.md` explains its order. You resolve the version, dispatch the workflow and drive it to a published release.
+`.github/workflows/release.yml` validates, builds, signs, verifies, tags, publishes, and updates the Homebrew cask. You dispatch it and drive it to a published release. When a job fails, read `docs/adr/0009-distribute-tagged-releases-with-signed-updates.md` for how the jobs depend on each other.
 
-1. Synchronize a clean `main` with `origin/main`. Resolve the version once with `tagsmith tag --target spaceterm --channel stable --bump <bump> --dry-run --json`, and reuse it through every attempt. Run `mise run release:preview <version>` and `mise run release:notes:preview`, then report the version, commit and notes.
-2. Dispatch with `gh workflow run release.yml --ref main -f version=<version> -f publish=true`. Watch every job of that run until the run ends.
-3. Success: every job passes, `gh release view v<version>` shows the release as Latest with its assets, and the Homebrew cask step pushed or found no change. Report the release URL and stop.
-4. Failure: read the failed jobs' logs and classify the cause.
-   - Infrastructure, such as a lost runner, a timeout, or a GitHub or Apple notary outage: run `gh run rerun <run-id> --failed`, then continue at step 3. A rerun resumes notarization and draft uploads from earlier attempts.
-   - Source or workflow defect: continue at step 5.
-5. Create a fix branch and PR. Fix the defect, validate through `mise run`, and obtain a fresh adversarial review. Address material findings, validate again, and update the PR. After checks pass, squash-merge and delete the PR's local and remote branch. If the failed run pushed `v<version>` without publishing, delete its draft release and remote tag. Synchronize `main` and continue at step 2.
+1. Sync a clean `main` with `origin/main`. Resolve the version with `tagsmith tag --target spaceterm --channel stable --bump <bump> --dry-run --json`, and keep it for every attempt. Report the version, the commit, and the output of `mise run release:notes:preview`.
+2. Run `gh workflow run release.yml --ref main -f version=<version> -f publish=true`. Follow that run until it ends.
+3. The release is done when every job passed and `gh release view v<version>` shows a Latest release with its assets. Report the release URL.
+4. When a job fails, read its log and classify the failure:
+   - Transient, such as a lost runner, a timeout, or a GitHub or Apple outage: run `gh run rerun <run-id> --failed`, which resumes notarization and uploads from the earlier attempt. Follow the run again.
+   - Defect in the source or the workflow: fix it in a PR, validated through `mise run` and a fresh adversarial review with its material findings addressed. Squash-merge, delete the branch, and sync `main`. If the failed run pushed `v<version>` and published nothing, delete that tag and its draft release. Return to step 2.
 
-After the eighth failed attempt, stop and lead with the conclusion that the release failed after eight attempts.
-
-A published release is immutable. Stop and report blockers that require unavailable credentials, additional authority, or a product decision.
+After eight failed attempts, stop and lead with the conclusion that the release failed after eight attempts. Stop and report any blocker that needs missing credentials, more authority, or a product decision.
