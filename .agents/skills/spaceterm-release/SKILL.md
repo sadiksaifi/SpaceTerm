@@ -6,16 +6,19 @@ description: Use when the user asks to release SpaceTerm with a major, minor, or
 # SpaceTerm release
 
 Input: `major|minor|patch`, for example `$spaceterm-release minor`. Ask when omitted.
-An explicit request to run this skill authorizes the loop below.
-Allow at most eight release attempts per invocation, counting each release tag push as one attempt.
+An explicit request to run this skill authorizes publishing the release and the fix loop below.
+Allow at most eight attempts per invocation, counting each dispatch and each rerun as one attempt.
 
-1. Read `.tagsmith.jsonc`, `.github/workflows/release.yml`, and release tasks in `.mise.toml`. Use `$tagsmith` on the clean, synchronized release base branch. Resolve the bump once; reuse that version throughout retries.
-2. Dry-run the explicit version, report the resolved release, then create and push with identical arguments. Monitor every release job.
-3. Success: every job passes, published asset checksums match, and distribution updates complete. Report the release URL and stop.
-4. Failure: retain diagnostic evidence, stop remaining jobs, and delete only this attempt's release, local/remote tag, and workflow artifacts. Undo its distribution changes. After the eighth failed attempt, stop and lead with the conclusion that the release failed after eight attempts.
-5. Create a fix branch and PR. Fix the failure and validate through `mise run`. Obtain a fresh adversarial review using `$codex-subagent`. Address material findings, validate, and update the PR.
-6. After checks pass and findings are addressed, squash-merge and delete the PR's local/remote branch. Synchronize the release base branch; retry step 2.
+The release workflow, `.github/workflows/release.yml`, validates, builds, signs, verifies, pushes the tag, publishes the GitHub release and updates the Homebrew cask. `docs/adr/0009-distribute-tagged-releases-with-signed-updates.md` explains its order. You resolve the version, dispatch the workflow and drive it to a published release.
 
-For Linux access and fork lookup, follow `<repo-root>/AGENTS.md`.
+1. Synchronize a clean `main` with `origin/main`. Resolve the version once with `tagsmith tag --target spaceterm --channel stable --bump <bump> --dry-run --json`, and reuse it through every attempt. Run `mise run release:preview <version>` and `mise run release:notes:preview`, then report the version, commit and notes.
+2. Dispatch with `gh workflow run release.yml --ref main -f version=<version> -f publish=true`. Watch every job of that run until the run ends.
+3. Success: every job passes, `gh release view v<version>` shows the release as Latest with its assets, and the Homebrew cask step pushed or found no change. Report the release URL and stop.
+4. Failure: read the failed jobs' logs and classify the cause.
+   - Infrastructure, such as a lost runner, a timeout, or a GitHub or Apple notary outage: run `gh run rerun <run-id> --failed`, then continue at step 3. A rerun resumes notarization and draft uploads from earlier attempts.
+   - Source or workflow defect: continue at step 5.
+5. Create a fix branch and PR. Fix the defect, validate through `mise run`, and obtain a fresh adversarial review. Address material findings, validate again, and update the PR. After checks pass, squash-merge and delete the PR's local and remote branch. If the failed run pushed `v<version>` without publishing, delete its draft release and remote tag. Synchronize `main` and continue at step 2.
 
-Stop and report blockers requiring unavailable credentials, additional authority, or a product decision.
+After the eighth failed attempt, stop and lead with the conclusion that the release failed after eight attempts.
+
+A published release is immutable. Stop and report blockers that require unavailable credentials, additional authority, or a product decision.
