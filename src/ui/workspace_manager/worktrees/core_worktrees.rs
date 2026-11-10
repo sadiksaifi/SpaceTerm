@@ -378,7 +378,9 @@ impl WorkspaceManager {
         let title = format!("Remove Worktree \u{201C}{name}\u{201D}?");
         let machine = self.owning_machine(workspace);
         let branch = self
-            .workspace_inventory(workspace)
+            .binding
+            .owning(workspace)
+            .and_then(|binding| binding.repositories().repository_worktrees(&review.root))
             .and_then(|i| i.worktrees.iter().find(|r| r.root == review.path))
             .and_then(|r| match &r.head {
                 WorktreeHead::Branch(branch) => {
@@ -544,8 +546,11 @@ impl WorkspaceManager {
         else {
             return;
         };
+        // The reviewed repository decides, whichever repository the row reads now.
         let missing = self
-            .workspace_inventory(review.workspace)
+            .binding
+            .owning(review.workspace)
+            .and_then(|binding| binding.repositories().repository_worktrees(&review.review.root))
             .is_some_and(|i| !i.worktrees.iter().any(|r| r.root == review.review.path));
         if missing || !review.review.matches_inventory(inventory) {
             let Some(review) = self.sidebar_worktrees.core_review.take() else {

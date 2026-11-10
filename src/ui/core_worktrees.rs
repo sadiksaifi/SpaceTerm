@@ -445,6 +445,8 @@ pub(crate) mod testing {
         git: Mutex<GitToolStatus>,
         /// Folders the server's account can't write to.
         unwritable: Mutex<Vec<String>>,
+        /// The removal check this server answers, else it can't check.
+        removal: Mutex<Option<spaceterm_core::worktree::Removal>>,
     }
 
     impl ScriptedReads {
@@ -457,7 +459,13 @@ pub(crate) mod testing {
                 reads: Mutex::default(),
                 git: Mutex::default(),
                 unwritable: Mutex::default(),
+                removal: Mutex::default(),
             })
+        }
+
+        /// Answers each removal check with `review`.
+        pub(crate) fn review_removals_as(&self, review: spaceterm_core::worktree::Removal) {
+            *self.removal.lock().unwrap() = Some(review);
         }
 
         /// Every read this server was asked, oldest first.
@@ -506,6 +514,13 @@ pub(crate) mod testing {
                     },
                 }),
                 Read::Location { location, .. } => Ok(ReadReply::Location(location.into())),
+                Read::CheckRemoval { .. } => self
+                    .removal
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .map(ReadReply::Removal)
+                    .ok_or(Error::Unavailable),
                 _ => Err(Error::Unavailable),
             }
         }

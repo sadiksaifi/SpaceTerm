@@ -11900,6 +11900,100 @@ mod workspace_repositories {
         );
     }
 
+    /// The removal alert for the feature Worktree is open when the Root Pane runs `cd` into
+    /// another repository. The feature Worktree still exists, so the alert stays.
+    #[gpui::test]
+    fn an_open_removal_alert_should_survive_the_root_pane_leaving_the_repository(
+        cx: &mut TestAppContext,
+    ) {
+        let close = spaceterm_core::hierarchy::CloseInventory {
+            boot: [1; 32],
+            sessions: Vec::new(),
+            controls: Vec::new(),
+        };
+        let mut initial = published(1, "main", true);
+        initial.close = Some(close.clone());
+        let (harness, edits, reads, cx) = paired_harness(cx, initial.clone());
+        reads.review_removals_as(spaceterm_core::worktree::Removal {
+            boot: close.boot,
+            confirmation: [5; 32],
+            root: MAIN_ROOT.into(),
+            path: FEATURE_ROOT.into(),
+            changes: false,
+            submodules: false,
+            tabs: initial.affected_worktree_tabs(std::path::Path::new(MAIN_ROOT), std::path::Path::new(FEATURE_ROOT)),
+        });
+        let feature = harness
+            .row(cx)
+            .worktrees
+            .and_then(|section| {
+                section
+                    .rows()
+                    .find(|row| row.name.as_ref() == "app-feature")
+                    .map(|row| row.worktree_id)
+            })
+            .expect("the feature Worktree has a row");
+        cx.update(|window, cx| {
+            window.activate_window();
+            harness.manager.update(cx, |manager, cx| {
+                manager.request_machine_worktree_removal(harness.binding, feature, window, cx);
+            })
+        });
+        cx.run_until_parked();
+        let asked = cx.debug_bounds("modal-action-worktree-removal-confirm").is_some();
+
+        let mut moved = published(2, "main", true);
+        moved.close = Some(close);
+        moved.workspaces[0].tabs[0].panes[0].repository_directory = Some("/srv/other".into());
+        if let Some(snapshot) = &mut moved.repositories {
+            let mut other = facts("/srv/other", "main", &[record("/srv/other", "main", false)]);
+            other.worktrees.as_mut().unwrap().main_root = "/srv/other".into();
+            snapshot.directories.push(other);
+        }
+        edits.set_inventory(moved);
+        cx.update(|window, cx| {
+            harness.manager.update(cx, |manager, cx| {
+                for key in manager.binding.keys() {
+                    manager.sync_workspaces(key, window, cx);
+                }
+            })
+        });
+        cx.run_until_parked();
+
+        assert!(asked, "the removal alert opened");
+        assert!(
+            cx.debug_bounds("modal-action-worktree-removal-confirm").is_some(),
+            "the alert stays open"
+        );
+        assert!(
+            cx.debug_bounds("modal-action-worktree-removal-failed-ok")
+                .is_none(),
+            "nothing says the Worktree was removed"
+        );
+
+        // Git then removes the feature Worktree, so the alert closes and says so.
+        let mut removed = published(3, "main", false);
+        removed.close = initial.close;
+        edits.set_inventory(removed);
+        cx.update(|window, cx| {
+            harness.manager.update(cx, |manager, cx| {
+                for key in manager.binding.keys() {
+                    manager.sync_workspaces(key, window, cx);
+                }
+            })
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("modal-action-worktree-removal-confirm")
+                .is_none()
+        );
+        assert!(
+            cx.debug_bounds("modal-action-worktree-removal-failed-ok")
+                .is_some()
+        );
+    }
+
     /// New Worktree and Remove Worktree on a paired server's Workspace ask that server, over its
     /// own route, about its own paths. This computer's server is never asked and no client-local
     /// Git or filesystem check runs on the other computer's paths.
