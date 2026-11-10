@@ -552,6 +552,8 @@ mod tests {
             push: None,
             bundled: None,
             failed_push: None,
+            asked: None,
+            retrying_since: None,
         }
     }
 

@@ -45,6 +45,8 @@ fn waiting(machine: MachineId, name: &'static str, sessions: u32) -> MachineUpda
         push: None,
         bundled: None,
         failed_push: None,
+        asked: None,
+        retrying_since: None,
     }
 }
 
@@ -545,14 +547,14 @@ fn the_menu_reads_in_full_and_its_information_stays_reachable(cx: &mut gpui::Tes
     visual.run_until_parked();
 
     let tree = A11yTree::read(visual);
-    let trigger = tree.node("2 Updates");
+    let trigger = tree.node("2 in Progress");
     assert_ne!(
         trigger["aria"]["disabled"], true,
         "two working items still open the menu"
     );
     assert_eq!(
         trigger["aria"]["description"],
-        "2 updates need you. Open the menu to see each machine."
+        "2 updates are in progress. Open the menu to see each machine."
     );
 
     click("update-control-menu", visual);

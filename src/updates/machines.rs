@@ -45,6 +45,21 @@ pub(crate) struct MachineUpdate {
     /// breaks off or runs out of disk space records nothing in the Core's facts. Adapters leave
     /// it None.
     pub(crate) failed_push: Option<FailedPush>,
+    /// A check or install a person started on this desktop that the Core has not ended. The
+    /// shared store records it, so the title bar shows that work and keeps quiet about the work
+    /// a Core starts by itself. Adapters leave it None.
+    pub(crate) asked: Option<Asked>,
+    /// When the Core's own download of an update first failed, while the Core tries it again by
+    /// itself and nobody tried it from this desktop. The shared store records it. Adapters
+    /// leave it None.
+    pub(crate) retrying_since: Option<u64>,
+}
+
+/// The work on a Machine that a person started on this desktop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Asked {
+    Check,
+    Install,
 }
 
 /// A push of this desktop's embedded Core build that failed.
