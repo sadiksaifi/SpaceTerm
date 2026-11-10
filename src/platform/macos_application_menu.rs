@@ -34,9 +34,7 @@ impl MacosApplicationMenuAdapter {
 
 use super::application_menu_model::{TOGGLE_PANE_ZOOM_TITLE, menus};
 #[cfg(test)]
-use super::application_menu_model::{
-    application_menu, file_menu, help_menu, view_menu, window_menu,
-};
+use super::application_menu_model::{application_menu, file_menu, help_menu, view_menu};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MenuItemIcon<'a> {
@@ -1126,51 +1124,6 @@ mod tests {
     }
 
     #[test]
-    fn macos_menu_bar_should_expose_the_standard_top_level_structure() {
-        let names = menus("SpaceTerm")
-            .into_iter()
-            .map(|menu| menu.name.to_string())
-            .collect::<Vec<_>>();
-
-        let expected: &[&str] = if cfg!(feature = "developer-tools") {
-            &[
-                "SpaceTerm",
-                "File",
-                "Edit",
-                "View",
-                "Develop",
-                "Window",
-                "Help",
-            ]
-        } else {
-            &["SpaceTerm", "File", "Edit", "View", "Window", "Help"]
-        };
-        assert_eq!(names, expected);
-    }
-
-    #[test]
-    fn icon_mapping_covers_every_custom_menu_item_path() {
-        let mut decorated = MENU_ITEM_ICONS
-            .iter()
-            .chain(WHATS_NEW_MENU_ITEM_ICONS)
-            .chain(DEVELOP_MENU_ITEM_ICONS)
-            .map(|decoration| {
-                (
-                    decoration.menu.to_owned(),
-                    decoration.submenu.map(str::to_owned),
-                    decoration.item.to_owned(),
-                )
-            })
-            .collect::<BTreeSet<_>>();
-        decorated.extend(
-            application_menu_item_icons("SpaceTerm")
-                .map(|(item, _)| ("SpaceTerm".to_owned(), None, item)),
-        );
-
-        assert_eq!(decorated, custom_menu_item_paths("SpaceTerm"));
-    }
-
-    #[test]
     fn symbol_images_wait_for_the_menu_bar_to_open_and_load_once_per_install() {
         type Path = (String, Option<String>, String);
         let path = |icon: &MenuItemIcon<'_>| {
@@ -1303,33 +1256,15 @@ mod tests {
     }
 
     #[test]
-    fn window_and_help_menus_should_expose_native_and_support_commands() {
+    fn help_menu_should_expose_support_commands() {
         assert_eq!(
-            (labels(window_menu().owned()), labels(help_menu().owned())),
-            (
-                [
-                    "Minimize",
-                    "Zoom",
-                    "|",
-                    "Previous Tab",
-                    "Next Tab",
-                    "Move Tab Left",
-                    "Move Tab Right",
-                    "|",
-                    "Previous Worktree",
-                    "Next Worktree",
-                    "|",
-                    "Bring All to Front",
-                ]
+            labels(help_menu().owned()),
+            ["SpaceTerm Help", "|"]
+                .into_iter()
+                .chain(cfg!(spaceterm_release_notes).then_some(WHATS_NEW_TITLE))
+                .chain(["Export Terminal Diagnostics…"])
                 .map(str::to_owned)
-                .to_vec(),
-                ["SpaceTerm Help", "|"]
-                    .into_iter()
-                    .chain(cfg!(spaceterm_release_notes).then_some(WHATS_NEW_TITLE))
-                    .chain(["Export Terminal Diagnostics…"])
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>(),
-            )
+                .collect::<Vec<_>>(),
         );
     }
 

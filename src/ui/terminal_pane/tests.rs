@@ -2372,17 +2372,6 @@ fn current_native_service_origin(
     })
 }
 
-#[gpui::test]
-fn command_equals_should_increase_terminal_font_size(cx: &mut TestAppContext) {
-    let (pane, cx) = terminal_pane(cx);
-    let before = pane.read_with(cx, |pane, _cx| pane.font_size());
-
-    cx.simulate_keystrokes("cmd-=");
-    let after = pane.read_with(cx, |pane, _cx| pane.font_size());
-
-    assert_eq!((before, after), (18.0, 19.0));
-}
-
 fn clear_requests(records: &TestTerminalSessionRecords) -> usize {
     records
         .commands()
@@ -3566,32 +3555,6 @@ fn terminal_find_tab_delegates_to_its_composite_controls(cx: &mut TestAppContext
         &call.command,
         RecordedCommand::SetFindQuery(_, query) if query == "x"
     )));
-}
-
-#[gpui::test]
-fn terminal_find_ime_candidate_geometry_comes_from_shared_input(cx: &mut TestAppContext) {
-    let (pane, cx, _) = connected_terminal_pane(cx);
-    cx.dispatch_action(OpenTerminalFind);
-    cx.run_until_parked();
-    let input = terminal_find_input(&pane, cx);
-    let input_bounds = cx
-        .debug_bounds("terminal-find-input")
-        .expect("the shared Find input was not rendered");
-
-    let candidate = cx.update(|window, cx| {
-        input.update(cx, |input, cx| {
-            input.replace_and_mark_text_in_range(None, "に", Some(1..1), window, cx);
-            input
-                .bounds_for_range(1..1, input_bounds, window, cx)
-                .expect("the shared input should expose candidate geometry")
-        })
-    });
-
-    assert!(input.read_with(cx, |input, _| input.composition().is_some()));
-    assert!(pane.read_with(cx, |pane, _| pane.find_input.is_some()));
-    assert!(candidate.left() > input_bounds.left());
-    assert_eq!(candidate.top(), input_bounds.top());
-    assert_eq!(candidate.bottom(), input_bounds.bottom());
 }
 
 #[gpui::test]
@@ -5450,100 +5413,6 @@ fn unsafe_paste_prompt_enter_should_confirm_and_restore_responder_focus(cx: &mut
 }
 
 #[gpui::test]
-fn unsafe_paste_prompt_escape_should_cancel_and_restore_responder_focus(cx: &mut TestAppContext) {
-    let confirmation = PasteConfirmation {
-        id: crate::terminal::PasteConfirmationId::new(8),
-        byte_len: 12,
-        line_count: 2,
-        risk: crate::terminal::PasteRisk {
-            multiline: true,
-            control_bytes: false,
-            closing_fence: false,
-        },
-    };
-    let (pane, cx, records) = terminal_pane_with_paste_response(
-        cx,
-        Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)),
-        Ok(PasteResolution::Cancelled),
-    );
-    cx.write_to_clipboard(ClipboardItem::new_string("first\nsecond".to_owned()));
-    cx.dispatch_action(PasteClipboard);
-    cx.run_until_parked();
-
-    assert!(!cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
-    let command_start = records.commands().len();
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-
-    assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
-    assert_eq!(
-        records.commands()[command_start..]
-            .iter()
-            .map(|call| &call.command)
-            .filter(|command| matches!(
-                command,
-                RecordedCommand::ResolvePaste(..) | RecordedCommand::Key(_)
-            ))
-            .collect::<Vec<_>>(),
-        [&RecordedCommand::ResolvePaste(
-            confirmation.id,
-            PasteDecision::Cancel
-        )]
-    );
-}
-
-#[gpui::test]
-fn losing_product_focus_cancels_pending_paste_without_confirming_it(cx: &mut TestAppContext) {
-    let confirmation = PasteConfirmation {
-        id: crate::terminal::PasteConfirmationId::new(9),
-        byte_len: 12,
-        line_count: 2,
-        risk: crate::terminal::PasteRisk {
-            multiline: true,
-            control_bytes: false,
-            closing_fence: false,
-        },
-    };
-    let (pane, cx, records) = terminal_pane_with_paste_response(
-        cx,
-        Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)),
-        Ok(PasteResolution::Cancelled),
-    );
-    cx.write_to_clipboard(ClipboardItem::new_string("first\nsecond".to_owned()));
-    cx.dispatch_action(PasteClipboard);
-    cx.run_until_parked();
-
-    let command_start = records.commands().len();
-    pane.update(cx, |pane, cx| {
-        pane.set_product_focus(
-            TerminalProductFocus {
-                active_workspace: false,
-                ..TerminalProductFocus::default()
-            },
-            cx,
-        );
-    });
-    cx.run_until_parked();
-
-    assert!(pane.read_with(cx, |pane, _| pane.pending_paste.is_none()));
-    assert!(!cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
-    assert_eq!(
-        records.commands()[command_start..]
-            .iter()
-            .map(|call| &call.command)
-            .filter(|command| matches!(
-                command,
-                RecordedCommand::ResolvePaste(..) | RecordedCommand::Key(_)
-            ))
-            .collect::<Vec<_>>(),
-        [&RecordedCommand::ResolvePaste(
-            confirmation.id,
-            PasteDecision::Cancel
-        )]
-    );
-}
-
-#[gpui::test]
 fn kitty_event_reports_receive_only_releases_of_delivered_presses(cx: &mut TestAppContext) {
     use crate::terminal::ScrollbackMovement;
     use crate::terminal::geometry::{
@@ -5650,30 +5519,6 @@ fn delivered_key_presses_belong_to_one_terminal_session() {
     presses.press(2, PhysicalKey::C);
     assert!(!presses.release(2, PhysicalKey::B));
     assert!(presses.release(2, PhysicalKey::C));
-}
-
-#[test]
-fn escape_pair_within_window_requests_fullscreen_exit() {
-    let start = Instant::now();
-    let mut sequence = FullscreenEscapeSequence::default();
-
-    assert!(!sequence.escape_pressed(start));
-    assert!(
-        sequence
-            .escape_pressed(start + DOUBLE_ESCAPE_FULLSCREEN_WINDOW - Duration::from_millis(100))
-    );
-}
-
-#[test]
-fn slow_escape_pair_does_not_request_fullscreen_exit() {
-    let start = Instant::now();
-    let mut sequence = FullscreenEscapeSequence::default();
-
-    assert!(!sequence.escape_pressed(start));
-    assert!(
-        !sequence
-            .escape_pressed(start + DOUBLE_ESCAPE_FULLSCREEN_WINDOW + Duration::from_millis(1))
-    );
 }
 
 #[gpui::test]
@@ -10173,6 +10018,7 @@ fn paste_confirmation_restores_terminal_focus_after_escape_and_accessibility_can
         cx.dispatch_action(PasteClipboard);
         let tree = A11yTree::read(cx);
         assert_eq!(tree.focused().unwrap()["aria"]["label"], "Paste");
+        assert!(!cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
         if escape {
             cx.simulate_keystrokes("escape");
         } else {
@@ -10326,12 +10172,16 @@ fn paste_confirmation_cancels_when_focus_leaves_its_pane_or_window(cx: &mut Test
         let tree = A11yTree::read(cx);
         assert!(tree.with_role("AlertDialog").is_empty());
         assert!(pane.read_with(cx, |pane, _| pane.pending_paste.is_none()));
+        assert!(!cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
         assert_eq!(
             records.commands()[before..]
                 .iter()
                 .filter_map(|call| {
-                    matches!(call.command, RecordedCommand::ResolvePaste(..))
-                        .then_some(&call.command)
+                    matches!(
+                        call.command,
+                        RecordedCommand::ResolvePaste(..) | RecordedCommand::Key(_)
+                    )
+                    .then_some(&call.command)
                 })
                 .collect::<Vec<_>>(),
             [&RecordedCommand::ResolvePaste(

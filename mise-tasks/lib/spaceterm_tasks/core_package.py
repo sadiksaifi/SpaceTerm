@@ -338,7 +338,15 @@ def unpack_verified(
     Callers use a private temporary copy, preventing replacement between signature
     verification, extraction, executable checks, and installation.
     """
-    if archive.stat().st_size > MAX_ARCHIVE or signature.stat().st_size != 64:
+    try:
+        invalid = archive.stat().st_size > MAX_ARCHIVE or signature.stat().st_size != 64
+    except FileNotFoundError:
+        raise ArtifactVerificationError(ArtifactCause.MISSING) from None
+    except PermissionError:
+        raise ArtifactVerificationError(ArtifactCause.UNREADABLE) from None
+    except OSError:
+        raise ArtifactVerificationError(ArtifactCause.OS_ERROR) from None
+    if invalid:
         raise TaskError("the signed server artifact has an invalid size")
     trust_identity = identity or (expected["identity"] if expected is not None else None)
     try:

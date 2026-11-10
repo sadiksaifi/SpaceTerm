@@ -244,6 +244,12 @@ mod tests {
             (exit(1, LISTED), Err(PullRequestError::Unavailable)),
             (exit(0, "[]"), Ok(None)),
             (exit(0, "{"), Err(PullRequestError::InvalidResponse)),
+            // A gh killed by a signal has no exit code.
+            (Ok((None, Vec::new())), Err(PullRequestError::Unavailable)),
+            (
+                Err(ProgramError::Failed),
+                Err(PullRequestError::Unavailable),
+            ),
             (
                 Err(ProgramError::NotFound),
                 Err(PullRequestError::ToolMissing),

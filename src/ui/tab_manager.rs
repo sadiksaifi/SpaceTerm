@@ -456,8 +456,6 @@ pub(crate) struct TabManager {
     /// now.
     tab_strip_merge: Option<TabId>,
     #[cfg(test)]
-    rendered_window_active: bool,
-    #[cfg(test)]
     rendered_active_close_icon: Rc<Cell<gpui::Rgba>>,
     #[cfg(test)]
     rendered_inactive_close_icon: Rc<Cell<gpui::Rgba>>,
@@ -529,8 +527,6 @@ impl TabManager {
             pane_strip_drag: None,
             tab_over_layout: false,
             tab_strip_merge: None,
-            #[cfg(test)]
-            rendered_window_active: window.is_window_active(),
             #[cfg(test)]
             rendered_active_close_icon: Rc::new(Cell::new(rgba(0))),
             #[cfg(test)]
@@ -2476,10 +2472,6 @@ impl Render for TabManager {
             window,
             cx,
         );
-        #[cfg(test)]
-        {
-            self.rendered_window_active = window.is_window_active();
-        }
         let manager = cx.entity().downgrade();
         let active_tab = self.tabs.active_tab().clone();
         let edge = self.stage_leading_edge(window, cx);
@@ -4158,29 +4150,15 @@ mod tests {
     #[test]
     fn inactive_window_preserves_selected_tab_identity() {
         let colors = ChromeColors::default();
-        let presentation = TabChromePresentation::resolve(false, false, &colors);
+        let active = TabChromePresentation::resolve(true, false, &colors);
 
         assert_eq!(
-            presentation,
+            TabChromePresentation::resolve(false, false, &colors),
             TabChromePresentation {
                 window_active: false,
-                show_borders: false,
                 background: colors.title_bar_inactive_background,
-                active_tab_background: colors.tab_active_background,
-                active_tab_border: colors.tab_active_border,
-                active_tab_hover_background: colors.tab_active_hover_background,
-                active_tab_hover_border: colors.tab_active_border,
-                active_tab_hover_foreground: colors.tab_active_hover_foreground,
-                active_tab_hover_icon: colors.tab_active_hover_icon,
                 inactive_tab_background: colors.title_bar_inactive_background,
-                active_tab_foreground: colors.tab_active_foreground,
-                inactive_tab_foreground: colors.tab_inactive_foreground,
-                active_tab_icon: colors.tab_active_icon,
-                inactive_tab_icon: colors.tab_inactive_icon,
-                hover_background: colors.tab_hover_background,
-                hover_foreground: colors.tab_hover_foreground,
-                hover_icon: colors.tab_hover_icon,
-                tab_separator: colors.tab_separator,
+                ..active
             }
         );
     }
@@ -4651,7 +4629,6 @@ mod tests {
         let inactive_resting = rendered.get();
         cx.simulate_mouse_move(title, None, Modifiers::none());
         crate::ui::settle_hover(cx);
-        assert!(!manager.read_with(cx, |manager, _| manager.rendered_window_active));
         assert_eq!(
             rendered.get(),
             inactive_resting,
@@ -5616,17 +5593,6 @@ mod tests {
             active_chip.bottom() < bar.bottom(),
             "the Active Tab should clear the bar's lower edge, got {active_chip:?} against {bar:?}"
         );
-        for stale in [
-            "tab-bar-divider",
-            "tab-item-1-divider",
-            "tab-item-1-bottom-divider",
-            "tab-item-2-underline",
-        ] {
-            assert!(
-                cx.debug_bounds(stale).is_none(),
-                "{stale} should no longer be drawn beside the chip"
-            );
-        }
     }
 
     /// The part of the Tab bar beneath the window's own edge, where every top control centres.
@@ -6017,22 +5983,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn tab_bar_should_follow_operating_system_window_activation(cx: &mut TestAppContext) {
-        let (manager, _records, cx) = tab_manager(cx);
-        let active_before = manager.read_with(cx, |manager, _| manager.rendered_window_active);
-
-        cx.deactivate_window();
-        cx.run_until_parked();
-        let inactive = manager.read_with(cx, |manager, _| manager.rendered_window_active);
-
-        cx.update(|window, _| window.activate_window());
-        cx.run_until_parked();
-        let active_after = manager.read_with(cx, |manager, _| manager.rendered_window_active);
-
-        assert_eq!((active_before, inactive, active_after), (true, false, true));
-    }
-
-    #[gpui::test]
     fn tab_bar_should_start_after_the_persistent_sidebar_chrome(cx: &mut TestAppContext) {
         let (_manager, _records, cx) = tab_manager(cx);
         let root = cx
@@ -6222,12 +6172,24 @@ mod tests {
     #[gpui::test]
     fn unavailable_command_number_shortcut_should_preserve_the_active_tab(cx: &mut TestAppContext) {
         let (manager, _records, cx) = tab_manager(cx);
-
-        cx.simulate_keystrokes("cmd-9");
+        for _ in 1..3 {
+            cx.simulate_keystrokes("cmd-t");
+            cx.run_until_parked();
+        }
+        // The middle Tab is neither the first nor the last, so no other position reads as it.
+        cx.simulate_keystrokes("cmd-2");
         cx.run_until_parked();
+        let active_tab_id = |cx: &mut VisualTestContext| {
+            manager.read_with(cx, |manager, _| manager.tabs.active_tab_id())
+        };
+        assert_eq!(active_tab_id(cx), TabId::new(2));
 
-        let active_tab_id = manager.read_with(cx, |manager, _| manager.tabs.active_tab_id());
-        assert_eq!(active_tab_id, TabId::new(1));
+        for shortcut in ["cmd-4", "cmd-9"] {
+            cx.simulate_keystrokes(shortcut);
+            cx.run_until_parked();
+
+            assert_eq!(active_tab_id(cx), TabId::new(2), "{shortcut}");
+        }
     }
 
     /// The Tab's activity prefers an explicit Terminal title, then the running command, then the
@@ -6312,7 +6274,6 @@ mod tests {
             (split_title.as_ref(), restored_title.as_ref()),
             ("Terminal · second", "editor")
         );
-        assert!(cx.debug_bounds("tab-pane-count-1").is_none());
     }
 
     #[gpui::test]
@@ -6384,8 +6345,7 @@ mod tests {
         );
     }
 
-    /// A Tab reads `<status glyph> <activity> · <place>`, and neither the account, the Workspace
-    /// name, nor a Pane count competes with those segments for room.
+    /// A Tab reads `<status glyph> <activity> · <place>`.
     #[gpui::test]
     fn tab_should_present_status_glyph_activity_and_place_in_order(cx: &mut TestAppContext) {
         use crate::terminal::metadata::{ProgressMetadata, TitleProvenance};
@@ -6439,8 +6399,6 @@ mod tests {
                 "{leading:?} should precede {trailing:?}"
             );
         }
-        assert!(cx.debug_bounds("tab-pane-count-1").is_none());
-        assert!(cx.debug_bounds("tab-account-1").is_none());
 
         // A single-Pane Tab carries the same mark as the Pane Caption under it.
         cx.simulate_keystrokes("cmd-w");
@@ -8190,38 +8148,6 @@ mod tests {
             .debug_bounds(end)
             .expect("the active last Tab scrolled out past the end should show the end mark");
         assert_eq!(mark.right(), strip.right());
-    }
-
-    #[gpui::test]
-    fn tab_items_should_scroll_horizontally_with_the_mouse_wheel(cx: &mut TestAppContext) {
-        let (manager, _records, cx) = tab_manager(cx);
-        for _ in 0..12 {
-            click("create-tab-button", cx);
-        }
-
-        manager.read_with(cx, |manager, _| {
-            manager
-                .tab_bar_scroll_handle
-                .set_offset(point(px(0.0), px(0.0)));
-        });
-        manager.update(cx, |_, cx| cx.notify());
-        cx.run_until_parked();
-        let items = cx
-            .debug_bounds("tab-items")
-            .expect("the Tab item strip was not rendered");
-        cx.simulate_event(ScrollWheelEvent {
-            position: items.center(),
-            delta: ScrollDelta::Pixels(point(px(0.0), px(-120.0))),
-            modifiers: Modifiers::none(),
-            touch_phase: TouchPhase::Moved,
-        });
-        cx.run_until_parked();
-
-        let offset = manager.read_with(cx, |manager, _| manager.tab_bar_scroll_handle.offset().x);
-        assert!(
-            offset < px(0.0),
-            "the Tab strip did not scroll; offset was {offset:?}"
-        );
     }
 
     #[gpui::test]

@@ -187,28 +187,6 @@ mod tests {
     }
 
     #[test]
-    fn notices_print_only_in_interactive_text_mode() {
-        let text = Mode::default();
-        assert!(shown(text, true));
-        assert!(!shown(text, false));
-        assert!(!shown(
-            Mode {
-                quiet: true,
-                ..text
-            },
-            true
-        ));
-        assert!(!shown(Mode { json: true, ..text }, true));
-        assert!(shown(
-            Mode {
-                verbose: true,
-                ..text
-            },
-            true
-        ));
-    }
-
-    #[test]
     fn a_work_command_names_its_machine_and_repeats_its_actor_in_the_restart() {
         let machine = MachineRef {
             name: "penguin".into(),

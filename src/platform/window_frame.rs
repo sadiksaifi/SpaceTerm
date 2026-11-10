@@ -151,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn each_window_should_preserve_its_compact_traffic_light_position() {
+    fn density_height_should_move_each_native_row_by_half_the_height_delta() {
         let geometry = geometry();
 
         assert_eq!(
@@ -162,14 +162,9 @@ mod tests {
             (
                 Some(point(px(15.5), px(14.0))),
                 Some(point(px(12.0), px(11.0))),
-            )
+            ),
+            "each compact height keeps its compact position"
         );
-    }
-
-    #[test]
-    fn density_height_should_move_each_native_row_by_half_the_height_delta() {
-        let geometry = geometry();
-
         assert_eq!(
             (
                 geometry.workspace_traffic_light_position(px(50.0)),

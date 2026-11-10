@@ -67,19 +67,6 @@ fn a_previewed_image_is_presented_before_it_is_saved(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
-fn a_missing_copy_presents_nothing(cx: &mut TestAppContext) {
-    let settings = Settings::load(Arc::new(MemoryStorage::default()));
-    let store = Arc::new(store().0);
-    let id = store.install(PNG).unwrap();
-    store.discard(store.retire(id)).unwrap();
-    commit(&settings, Some(id));
-    cx.update(|cx| install(settings.clone(), Arc::clone(&store), cx));
-    cx.run_until_parked();
-
-    assert_eq!(presented_bytes(cx), None);
-}
-
 /// A choice may copy the very image the runtime is about to discard; nothing is discarded until
 /// the choice ends, and then only what no Settings name.
 #[gpui::test]

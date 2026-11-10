@@ -53,7 +53,6 @@ struct TestRoot {
     before_focus: FocusHandle,
     other_focus: FocusHandle,
     show_combo_box: bool,
-    right_to_left: bool,
     menu_with_filter_header: bool,
     events: Rc<RefCell<Vec<RecordedEvent>>>,
     underlay_presses: Rc<Cell<usize>>,
@@ -81,7 +80,6 @@ impl Render for TestRoot {
         .handle(self.handle.clone())
         .copy(self.copy.clone())
         .disabled(self.disabled)
-        .right_to_left(self.right_to_left)
         .placement(AnchoredPlacementConfig::new(
             AnchoredPlacement::Bottom,
             AnchoredAlignment::Start,
@@ -496,6 +494,7 @@ impl Render for IconTriggerRoot {
 struct PlacementRoot {
     origin: gpui::Point<gpui::Pixels>,
     placement: AnchoredPlacementConfig,
+    right_to_left: bool,
     items: Vec<ComboBoxItem<u8>>,
     accepted: Rc<RefCell<Vec<u8>>>,
 }
@@ -519,6 +518,7 @@ impl Render for PlacementRoot {
                     )
                     .full_width(true)
                     .placement(self.placement)
+                    .when(self.right_to_left, |combo| combo.right_to_left(true))
                     .debug_selector("combo-box-trigger")
                     .on_accept(move |acceptance, _, _| {
                         accepted.borrow_mut().push(*acceptance.item_id());
@@ -886,7 +886,6 @@ fn combo_box_window(
         before_focus: cx.focus_handle().tab_stop(true),
         other_focus: cx.focus_handle().tab_stop(true),
         show_combo_box: true,
-        right_to_left: false,
         menu_with_filter_header: false,
         events: root_events,
         underlay_presses: root_underlay_presses,
@@ -916,7 +915,6 @@ fn command_combo_box_window(
         before_focus: cx.focus_handle().tab_stop(true),
         other_focus: cx.focus_handle().tab_stop(true),
         show_combo_box: true,
-        right_to_left: false,
         menu_with_filter_header: false,
         events: root_events,
         underlay_presses: root_underlay_presses,
@@ -973,6 +971,7 @@ fn placement_window(
     let (_, cx) = cx.add_window_view(move |_, _| PlacementRoot {
         origin,
         placement,
+        right_to_left: false,
         items,
         accepted: root_accepted,
     });
@@ -2669,11 +2668,19 @@ fn repaired_provisional_item_should_be_revealed_after_a_long_model_update(cx: &m
 
 #[gpui::test]
 fn start_alignment_should_follow_right_to_left_layout_direction(cx: &mut TestAppContext) {
-    let (root, _, _, cx) = combo_box_window(cx, Some(1), items(), false);
-    root.update(cx, |root, cx| {
-        root.right_to_left = true;
-        cx.notify();
+    install_themes(cx);
+    let (_, cx) = cx.add_window_view(|_, _| PlacementRoot {
+        origin: point(px(250.0), px(120.0)),
+        placement: AnchoredPlacementConfig::new(
+            AnchoredPlacement::Bottom,
+            AnchoredAlignment::Start,
+        ),
+        right_to_left: true,
+        items: items(),
+        accepted: Rc::default(),
     });
+    cx.simulate_resize(gpui::size(px(600.0), px(420.0)));
+    cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     open_by_pointer(cx);
 
@@ -2683,7 +2690,8 @@ fn start_alignment_should_follow_right_to_left_layout_direction(cx: &mut TestApp
     let panel = cx
         .debug_bounds("combo-box-panel")
         .expect("the panel should render");
-    assert_eq!(trigger.right() - panel.right(), px(12.0));
+    assert_eq!(panel.right(), trigger.right());
+    assert!(panel.left() < trigger.left());
 }
 
 #[gpui::test]
@@ -2721,42 +2729,6 @@ fn rendered_combo_box_placement_should_flip_left_to_right_at_the_left_edge(
     let panel = cx.debug_bounds("combo-box-panel").expect("popup");
     assert_eq!(panel.left(), trigger.right() + px(4.0));
     assert_eq!(panel.top(), trigger.top());
-}
-
-#[gpui::test]
-fn rendered_combo_box_placement_should_flip_right_to_left_at_the_right_edge(
-    cx: &mut TestAppContext,
-) {
-    let (_, cx) = placement_window(
-        cx,
-        point(px(488.0), px(120.0)),
-        AnchoredPlacementConfig::new(AnchoredPlacement::Right, AnchoredAlignment::Start),
-        gpui::size(px(600.0), px(420.0)),
-        items(),
-    );
-    open_by_pointer(cx);
-
-    let trigger = cx.debug_bounds("combo-box-trigger").expect("trigger");
-    let panel = cx.debug_bounds("combo-box-panel").expect("popup");
-    assert_eq!(panel.right(), trigger.left() - px(4.0));
-    assert_eq!(panel.top(), trigger.top());
-}
-
-#[gpui::test]
-fn rendered_combo_box_placement_should_flip_top_to_bottom_at_the_top_edge(cx: &mut TestAppContext) {
-    let (_, cx) = placement_window(
-        cx,
-        point(px(180.0), px(12.0)),
-        AnchoredPlacementConfig::new(AnchoredPlacement::Top, AnchoredAlignment::Start),
-        gpui::size(px(600.0), px(420.0)),
-        items(),
-    );
-    open_by_pointer(cx);
-
-    let trigger = cx.debug_bounds("combo-box-trigger").expect("trigger");
-    let panel = cx.debug_bounds("combo-box-panel").expect("popup");
-    assert_eq!(panel.top(), trigger.bottom() + px(4.0));
-    assert_eq!(panel.left(), trigger.left());
 }
 
 #[gpui::test]

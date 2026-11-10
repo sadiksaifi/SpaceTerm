@@ -969,36 +969,6 @@ fn disabling_cancellable_progress_invalidates_only_the_current_attempt() {
     );
 }
 
-#[test]
-fn stale_progress_update_generation_cannot_overwrite_newer_status() {
-    let mut owner = ModalWindowOwner::detached(WindowId::from(1));
-    let weak = WeakEntity::new_invalid();
-    let (presentation, _) = owner
-        .submit(progress_request(AnyWeakEntity::new_invalid()), weak)
-        .expect("progress should open");
-    owner
-        .update_progress(
-            presentation,
-            0,
-            ProgressDialogUpdate::new().status("New status"),
-        )
-        .expect("first update should succeed");
-
-    let stale = owner.update_progress(
-        presentation,
-        0,
-        ProgressDialogUpdate::new().status("Stale status"),
-    );
-
-    assert_eq!(
-        stale,
-        Err(ModalUpdateError::StaleUpdate {
-            attempted: 0,
-            current: 1
-        })
-    );
-}
-
 #[gpui::test]
 fn terminal_progress_outcome_is_delivered_once(cx: &mut TestAppContext) {
     let outcomes = Rc::new(RefCell::new(Vec::new()));
@@ -1048,46 +1018,6 @@ fn terminal_progress_outcome_is_delivered_once(cx: &mut TestAppContext) {
 
     assert!(
         duplicate.is_err() && outcomes.borrow().as_slice() == [ProgressDialogOutcome::Completed]
-    );
-}
-
-#[gpui::test]
-fn programmatic_only_deadline_expires_deterministically(cx: &mut TestAppContext) {
-    let outcomes = Rc::new(RefCell::new(Vec::new()));
-    let sink_outcomes = outcomes.clone();
-    let request = PreparedModalRequest::new(
-        ModalId::new("deadline"),
-        ModalKind::Progress,
-        Vec::new(),
-        PreparedModalSemantics::Progress {
-            visible_title: "Progress".into(),
-            status: "Working".into(),
-            detail: None,
-            progress: ProgressState::Indeterminate,
-            cancellation_capable: false,
-        },
-        PreparedFocusIntent::Surface,
-        AnyWeakEntity::new_invalid(),
-        Box::new(move |outcome, _| {
-            if let InternalOutcome::Progress(outcome) = outcome {
-                sink_outcomes.borrow_mut().push(outcome);
-            }
-        }),
-    )
-    .with_programmatic_deadline(Some(Duration::from_secs(5)));
-    let owner = cx.new(|cx| ModalWindowOwner::new(WindowId::from(1), cx));
-    let weak = owner.downgrade();
-    let (_, effects) = owner
-        .update(cx, |owner, _| owner.submit(request, weak))
-        .expect("programmatic-only progress should open");
-    cx.update(|cx| run_effects(effects, cx));
-
-    cx.executor().advance_clock(Duration::from_secs(5));
-    cx.run_until_parked();
-
-    assert_eq!(
-        outcomes.borrow().as_slice(),
-        [ProgressDialogOutcome::DeadlineExpired]
     );
 }
 

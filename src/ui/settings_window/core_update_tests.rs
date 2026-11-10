@@ -205,7 +205,11 @@ fn settings_rebuilds_confirmation_when_the_pending_version_or_sessions_change(
 fn settings_tracks_the_shared_install_and_restart_without_starting_another(
     cx: &mut TestAppContext,
 ) {
-    let (settings, adapter, cx) = open(cx, None);
+    let (settings, adapter, cx) = open(cx, Some("1.6.0"));
+    assert!(
+        cx.debug_bounds(UPDATE_SELECTOR).is_some(),
+        "the pending version offers Update until the work begins"
+    );
     for operation in [
         spaceterm_core::update::facts::Operation::Installing {
             version: Version::parse("1.6.0").unwrap(),
@@ -216,7 +220,7 @@ fn settings_tracks_the_shared_install_and_restart_without_starting_another(
             to: Version::parse("1.6.0").unwrap(),
         },
     ] {
-        let mut update = machine(None, 3);
+        let mut update = machine(Some("1.6.0"), 3);
         update.facts.as_mut().unwrap().operation = Some(operation);
         adapter.emit(MachineUpdatesEvent::Changed(Box::new(update)));
         cx.run_until_parked();

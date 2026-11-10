@@ -3,7 +3,7 @@
 //! Everything here is pure. Every repository-supplied string is sanitized before display, and no
 //! state is carried by color alone: a dimmed value also says why in its accessible label.
 
-use super::display_text::is_bidirectional_format;
+use super::display_text::is_unsafe_display_character;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -49,13 +49,13 @@ pub(crate) const MAXIMUM_PATH_CHARS: usize = 240;
 const REPLACEMENT: char = '\u{FFFD}';
 const ELLIPSIS: char = '…';
 
-/// Replaces control and bidirectional formatting characters with U+FFFD and bounds the text to
-/// `maximum_chars`, ending a cut with an ellipsis.
+/// Replaces control, line and paragraph separator, and bidirectional formatting characters with
+/// U+FFFD and bounds the text to `maximum_chars`, ending a cut with an ellipsis.
 pub(crate) fn sanitize_for_display(text: &str, maximum_chars: usize) -> String {
     let sanitized: Vec<char> = text
         .chars()
         .map(|character| {
-            if character.is_control() || is_bidirectional_format(character) {
+            if is_unsafe_display_character(character) {
                 REPLACEMENT
             } else {
                 character
@@ -691,6 +691,10 @@ mod tests {
         assert_eq!(
             sanitize_for_display("ma\u{1b}[31min\u{202e}txt\u{2066}\n", 100),
             "ma\u{FFFD}[31min\u{FFFD}txt\u{FFFD}\u{FFFD}"
+        );
+        assert_eq!(
+            sanitize_for_display("line\u{2028}separator\u{2029}paragraph", 100),
+            "line\u{FFFD}separator\u{FFFD}paragraph"
         );
         assert_eq!(
             sanitize_for_display("feature/ünïcode", 100),

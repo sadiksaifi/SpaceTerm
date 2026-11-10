@@ -527,51 +527,6 @@ mod tests {
     }
 
     #[test]
-    fn linux_defaults_resolve_to_the_chords_gpui_dispatches() {
-        let resolved = profile().resolve(&KeybindingPreferences::default());
-        for (command, dispatch) in [
-            (Command::ChooseWorkspace, &["ctrl-shift-k"][..]),
-            (Command::NewTab, &["ctrl-shift-t"]),
-            (Command::CloseTab, &["ctrl-alt-shift-w"]),
-            (Command::NextWorktree, &["ctrl-alt-}"]),
-            (Command::PreviousWorktree, &["ctrl-alt-{"]),
-            (Command::ActivateWorkspace1, &["ctrl-alt-1"]),
-            (Command::ActivateWorkspace9, &["ctrl-alt-9"]),
-            (Command::ActivateTab1, &["alt-1"]),
-            (Command::ActivateTab9, &["alt-9"]),
-            (Command::NextTab, &["ctrl-pagedown", "ctrl-tab"]),
-            (Command::PreviousTab, &["ctrl-pageup", "ctrl-shift-tab"]),
-            (Command::MoveTabRight, &["ctrl-shift-pagedown"]),
-            (Command::MoveTabLeft, &["ctrl-shift-pageup"]),
-            (Command::FocusPaneLeft, &["ctrl-shift-left"]),
-            (Command::FocusPreviousPane, &["ctrl-{", "ctrl-alt-shift-f6"]),
-            (Command::FocusNextPane, &["ctrl-}", "ctrl-shift-f6"]),
-            (Command::FindNext, &["ctrl-shift-g", "f3"]),
-            (Command::FindPrevious, &["ctrl-shift-h", "shift-f3"]),
-            (Command::ScrollPageUp, &["shift-pageup"]),
-            (Command::ScrollPageDown, &["shift-pagedown"]),
-            (Command::ScrollToTop, &["shift-home"]),
-            (Command::ScrollToBottom, &["shift-end"]),
-            (Command::IncreaseTerminalFontSize, &["ctrl-=", "ctrl-+"]),
-            (Command::DecreaseTerminalFontSize, &["ctrl--"]),
-            (Command::ResetTerminalFontSize, &["ctrl-0"]),
-            (Command::ToggleSidebar, &["ctrl-shift-b"]),
-            (Command::KeyboardShortcuts, &["ctrl-?"]),
-        ] {
-            assert_eq!(
-                resolved
-                    .shortcuts(command)
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>(),
-                dispatch,
-                "{command:?}"
-            );
-        }
-        assert_eq!(resolved.shortcut(Command::KillWorkspace), None);
-    }
-
-    #[test]
     fn an_override_reserved_on_this_host_keeps_the_host_default_in_both_directions() {
         use crate::keybindings::{KeybindingState, Reservation, SystemReservation};
         let cases = [

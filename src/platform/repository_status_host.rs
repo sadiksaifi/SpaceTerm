@@ -61,6 +61,9 @@ mod tests {
         let environment = github_cli_environment(|key| match key {
             "HTTPS_PROXY" => Some("http://proxy:3128".into()),
             "GH_HOST" => Some("github.example.com".into()),
+            // The launch environment sets these, and the passthrough list names neither.
+            "SSH_AUTH_SOCK" => Some("/private/agent.sock".into()),
+            "AWS_SECRET_ACCESS_KEY" => Some("secret".into()),
             _ => None,
         });
         assert_eq!(

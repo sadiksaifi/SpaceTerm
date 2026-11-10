@@ -205,13 +205,6 @@ pub(crate) trait SecureFilesystem: Send + Sync {
         name: &OsStr,
         identity: &SecureEntryIdentity,
     ) -> Result<(), SecureFilesystemError>;
-
-    #[cfg(all(test, feature = "native-tests"))]
-    fn create_private_artifact(
-        &self,
-        directory: &SecureDirectory,
-        name: &OsStr,
-    ) -> Result<(), SecureFilesystemError>;
 }
 
 impl std::fmt::Debug for SecureDirectory {

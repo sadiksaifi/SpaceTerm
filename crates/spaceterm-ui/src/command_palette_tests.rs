@@ -1794,46 +1794,6 @@ fn header_action_press_should_emit_its_caller_identity(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
-fn section_boundaries_should_emit_one_heading_each(cx: &mut TestAppContext) {
-    let (root, palette, _, _, cx) = palette_window(cx);
-    open_palette(&root, &palette, cx);
-
-    palette.update(cx, |palette, cx| {
-        palette.set_items(
-            vec![
-                CommandPaletteItem::new(1, "Recent One").section("Recent"),
-                CommandPaletteItem::new(2, "Recent Two").section("Recent"),
-                CommandPaletteItem::new(3, "All One").section("All"),
-            ],
-            cx,
-        );
-    });
-    cx.run_until_parked();
-
-    let rows = palette.read_with(cx, |palette, _| palette.presented_results.rows().to_vec());
-    assert_eq!(
-        rows,
-        vec![
-            PaletteRow::Section("Recent".into()),
-            PaletteRow::Item {
-                position: 0,
-                single_line: true
-            },
-            PaletteRow::Item {
-                position: 1,
-                single_line: true
-            },
-            PaletteRow::Separator,
-            PaletteRow::Section("All".into()),
-            PaletteRow::Item {
-                position: 2,
-                single_line: true
-            },
-        ]
-    );
-}
-
-#[gpui::test]
 fn applying_sectioned_results_should_keep_the_first_heading_above_initial_selection(
     cx: &mut TestAppContext,
 ) {
@@ -3595,38 +3555,6 @@ fn closing_suspended_palette_should_not_suspend_replacement_after_modal_close(
 }
 
 #[gpui::test]
-fn modal_suspension_should_preserve_complete_palette_state_without_closing(
-    cx: &mut TestAppContext,
-) {
-    let (root, palette, events, _, cx) = palette_window(cx);
-    open_palette(&root, &palette, cx);
-    palette.update(cx, |palette, cx| {
-        palette.set_query("window", cx);
-        palette.set_loading(true, cx);
-        palette.set_dismissible(false, cx);
-        palette.set_preferred_item(Some(3), cx);
-    });
-    cx.run_until_parked();
-    events.borrow_mut().clear();
-    let before = palette_state_snapshot(&palette, cx);
-    let window_id = cx.update(|window, _| window.window_handle().window_id());
-
-    let suspension = cx.update(|_, cx| suspend_window_command_palette(window_id, cx));
-    cx.run_until_parked();
-    assert!(palette.read_with(cx, |palette, _| {
-        palette.suspended_by_modal.is_some() && palette.open
-    }));
-    assert!(events.borrow().is_empty());
-
-    let resumed = cx.update(|_, cx| resume_window_command_palette(suspension.token, cx));
-    cx.run_until_parked();
-
-    assert!(resumed);
-    assert_eq!(palette_state_snapshot(&palette, cx), before);
-    assert!(events.borrow().is_empty());
-}
-
-#[gpui::test]
 fn modal_palette_suspension_should_be_isolated_by_operating_system_window(cx: &mut TestAppContext) {
     cx.update(init);
     let first_suspended = Rc::new(Cell::new(false));
@@ -3782,9 +3710,18 @@ fn modal_open_and_close_should_suspend_then_resume_the_registered_palette(cx: &m
             palette.set_query("window", cx);
             palette.set_loading(true, cx);
             palette.set_dismissible(false, cx);
+            palette.set_preferred_item(Some(3), cx);
         });
     });
     cx.run_until_parked();
+    let events = Rc::new(RefCell::new(Vec::new()));
+    cx.update(|_, cx| {
+        let events = events.clone();
+        cx.subscribe(&palette, move |_, event: &CommandPaletteEvent<u8>, _| {
+            events.borrow_mut().push(event.clone());
+        })
+        .detach();
+    });
     let before = palette_state_snapshot(&palette, cx);
 
     cx.update(|window, cx| {
@@ -3794,6 +3731,7 @@ fn modal_open_and_close_should_suspend_then_resume_the_registered_palette(cx: &m
     assert!(palette.read_with(cx, |palette, _| {
         palette.open && palette.suspended_by_modal.is_some()
     }));
+    assert!(events.borrow().is_empty());
 
     let modal = root
         .read_with(cx, |root, _| root.modal.clone())
@@ -3802,6 +3740,7 @@ fn modal_open_and_close_should_suspend_then_resume_the_registered_palette(cx: &m
     cx.run_until_parked();
 
     assert_eq!(palette_state_snapshot(&palette, cx), before);
+    assert!(events.borrow().is_empty());
     assert!(cx.update(|window, cx| editor_is_focused(&palette, window, cx)));
 }
 
@@ -3863,42 +3802,6 @@ fn parent_completion_closes_owned_menu_before_suspended_palette_resumes(cx: &mut
     cx.run_until_parked();
 
     assert!(!cx.update(|window, cx| crate::window_menu_is_open(window, cx)));
-    assert!(palette.read_with(cx, |palette, _| {
-        palette.open && palette.suspended_by_modal.is_none()
-    }));
-    assert!(cx.update(|window, cx| editor_is_focused(&palette, window, cx)));
-}
-
-#[gpui::test]
-fn programmatic_progress_closed_while_deactivated_should_resume_palette_on_reactivation(
-    cx: &mut TestAppContext,
-) {
-    let (root, palette, cx) = modal_palette_window(cx);
-    cx.update(|window, cx| {
-        palette.update(cx, |palette, cx| palette.open(window, cx));
-        root.update(cx, |root, cx| {
-            root.present_programmatic_progress(window, cx)
-        });
-    });
-    cx.run_until_parked();
-    let progress = root
-        .read_with(cx, |root, _| root.progress.clone())
-        .expect("progress handle should be retained");
-
-    cx.deactivate_window();
-    cx.update(|window, cx| {
-        progress
-            .complete(window, cx)
-            .expect("progress should complete while inactive");
-    });
-    cx.run_until_parked();
-    assert!(palette.read_with(cx, |palette, _| {
-        palette.open && palette.suspended_by_modal.is_some()
-    }));
-
-    cx.update(|window, _| window.activate_window());
-    cx.run_until_parked();
-
     assert!(palette.read_with(cx, |palette, _| {
         palette.open && palette.suspended_by_modal.is_none()
     }));

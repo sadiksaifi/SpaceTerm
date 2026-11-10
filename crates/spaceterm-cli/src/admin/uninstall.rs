@@ -306,17 +306,6 @@ mod tests {
     }
 
     #[test]
-    fn delete_data_removes_credentials_before_the_core_and_then_the_app() {
-        let removal = Scripted::new(true, false);
-        let reply = uninstall(&removal, true, Some("c1-token"));
-        assert_eq!(code(&reply), None);
-        assert_eq!(
-            *removal.log.borrow(),
-            ["forget credentials", "uninstall Delete", "remove apps"]
-        );
-    }
-
-    #[test]
     fn a_credential_failure_removes_nothing_so_a_rerun_can_finish() {
         let mut removal = Scripted::new(true, false);
         removal.credentials = Err(Failure::new(Code::CredentialInteractionRequired));

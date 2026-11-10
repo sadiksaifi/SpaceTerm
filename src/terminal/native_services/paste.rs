@@ -390,12 +390,15 @@ mod tests {
 
     #[test]
     fn converted_file_paths_still_require_the_unified_unsafe_paste_policy() {
-        let insertion = crate::terminal::file_insertion::prepare_file_insertion(
-            crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
-            &[std::path::PathBuf::from("/tmp/line\nbreak")],
+        let prepared = PastePayload::prepare_dropped_files(
+            file_insertion::FileInsertionPolicy::fixture(),
+            &[PathBuf::from("/tmp/line\nbreak")],
+            TerminalLocalFileCapabilities::Enabled,
         )
+        .unwrap()
+        .unwrap()
+        .prepare()
         .unwrap();
-        let prepared = PreparedPaste::prepare(insertion.text).unwrap();
         assert!(prepared.requires_confirmation(false));
         assert!(prepared.risk.multiline);
     }

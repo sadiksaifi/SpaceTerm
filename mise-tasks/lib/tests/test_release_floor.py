@@ -84,11 +84,11 @@ class FloorTests(unittest.TestCase):
         return release_floor.floor(product, version, self.root, self.repository.published)
 
     def test_the_first_release_with_data_generations_is_its_own_floor(self):
-        self.repository.release("0.6.8", None)
-        self.repository.release("0.7.0", None)
+        self.repository.release("0.10.0", None)
+        self.repository.release("0.11.0", None)
         self.repository.commit(source())
-        self.assertEqual(self.floor("core", "1.0.0"), "1.0.0")
-        self.assertEqual(self.floor("desktop", "1.0.0"), "1.0.0")
+        self.assertEqual(self.floor("core", "0.12.0"), "0.12.0")
+        self.assertEqual(self.floor("desktop", "0.12.0"), "0.12.0")
 
     def test_the_floor_is_the_oldest_release_at_or_above_every_oldest_of_the_product(self):
         self.repository.release("0.6.8", None)
@@ -210,11 +210,6 @@ class ReleaseCheckTests(unittest.TestCase):
         self.repository.commit(source(CORE_DATA=(2, 3)))
         self.complete_fixtures(CORE_DATA=(2, 3))
         self.assertEqual(self.check("1.2.0"), {"core": "1.1.0", "desktop": "1.0.0"})
-
-    def test_a_first_release_is_its_own_floor(self):
-        self.repository.commit(source())
-        self.complete_fixtures()
-        self.assertEqual(self.check("1.0.0"), {"core": "1.0.0", "desktop": "1.0.0"})
 
     def test_greenfield_history_ignores_legacy_generations_and_starts_at_zero_ten(self):
         self.repository.release("0.6.8", source(CORE_DATA=(70, 99)))

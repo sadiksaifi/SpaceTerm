@@ -254,7 +254,7 @@ fn destructive_target_never_fills_from_a_single_candidate() {
 }
 
 #[test]
-fn ambiguous_current_and_duplicate_labels_report_operational_candidates() {
+fn duplicate_labels_report_operational_candidates_outside_the_bounded_error() {
     let error = resolve(
         &fixture(),
         &args(None, None, None, Some("cargo test")),

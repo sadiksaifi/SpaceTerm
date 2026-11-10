@@ -89,10 +89,16 @@ mod tests {
     }
 
     #[test]
-    fn the_running_build_is_named_by_its_identity_and_build_identity() {
-        let about = About::current();
-        assert_eq!(about.name(), ApplicationIdentity::current().display_name());
-        assert!(about.version_line().contains(env!("SPACETERM_VERSION")));
+    fn the_running_build_version_line_carries_its_marketing_and_build_versions() {
+        let version_line = About::current().version_line();
+        assert!(
+            version_line.starts_with(&format!("Version {}", env!("SPACETERM_BUNDLE_VERSION"))),
+            "{version_line}"
+        );
+        assert!(
+            version_line.contains(env!("SPACETERM_VERSION")),
+            "{version_line}"
+        );
     }
 
     #[test]

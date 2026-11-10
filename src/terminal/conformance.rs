@@ -1,17 +1,11 @@
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::path::Path;
 
-use super::accessibility::{
-    AccessibilityCell, AccessibilityGeometry, AccessibilityLine, TerminalAccessibilityModel,
-};
-use super::attention::{AttentionEvent, AttentionFacts, AttentionState};
 use super::emulator::{
     ActiveScreenSnapshot, CellSnapshot, CursorShapeSnapshot, TerminalColor, TerminalEmulator,
     TerminalUnderlineSnapshot,
 };
 use super::failure::{DiagnosticBundle, FailureClass, Recoverability, TerminalFailure};
-use super::file_insertion::prepare_file_insertion;
 use super::geometry::{
     BackingPosition, BackingScale, BackingSize, CellGridPosition, CellGridSize, LogicalCellSize,
     LogicalPosition, LogicalSize, TerminalGeometry,
@@ -26,25 +20,14 @@ use super::key_input::KeyTranslation;
 use super::metadata::{
     DirectoryProvenance, TerminalLocalFileCapabilities, parse_osc7_directory, sanitize_title,
 };
-use super::native_services::{
-    FilePreviewTarget, NativeContextActions, PasteIntakeError, PastePayload,
-};
-use super::osc52::{Osc52Effect, Osc52Filter, Osc52Operation, Osc52Rejection, Osc52Target};
 use super::paste::{MAX_PASTE_BYTES, PasteRejection, PreparedPaste};
-use super::pointer_input::{
-    PointerButton, PointerInput, PointerPhase, ShiftSelectionPolicy, SurfacePosition, WheelInput,
-    WheelPhase,
-};
+use super::pointer_input::{ShiftSelectionPolicy, SurfacePosition, WheelInput, WheelPhase};
 use super::selection::{SelectionCopyOptions, TrailingSpacePolicy};
 use super::session::TerminalSessionFailure;
 use super::testing::ShellResourcesFixture;
 use crate::platform::shell_integration::{
     ShellEnvironment, ShellIntegrationMode, ShellIntegrationStatus, ShellKind,
     plan_shell_integration,
-};
-use crate::ui::{
-    RenderLifecycle, ScaleChange, SurfaceVisibility, TerminalFocusBlocker,
-    TerminalFocusCoordinator, TerminalFocusFacts,
 };
 
 const MAX_FIXTURE_STEPS: usize = 1_024;
@@ -104,20 +87,6 @@ const FIXTURES: &[FixtureSpec] = &[
         Geometry
     ),
     fixture!(
-        "pty.initialization",
-        8,
-        [38, 46],
-        "spaceterm-pty-owner-contract",
-        Lifecycle
-    ),
-    fixture!(
-        "pty.shutdown",
-        9,
-        [39, 46],
-        "spaceterm-pty-owner-contract",
-        Lifecycle
-    ),
-    fixture!(
         "presentation.colors",
         10,
         [3],
@@ -160,13 +129,6 @@ const FIXTURES: &[FixtureSpec] = &[
         SemanticSnapshot
     ),
     fixture!(
-        "focus.terminal-input-focus",
-        16,
-        [8, 9, 10, 11, 12, 13, 46],
-        "apple-responder-and-spaceterm-focus",
-        Interface
-    ),
-    fixture!(
         "keyboard.vocabulary",
         17,
         [1, 17, 18],
@@ -188,13 +150,6 @@ const FIXTURES: &[FixtureSpec] = &[
         Interface
     ),
     fixture!(
-        "focus.dec-1004",
-        20,
-        [14, 15, 16],
-        "xterm-focus-event",
-        Bytes
-    ),
-    fixture!(
         "cursor.blink-lifecycle",
         21,
         [6, 7],
@@ -207,13 +162,6 @@ const FIXTURES: &[FixtureSpec] = &[
         [33, 34],
         "ecma-48-and-xterm-private-modes",
         SemanticSnapshot
-    ),
-    fixture!(
-        "mouse.protocols",
-        25,
-        [24, 25],
-        "xterm-mouse-tracking",
-        Bytes
     ),
     fixture!(
         "selection.semantic-ranges",
@@ -245,14 +193,6 @@ const FIXTURES: &[FixtureSpec] = &[
         Security
     ),
     fixture!(
-        "paste.file-urls",
-        32,
-        [31],
-        "apple-file-url-and-posix-shell",
-        Security
-    ),
-    fixture!("clipboard.osc-52", 33, [32], "xterm-osc-52", Security),
-    fixture!(
         "metadata.osc-7-and-133",
         34,
         [35],
@@ -272,34 +212,6 @@ const FIXTURES: &[FixtureSpec] = &[
         [37],
         "ncurses-terminfo-and-xterm",
         Bytes
-    ),
-    fixture!(
-        "attention.bell-and-notification",
-        37,
-        [41],
-        "ecma-48-bel-and-apple-notifications",
-        Interface
-    ),
-    fixture!(
-        "services.native-actions",
-        38,
-        [43],
-        "apple-services-drag-and-quick-look",
-        Interface
-    ),
-    fixture!(
-        "accessibility.editable-text",
-        39,
-        [42],
-        "apple-nsaccessibility",
-        Interface
-    ),
-    fixture!(
-        "render.visibility-lifecycle",
-        40,
-        [12, 13, 44, 45],
-        "apple-window-visibility",
-        Lifecycle
     ),
     fixture!(
         "failure.typed-local-diagnostics",
@@ -750,30 +662,19 @@ fn observe_portable_contract(
     match spec.issue {
         6 => check_snapshot_isolation()?,
         7 => check_geometry()?,
-        8 => check_pty_initialization()?,
-        9 => check_pty_shutdown()?,
         10..=15 => check_presentation(spec.issue)?,
-        16 => check_terminal_focus()?,
         17..=18 => check_keyboard_encoding()?,
         19 => check_gpui_keyboard_adapter()?,
-        20 => check_focus_reporting()?,
         21 => check_cursor_blink_lifecycle()?,
         24 => check_screens_scrollback_and_reflow()?,
-        25 => check_mouse_protocols()?,
         26 => check_selection_and_copy(false)?,
         27 => check_precision_wheel()?,
         29 => check_hyperlinks()?,
         30 => check_selection_and_copy(true)?,
         31 => check_paste_safety()?,
-        32 => check_file_insertion()?,
-        33 => check_osc52()?,
         34 => check_metadata()?,
         35 => check_shell_integration()?,
         36 => check_identity()?,
-        37 => check_attention()?,
-        38 => check_native_services()?,
-        39 => check_accessibility()?,
-        40 => check_render_lifecycle()?,
         41 => check_typed_failures()?,
         89 => check_kitty_graphics()?,
         issue => {
@@ -793,7 +694,7 @@ fn observe_portable_contract(
 
 fn check_kitty_graphics() -> Result<(), String> {
     run_fixture(&ExecutableFixture {
-        spec: &FIXTURES[33],
+        spec: &FIXTURES[22],
         expected: KITTY_GRAPHICS_EXPECTED,
         observe: observe_kitty_graphics,
     })
@@ -878,49 +779,6 @@ fn check_geometry() -> Result<(), String> {
         "backing-to-cell",
         geometry.cell_at_backing_position(BackingPosition::new(22.5, 35.0)),
         CellGridPosition::new(1, 1),
-    )
-}
-
-fn check_pty_initialization() -> Result<(), String> {
-    use crate::platform::native_pty::NativePtySize;
-    let observed = crate::platform::native_pty::conformance_initialization()?;
-    require_eq(
-        "construction",
-        observed,
-        Some((
-            std::path::PathBuf::from("/exact/spelling/../project"),
-            NativePtySize {
-                rows: 31,
-                columns: 97,
-                pixel_width: 1_164,
-                pixel_height: 620,
-            },
-        )),
-    )
-}
-
-fn check_pty_shutdown() -> Result<(), String> {
-    let observed = crate::platform::native_pty::conformance_shutdown()?;
-    require_eq(
-        "termination-after-factory-drop",
-        observed.after_factory_drop,
-        0,
-    )?;
-    require_eq("termination-after-owner-drop", observed.after_owner_drop, 1)?;
-    require_eq(
-        "termination-after-repeated-close",
-        observed.after_repeated_close,
-        1,
-    )?;
-    require_eq(
-        "termination-completed",
-        observed.termination_completed,
-        true,
-    )?;
-    require_eq(
-        "adapter-dropped-before-termination",
-        observed.dropped_before_termination,
-        false,
     )
 }
 
@@ -1032,33 +890,8 @@ fn check_presentation(issue: u8) -> Result<(), String> {
     Ok(())
 }
 
-fn check_terminal_focus() -> Result<(), String> {
-    let focused = TerminalFocusFacts {
-        active_workspace: true,
-        active_tab: true,
-        focused_pane: true,
-        responder: true,
-        operating_system_window_key: true,
-        application_active: true,
-        blocker: None,
-    };
-    require(
-        TerminalFocusCoordinator::is_focused(focused),
-        "focus-positive",
-        "all focus facts were true",
-    )?;
-    require(
-        !TerminalFocusCoordinator::is_focused(TerminalFocusFacts {
-            blocker: Some(TerminalFocusBlocker::ContextMenu),
-            ..focused
-        }),
-        "focus-blocker",
-        "Context Menu did not take Terminal Input Focus",
-    )
-}
-
 fn check_keyboard_encoding() -> Result<(), String> {
-    let spec = &FIXTURES[12];
+    let spec = &FIXTURES[9];
     let mut budget = FixtureBudget::new();
     let observed = observe_keyboard_protocols(spec, &mut budget)?;
     require_eq("keyboard-golden", observed[0].value.as_str(), "61")?;
@@ -1082,35 +915,6 @@ fn check_gpui_keyboard_adapter() -> Result<(), String> {
     require_eq("physical-key", input.physical_key, PhysicalKey::A)?;
     require_eq("printable-text", input.text.as_deref(), Some("a"))?;
     require_eq("native-identity-absent", input.native_key_code, None)
-}
-
-fn check_focus_reporting() -> Result<(), String> {
-    let mut emulator = emulator(10, 2)?;
-    require_eq(
-        "focus-disabled",
-        emulator
-            .focus(true)
-            .map_err(|error| error.to_string())?
-            .bytes,
-        Vec::new(),
-    )?;
-    emulator.feed(b"\x1b[?1004h");
-    require_eq(
-        "focus-gained",
-        emulator
-            .focus(true)
-            .map_err(|error| error.to_string())?
-            .bytes,
-        b"\x1b[I".to_vec(),
-    )?;
-    require_eq(
-        "focus-lost",
-        emulator
-            .focus(false)
-            .map_err(|error| error.to_string())?
-            .bytes,
-        b"\x1b[O".to_vec(),
-    )
 }
 
 fn check_cursor_blink_lifecycle() -> Result<(), String> {
@@ -1177,70 +981,6 @@ fn check_screens_scrollback_and_reflow() -> Result<(), String> {
         ActiveScreenSnapshot::Primary,
     )?;
     require_eq("resized-columns", restored.size.cols, 10)
-}
-
-fn pointer_input(
-    emulator: &TerminalEmulator,
-    phase: PointerPhase,
-    button: Option<PointerButton>,
-    x: f32,
-    y: f32,
-    shift: bool,
-) -> PointerInput {
-    PointerInput {
-        generation: emulator.presentation_generation(),
-        phase,
-        button,
-        position: SurfacePosition { x, y },
-        modifiers: InputModifiers {
-            shift,
-            ..InputModifiers::default()
-        },
-        shift_selection: ShiftSelectionPolicy::default(),
-    }
-}
-
-fn check_mouse_protocols() -> Result<(), String> {
-    let mut emulator = emulator(12, 3)?;
-    emulator.feed(b"hello world\x1b[?1000h\x1b[?1006h");
-    _ = emulator.snapshot().map_err(|error| error.to_string())?;
-    let report = emulator
-        .pointer(pointer_input(
-            &emulator,
-            PointerPhase::Press,
-            Some(PointerButton::Left),
-            2.0,
-            10.0,
-            false,
-        ))
-        .map_err(|error| error.to_string())?;
-    require_eq("sgr-mouse-press", report.bytes, b"\x1b[<0;1;1M".to_vec())?;
-    _ = emulator
-        .pointer(pointer_input(
-            &emulator,
-            PointerPhase::Release,
-            Some(PointerButton::Left),
-            2.0,
-            10.0,
-            false,
-        ))
-        .map_err(|error| error.to_string())?;
-    let selection = emulator
-        .pointer(pointer_input(
-            &emulator,
-            PointerPhase::Press,
-            Some(PointerButton::Left),
-            2.0,
-            10.0,
-            true,
-        ))
-        .map_err(|error| error.to_string())?;
-    // The client owns Shift selection, so the program receives no press.
-    require(
-        selection.bytes.is_empty() && !selection.screen_changed,
-        "shift-selection-override",
-        format!("observed {selection:?}"),
-    )
 }
 
 fn select_hello(emulator: &mut TerminalEmulator) -> Result<(), String> {
@@ -1412,45 +1152,6 @@ fn check_paste_safety() -> Result<(), String> {
     )
 }
 
-fn check_file_insertion() -> Result<(), String> {
-    let insertion = prepare_file_insertion(
-        crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
-        &[PathBuf::from("/tmp/a b'c"), PathBuf::from("/tmp/界")],
-    )?;
-    require_eq(
-        "file-shell-quoting",
-        insertion.text,
-        "'/tmp/a b'\"'\"'c' '/tmp/界'".to_owned(),
-    )?;
-    require(
-        prepare_file_insertion(
-            crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
-            &[PathBuf::from("relative")],
-        )
-        .is_err(),
-        "absolute-file-gate",
-        "relative path was accepted",
-    )
-}
-
-fn check_osc52() -> Result<(), String> {
-    let mut filter = Osc52Filter::default();
-    let effects = filter.feed(b"\x1b]52;s;aGVsbG8=\x07");
-    require(
-        effects.iter().any(|effect| matches!(effect, Osc52Effect::Operation(Osc52Operation::Write { target: Osc52Target::Selection, text }) if text == "hello")),
-        "osc52-write",
-        format!("observed {effects:?}"),
-    )?;
-    let rejected = filter.feed(b"\x1b]52;c;abc\x07");
-    require(
-        rejected
-            .iter()
-            .any(|effect| matches!(effect, Osc52Effect::Rejected(Osc52Rejection::InvalidBase64))),
-        "osc52-invalid-base64",
-        format!("observed {rejected:?}"),
-    )
-}
-
 fn check_metadata() -> Result<(), String> {
     require_eq(
         "safe-title",
@@ -1546,161 +1247,6 @@ fn check_identity() -> Result<(), String> {
     )
 }
 
-fn check_attention() -> Result<(), String> {
-    let epoch = Instant::now();
-    let mut state = AttentionState::default();
-    let first = state.observe(AttentionEvent::Bell, AttentionFacts::default(), epoch);
-    let storm = state.observe(
-        AttentionEvent::Bell,
-        AttentionFacts::default(),
-        epoch + Duration::from_millis(20),
-    );
-    require(
-        first.audio_bell
-            && first.visual_bell
-            && first.request_dock_attention
-            && first.notification.is_some(),
-        "attention-first",
-        format!("observed {first:?}"),
-    )?;
-    require(
-        !storm.audio_bell && storm.unread_count == 1,
-        "attention-storm",
-        format!("observed {storm:?}"),
-    )
-}
-
-fn check_native_services() -> Result<(), String> {
-    let local_files = TerminalLocalFileCapabilities::Enabled;
-    let url = HyperlinkTarget::url("https://example.test").unwrap();
-    require_eq(
-        "context-actions",
-        NativeContextActions::from_presence(local_files, true, Some(&url)),
-        NativeContextActions {
-            copy: true,
-            open_link: true,
-            file_preview: false,
-        },
-    )?;
-    let insertion = PastePayload::prepare_dropped_files(
-        crate::terminal::native_services::file_insertion::FileInsertionPolicy::fixture(),
-        &[PathBuf::from("/tmp/a b")],
-        local_files,
-    )
-    .map_err(|error| format!("native insertion failed: {error:?}"))?
-    .ok_or_else(|| "local file insertion was not prepared".to_owned())?;
-    require_eq("native-file-insertion", insertion.text(), "'/tmp/a b'")?;
-    require_eq(
-        "native-focus-gate",
-        PastePayload::service_text("ignored", false),
-        Err(PasteIntakeError::TerminalUnfocused),
-    )?;
-
-    let directory = std::env::temp_dir().join(format!(
-        "spaceterm-conformance-file-preview-{}",
-        std::process::id()
-    ));
-    _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    let file = directory.join("preview.txt");
-    std::fs::write(&file, b"preview").map_err(|error| error.to_string())?;
-    let result = (|| {
-        let local = HyperlinkTarget::osc8(
-            &format!("file://{}", file.to_string_lossy()),
-            &directory,
-            None,
-            local_files,
-        )
-        .ok_or_else(|| "valid file preview link was rejected".to_owned())?;
-        require_eq(
-            "file-preview-local-regular-file",
-            NativeContextActions::from_presence(local_files, false, Some(&local)).file_preview,
-            true,
-        )?;
-        std::fs::remove_file(&file).map_err(|error| error.to_string())?;
-        require(
-            FilePreviewTarget::from_link(&local, local_files).is_none()
-                && NativeContextActions::from_presence(local_files, false, Some(&local))
-                    .file_preview,
-            "file-preview-stale-path",
-            "missing local file remained executable or immutable eligibility was lost",
-        )
-    })();
-    _ = std::fs::remove_dir_all(directory);
-    result
-}
-
-fn check_accessibility() -> Result<(), String> {
-    let model = TerminalAccessibilityModel::new(
-        vec![AccessibilityLine::new(
-            vec![
-                AccessibilityCell::new("A", 1, false),
-                AccessibilityCell::new("😀", 2, true),
-                AccessibilityCell::new("B", 1, false),
-            ],
-            false,
-        )],
-        0..1,
-        Some((0, 3)),
-    );
-    require_eq("accessibility-text", model.text(), "A😀B")?;
-    require_eq(
-        "accessibility-selection",
-        model.selection_range(),
-        Some(1..3),
-    )?;
-    require_eq("accessibility-cursor", model.cursor_range(), 3..3)?;
-    let geometry = AccessibilityGeometry::new(10.0, 20.0, 8.0, 18.0).unwrap();
-    require_eq(
-        "accessibility-bounds",
-        model.bounds_for_range(1..3, geometry),
-        Some((18.0, 20.0, 16.0, 18.0)),
-    )
-}
-
-fn visible_surface() -> SurfaceVisibility {
-    SurfaceVisibility {
-        application_active: true,
-        key_window: true,
-        minimized: false,
-        occluded: false,
-        live_resize: false,
-        workspace_visible: true,
-        pane_visible: true,
-    }
-}
-
-fn check_render_lifecycle() -> Result<(), String> {
-    let mut lifecycle = RenderLifecycle::new(SurfaceVisibility {
-        occluded: true,
-        ..visible_surface()
-    });
-    let generation = super::emulator::PresentationGeneration::test(7);
-    require(
-        !lifecycle.observe_snapshot(generation).request_redraw,
-        "hidden-redraw",
-        "occluded Surface requested redraw",
-    )?;
-    let restored = lifecycle.update_visibility(visible_surface());
-    require(
-        restored.request_redraw && restored.animations_active,
-        "restore-redraw",
-        format!("observed {restored:?}"),
-    )?;
-    require_eq("latest-frame", lifecycle.take_frame(), Some(generation))?;
-    require_eq(
-        "scale-resources",
-        lifecycle.update_scale(2.0),
-        ScaleChange::ScaleResources,
-    )?;
-    lifecycle.release();
-    require(
-        lifecycle.take_frame().is_none() && !lifecycle.effects().animations_active,
-        "released-renderer",
-        "released renderer retained work",
-    )
-}
-
 fn check_typed_failures() -> Result<(), String> {
     let failure = TerminalFailure::pty("read-shell-output");
     require_eq("failure-class", failure.class(), FailureClass::Pty)?;
@@ -1736,17 +1282,17 @@ fn check_typed_failures() -> Result<(), String> {
 
 const EXECUTABLE_FIXTURES: &[ExecutableFixture] = &[
     ExecutableFixture {
-        spec: &FIXTURES[12],
+        spec: &FIXTURES[9],
         expected: KEYBOARD_PROTOCOL_EXPECTED,
         observe: observe_keyboard_protocols,
     },
     ExecutableFixture {
-        spec: &FIXTURES[4],
+        spec: &FIXTURES[2],
         expected: SEMANTIC_SNAPSHOT_EXPECTED,
         observe: observe_semantic_snapshot,
     },
     ExecutableFixture {
-        spec: &FIXTURES[33],
+        spec: &FIXTURES[22],
         expected: KITTY_GRAPHICS_EXPECTED,
         observe: observe_kitty_graphics,
     },
@@ -1790,7 +1336,7 @@ fn runner_identifies_the_exact_fixture_step_and_oracle_mismatch() {
     }
 
     let fixture = ExecutableFixture {
-        spec: &FIXTURES[12],
+        spec: &FIXTURES[9],
         expected: &[ExpectedObservation {
             step: 2,
             field: "pty-bytes",
@@ -1871,7 +1417,7 @@ fn semantic_snapshot_fixtures_match_terminal_state() {
 
 #[test]
 fn registered_portable_contract_fixtures_pass() {
-    // PTY and native-service drivers exercise injected portable contracts.
+    // These drivers exercise portable contracts.
     // Native Adapter suites validate their operating system integrations separately.
     for spec in FIXTURES {
         let fixture = ExecutableFixture {

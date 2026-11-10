@@ -901,6 +901,9 @@ mod tests {
 
     #[test]
     fn unix_repository_program_runs_hardened_git_status_without_hooks_or_index_writes() {
+        use crate::repository_status::FsmonitorPolicy;
+        use crate::repository_status::local_read::{git_arguments, git_environment};
+
         let Some(git) = installed_git() else {
             eprintln!("skipping: git is not installed");
             return;
@@ -968,39 +971,18 @@ mod tests {
         std::fs::write(repository.join("untracked.txt"), "new\n").unwrap();
         let index_before = std::fs::read(repository.join(".git/index")).unwrap();
 
-        let mut arguments = vec!["--no-optional-locks", "--no-pager"];
-        for setting in [
-            "core.fsmonitor=false",
-            "core.hooksPath=/dev/null",
-            "color.ui=false",
-            "core.quotePath=false",
-            "status.relativePaths=false",
-            "advice.statusHints=false",
-        ] {
-            arguments.extend(["-c", setting]);
-        }
-        let repository_argument = repository.to_string_lossy().into_owned();
-        arguments.extend(["-C", &repository_argument]);
-        arguments.extend(["status", "--porcelain=v2", "--branch", "-z"]);
-        let git_directory = git.parent().unwrap().as_os_str().to_owned();
-        let mut path = git_directory;
-        path.push(":/usr/bin:/bin");
-        let mut request = request(&git.to_string_lossy(), &arguments);
+        let mut request = request(&git.to_string_lossy(), &[]);
+        request.arguments = git_arguments(
+            &repository,
+            FsmonitorPolicy::Disabled,
+            &["status", "--porcelain=v2", "--branch", "-z"],
+        );
         request.directory = repository.clone();
-        request.environment = [
-            ("HOME", home.as_os_str().to_owned()),
-            ("PATH", path),
-            ("LC_ALL", "C".into()),
-            ("GIT_TERMINAL_PROMPT", "0".into()),
-            ("GIT_OPTIONAL_LOCKS", "0".into()),
-            ("GIT_PAGER", "cat".into()),
-            ("PAGER", "cat".into()),
-            ("GIT_NO_LAZY_FETCH", "1".into()),
-            ("GIT_CONFIG_NOSYSTEM", "1".into()),
-        ]
-        .into_iter()
-        .map(|(name, value)| (OsString::from(name), value))
-        .collect();
+        request.environment = git_environment(&git, &home);
+        // The host's system configuration stays out of the fixture.
+        request
+            .environment
+            .push(("GIT_CONFIG_NOSYSTEM".into(), "1".into()));
 
         let (result, output, _) = run(&request);
 
@@ -1025,6 +1007,7 @@ mod tests {
         );
 
         // The same status without the hardening runs the hook program, so the fixture is armed.
+        let repository_argument = repository.to_string_lossy().into_owned();
         let mut unhardened = request.clone();
         unhardened.arguments = ["-C", &repository_argument, "status", "--porcelain=v2"]
             .into_iter()

@@ -730,7 +730,7 @@ mod tests {
     }
 
     #[test]
-    fn screen_recording_and_accessibility_requests_run_in_a_child() {
+    fn request_arguments_spell_screen_recording_and_accessibility() {
         assert_eq!(
             request_arguments(SystemPermission::ScreenRecording),
             ["internal", "permission-request", "screen-recording"]

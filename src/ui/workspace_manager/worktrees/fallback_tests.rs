@@ -308,33 +308,3 @@ fn worktree_fallback_never_closes_a_reassigned_original_anchor(cx: &mut TestAppC
             .is_none()
     );
 }
-
-#[test]
-fn worktree_fallback_destination_prefers_main_and_excludes_bare_missing_and_target() {
-    use spaceterm_core::organize::fallback_destination as destination;
-    let mut listing = WorktreeInventory {
-        main_root: MAIN_ROOT.into(),
-        current: None,
-        worktrees: vec![
-            record(EXTRA_ROOT, "extra", false),
-            record(MAIN_ROOT, "main", false),
-            record(FEATURE_ROOT, "feature", false),
-        ],
-    };
-    assert_eq!(
-        destination(&listing, Path::new(FEATURE_ROOT)),
-        Some(Path::new(MAIN_ROOT))
-    );
-    listing.worktrees[1].missing = true;
-    assert_eq!(
-        destination(&listing, Path::new(FEATURE_ROOT)),
-        Some(Path::new(EXTRA_ROOT))
-    );
-    listing.worktrees[0].head = WorktreeHead::Bare;
-    assert_eq!(destination(&listing, Path::new(FEATURE_ROOT)), None);
-    listing.worktrees[1].missing = false;
-    assert_eq!(
-        destination(&listing, Path::new(MAIN_ROOT)),
-        Some(Path::new(FEATURE_ROOT))
-    );
-}

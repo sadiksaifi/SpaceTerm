@@ -4720,25 +4720,73 @@ pub(crate) mod tests {
         }
     }
 
-    #[test]
-    fn informational_entries_keep_their_menu_open_but_never_activate() {
-        let info = || MenuEntry::action("penguin installed 0.9", ()).informational();
-        assert!(
-            has_selectable(&[info()]),
-            "information is reachable content"
+    #[gpui::test]
+    fn informational_entries_keep_their_menu_open_but_never_activate(cx: &mut TestAppContext) {
+        use crate::a11y_testing::{A11yTree, supports};
+
+        struct InformationRoot {
+            activations: Rc<Cell<usize>>,
+        }
+
+        impl Render for InformationRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let activations = self.activations.clone();
+                let info = MenuEntry::action("penguin installed 0.9", ())
+                    .informational()
+                    .debug_selector("information-entry");
+                Menu::new(
+                    "information-menu",
+                    "Updates",
+                    vec![MenuEntry::submenu("Recent", vec![info])],
+                )
+                .debug_selector("information-menu")
+                .on_activate(move |_, _, _| activations.set(activations.get() + 1))
+            }
+        }
+
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        let activations = Rc::new(Cell::new(0));
+        let root_activations = activations.clone();
+        let (_, cx) = cx.add_window_view(move |_, _| InformationRoot {
+            activations: root_activations,
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let trigger = cx.debug_bounds("information-menu").expect("menu trigger");
+        cx.simulate_click(trigger.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        // A submenu holding only information still opens, and the keyboard reaches its row.
+        cx.simulate_keystrokes("right");
+        cx.run_until_parked();
+        let tree = A11yTree::read(cx);
+        assert_eq!(
+            tree.focused().expect("a highlighted row")["aria"]["label"],
+            "penguin installed 0.9"
         );
-        let converted = convert_entries(
-            vec![MenuEntry::submenu("Recent", vec![info()])],
-            &|_: (), _| -> InternalActivation { Rc::new(|_, _: &mut Window, _: &mut App| {}) },
+        assert!(!supports(
+            tree.node("penguin installed 0.9"),
+            gpui::accesskit::Action::Click
+        ));
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(activations.get(), 0, "Return must not activate information");
+        assert!(cx.update(|window, cx| window_menu_is_open(window, cx)));
+
+        let row = cx
+            .debug_bounds("information-entry")
+            .expect("the information row stays presented");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            activations.get(),
+            0,
+            "a click must not activate information"
         );
-        let Some(children) = converted[0].submenu() else {
-            panic!("a submenu holding only information still opens");
-        };
-        assert!(children[0].selectable(), "keyboard reaches the information");
-        let InternalEntryKind::Item { extra, .. } = &children[0].kind else {
-            panic!("the information stays a row");
-        };
-        assert!(extra.informational);
+        assert!(cx.update(|window, cx| window_menu_is_open(window, cx)));
+        assert!(cx.debug_bounds("information-entry").is_some());
     }
 
     #[test]
@@ -7157,8 +7205,10 @@ pub(crate) mod tests {
         }
     }
 
+    // GPUI's test platform exposes no resolved cursor. This covers the builder flag only, not the
+    // cursor the trigger requests.
     #[test]
-    fn context_cursor_preservation_is_opt_in() {
+    fn context_menu_builder_records_cursor_preservation_only_when_requested() {
         let default_menu = ContextMenu::new(
             "default-context-cursor",
             "Default context cursor",

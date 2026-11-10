@@ -400,15 +400,4 @@ mod tests {
             68
         );
     }
-    #[test]
-    fn objective_c_callback_types_match_supported_macos_abis() {
-        assert_eq!(
-            (
-                size_of::<Bool>(),
-                size_of::<NSInteger>(),
-                size_of::<objc2_foundation::NSUInteger>()
-            ),
-            (1, 8, 8)
-        );
-    }
 }

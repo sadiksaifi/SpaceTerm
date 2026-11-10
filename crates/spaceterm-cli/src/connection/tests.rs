@@ -782,6 +782,8 @@ fn concurrent_connection_add_processes_preserve_the_desktop_fixture() {
     let fixture = Fixture::new();
     let bytes =
         include_bytes!("../../../spaceterm-connections/tests/fixtures/desktop-connections.json");
+    let document: connections::records::Document = serde_json::from_slice(bytes).unwrap();
+    assert_eq!(document.routes.len(), 1);
     let desktop = fixture.root.join("direct-device-connections.json");
     std::fs::write(&desktop, bytes).unwrap();
     let mut children = Vec::new();

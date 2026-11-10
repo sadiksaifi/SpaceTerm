@@ -93,8 +93,6 @@ impl SshProcessAdapter for UnixSshProcessAdapter {
         signal: ProcessSignal,
     ) -> Result<(), SshProcessMechanismError> {
         let signal = match signal {
-            #[cfg(all(test, feature = "native-tests"))]
-            ProcessSignal::Terminate => libc::SIGTERM,
             ProcessSignal::Kill => libc::SIGKILL,
         };
         signal_group(process, signal)
@@ -654,38 +652,32 @@ mod tests {
     }
 
     #[test]
-    fn terminate_and_kill_should_reap_the_leader_and_descendants() {
-        for signal in [ProcessSignal::Terminate, ProcessSignal::Kill] {
-            let sequence = match signal {
-                ProcessSignal::Terminate => "term",
-                ProcessSignal::Kill => "kill",
-            };
-            let pid_file = short_temporary_root().join(format!(
-                "spaceterm-process-{sequence}-{}.pid",
-                std::process::id()
-            ));
-            let script = format!("sleep 30 & echo $! > '{}'; wait", pid_file.display());
-            let adapter = UnixSshProcessAdapter;
-            let mut spawned = adapter.spawn(shell_request(&script)).unwrap();
-            let mut descendant = None;
-            for _ in 0..100 {
-                descendant = fs::read_to_string(&pid_file)
-                    .ok()
-                    .and_then(|value| value.trim().parse::<libc::pid_t>().ok());
-                if descendant.is_some() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(10));
+    fn kill_should_reap_the_leader_and_descendants() {
+        let pid_file = short_temporary_root()
+            .join(format!("spaceterm-process-kill-{}.pid", std::process::id()));
+        let script = format!("sleep 30 & echo $! > '{}'; wait", pid_file.display());
+        let adapter = UnixSshProcessAdapter;
+        let mut spawned = adapter.spawn(shell_request(&script)).unwrap();
+        let mut descendant = None;
+        for _ in 0..100 {
+            descendant = fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|value| value.trim().parse::<libc::pid_t>().ok());
+            if descendant.is_some() {
+                break;
             }
-            let descendant = descendant.expect("the child must finish publishing its process ID");
-            let leader = spawned.process_mut().process_group;
-
-            adapter.signal(spawned.process_mut(), signal).unwrap();
-            adapter.reap(spawned.into_process()).unwrap();
-
-            assert!(wait_for_missing_process(leader) && wait_for_missing_process(descendant));
-            let _ = fs::remove_file(pid_file);
+            std::thread::sleep(Duration::from_millis(10));
         }
+        let descendant = descendant.expect("the child must finish publishing its process ID");
+        let leader = spawned.process_mut().process_group;
+
+        adapter
+            .signal(spawned.process_mut(), ProcessSignal::Kill)
+            .unwrap();
+        adapter.reap(spawned.into_process()).unwrap();
+
+        assert!(wait_for_missing_process(leader) && wait_for_missing_process(descendant));
+        let _ = fs::remove_file(pid_file);
     }
 
     #[test]

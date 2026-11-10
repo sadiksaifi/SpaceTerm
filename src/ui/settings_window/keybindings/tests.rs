@@ -382,8 +382,18 @@ fn control_shift_recording_accepts_and_refuses_chords_by_its_conventions(cx: &mu
 #[gpui::test]
 fn a_system_reserved_chord_is_refused_without_being_performed(cx: &mut TestAppContext) {
     let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
+    let quits = Rc::new(std::cell::Cell::new(0));
+    let counted = quits.clone();
+    cx.update(|_, cx| {
+        cx.on_action(move |_: &crate::app::DismissApplication, _| counted.set(counted.get() + 1));
+    });
+    cx.simulate_keystrokes("cmd-q");
+    cx.run_until_parked();
+    assert_eq!(quits.get(), 1, "outside a recording the chord quits");
+
     record(&window, Command::NewWorkspace, "cmd-q", cx);
 
+    assert_eq!(quits.get(), 1, "the refused chord is not performed");
     assert_eq!(retained(&window, Command::NewWorkspace, cx), None);
     assert_eq!(
         description(&window, Command::NewWorkspace, cx),

@@ -1,7 +1,7 @@
 //! Paired machine Status, Restart and Update from the Machines card.
 use gpui::{TestAppContext, VisualTestContext};
 use spaceterm_core::service::lane::{
-    LaneActivation, LaneEffects, LaneNetwork, LaneOperationState, LaneReceipt,
+    LaneActivation, LaneEffects, LaneNetwork, LaneOperationState, LaneReceipt, LaneVersion,
 };
 use spaceterm_ui::a11y_testing::A11yTree;
 
@@ -37,18 +37,6 @@ fn preview(action: LaneAction, effects: LaneEffects) -> Preview {
         expires_at: "2026-10-30T12:10:00Z".into(),
         effects,
     }
-}
-
-fn update_preview(to_major: Option<u16>) -> Preview {
-    preview(
-        LaneAction::Restart,
-        LaneEffects {
-            from: Some(version("1.2.0", "aaaaaaaaaa")),
-            to: Some(version("1.3.0", "bbbbbbbbbb")),
-            to_major,
-            ..effects(2)
-        },
-    )
 }
 
 fn receipt(action: LaneAction, state: LaneOperationState, boot: &str) -> LaneReceipt {
@@ -119,14 +107,8 @@ fn status(runtime: LaneVersion) -> LaneStatus {
 /// close there, and that it unpairs.
 #[test]
 fn a_remove_confirmation_names_the_machine_and_the_sessions_that_close() {
-    let detail = |sessions| {
-        confirmation(
-            "build-box",
-            &preview(LaneAction::Uninstall, effects(sessions)),
-        )
-        .detail
-    };
-    let removal = confirmation("build-box", &preview(LaneAction::Uninstall, effects(1)));
+    let detail = |sessions| confirmation("build-box", sessions).detail;
+    let removal = confirmation("build-box", 1);
     assert_eq!(removal.message, "Remove build-box?");
     assert_eq!(removal.confirm, "Remove");
     assert_eq!(
@@ -146,77 +128,20 @@ fn a_remove_confirmation_names_the_machine_and_the_sessions_that_close() {
 }
 
 #[test]
-fn a_restart_confirmation_names_the_exact_sessions_that_end() {
-    let confirmation = confirmation("penguin", &preview(LaneAction::Restart, effects(1)));
-
-    assert_eq!(confirmation.message, "Restart SpaceTerm Core on penguin?");
-    assert_eq!(
-        confirmation.detail,
-        "Its 1 Terminal Session ends for every client. Every client connected to it disconnects \
-         until it starts again, and Workspaces are kept."
-    );
-    assert_eq!(confirmation.confirm, "Restart SpaceTerm Core");
-}
-
-#[test]
-fn an_update_confirmation_says_it_replaces_the_running_core() {
-    let confirmation = confirmation("penguin", &update_preview(None));
-
-    assert_eq!(confirmation.title, "Update SpaceTerm Core");
-    assert_eq!(
-        confirmation.message,
-        "Update SpaceTerm Core on penguin to 1.3.0 (commit bbbbbbb)?"
-    );
-    assert_eq!(
-        confirmation.detail,
-        "It changes from 1.2.0 (commit aaaaaaa) to 1.3.0 (commit bbbbbbb), replacing the running \
-         SpaceTerm Core. Its 2 Terminal Sessions end for every client. Every client connected to it \
-         disconnects until it starts again, and Workspaces are kept."
-    );
-    assert_eq!(confirmation.confirm, "Update SpaceTerm Core");
-}
-
-#[test]
-fn an_update_to_another_protocol_says_this_client_needs_its_own_update() {
-    let other = spaceterm_core::protocol::MAJOR + 1;
-    let confirmation = confirmation("penguin", &update_preview(Some(other)));
-
-    assert!(
-        confirmation.detail.ends_with(
-            "Afterward, SpaceTerm here needs its own update to open penguin\u{2019}s Workspaces."
-        ),
-        "got {:?}",
-        confirmation.detail
-    );
-    let same = confirmation_detail(Some(spaceterm_core::protocol::MAJOR));
-    assert!(!same.contains("Afterward"), "got {same:?}");
-}
-
-fn confirmation_detail(to_major: Option<u16>) -> String {
-    confirmation("penguin", &update_preview(to_major)).detail
-}
-
-#[test]
 fn an_outcome_the_client_cannot_confirm_says_so() {
-    let (closed, tone) = ended_message(
-        "penguin",
-        &Ended::Changed(Act::Restart, Settlement::Shutdown),
-    );
+    let (closed, tone) = ended_message("penguin", &Ended::Changed(Settlement::Shutdown));
     assert_eq!(
         closed,
-        "penguin closed its connection before it confirmed its restart, so SpaceTerm \
+        "penguin closed its connection before it confirmed its uninstall, so SpaceTerm \
          can\u{2019}t confirm it finished."
     );
     assert_eq!(tone, CaptionTone::Warning);
 
-    let (restart, tone) = ended_message(
-        "penguin",
-        &Ended::Changed(Act::Restart, Settlement::Uncertain),
-    );
+    let (uncertain, tone) = ended_message("penguin", &Ended::Changed(Settlement::Uncertain));
     assert_eq!(
-        restart,
-        "SpaceTerm couldn\u{2019}t confirm whether penguin finished its restart. Check Now asks \
-         penguin again."
+        uncertain,
+        "SpaceTerm couldn\u{2019}t confirm whether penguin finished its uninstall. Check Now \
+         asks penguin again."
     );
     assert_eq!(tone, CaptionTone::Warning);
 }
@@ -225,26 +150,13 @@ fn an_outcome_the_client_cannot_confirm_says_so() {
 fn each_settled_change_reads_its_own_way() {
     let message = |ended| ended_message("penguin", &ended).0;
     assert_eq!(
-        message(Ended::Changed(Act::Restart, Settlement::Done)),
-        "penguin restarted."
+        message(Ended::Changed(Settlement::NotPerformed)),
+        "penguin didn\u{2019}t uninstall SpaceTerm Core, so nothing changed."
     );
     assert_eq!(
-        message(Ended::Changed(
-            Act::Update(Some("1.3.0".into())),
-            Settlement::Done
-        )),
-        "penguin updated to 1.3.0."
-    );
-    assert_eq!(
-        message(Ended::Changed(Act::Restart, Settlement::NotPerformed)),
-        "penguin didn\u{2019}t restart, so nothing changed."
-    );
-    assert_eq!(
-        message(Ended::Changed(
-            Act::Update(None),
-            Settlement::Failed(RemoteFailure::StartupFailed)
-        )),
-        "penguin couldn\u{2019}t update. penguin didn\u{2019}t start after the change."
+        message(Ended::Changed(Settlement::Failed(RemoteFailure::Busy))),
+        "penguin couldn\u{2019}t uninstall SpaceTerm Core. penguin is finishing another change. \
+         Try again once it\u{2019}s done."
     );
     assert_eq!(
         message(Ended::Refused(RemoteFailure::Changed)),
@@ -317,18 +229,49 @@ fn footnote(machines: &Machines<'_>) -> String {
 
 #[gpui::test]
 fn a_disconnected_paired_machine_takes_no_lane_step(cx: &mut TestAppContext) {
+    use crate::updates::machines::{MachineLink, MachineUpdate, MachineUpdatesEvent};
+    use crate::updates::machines::{store::MachineUpdates, testing::ScriptedMachines};
+    use spaceterm_core::protocol::capability::{Capabilities, Capability};
+    let adapter = std::rc::Rc::new(ScriptedMachines::default());
+    cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
     let remote = ScriptedRemote::new();
     let paired = disconnected(&["penguin"]);
     cx.update(|cx| remote.install(cx));
     let machines = open_with(false, paired, cx);
+    let route = machines.routes[0];
+    adapter.emit(MachineUpdatesEvent::Machines(vec![MachineUpdate {
+        machine: machines.direct.route(&route).unwrap().paired.pin.core,
+        name: "penguin".into(),
+        local: false,
+        link: MachineLink::Offline { since: 0 },
+        facts: None,
+        capabilities: Capabilities::fake(&Capability::ALL),
+        push: None,
+        bundled: None,
+        failed_push: None,
+        asked: None,
+        retrying_since: None,
+    }]));
     machines.cx.run_until_parked();
 
     let ready = machines.window.read_with(machines.cx, |settings, cx| {
-        settings.remote_ready(&machines.routes[0], cx)
+        settings.remote_ready(&route, cx)
     });
     assert!(!ready);
     click(super::super::machine_card::MENU_SELECTOR, machines.cx);
-    assert!(machines.cx.debug_bounds(RESTART_SELECTOR).is_none());
+    let tree = A11yTree::read(machines.cx);
+    assert_eq!(
+        tree.node("Restart SpaceTerm Core on penguin\u{2026}")["aria"]["disabled"],
+        true
+    );
+    let window = machines.window.clone();
+    machines.cx.update(|settings_window, cx| {
+        let handle = settings_window.window_handle();
+        window.update(cx, |settings, cx| {
+            settings.request_remote_change(route, Change::Remove, handle, cx)
+        });
+    });
+    machines.cx.run_until_parked();
     assert!(remote.prepared.lock().unwrap().is_empty());
     assert!(
         footnote(&machines).contains("Connect to penguin to change these settings."),
@@ -347,10 +290,6 @@ fn an_earlier_network_access_change_reads_as_an_earlier_change() {
     assert_eq!(
         earlier_message("penguin", &act, &settlement).0,
         "SpaceTerm confirmed that an earlier Network Access change of penguin finished."
-    );
-    assert_eq!(
-        ended_message("penguin", &Ended::Changed(act, Settlement::Done)).0,
-        "penguin changed its Network Access."
     );
 }
 
@@ -444,23 +383,6 @@ fn removal_keeps_the_machine(
     assert!(
         machines.direct.pending_unpairs().is_empty(),
         "nothing was unpaired"
-    );
-}
-
-/// No Core run accepted the request, which may never have arrived.
-#[gpui::test]
-fn an_uninstall_no_core_admitted_keeps_the_machine_and_its_pairing(cx: &mut TestAppContext) {
-    removal_keeps_the_machine(
-        Ok(Performed {
-            outcome: Outcome::Unconfirmed {
-                operation: "0123456789abcdef0123456789abcdef".into(),
-                boot: String::new(),
-                last: None,
-            },
-            settled: Vec::new(),
-        }),
-        "SpaceTerm couldn\u{2019}t confirm whether penguin finished its uninstall.",
-        cx,
     );
 }
 

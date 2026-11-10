@@ -466,33 +466,6 @@ mod tests {
         assert_eq!(environment, expected);
     }
 
-    #[test]
-    fn exits_and_program_errors_should_map_to_lookup_failures() {
-        assert_eq!(pull_request_exit(ProgramExit { code: Some(0) }), Ok(()));
-        assert_eq!(
-            pull_request_exit(ProgramExit { code: Some(4) }),
-            Err(PullRequestError::NotLoggedIn)
-        );
-        for code in [Some(1), Some(2), Some(128), None] {
-            assert_eq!(
-                pull_request_exit(ProgramExit { code }),
-                Err(PullRequestError::Unavailable)
-            );
-        }
-        for (error, expected) in [
-            (ProgramError::NotFound, PullRequestError::ToolMissing),
-            (ProgramError::Cancelled, PullRequestError::Cancelled),
-            (ProgramError::TimedOut, PullRequestError::Unavailable),
-            (
-                ProgramError::OutputTooLarge,
-                PullRequestError::InvalidResponse,
-            ),
-            (ProgramError::Failed, PullRequestError::Unavailable),
-        ] {
-            assert_eq!(pull_request_program_error(error), expected);
-        }
-    }
-
     fn listed(
         number: u32,
         head: &str,

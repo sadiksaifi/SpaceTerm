@@ -332,5 +332,12 @@ mod tests {
         );
         assert!(representations[1].text == "<pre>fixture</pre>");
         assert_eq!(selection_representations("fixture", Some("")).len(), 1);
+        assert_eq!(
+            selection_representations("fixture", None),
+            vec![PasteboardRepresentation {
+                mime: PLAIN_TEXT_MIME,
+                text: "fixture",
+            }]
+        );
     }
 }

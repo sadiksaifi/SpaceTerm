@@ -768,6 +768,8 @@ mod tests {
         let mut state = state();
         state.pointer_down(point(px(10.0), px(10.0)));
         state.pointer_move(point(px(20.0), px(10.0)), Some(MouseButton::Left));
+        assert!(matches!(state.pointer, PointerLifecycle::MoveRequested(_)));
+        assert!(state.status.is_active());
         let events = state.finish(WindowDragFinishReason::PointerExited);
 
         assert!(matches!(
@@ -777,22 +779,8 @@ mod tests {
                 ..
             }]
         ));
-    }
-
-    #[test]
-    fn window_deactivation_after_threshold_should_finish_the_move_requested_state() {
-        let mut state = state();
-        state.pointer_down(point(px(10.0), px(10.0)));
-        state.pointer_move(point(px(20.0), px(10.0)), Some(MouseButton::Left));
-        let events = state.finish(WindowDragFinishReason::WindowDeactivated);
-
-        assert!(matches!(
-            events.as_slice(),
-            [WindowDragRegionEvent::InteractionFinished {
-                reason: WindowDragFinishReason::WindowDeactivated,
-                ..
-            }]
-        ));
+        assert!(!state.status.is_active());
+        assert_eq!(state.pointer, PointerLifecycle::CancelledUntilRelease);
     }
 
     #[test]

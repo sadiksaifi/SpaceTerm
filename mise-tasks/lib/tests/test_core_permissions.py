@@ -1,5 +1,6 @@
 """The owner-run permission check's pure parts. Nothing here runs ssh or osascript."""
 
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -45,6 +46,16 @@ class CorePermissionCheckTests(unittest.TestCase):
         )
 
     def test_bundle_is_the_app_that_holds_the_launchers_executable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            bundle = root / "Applications/SpaceTerm Core.app"
+            executable = bundle / "Contents/MacOS/spaceterm"
+            executable.parent.mkdir(parents=True)
+            executable.touch()
+            launcher = root / "bin/spaceterm"
+            launcher.parent.mkdir()
+            launcher.symlink_to(executable)
+            self.assertEqual(bundle_of(launcher), bundle)
         with self.assertRaises(TaskError):
             bundle_of(Path("/usr/bin/true"))
 

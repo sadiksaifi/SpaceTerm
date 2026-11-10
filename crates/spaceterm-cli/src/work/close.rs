@@ -227,6 +227,11 @@ mod tests {
             .presentation
             .as_mut()
             .unwrap()
+            .prompt_zone = PromptZone::Prompt;
+        snapshot.inventory.workspaces[0].tabs[0].panes[0]
+            .presentation
+            .as_mut()
+            .unwrap()
             .freshness = Freshness::Stale;
         assert!(matches!(
             review(&snapshot, target, id(5), &facts).unwrap(),

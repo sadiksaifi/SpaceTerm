@@ -273,81 +273,6 @@ fn command_t_should_ask_the_core_for_a_tab_beside_the_active_one(cx: &mut TestAp
 }
 
 #[gpui::test]
-fn a_published_tab_should_join_the_strip_without_taking_the_active_tab(cx: &mut TestAppContext) {
-    let (harness, cx) = tab_manager(cx);
-    let active = harness
-        .manager
-        .read_with(cx, |manager, cx| manager.active_terminal_identity(cx).0);
-
-    publish(
-        &harness,
-        inventory(
-            2,
-            vec![
-                tab(ROOT_TAB, vec![pane(ROOT_PANE, None, Axis::Right)]),
-                tab(SECOND_TAB, vec![pane(SECOND_TAB_PANE, None, Axis::Right)]),
-            ],
-        ),
-        cx,
-    );
-
-    assert_eq!(tab_count(&harness, cx), 2, "the published Tab should join");
-    assert_eq!(
-        harness
-            .manager
-            .read_with(cx, |manager, cx| manager.active_terminal_identity(cx).0),
-        active,
-        "another client's Tab must not take the Active Tab"
-    );
-    assert_eq!(
-        harness.panes.pane(SECOND_TAB_PANE).selections(),
-        0,
-        "presenting a published Tab must not ask the server for its Pane"
-    );
-}
-
-#[gpui::test]
-fn a_published_split_should_join_the_layout_without_taking_focus(cx: &mut TestAppContext) {
-    let (harness, cx) = tab_manager(cx);
-    let focused = harness
-        .manager
-        .read_with(cx, |manager, cx| manager.active_terminal_identity(cx).1);
-
-    publish(
-        &harness,
-        inventory(
-            2,
-            vec![tab(
-                ROOT_TAB,
-                vec![
-                    pane(ROOT_PANE, None, Axis::Right),
-                    pane(SPLIT_PANE, Some(ROOT_PANE), Axis::Down),
-                ],
-            )],
-        ),
-        cx,
-    );
-
-    assert_eq!(
-        pane_count(&harness, cx),
-        2,
-        "the published Pane should join"
-    );
-    assert_eq!(
-        harness
-            .manager
-            .read_with(cx, |manager, cx| manager.active_terminal_identity(cx).1),
-        focused,
-        "another client's Pane must not take the Focused Pane"
-    );
-    assert_eq!(
-        harness.panes.pane(SPLIT_PANE).selections(),
-        0,
-        "presenting a published Pane must not ask the server for it"
-    );
-}
-
-#[gpui::test]
 fn a_split_in_a_workspace_should_ask_the_core_for_the_pane(cx: &mut TestAppContext) {
     let (harness, cx) = tab_manager(cx);
 
@@ -1318,6 +1243,14 @@ mod independent_views {
             assert_eq!(harness.panes.pane(REPLACEMENT_PANE).selections(), 0);
             assert_eq!(harness.panes.pane(SECOND_TAB_PANE).selections(), 0);
         }
+        for (harness, mac) in [(&first, &mut *mac_1), (&second, &mut *mac_2)] {
+            assert_eq!(tab_count(harness, mac), 2, "the published Tab should join");
+            assert_eq!(
+                pane_count(harness, mac),
+                3,
+                "the published Pane should join"
+            );
+        }
 
         // Another client closes the split Pane, which only Mac 2 was reading.
         let mut closed = vec![pane(ROOT_PANE, None, Axis::Right)];
@@ -1438,6 +1371,19 @@ mod edits {
             WorkspaceSubmission::Submitted
         );
         assert_eq!(edits.submitted().len(), 1, "only the first edit is sent");
+
+        edits.answer(Outcome::Accepted { target: WORKSPACE });
+        binding.poll();
+        let rename = |name: &str| Mutation::RenameWorkspace {
+            workspace: WORKSPACE,
+            version: 0,
+            name: name.to_owned(),
+        };
+        assert_eq!(
+            edits.submitted(),
+            [rename("Logs"), rename("Notes")],
+            "the waiting edit follows the first answer"
+        );
     }
 
     #[test]

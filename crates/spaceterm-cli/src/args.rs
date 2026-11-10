@@ -1023,6 +1023,14 @@ mod tests {
                 &["internal", "permission-request", "camera"],
                 "internal.permission-request",
             ),
+            (
+                &["internal", "permission-request", "screen-recording"],
+                "internal.permission-request",
+            ),
+            (
+                &["internal", "permission-request", "accessibility"],
+                "internal.permission-request",
+            ),
             (&["internal", "ssh-discover"], "internal.ssh-discover"),
             (
                 &["internal", "ssh-direct-status"],

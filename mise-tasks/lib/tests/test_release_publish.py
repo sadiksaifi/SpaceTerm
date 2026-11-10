@@ -324,26 +324,15 @@ class PublishTests(unittest.TestCase):
             "name": "SpaceTerm v0.10.0",
         }
 
-    def test_the_release_body_opens_with_download_buttons_above_the_embedded_notes(self):
-        self.publish()
-        assert self.github.release is not None
-        body = self.github.release["body"]
-        assert isinstance(body, str)
-        buttons, notes = body.split("\n\n", 1)
-        self.assertEqual(buttons, release_publish.download_buttons("0.10.0"))
-        self.assertEqual(notes, "First release of SpaceTerm.\n")
-
-    def test_retry_refuses_a_draft_without_download_buttons(self):
-        self.github.release = {**self.draft(), "body": "First release of SpaceTerm.\n"}
-        with self.assertRaises(TaskError):
-            self.publish()
-        self.assertEqual(self.github.mutations, [])
-
     def test_retry_refuses_different_notes_before_uploading_or_publishing(self):
-        self.github.release = {**self.draft(), "body": "Different release notes"}
-        with self.assertRaises(TaskError):
-            self.publish()
-        self.assertEqual(self.github.mutations, [])
+        # The second body is the planned notes without the download buttons.
+        for body in ("Different release notes", "First release of SpaceTerm.\n"):
+            with self.subTest(body=body):
+                self.github.release = {**self.draft(), "body": body}
+                self.github.mutations = []
+                with self.assertRaises(TaskError):
+                    self.publish()
+                self.assertEqual(self.github.mutations, [])
 
     def test_an_existing_publication_must_match_every_planned_value(self):
         self.publish()

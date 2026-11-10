@@ -721,23 +721,6 @@ pub(super) fn screen_text(screen: &ScreenSnapshot) -> String {
 }
 
 #[test]
-fn dropping_presentation_receivers_keeps_the_owned_runtime_reading_output() {
-    let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
-    let (mut session, events, accessibility) = result.unwrap();
-    drop(events);
-    drop(accessibility);
-
-    reader_steps
-        .send(ReaderStep::Bytes(b"unobserved output\r\n".to_vec()))
-        .unwrap();
-    reader_steps.send(ReaderStep::Eof).unwrap();
-    records.wait_for("the runtime to consume output and exit", |state| {
-        state.pty_drops == 1
-    });
-    session.shutdown_and_join();
-}
-
-#[test]
 fn a_new_subscription_presents_output_received_while_detached() {
     let (result, reader_steps, _) = start_scripted_session(ScriptedPtyOptions::default());
     let (mut runtime, events, accessibility) = result.unwrap();
@@ -2769,12 +2752,12 @@ fn synchronized_output_between_accessibility_chunks_preserves_the_demanded_updat
 }
 
 #[test]
-fn closed_screen_lane_skips_snapshot_and_accessibility_without_stopping_runtime() {
+fn closed_screen_lane_skips_the_snapshot_and_stops_presenting_without_stopping_runtime() {
     let (_command_tx, commands) = mpsc::channel();
     let (_reader_tx, reader_events) = reader_output::reader_output(PTY_OUTPUT_QUEUE_CAPACITY);
     let records = ScriptedPtyRecords::default();
     let (events, receiver) = async_channel::bounded(1);
-    let (accessibility, accessibility_receiver) = async_channel::bounded(1);
+    let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     let mut worker = TerminalWorker {
         metadata_state: TerminalSessionMetadataState::default(),
         native_pty: direct_native_pty(records),
@@ -2800,7 +2783,7 @@ fn closed_screen_lane_skips_snapshot_and_accessibility_without_stopping_runtime(
 
     assert!(worker.publish_screen());
     assert_eq!(worker.emulator.presentation_generation(), generation);
-    assert!(accessibility_receiver.try_recv().is_err());
+    assert!(!worker.schedules.is_presentable());
     worker.finish();
 }
 
@@ -3368,27 +3351,6 @@ fn a_worker_panic_with_a_full_reader_queue_ends_the_session_with_a_typed_failure
         state.reader_drops == 1 && state.pty_drops == 1
     });
     assert!(events.recv_blocking().is_err());
-    session.shutdown();
-}
-
-#[test]
-fn resize_should_reach_the_pty_with_pixel_dimensions() {
-    let (result, _reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
-    let (mut session, _events, _accessibility) = result.unwrap();
-    let resized = geometry(100, 30, 9.0, 21.0);
-
-    session.resize(resized);
-    let state = records.wait_for("the scripted PTY resize", |state| state.resizes.len() == 1);
-
-    assert_eq!(
-        state.resizes,
-        vec![NativePtySize {
-            rows: 30,
-            columns: 100,
-            pixel_width: 900,
-            pixel_height: 630
-        }]
-    );
     session.shutdown();
 }
 

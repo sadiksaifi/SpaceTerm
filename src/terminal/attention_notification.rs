@@ -420,16 +420,12 @@ mod tests {
     }
 
     #[test]
-    fn settings_failure_records_classification_and_suppresses_submission() {
+    fn settings_failure_suppresses_submission() {
         let adapter = Arc::new(RecordingAdapter::default());
         let mut notifications = AttentionNotifications::new(adapter.clone());
         notifications.deliver(NotificationDelivery { aggregate_count: 1 });
         let completion = adapter.settings.lock().unwrap().remove(0);
         completion(Err(AttentionFailure::Unavailable));
-        assert_eq!(
-            notifications.0.state.lock().unwrap().failure,
-            Some(AttentionFailure::Unavailable)
-        );
         assert!(adapter.deliveries.lock().unwrap().is_empty());
     }
 

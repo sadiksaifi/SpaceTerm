@@ -14,10 +14,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{AnyWindowHandle, App, AppContext as _, Context, Global, SharedString, Task};
-use spaceterm_core::service::control::{self, BuildName, UpdateWording, Wording};
 use spaceterm_core::service::lane::admin::{self, Preview, Verdict};
 use spaceterm_core::service::lane::client::{LaneError, Outcome};
-use spaceterm_core::service::lane::{LaneAction, LaneReceipt, LaneStatus, LaneVersion};
+use spaceterm_core::service::lane::{LaneAction, LaneReceipt, LaneStatus};
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionIntent,
     ModalActionRole, ModalId,
@@ -301,12 +300,11 @@ pub(super) fn installed(cx: &App) -> Option<ControlSource> {
         .map(|installed| Arc::clone(&installed.0))
 }
 
-/// The change a confirmed preview makes, named by the version it changes to.
+/// The change a confirmed preview or a settled receipt names.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum Act {
     Stop,
     Restart,
-    Update(Option<SharedString>),
     /// A Network Access change. Only the CLI makes one, so the card names it only as an earlier
     /// operation a connection settled.
     NetworkAccess,
@@ -315,12 +313,9 @@ pub(super) enum Act {
 }
 
 impl Act {
-    fn of(action: &LaneAction, to: Option<&LaneVersion>) -> Self {
-        let to = to.map(|to| SharedString::from(to.version.clone()));
+    fn of(action: &LaneAction) -> Self {
         match action {
             LaneAction::Stop => Self::Stop,
-            // A Restart into the Pending Version names the version it updates to.
-            LaneAction::Restart if to.is_some() => Self::Update(to),
             LaneAction::Restart => Self::Restart,
             LaneAction::Network { .. } => Self::NetworkAccess,
             LaneAction::Uninstall => Self::Uninstall,
@@ -332,20 +327,8 @@ impl Act {
         match self {
             Self::Stop => "stop",
             Self::Restart => "restart",
-            Self::Update(_) => "update",
             Self::NetworkAccess => "Network Access change",
             Self::Uninstall => "uninstall",
-        }
-    }
-
-    /// The verb a failure is named by.
-    const fn verb(&self) -> &'static str {
-        match self {
-            Self::Stop => "stop",
-            Self::Restart => "restart",
-            Self::Update(_) => "update",
-            Self::NetworkAccess => "change its Network Access",
-            Self::Uninstall => "uninstall SpaceTerm Core",
         }
     }
 }
@@ -383,8 +366,8 @@ impl Settlement {
 pub(super) enum Ended {
     /// Nothing was dispatched: the read, preview or execution was refused.
     Refused(RemoteFailure),
-    /// The confirmed change ran this far.
-    Changed(Act, Settlement),
+    /// The confirmed uninstall ran this far. Remove Machine is the card's only change.
+    Changed(Settlement),
 }
 
 /// The step underway on one paired server.
@@ -416,8 +399,7 @@ pub(super) struct RemoteAdministration {
     routes: HashMap<DirectRouteId, RouteAdmin>,
 }
 
-/// The confirmation of one preview. Its message states what ends and that every client loses
-/// the server while it changes.
+/// Remove Machine's confirmation of one preview. Its detail states what ends on the machine.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct RemoteConfirmation {
     pub(super) title: &'static str,
@@ -449,107 +431,24 @@ fn uninstalls(lane_major: u16) -> bool {
     .is_ok()
 }
 
-/// What ends for every client: the exact count the server's preview named.
-fn sessions_end(count: u32) -> String {
-    match count {
-        0 => "No Terminal Sessions are running on it.".to_owned(),
-        1 => "Its 1 Terminal Session ends for every client.".to_owned(),
-        count => format!("Its {count} Terminal Sessions end for every client."),
-    }
-}
-
-/// How a person tells a lane build apart from another.
-fn build(version: &LaneVersion) -> BuildName<'_> {
-    BuildName {
-        version: &version.version,
-        commit: &version.commit,
-        package: &version.sha256,
-    }
-}
-
-/// The confirmation for `preview` of the server named `name`.
-pub(super) fn confirmation(name: &str, preview: &Preview) -> RemoteConfirmation {
-    let effects = &preview.effects;
-    let ends = sessions_end(effects.ends_sessions);
-    // A restart keeps the machine's own startup, so the shared wording's startup clause never
-    // shows.
-    let startup = spaceterm_core::service::ServiceStartup::AtLogin;
-    match &preview.action {
-        LaneAction::Restart if effects.to.is_none() => {
-            let wording = Wording::for_machine(name, control::Action::Restart, true, startup);
-            RemoteConfirmation {
-                title: wording.title(),
-                message: wording.message(),
-                detail: format!(
-                    "{ends} Every client connected to it disconnects until it starts again, and \
-                     Workspaces are kept."
-                ),
-                confirm: wording.confirm_label().to_owned(),
-            }
-        }
-        // Only the machine itself stops its Core.
-        LaneAction::Stop => RemoteConfirmation {
-            title: "Stop SpaceTerm Core",
-            message: format!("Stop SpaceTerm Core on {name}?"),
-            detail: ends,
-            confirm: "Stop".to_owned(),
+/// Remove Machine's confirmation for the machine named `name`, whose preview named
+/// `ends_sessions` Terminal Sessions that end.
+pub(super) fn confirmation(name: &str, ends_sessions: u32) -> RemoteConfirmation {
+    RemoteConfirmation {
+        title: "Remove Machine",
+        message: format!("Remove {name}?"),
+        detail: match ends_sessions {
+            0 => format!("This will uninstall SpaceTerm Core on {name} and unpair it."),
+            1 => format!(
+                "This will uninstall SpaceTerm Core on {name}, close your 1 running session \
+                 there, and unpair it."
+            ),
+            count => format!(
+                "This will uninstall SpaceTerm Core on {name}, close your {count} running \
+                 sessions there, and unpair it."
+            ),
         },
-        LaneAction::Uninstall => RemoteConfirmation {
-            title: "Remove Machine",
-            message: format!("Remove {name}?"),
-            detail: match effects.ends_sessions {
-                0 => format!("This will uninstall SpaceTerm Core on {name} and unpair it."),
-                1 => format!(
-                    "This will uninstall SpaceTerm Core on {name}, close your 1 running session \
-                     there, and unpair it."
-                ),
-                count => format!(
-                    "This will uninstall SpaceTerm Core on {name}, close your {count} running \
-                     sessions there, and unpair it."
-                ),
-            },
-            confirm: "Remove".to_owned(),
-        },
-        // The card offers no Network Access change, and a Network preview arrives as its own
-        // reply, so this names the change plainly should one ever reach it.
-        LaneAction::Network { .. } => RemoteConfirmation {
-            title: "Change Network Access",
-            message: format!("Change Network Access on {name}?"),
-            detail: "Paired connections to it may end.".to_owned(),
-            confirm: "Change".to_owned(),
-        },
-        // A Restart into the Pending Version reads as the update it completes.
-        LaneAction::Restart => {
-            let unnamed = LaneVersion {
-                version: String::new(),
-                commit: String::new(),
-                sha256: String::new(),
-            };
-            let from = effects.from.as_ref().unwrap_or(&unnamed);
-            let to = effects.to.as_ref().unwrap_or(&unnamed);
-            let wording = UpdateWording::for_machine(name, build(from), build(to), true, false);
-            let (previous, candidate) = control::build_labels(build(from), build(to));
-            let mut detail = format!(
-                "It changes from {previous} to {candidate}, replacing the running SpaceTerm Core. {ends} \
-                 Every client connected to it disconnects until it starts again, and Workspaces \
-                 are kept."
-            );
-            if effects
-                .to_major
-                .is_some_and(|major| major != spaceterm_core::protocol::MAJOR)
-            {
-                detail.push_str(&format!(
-                    " Afterward, SpaceTerm here needs its own update to open {name}\u{2019}s \
-                     Workspaces."
-                ));
-            }
-            RemoteConfirmation {
-                title: wording.title(),
-                message: wording.message(),
-                detail,
-                confirm: wording.confirm_label(),
-            }
-        }
+        confirm: "Remove".to_owned(),
     }
 }
 
@@ -557,57 +456,38 @@ pub(super) fn confirmation(name: &str, preview: &Preview) -> RemoteConfirmation 
 pub(super) fn ended_message(name: &str, ended: &Ended) -> (String, CaptionTone) {
     match ended {
         Ended::Refused(failure) => (failure.explanation(name), CaptionTone::Error),
-        Ended::Changed(Act::Stop, Settlement::Done) => {
-            (format!("{name} stopped."), CaptionTone::Guidance)
-        }
         // The machine closed the lane before it confirmed the change, so only the machine itself
         // can read the outcome.
-        Ended::Changed(act, Settlement::Shutdown) => (
+        Ended::Changed(Settlement::Shutdown) => (
             format!(
-                "{name} closed its connection before it confirmed its {}, so SpaceTerm can\u{2019}t \
-                 confirm it finished.",
-                act.noun()
+                "{name} closed its connection before it confirmed its uninstall, so SpaceTerm \
+                 can\u{2019}t confirm it finished."
             ),
             CaptionTone::Warning,
         ),
-        Ended::Changed(Act::Restart, Settlement::Done) => {
-            (format!("{name} restarted."), CaptionTone::Guidance)
-        }
-        Ended::Changed(Act::Update(to), Settlement::Done) => (
-            to.as_ref().map_or_else(
-                || format!("{name} updated."),
-                |to| format!("{name} updated to {to}."),
-            ),
-            CaptionTone::Guidance,
-        ),
         // A removed machine leaves the list, so this reads only should its removal here fail.
-        Ended::Changed(Act::Uninstall, Settlement::Done) => (
+        Ended::Changed(Settlement::Done) => (
             format!("SpaceTerm Core was uninstalled on {name}."),
             CaptionTone::Guidance,
         ),
-        Ended::Changed(Act::NetworkAccess, Settlement::Done) => (
-            format!("{name} changed its Network Access."),
-            CaptionTone::Guidance,
-        ),
-        Ended::Changed(act, Settlement::Uncertain) => (
+        Ended::Changed(Settlement::Uncertain) => (
             format!(
-                "SpaceTerm couldn\u{2019}t confirm whether {name} finished its {}. Check Now asks \
-                 {name} again.",
-                act.noun()
+                "SpaceTerm couldn\u{2019}t confirm whether {name} finished its uninstall. Check \
+                 Now asks {name} again."
             ),
             CaptionTone::Warning,
         ),
-        Ended::Changed(act, Settlement::NotPerformed) => (
-            format!("{name} didn\u{2019}t {}, so nothing changed.", act.verb()),
+        Ended::Changed(Settlement::NotPerformed) => (
+            format!("{name} didn\u{2019}t uninstall SpaceTerm Core, so nothing changed."),
             CaptionTone::Warning,
         ),
-        Ended::Changed(act, Settlement::Failed(failure)) => {
+        Ended::Changed(Settlement::Failed(failure)) => {
             let reason = match failure {
                 RemoteFailure::Failed => String::new(),
                 failure => format!(" {}", failure.explanation(name)),
             };
             (
-                format!("{name} couldn\u{2019}t {}.{reason}", act.verb()),
+                format!("{name} couldn\u{2019}t uninstall SpaceTerm Core.{reason}"),
                 CaptionTone::Error,
             )
         }
@@ -642,7 +522,7 @@ fn earlier_message(name: &str, act: &Act, settlement: &Settlement) -> (String, C
 fn earlier(settled: &[LaneReceipt]) -> Option<(Act, Settlement)> {
     let receipt = settled.last()?;
     Some((
-        Act::of(&receipt.action, None),
+        Act::of(&receipt.action),
         Settlement::of(admin::receipt_verdict(receipt)),
     ))
 }
@@ -751,9 +631,8 @@ impl SettingsWindow {
     /// The verb of a change underway on `route`, which the Server row names under its label.
     pub(super) fn remote_operation(&self, route: &DirectRouteId) -> Option<&'static str> {
         match self.remote_work(route)? {
-            Work::Performing(Act::Restart | Act::Update(_)) => None,
-            // The card never performs a Stop or a Network Access change.
-            Work::Performing(Act::Stop | Act::NetworkAccess) => None,
+            // The card performs only Remove Machine's uninstall.
+            Work::Performing(Act::Stop | Act::Restart | Act::NetworkAccess) => None,
             Work::Performing(Act::Uninstall) => Some("Removing\u{2026}"),
             Work::Reading | Work::Preparing(_) | Work::Confirming => None,
         }
@@ -768,8 +647,7 @@ impl SettingsWindow {
     /// The change underway on `route`, as the Server row names it once it runs long.
     pub(super) fn remote_progress(&self, route: &DirectRouteId) -> Option<SharedString> {
         let text = match self.remote_work(route)? {
-            Work::Performing(Act::Restart | Act::Update(_)) => return None,
-            Work::Performing(Act::Stop | Act::NetworkAccess) => return None,
+            Work::Performing(Act::Stop | Act::Restart | Act::NetworkAccess) => return None,
             Work::Performing(Act::Uninstall) => "Uninstalling SpaceTerm Core\u{2026}".to_owned(),
             Work::Reading | Work::Preparing(_) | Work::Confirming => return None,
         };
@@ -886,7 +764,7 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) {
         let name = self.machine_name(&super::machine_list::MachineChoice::Direct(route));
-        let confirmation = confirmation(&name, &preview);
+        let confirmation = confirmation(&name, preview.effects.ends_sessions);
         let owner = cx.weak_entity();
         let entity = cx.entity();
         // The preview arrived outside any window update, so the alert is presented through the
@@ -957,7 +835,7 @@ impl SettingsWindow {
             admin.ended = Some(Ended::Refused(RemoteFailure::Unreachable));
             return;
         };
-        let act = Act::of(&preview.action, preview.effects.to.as_ref());
+        let act = Act::of(&preview.action);
         let performing = act.clone();
         let task = cx.spawn(async move |settings, cx| {
             let performed = cx
@@ -981,7 +859,7 @@ impl SettingsWindow {
                 match performed {
                     Ok(performed) => {
                         admin.earlier = earlier(&performed.settled);
-                        admin.ended = Some(Ended::Changed(act, settlement(&performed.outcome)));
+                        admin.ended = Some(Ended::Changed(settlement(&performed.outcome)));
                         // The server changed, so what the last read said no longer holds.
                         admin.status = None;
                         admin.read_over = None;

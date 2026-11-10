@@ -473,26 +473,6 @@ impl SecureFilesystem for UnixSecureFilesystem {
             EntryKind::Socket,
         )
     }
-
-    #[cfg(all(test, feature = "native-tests"))]
-    fn create_private_artifact(
-        &self,
-        directory_handle: &SecureDirectory,
-        name: &OsStr,
-    ) -> Result<(), SecureFilesystemError> {
-        let directory = directory(directory_handle)?;
-        verify_directory_entry(&directory)?;
-        let file = open_file_at(
-            &directory.file,
-            name,
-            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
-            PRIVATE_FILE_MODE,
-        )
-        .map_err(classify)?;
-        set_file_mode(&file, PRIVATE_FILE_MODE).map_err(classify)?;
-        private_file_identity(&file.metadata().map_err(classify)?)?;
-        Ok(())
-    }
 }
 
 fn wrap_directory(directory: NativeDirectory) -> SecureDirectory {
@@ -1467,9 +1447,10 @@ mod tests {
         let root = test_root("hard-link");
         let filesystem = UnixSecureFilesystem;
         let directory = filesystem.ensure_private_directory(&root).unwrap();
-        filesystem
-            .create_private_artifact(&directory, OsStr::new("config"))
+        let prepared = filesystem
+            .prepare_private_file(&directory, OsStr::new("config"), b"x", [54; 16])
             .unwrap();
+        filesystem.commit_private_file(prepared, None).unwrap();
         fs::hard_link(root.join("config"), root.join("second")).unwrap();
 
         let result = filesystem.read_private_file(&directory, OsStr::new("config"), 1024);

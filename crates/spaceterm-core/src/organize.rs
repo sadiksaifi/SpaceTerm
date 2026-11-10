@@ -400,6 +400,35 @@ mod tests {
             worktree_close_plan(&state.inventory, &repos, workspace, anchor),
             Err(OrganizeError::NoFallbackWorktree)
         );
+
+        // Git lists another Worktree before the main one.
+        let record = |root: &str| WorktreeRecord {
+            root: root.into(),
+            head: WorktreeHead::Branch("branch".into()),
+            locked: false,
+            missing: false,
+        };
+        let mut listing = WorktreeInventory {
+            main_root: "/repo".into(),
+            current: None,
+            worktrees: vec![record("/extra"), record("/repo"), record("/feature")],
+        };
+        assert_eq!(
+            fallback_destination(&listing, Path::new("/feature")),
+            Some(Path::new("/repo"))
+        );
+        listing.worktrees[1].missing = true;
+        assert_eq!(
+            fallback_destination(&listing, Path::new("/feature")),
+            Some(Path::new("/extra"))
+        );
+        listing.worktrees[0].head = WorktreeHead::Bare;
+        assert_eq!(fallback_destination(&listing, Path::new("/feature")), None);
+        listing.worktrees[1].missing = false;
+        assert_eq!(
+            fallback_destination(&listing, Path::new("/repo")),
+            Some(Path::new("/feature"))
+        );
     }
 
     #[test]

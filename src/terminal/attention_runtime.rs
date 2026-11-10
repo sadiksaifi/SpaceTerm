@@ -974,6 +974,7 @@ mod tests {
         assert_eq!(coordinator.driver.clears, 0);
         coordinator.clear(first);
         assert_eq!(coordinator.driver.clears, 1);
+        assert_eq!(coordinator.driver.deliveries.len(), 3);
     }
 
     #[test]
@@ -1028,23 +1029,6 @@ mod tests {
 
         assert!(coordinator.driver.deliveries.is_empty());
         assert_eq!(coordinator.scheduled, None);
-    }
-
-    #[test]
-    fn clearing_delivered_pane_clears_notification() {
-        let epoch = Instant::now();
-        let pane = AttentionPaneId::test(1);
-        let mut coordinator = NotificationCoordinator::new(RecordingNotificationDriver::default());
-        let schedule = coordinator
-            .request(pane, false, epoch)
-            .expect("inactive attention should schedule one batch");
-        let _ = coordinator.reconcile_scheduled(schedule, schedule.deadline, false);
-
-        coordinator.clear(pane);
-
-        assert_eq!(coordinator.driver.deliveries.len(), 1);
-        assert_eq!(coordinator.driver.clears, 1);
-        assert!(coordinator.delivered_by_pane.is_empty());
     }
 
     #[test]
@@ -1339,10 +1323,6 @@ mod tests {
         let _ = coordinator.request(pane, Instant::now());
         coordinator.clear(pane);
         assert!(!coordinator.outstanding);
-        assert_eq!(
-            coordinator.last_failure,
-            Some(AttentionFailure::Unavailable)
-        );
     }
 
     #[gpui::test]

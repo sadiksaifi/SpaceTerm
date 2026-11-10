@@ -349,13 +349,23 @@ fn discarding_a_routes_copy_should_leave_nothing_to_present(cx: &mut TestAppCont
     let retained = RetainedInventory::retain(&titled_inventory(9, &[("Far", 1)]));
     let key = harness.present_saved_route("penguin", route, Some(retained), cx);
 
-    let copy = harness.manager.update(cx, |manager, _| {
-        let binding = manager.binding.get_mut(key)?;
-        binding.discard_retained_copy();
-        binding.retained_copy()
-    });
+    harness.manager.update(cx, |manager, _| {
+        let binding = manager.binding.get_mut(key).expect("the route is bound");
+        assert!(binding.presents_retained_copy());
 
-    assert_eq!(copy, None);
+        binding.discard_retained_copy();
+        binding.poll();
+        assert!(
+            !binding.presents_retained_copy(),
+            "no copy stands in for the server's inventory"
+        );
+
+        // Presenting again finds no saved copy to bring back.
+        binding.present_retained_copy();
+        binding.poll();
+        assert_eq!(binding.retained_copy(), None);
+        assert!(!binding.presents_retained_copy());
+    });
 }
 
 /// The most common relaunch: the server's inventory is unchanged since this client retained it,

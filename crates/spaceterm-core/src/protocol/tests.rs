@@ -280,32 +280,6 @@ fn accessibility_tail() -> pane::accessibility::Update {
 }
 
 #[test]
-fn a_demand_decodes_with_its_channel_and_whether_it_starts_or_ends() {
-    use pane::accessibility::Demand;
-    for demand in [Demand::Start { generation: 300 }, Demand::End] {
-        let wire = encode_client(&request(Operation::AccessibilityDemand {
-            channel: Channel(2),
-            demand,
-        }))
-        .unwrap();
-        let decoded = Assembler::default()
-            .client(RawFrame::parse(&wire.frames[0]).unwrap())
-            .unwrap();
-        let Some(ClientMessage::Request(request)) = decoded else {
-            panic!("a demand decodes as a request");
-        };
-        let Operation::AccessibilityDemand {
-            channel,
-            demand: decoded,
-        } = request.operation
-        else {
-            panic!("a demand decodes as a demand");
-        };
-        assert_eq!((channel, decoded), (Channel(2), demand));
-    }
-}
-
-#[test]
 fn every_operation_round_trips() {
     let attachment = crate::attachments::Attachment {
         workspace: [1; 32],

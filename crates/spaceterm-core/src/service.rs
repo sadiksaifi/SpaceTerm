@@ -1779,20 +1779,6 @@ mod tests {
         assert!(Service::state(&reopened).unwrap().unwrap().stopped);
     }
     #[test]
-    fn stop_publishes_durable_intent_before_a_failing_supervisor_operation() {
-        let fixture = Fixture::new();
-        let supervisor = TestSupervisor {
-            stop_data: Some(fixture.paths.data.clone()),
-            ..Default::default()
-        };
-        let service = Service::new(
-            fixture.paths.clone(),
-            "spaceterm-development".into(),
-            std::sync::Arc::new(supervisor),
-        );
-        assert_eq!(service.stop(), Err(CoreError::ServiceUnavailable));
-    }
-    #[test]
     fn cancelled_control_preserves_work_and_confirmed_native_refusal_retains_stop() {
         use control::{Action, Controller};
         let fixture = Fixture::new();
@@ -2791,17 +2777,16 @@ mod tests {
                         Some(CoreError::Changed)
                     );
                     assert!(data.join("installations").exists());
-                    let Ok(CliUninstall::Preview { token, .. }) =
-                        service.uninstall_cli(None, Data::Keep)
-                    else {
-                        panic!("a stopped Core previews its uninstall");
-                    };
+                    // The desktop's preview issues a token the same confirmation accepts.
+                    let preview = service.preview_uninstall(Data::Keep).unwrap();
+                    assert!(preview.sessions.is_empty());
                     assert!(matches!(
-                        service.uninstall_cli(Some(&token), Data::Keep),
+                        service.uninstall_cli(Some(&preview.token), Data::Keep),
                         Ok(CliUninstall::Completed)
                     ));
                     assert!(supervisor.registered.lock().unwrap().is_none());
                     assert!(!data.join("installations").exists());
+                    assert!(data.join("identity.json").exists());
                 },
             );
         }
@@ -2825,48 +2810,6 @@ mod tests {
                 service.uninstall_cli(Some(&token), Data::Keep),
                 Ok(CliUninstall::Completed)
             ));
-        }
-
-        #[test]
-        fn a_preview_of_a_stopped_core_removes_nothing_until_its_choice_is_confirmed() {
-            let fixture = Fixture::new();
-            fresh(&fixture);
-            let supervisor = AccountSupervisor::new(fixture.paths.clone());
-            let service = supervisor.service();
-            runtime::test_support::with_artifact(
-                &fixture.root.join("artifact"),
-                &fixture.paths.identity,
-                |archive, signature| {
-                    let startup = LocalStartup::with_service(service.clone()).unwrap();
-                    ready(
-                        startup
-                            .run(|| provision(&service, archive, signature), || false)
-                            .unwrap(),
-                    );
-                    service.stop().unwrap();
-                    let preview = service.preview_uninstall(Data::Keep).unwrap();
-                    assert!(preview.sessions.is_empty());
-                    let data = &fixture.paths.data;
-                    assert!(data.join("installations").exists());
-                    assert!(supervisor.registered.lock().unwrap().is_some());
-                    // The token binds the data choice.
-                    assert_eq!(
-                        service
-                            .uninstall_cli(Some(&preview.token), Data::Delete)
-                            .err(),
-                        Some(CoreError::Changed)
-                    );
-                    assert!(data.join("installations").exists());
-                    let preview = service.preview_uninstall(Data::Keep).unwrap();
-                    assert!(matches!(
-                        service.uninstall_cli(Some(&preview.token), Data::Keep),
-                        Ok(CliUninstall::Completed)
-                    ));
-                    assert!(supervisor.registered.lock().unwrap().is_none());
-                    assert!(!data.join("installations").exists());
-                    assert!(data.join("identity.json").exists());
-                },
-            );
         }
 
         #[test]

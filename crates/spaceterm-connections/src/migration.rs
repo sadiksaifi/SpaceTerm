@@ -113,17 +113,26 @@ mod tests {
         credentials.copy(&item(1), &item(2)).unwrap();
         credentials.copy(&item(1), &item(2)).unwrap();
         assert_eq!(memory.0.lock().unwrap().len(), 2);
+        memory.insert(&[3; 32], b"other").unwrap();
+        assert_eq!(
+            credentials.copy(&item(1), &item(3)),
+            Err(CredentialFailure),
+            "a different item under the new key refuses"
+        );
+        assert_eq!(
+            memory.0.lock().unwrap().get(&[3; 32]).map(Vec::as_slice),
+            Some(b"other".as_slice())
+        );
         credentials.remove(&item(1)).unwrap();
         assert_eq!(
             memory.0.lock().unwrap().get(&[2; 32]).map(Vec::as_slice),
             Some(b"secret".as_slice())
         );
         assert!(!memory.0.lock().unwrap().contains_key(&[1; 32]));
-        memory.insert(&[3; 32], b"other").unwrap();
         assert_eq!(
-            credentials.copy(&item(1), &item(3)),
+            credentials.copy(&item(1), &item(4)),
             Err(CredentialFailure),
-            "a missing source or a different item under the new key refuses"
+            "a missing source refuses"
         );
     }
 }

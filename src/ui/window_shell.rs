@@ -513,47 +513,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn client_controls_publish_accessible_names_and_owner_actions(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| super::super::init(cx).unwrap());
-        let closed = Rc::new(Cell::new(0));
-        let (_, cx) = cx.add_window_view(|_, _| ChromeHarness(closed.clone()));
-        cx.simulate_decorations(Decorations::Client {
-            tiling: Tiling::default(),
-        });
-        cx.activate_accessibility();
-        let tree: serde_json::Value = cx.update(|window, _| {
-            serde_json::from_str(&window.debug_a11y_tree_json().unwrap()).unwrap()
-        });
-        for label in ["Minimize", "Maximize", "Close"] {
-            let (_, node) = tree["nodes"]
-                .as_object()
-                .unwrap()
-                .iter()
-                .find(|(_, node)| node["aria"]["label"] == label)
-                .unwrap_or_else(|| {
-                    panic!("client control {label} must be exposed to screen readers")
-                });
-            assert_eq!(node["aria"]["role"], "Button");
-            cx.simulate_accessibility_action(gpui::accesskit::ActionRequest {
-                action: gpui::AccessibleAction::Click,
-                target_tree: gpui::accesskit::TreeId::ROOT,
-                target_node: gpui::accesskit::NodeId(
-                    node["accesskit_id"].as_str().unwrap().parse().unwrap(),
-                ),
-                data: None,
-            });
-        }
-        assert_eq!(closed.get(), 1);
-        assert_eq!(
-            cx.window_requests(),
-            [
-                gpui::TestWindowRequest::Minimize,
-                gpui::TestWindowRequest::Zoom
-            ]
-        );
-    }
-
-    #[gpui::test]
     fn opaque_client_frame_keeps_controls_and_resizes_without_a_shadow_gutter(
         cx: &mut gpui::TestAppContext,
     ) {

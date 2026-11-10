@@ -22,13 +22,15 @@ pub(crate) fn sanitize_display_text(value: &str) -> String {
         .collect()
 }
 
-fn is_unsafe_display_character(character: char) -> bool {
+/// Whether `character` could reorder, hide, or break the line of surrounding interface text: a
+/// control, a line or paragraph separator, or bidirectional formatting.
+pub(super) fn is_unsafe_display_character(character: char) -> bool {
     character.is_control()
         || matches!(character, '\u{2028}' | '\u{2029}')
         || is_bidirectional_format(character)
 }
 
-pub(super) fn is_bidirectional_format(character: char) -> bool {
+fn is_bidirectional_format(character: char) -> bool {
     matches!(character,
         '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
 }

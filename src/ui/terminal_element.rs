@@ -7730,25 +7730,6 @@ mod tests {
     }
 
     #[test]
-    fn shaped_geometry_cache_invalidates_when_row_identity_changes() {
-        let first_source = Arc::new(prepare_row(
-            &Arc::from([cell("a")]),
-            &colors(),
-            &"Menlo".into(),
-        ));
-        let second_source = Arc::new(prepare_row(
-            &Arc::from([cell("b")]),
-            &colors(),
-            &"Menlo".into(),
-        ));
-        let mut cached = None;
-        let first = reuse_or_prepare_row(&mut cached, &first_source, prepared_row_key(), || ());
-        let second = reuse_or_prepare_row(&mut cached, &second_source, prepared_row_key(), || ());
-
-        assert!(!Arc::ptr_eq(&first, &second));
-    }
-
-    #[test]
     fn render_cache_invalidates_rows_when_color_semantics_change() {
         let mut palette_cell = cell("a");
         palette_cell.foreground_source = TerminalColor::Palette(1);

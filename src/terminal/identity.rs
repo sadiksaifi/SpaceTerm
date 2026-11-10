@@ -304,7 +304,14 @@ mod tests {
     #[test]
     fn terminfo_source_and_xtgettcap_share_the_verified_capability_profile() {
         let source = include_str!("../../assets/terminfo/xterm-spaceterm.terminfo");
-        for capability in ["colors#256", "RGB#8", "Tc", "Ms=", "Ss=", "Se="] {
+        for capability in [
+            "colors#256,",
+            "RGB#8,",
+            "Tc,",
+            r"Ms=\E]52;%p1%s;%p2%s\007,",
+            r"Ss=\E[%p1%d q,",
+            r"Se=\E[2 q,",
+        ] {
             assert!(source.contains(capability), "missing {capability}");
         }
         assert!(source.contains("use=xterm-256color"));

@@ -468,36 +468,6 @@ fn composition_empty_state_cancels_before_cancel_event(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
-fn pointer_lost_button_and_deactivation_cancel_owned_gesture(cx: &mut TestAppContext) {
-    let (input, cx) = input(cx, "abcdef");
-    input.update(cx, |input, cx| {
-        input.pointer_generation = 10;
-        input.pointer_gesture = Some(PointerGesture {
-            generation: 10,
-            anchor: 0,
-            latest_position: point(px(0.0), px(0.0)),
-        });
-        input.on_global_mouse_move(
-            &MouseMoveEvent {
-                position: point(px(0.0), px(0.0)),
-                pressed_button: None,
-                modifiers: Default::default(),
-            },
-            cx,
-        );
-        assert!(input.pointer_gesture.is_none());
-        input.pointer_gesture = Some(PointerGesture {
-            generation: 11,
-            anchor: 0,
-            latest_position: point(px(0.0), px(0.0)),
-        });
-    });
-    cx.deactivate_window();
-    cx.run_until_parked();
-    assert!(input.read_with(cx, |input, _| input.pointer_gesture.is_none()));
-}
-
-#[gpui::test]
 fn caret_does_not_schedule_while_unfocused_or_inactive(cx: &mut TestAppContext) {
     let (input, cx) = input(cx, "abc");
     cx.deactivate_window();
@@ -1390,7 +1360,7 @@ fn stale_autoscroll_generation_is_inert_and_releases_its_task_slot(cx: &mut Test
 }
 
 #[gpui::test]
-fn lost_button_blur_and_disable_cancel_drag(cx: &mut TestAppContext) {
+fn lost_button_blur_deactivation_and_disable_cancel_drag(cx: &mut TestAppContext) {
     let (input, other_focus, _, cx) = input_with_events(cx, "abcdef", false);
     let bounds = cx
         .debug_bounds("test-input")
@@ -1401,6 +1371,14 @@ fn lost_button_blur_and_disable_cancel_drag(cx: &mut TestAppContext) {
 
     cx.simulate_mouse_down(bounds.center(), MouseButton::Left, Modifiers::none());
     cx.update(|window, cx| other_focus.focus(window, cx));
+    cx.run_until_parked();
+    assert!(input.read_with(cx, |input, _| input.pointer_gesture.is_none()));
+
+    // Native text UI holds the window's key status, so the editor keeps focus and no blur cancels.
+    cx.simulate_mouse_down(bounds.center(), MouseButton::Left, Modifiers::none());
+    assert!(input.read_with(cx, |input, _| input.pointer_gesture.is_some()));
+    cx.update(|window, cx| crate::TextInputFocus::set(Some(window.window_handle()), cx));
+    cx.deactivate_window();
     cx.run_until_parked();
     assert!(input.read_with(cx, |input, _| input.pointer_gesture.is_none()));
 
@@ -1841,6 +1819,7 @@ fn obscured_inputs_publish_a_secure_field_without_their_value(cx: &mut TestAppCo
     let field = tree.node("Secret");
     assert_eq!(field["aria"]["role"], "PasswordInput");
     assert!(field["aria"]["value"].is_null());
+    assert!(tree.children(field).is_empty());
     let published = cx.update(|window, _| window.debug_a11y_tree_json().unwrap());
     assert!(!published.contains("hunter2"));
 }
@@ -1885,15 +1864,6 @@ fn text_inputs_publish_their_caret_and_accept_selection_requests(cx: &mut TestAp
         tree.node("Test input")["aria"]["text_selection"]["focus"]["character_index"],
         0
     );
-}
-
-#[gpui::test]
-fn obscured_inputs_publish_no_text_runs(cx: &mut TestAppContext) {
-    use crate::a11y_testing::A11yTree;
-
-    let (_, cx) = obscured_input(cx, "hunter2");
-    let tree = A11yTree::read(cx);
-    assert!(tree.children(tree.node("Secret")).is_empty());
 }
 
 #[gpui::test]

@@ -6,7 +6,7 @@ use spaceterm_core::protocol::capability::{Capabilities, Capability};
 use spaceterm_core::update::facts::{
     PendingVersion, Platform, Protocols, UpdateCheck, UpdateFacts, Version,
 };
-use spaceterm_ui::a11y_testing::A11yTree;
+use spaceterm_ui::a11y_testing::{A11yTree, node_id};
 
 use crate::updates::UpdateEvent;
 use crate::updates::machines::testing::ScriptedMachines;
@@ -215,18 +215,6 @@ fn no_session_update_menu(
     (machines, visual)
 }
 
-#[gpui::test]
-fn a_menu_update_with_no_sessions_performs_at_once(cx: &mut gpui::TestAppContext) {
-    let (machines, visual) = no_session_update_menu(cx);
-    click("update-control-menu", visual);
-    click("update-row-1", visual);
-    assert_eq!(
-        machines.executed_actions(),
-        vec![(PENGUIN, MachineAction::Restart)]
-    );
-    assert!(visual.debug_bounds(CONFIRM).is_none(), "no alert asks");
-}
-
 /// When the Core refuses a restart's preview, the window previews again and asks; it never
 /// restarts again by itself.
 #[gpui::test]
@@ -238,6 +226,7 @@ fn a_refused_restart_never_runs_again_by_itself(cx: &mut gpui::TestAppContext) {
         machines.executed_actions(),
         vec![(PENGUIN, MachineAction::Restart)]
     );
+    assert!(visual.debug_bounds(CONFIRM).is_none(), "no alert asks");
 
     machines.emit(MachineUpdatesEvent::Finished {
         machine: PENGUIN,
@@ -562,6 +551,14 @@ fn work_in_progress_is_a_focusable_status(cx: &mut gpui::TestAppContext) {
         "Updating SpaceTerm Core on penguin to 0.9.0."
     );
     assert!(tree.with_role("Button").is_empty(), "nothing to press");
+
+    visual.update(|window, cx| window.focus_next(cx));
+    let tree = A11yTree::read(visual);
+    assert_eq!(
+        tree.focused().map(node_id),
+        Some(node_id(tree.node("Updating penguin…"))),
+        "keyboard traversal stops on the status"
+    );
 }
 
 #[gpui::test]

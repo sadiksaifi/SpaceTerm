@@ -5,10 +5,9 @@ use std::{
 };
 
 use gpui::{
-    Action, Bounds, Context, ElementInputHandler, Entity, EntityInputHandler as _,
-    InputHandler as _, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, MouseButton, MouseMoveEvent,
-    Render, ScrollDelta, TestAppContext, TouchPhase, VisualTestContext, WindowBounds, WindowHandle,
-    WindowOptions, point, rgba,
+    Action, Bounds, Context, Entity, EntityInputHandler as _, KeyDownEvent, KeyUpEvent, Keystroke,
+    Modifiers, MouseButton, MouseMoveEvent, Render, ScrollDelta, TestAppContext, TouchPhase,
+    VisualTestContext, WindowBounds, WindowHandle, WindowOptions, point, rgba,
 };
 
 use super::*;
@@ -135,21 +134,6 @@ fn test_menu_theme() -> MenuTheme {
     );
     let metrics = MenuMetrics::new(px(180.0), px(26.0));
     MenuTheme::new(paint, MenuSizes::new(metrics, metrics, metrics))
-}
-
-#[test]
-fn escape_and_command_period_target_rejects_destructive_cancel_render_state() {
-    let actions = vec![ModalRenderAction {
-        label: "Cancel".into(),
-        role: ModalActionRole::Cancel,
-        intent: ModalActionIntent::Destructive,
-        emphasis: ModalActionEmphasis::Standard,
-        enabled: true,
-        is_default: false,
-        debug_identity: "destructive-cancel".into(),
-    }];
-
-    assert_eq!(safe_cancel_action(Some(0), &actions), None);
 }
 
 #[test]
@@ -7836,58 +7820,6 @@ fn focused_dialog_text_input_receives_printable_key_input(cx: &mut TestAppContex
 }
 
 #[gpui::test]
-fn dialog_registered_input_handler_accepts_marked_text_composition(cx: &mut TestAppContext) {
-    install_test_catalogs(cx);
-    let requests = Rc::new(RefCell::new(Vec::new()));
-    let outcome = Rc::new(RefCell::new(None));
-    let lifecycle = Rc::new(RefCell::new(Vec::new()));
-    let (root, cx) = cx.add_window_view(move |window, cx| {
-        let input = cx.new(|cx| {
-            TextInput::new("handler-input", "Name", "", window, cx)
-                .debug_selector("dialog-handler-input")
-        });
-        let body = cx.new(|_| CompositionDialogBody {
-            input: input.clone(),
-        });
-        CompositionDialogFixture {
-            input,
-            body,
-            requests,
-            outcome,
-            lifecycle,
-            presentation: None,
-        }
-    });
-    cx.update(|window, cx| {
-        window.activate_window();
-        root.update(cx, |root, cx| root.present(window, cx));
-    });
-    cx.run_until_parked();
-    let input = root.read_with(cx, |root, _| root.input.clone());
-    let bounds = cx
-        .debug_bounds("dialog-handler-input")
-        .expect("Dialog TextInput should register its platform input handler");
-
-    cx.update(|window, cx| {
-        ElementInputHandler::new(bounds, input.clone())
-            .replace_and_mark_text_in_range(None, "日本", None, window, cx);
-    });
-    cx.run_until_parked();
-
-    assert_eq!(
-        input.read_with(cx, |input, _| {
-            (
-                input.value().to_owned(),
-                input
-                    .composition()
-                    .map(|composition| composition.marked_range()),
-            )
-        }),
-        ("日本".to_owned(), Some(0.."日本".len())),
-    );
-}
-
-#[gpui::test]
 fn return_commits_dialog_input_composition_before_a_later_default_submission(
     cx: &mut TestAppContext,
 ) {
@@ -8037,11 +7969,13 @@ fn escape_cancels_dialog_input_composition_before_later_safe_cancel(cx: &mut Tes
 
 struct OwnedDialogMenuBody {
     lifecycle_owner: Rc<RefCell<Option<WeakEntity<DialogMenuFixture>>>>,
+    trace: Rc<RefCell<Vec<&'static str>>>,
 }
 
 impl Render for OwnedDialogMenuBody {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let lifecycle_owner = self.lifecycle_owner.clone();
+        let trace = self.trace.clone();
         Menu::new(
             "dialog-owned-menu",
             "Dialog options",
@@ -8054,6 +7988,7 @@ impl Render for OwnedDialogMenuBody {
             if matches!(event, MenuLifecycleEvent::Closed(MenuCloseReason::Replaced))
                 && let Some(owner) = lifecycle_owner.borrow().clone()
             {
+                trace.borrow_mut().push("menu-closed");
                 let _ = owner.update(cx, |fixture, _| fixture.menu_closed += 1);
             }
         })
@@ -8066,12 +8001,19 @@ struct DialogMenuFixture {
     allow_actions: bool,
     outcome: Rc<RefCell<Option<DialogOutcome<&'static str>>>>,
     menu_closed: usize,
+    /// The owned Menu's close, the Dialog's outcome, and a successor's opening, in delivery order.
+    trace: Rc<RefCell<Vec<&'static str>>>,
+    /// Whether the window still presented a Menu when the Dialog delivered its outcome.
+    menu_open_at_outcome: Rc<Cell<Option<bool>>>,
 }
 
 impl DialogMenuFixture {
     fn present(&mut self, window: &Window, cx: &mut Context<Self>) {
         let allow_actions = self.allow_actions;
         let outcome = self.outcome.clone();
+        let trace = self.trace.clone();
+        let menu_open_at_outcome = self.menu_open_at_outcome.clone();
+        let window_handle = window.window_handle();
         self.presentation = Some(
             Dialog::new(
                 ModalId::new("dialog-owned-menu-fixture"),
@@ -8097,7 +8039,17 @@ impl DialogMenuFixture {
                         }
                     }
                 },
-                move |result, _| *outcome.borrow_mut() = Some(result),
+                move |result, cx| {
+                    trace.borrow_mut().push("dialog-outcome");
+                    menu_open_at_outcome.set(
+                        window_handle
+                            .update(cx, |_, window, cx| {
+                                crate::menu::window_menu_is_open(window, cx)
+                            })
+                            .ok(),
+                    );
+                    *outcome.borrow_mut() = Some(result);
+                },
             )
             .expect("dialog should present"),
         );
@@ -8127,14 +8079,19 @@ fn dialog_menu_window(
     install_test_catalogs(cx);
     let lifecycle_owner = Rc::new(RefCell::new(None));
     let body_lifecycle_owner = lifecycle_owner.clone();
+    let trace = Rc::new(RefCell::new(Vec::new()));
+    let body_trace = trace.clone();
     let (root, cx) = cx.add_window_view(move |_, cx| DialogMenuFixture {
         body: cx.new(|_| OwnedDialogMenuBody {
             lifecycle_owner: body_lifecycle_owner,
+            trace: body_trace,
         }),
         presentation: None,
         allow_actions: false,
         outcome: Rc::new(RefCell::new(None)),
         menu_closed: 0,
+        trace,
+        menu_open_at_outcome: Rc::new(Cell::new(None)),
     });
     *lifecycle_owner.borrow_mut() = Some(root.downgrade());
     cx.update(|window, _| window.activate_window());
@@ -8216,6 +8173,10 @@ fn programmatic_dialog_completion_closes_owned_menu_before_parent(cx: &mut TestA
         root.read_with(cx, |root, _| root.outcome.borrow().clone()),
         Some(DialogOutcome::ProgrammaticallyCompleted)
     );
+    assert_eq!(
+        root.read_with(cx, |root, _| root.trace.borrow().clone()),
+        ["menu-closed", "dialog-outcome"]
+    );
 }
 
 #[gpui::test]
@@ -8259,6 +8220,8 @@ fn public_dialog_replacement_retires_owned_menu_before_successor_open(cx: &mut T
     cx.simulate_click(trigger.center(), Modifiers::default());
     cx.run_until_parked();
     assert!(cx.update(|window, cx| crate::menu::window_menu_is_open(window, cx)));
+    let trace = root.read_with(cx, |root, _| root.trace.clone());
+    let successor_trace = trace.clone();
 
     let replacement = cx.update(|window, cx| {
         root.update(cx, |_, cx| {
@@ -8287,7 +8250,11 @@ fn public_dialog_replacement_retires_owned_menu_before_successor_open(cx: &mut T
                 cx,
                 |_, _, _| DialogCloseDecision::Pending,
                 |_, _| {},
-                |_, _| {},
+                move |event, _| {
+                    if matches!(event, ModalLifecycleEvent::Opened(_)) {
+                        successor_trace.borrow_mut().push("successor-opened");
+                    }
+                },
             )
             .expect("Dialog should replace owned-Menu predecessor")
         })
@@ -8300,6 +8267,8 @@ fn public_dialog_replacement_retires_owned_menu_before_successor_open(cx: &mut T
         root.read_with(cx, |root, _| root.outcome.borrow().clone()),
         Some(DialogOutcome::Dismissed(ModalCloseReason::Replaced))
     );
+    assert_eq!(trace.borrow().first(), Some(&"menu-closed"));
+    assert!(trace.borrow().contains(&"successor-opened"));
     cx.update(|window, cx| {
         replacement
             .complete(window, None, cx)
@@ -8383,6 +8352,10 @@ fn command_period_closes_owned_menu_before_allowed_parent_cancellation(cx: &mut 
             source: ModalActivationSource::CommandPeriod,
         })
     );
+    assert_eq!(
+        root.read_with(cx, |root, _| root.menu_open_at_outcome.get()),
+        Some(false)
+    );
 }
 
 #[gpui::test]
@@ -8430,34 +8403,6 @@ fn surface_contains_includes_edges_and_rejects_scrim() {
             "outside ({x}, {y})"
         );
     }
-}
-
-#[test]
-fn default_presentation_is_policy_resolved_without_mutating_action_semantics() {
-    let action = ModalRenderAction {
-        label: "Continue".into(),
-        role: ModalActionRole::Affirmative,
-        intent: ModalActionIntent::Ordinary,
-        emphasis: ModalActionEmphasis::Standard,
-        enabled: true,
-        is_default: true,
-        debug_identity: "policy-default".into(),
-    };
-
-    assert_eq!(
-        (
-            ModalDesktopPolicy::mac_os().default_action_presentation(&action),
-            action.role,
-            action.intent,
-            action.emphasis,
-        ),
-        (
-            DefaultActionPresentation::Emphasized,
-            ModalActionRole::Affirmative,
-            ModalActionIntent::Ordinary,
-            ModalActionEmphasis::Standard,
-        )
-    );
 }
 
 #[test]

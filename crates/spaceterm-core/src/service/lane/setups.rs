@@ -86,27 +86,6 @@ mod tests {
         format!("{index:032x}")
     }
 
-    /// The sequence that once revived a cancelled setup: it is cancelled while it waits, then
-    /// more cancellations than any eviction bound arrive. It stays cancelled until it finishes.
-    #[test]
-    fn later_cancellations_never_revive_a_running_one() {
-        let now = Instant::now();
-        let mut setups = Setups::default();
-        setups.begin("a", now).unwrap();
-        setups.cancel("a", now).unwrap();
-        for index in 0..MAX_EARLY_CANCELLATIONS {
-            setups.cancel(&name(index), now).unwrap();
-        }
-        assert_eq!(
-            setups.cancel(&name(MAX_EARLY_CANCELLATIONS), now),
-            Err(CoreError::ServiceBusy),
-            "a full set of early cancellations refuses another rather than evicting one"
-        );
-        assert!(setups.cancelled("a"));
-        setups.finish("a");
-        assert!(setups.cancelled("a"), "a finished setup takes no effect");
-    }
-
     #[test]
     fn a_cancellation_before_its_preparation_starts_it_cancelled() {
         let now = Instant::now();

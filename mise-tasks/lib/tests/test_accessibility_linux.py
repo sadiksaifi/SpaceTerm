@@ -513,13 +513,14 @@ class AccessibilityTerminalDiscoveryTests(unittest.TestCase):
         self.assertEqual(list(tree), [retained])
 
     def test_foreign_terminal_cannot_satisfy_missing_application_readiness(self):
+        foreign = Accessible("terminal", name="Terminal Pane")
         self.desktop(
-            [
-                Accessible(
-                    "application", pid=43, children=[Accessible("terminal", name="Terminal Pane")]
-                )
-            ]
+            [Accessible("application", pid=43, children=[Accessible("frame", children=[foreign])])]
         )
+        self.probe.core_workspace_named = True
+        self.probe.workspace_rows = lambda: [
+            Accessible("tree item", name=self.probe.core_workspace_name)
+        ]
         self.assertIsNone(self.probe.find_terminal())
 
     def test_cleanup_reacquires_only_the_owned_workspace_after_native_objects_change(self):

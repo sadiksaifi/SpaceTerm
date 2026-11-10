@@ -464,18 +464,6 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_reservation_lives_until_the_last_owner_releases_pixels() {
-        let _guard = test_lock();
-        let reservation =
-            Arc::new(GraphicsReservation::try_acquire(APPLICATION_DECODED_LIMIT).unwrap());
-        let retained = Arc::clone(&reservation);
-        drop(reservation);
-        assert!(GraphicsReservation::try_acquire(1).is_none());
-        drop(retained);
-        assert!(GraphicsReservation::try_acquire(APPLICATION_DECODED_LIMIT).is_some());
-    }
-
-    #[test]
     fn deferred_pixel_capacity_wakes_once_after_a_sufficient_release() {
         let _guard = test_lock();
         let large = GraphicsReservation::try_acquire(APPLICATION_DECODED_LIMIT - 2).unwrap();

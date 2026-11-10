@@ -1293,18 +1293,6 @@ mod tests {
         }
     }
 
-    /// The theme row changes the displayed appearance's theme, so its reset leaves the shared
-    /// appearance mode and the other slot alone.
-    #[test]
-    fn the_theme_row_resets_only_the_displayed_theme() {
-        for appearance in [Appearance::Light, Appearance::Dark] {
-            assert_eq!(
-                SettingsRowId::TerminalTheme.reset_target(appearance),
-                Some(ResetTarget::TerminalTheme(appearance)),
-            );
-        }
-    }
-
     #[test]
     fn an_empty_query_matches_every_row() {
         assert_eq!(matching_rows("   ").len(), rows().count());

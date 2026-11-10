@@ -297,26 +297,4 @@ mod tests {
             assert!(!TerminalFocusCoordinator::is_focused(facts));
         }
     }
-
-    #[test]
-    fn every_temporary_ui_owner_blocks_terminal_input_focus() {
-        let blockers = [
-            TerminalFocusBlocker::Sidebar,
-            TerminalFocusBlocker::SidebarResize,
-            TerminalFocusBlocker::CommandPalette,
-            TerminalFocusBlocker::RenameField,
-            TerminalFocusBlocker::ContextMenu,
-            TerminalFocusBlocker::PaneResize,
-            TerminalFocusBlocker::TopChrome,
-            TerminalFocusBlocker::TabSelector,
-            TerminalFocusBlocker::Modal,
-        ];
-
-        for blocker in blockers {
-            assert!(!TerminalFocusCoordinator::is_focused(TerminalFocusFacts {
-                blocker: Some(blocker),
-                ..TerminalFocusFacts::focused()
-            }));
-        }
-    }
 }

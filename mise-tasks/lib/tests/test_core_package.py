@@ -389,7 +389,7 @@ class CoreArchiveTests(unittest.TestCase):
             self.unpack()
         self.assertFalse((self.root / "unpacked").exists())
         self.signature.unlink()
-        with self.assertRaises((TaskError, OSError)):
+        with self.assertRaises(TaskError):
             self.unpack()
 
     def test_signed_wrong_target_build_or_commit_is_refused(self):

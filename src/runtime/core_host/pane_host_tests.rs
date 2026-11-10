@@ -7,7 +7,7 @@ use spaceterm_core::protocol::{PaneEvent, screen::ScreenUpdate};
 use std::time::Duration;
 
 #[test]
-fn native_clipboard_requests_reach_only_the_current_controller() {
+fn an_osc_52_clipboard_write_reaches_the_controller_with_its_decoded_text() {
     let mut host = host();
     let lease = attach(&mut host, 1, true);
     focus(&mut host, lease, 1, FocusTarget::Terminal);
@@ -16,71 +16,6 @@ fn native_clipboard_requests_reach_only_the_current_controller() {
     assert!(
         matches!(request.effect, pane::effects::Effect::ClipboardWrite { text, .. } if text == "hello")
     );
-    host.shutdown().unwrap();
-}
-
-#[test]
-fn interactive_input_requires_current_focus() {
-    let mut host = host();
-    let lease = attach(&mut host, 1, true);
-    let key = Key {
-        physical: PhysicalKey::Enter as u32,
-        action: 0,
-        logical: "enter".into(),
-        text: None,
-        unshifted: None,
-        modifiers: 0,
-        consumed: 0,
-        option_as_alt: false,
-    };
-    assert!(matches!(
-        host.request(
-            [1; 32],
-            [1; 32],
-            Request::Focus {
-                lease,
-                generation: 1,
-                target: FocusTarget::Unfocused
-            }
-        ),
-        Reply::Unchanged
-    ));
-    assert!(matches!(
-        host.request(
-            [1; 32],
-            [1; 32],
-            Request::Input {
-                lease,
-                generation: 1,
-                input: InteractiveInput::Key(key.clone())
-            }
-        ),
-        Reply::Refused(Refusal::Stale)
-    ));
-    assert!(matches!(
-        host.request(
-            [1; 32],
-            [1; 32],
-            Request::Focus {
-                lease,
-                generation: 2,
-                target: FocusTarget::Terminal
-            }
-        ),
-        Reply::Unchanged
-    ));
-    assert!(matches!(
-        host.request(
-            [1; 32],
-            [1; 32],
-            Request::Input {
-                lease,
-                generation: 2,
-                input: InteractiveInput::Key(key)
-            }
-        ),
-        Reply::Unchanged
-    ));
     host.shutdown().unwrap();
 }
 

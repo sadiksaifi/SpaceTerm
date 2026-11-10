@@ -178,14 +178,6 @@ impl TerminalGeometry {
         self.backing_grid
     }
 
-    #[cfg(test)]
-    pub fn logical_grid_size(self) -> LogicalSize {
-        LogicalSize::new(
-            self.logical_cell.width * f32::from(self.grid.cols),
-            self.logical_cell.height * f32::from(self.grid.rows),
-        )
-    }
-
     pub fn to_backing_position(self, logical: LogicalPosition) -> BackingPosition {
         BackingPosition::new(
             logical.x * self.backing_scale.0,
@@ -284,14 +276,12 @@ mod tests {
             (
                 geometry.grid(),
                 geometry.logical_cell,
-                geometry.logical_grid_size(),
                 geometry.backing_cell_size(),
                 geometry.backing_grid_size(),
             ),
             (
                 CellGridSize::new(13, 3),
                 LogicalCellSize::new(101.0 / 13.0, 52.0 / 3.0),
-                LogicalSize::new(101.0, 52.0),
                 BackingSize::new(12, 26),
                 BackingSize::new(152, 78),
             )
