@@ -49,6 +49,11 @@ pub(crate) trait WorktreeFormBackend {
         branch: WorktreeBranch,
         cx: &mut App,
     ) -> Task<Result<PathBuf, WorktreeCreateError>>;
+    /// Stops the last Create if it has not started its write yet. Returns whether it stopped it.
+    /// A started write runs to its end.
+    fn cancel(&self) -> bool {
+        false
+    }
     /// The person answered the form after it showed the answer to its last Create, so nothing
     /// presents it again.
     fn presented(&self) {}
@@ -511,6 +516,9 @@ impl WorktreeForm {
                     return DialogCloseDecision::Deny {
                         first_invalid: None,
                     };
+                }
+                if self.backend.cancel() {
+                    return DialogCloseDecision::Allow;
                 }
                 // A started write runs to its end; Cancel waits for it.
                 self.pending_cancel = Some(completion);
@@ -1220,6 +1228,8 @@ mod tests {
         presentations: Cell<usize>,
         /// How many times the form left its answer to the Workspace Window.
         releases: Cell<usize>,
+        /// Whether the held Create has not started its write, so Cancel stops it.
+        stoppable: Cell<bool>,
     }
 
     impl WorktreeFormBackend for ScriptedBackend {
@@ -1259,6 +1269,10 @@ mod tests {
                     .unwrap_or(Ok(()))
                     .map(|()| path),
             )
+        }
+
+        fn cancel(&self) -> bool {
+            self.stoppable.replace(false)
         }
 
         fn presented(&self) {
@@ -1616,6 +1630,20 @@ mod tests {
                 "/Users/person/.worktrees/app/fresh"
             ))]
         );
+    }
+
+    #[gpui::test]
+    fn cancel_before_the_write_starts_should_close_at_once(cx: &mut TestAppContext) {
+        let (held, cx) = create_and_hold(cx);
+        held.backend.stoppable.set(true);
+
+        click("modal-action-new-worktree-cancel", cx);
+        // An answer that arrives after Cancel stopped the Create opens nothing.
+        let _ = held.answer.try_send(Ok(()));
+        cx.run_until_parked();
+
+        assert!(!held.form.read_with(cx, |form, _| form.is_open()));
+        assert_eq!(*held.events.borrow(), [WorktreeFormEvent::Cancelled]);
     }
 
     #[gpui::test]

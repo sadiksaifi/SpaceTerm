@@ -127,6 +127,7 @@ impl WorkspaceManager {
                     branches,
                     machine,
                     owner: std::cell::RefCell::default(),
+                    stage: Rc::default(),
                 });
                 let form = cx.new(|cx| WorktreeForm::new(backend, context, window, cx));
                 cx.subscribe_in(
