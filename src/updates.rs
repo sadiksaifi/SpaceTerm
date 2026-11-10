@@ -543,6 +543,9 @@ pub(crate) struct ApplicationUpdates {
     /// When an automatic download first failed, while SpaceTerm tries it again by itself. A
     /// finished download, a current SpaceTerm or the person's own try ends it.
     retrying_since: Option<u64>,
+    /// A download the person started failed. That failure is theirs to see until a download
+    /// finishes, SpaceTerm is current or they dismiss it, so no later try dates it.
+    own_download_failed: bool,
     download_requested: bool,
     /// The person chose Relaunch before the release was ready, so it relaunches once it is.
     relaunch_requested: bool,
@@ -671,6 +674,7 @@ impl ApplicationUpdates {
                 prepared: false,
                 automatic_download: false,
                 retrying_since: None,
+                own_download_failed: false,
                 download_requested: false,
                 relaunch_requested: false,
                 recheck: false,
@@ -1028,6 +1032,7 @@ impl ApplicationUpdates {
         if matches!(self.model.state, UpdateState::Failed { .. }) {
             self.model.state = UpdateState::Idle;
             self.retrying_since = None;
+            self.own_download_failed = false;
             cx.notify();
         }
     }
@@ -1069,11 +1074,16 @@ impl ApplicationUpdates {
             self.reminder = None;
             self.save_history();
         }
-        if matches!(event, UpdateEvent::Failed(UpdateError::Download)) && self.automatic_download {
-            self.retrying_since.get_or_insert(time);
+        if matches!(event, UpdateEvent::Failed(UpdateError::Download)) {
+            if !self.automatic_download {
+                self.own_download_failed = true;
+            } else if !self.own_download_failed {
+                self.retrying_since.get_or_insert(time);
+            }
         }
         if ready || current {
             self.retrying_since = None;
+            self.own_download_failed = false;
         }
         let finished = matches!(event, UpdateEvent::Finished);
         let notice = self.model.receive(event);
@@ -1976,6 +1986,128 @@ mod tests {
         service.update(cx, |updates, cx| updates.download_now(cx));
         fail_a_download(cx);
         assert!(!retries(cx), "the person's own download failed");
+    }
+
+    /// The updater on a clock the test sets, and the steps the quiet-retry tests share: an
+    /// automatic download that fails, and whether SpaceTerm retries quietly.
+    fn clocked_fixture(
+        cx: &mut gpui::TestAppContext,
+    ) -> (Rc<RecordingAdapter>, Entity<ApplicationUpdates>) {
+        let adapter = Rc::new(RecordingAdapter::available());
+        *adapter.clock.borrow_mut() = Some(Box::new(|| 1_000_000));
+        cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
+        let service = cx.update(|cx| cx.global::<UpdateService>().0.clone());
+        (adapter, service)
+    }
+
+    fn fail_an_automatic_download(
+        adapter: &RecordingAdapter,
+        service: &Entity<ApplicationUpdates>,
+        cx: &mut gpui::TestAppContext,
+    ) {
+        service.update(cx, |updates, cx| updates.check(false, cx));
+        adapter.emit(UpdateEvent::Available("0.1.1".into()));
+        adapter.emit(UpdateEvent::Failed(UpdateError::Download));
+        adapter.emit(UpdateEvent::Finished);
+        cx.run_until_parked();
+    }
+
+    fn retries(service: &Entity<ApplicationUpdates>, cx: &mut gpui::TestAppContext) -> bool {
+        service.read_with(cx, |updates, _| updates.retries_download())
+    }
+
+    /// A download the person started that fails stays theirs to see. SpaceTerm's later tries
+    /// by itself do not make it quiet, until the person dismisses it.
+    #[gpui::test]
+    fn a_persons_failed_download_stays_visible_through_automatic_retries(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (adapter, service) = clocked_fixture(cx);
+        service.update(cx, |updates, cx| updates.check(false, cx));
+        service.update(cx, |updates, cx| updates.download_now(cx));
+        adapter.emit(UpdateEvent::Available("0.1.1".into()));
+        adapter.emit(UpdateEvent::Failed(UpdateError::Download));
+        adapter.emit(UpdateEvent::Finished);
+        cx.run_until_parked();
+        assert!(!retries(&service, cx));
+
+        fail_an_automatic_download(&adapter, &service, cx);
+        assert!(!retries(&service, cx), "the person's failure still stands");
+
+        service.update(cx, |updates, cx| updates.dismiss_failure(cx));
+        fail_an_automatic_download(&adapter, &service, cx);
+        assert!(retries(&service, cx));
+    }
+
+    /// The quiet retry ends when the person acts on the release, when the download works, when
+    /// SpaceTerm is current, and when automatic downloads are turned off.
+    #[gpui::test]
+    fn the_quiet_retry_ends_when_the_person_acts_or_the_download_works(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (adapter, service) = clocked_fixture(cx);
+        let quiet = |cx: &mut gpui::TestAppContext| {
+            fail_an_automatic_download(&adapter, &service, cx);
+            assert!(retries(&service, cx));
+        };
+        let finish = |cx: &mut gpui::TestAppContext| {
+            adapter.emit(UpdateEvent::Finished);
+            cx.run_until_parked();
+        };
+
+        quiet(cx);
+        service.update(cx, |updates, cx| updates.dismiss_failure(cx));
+        assert!(!retries(&service, cx), "Dismiss");
+
+        quiet(cx);
+        service.update(cx, |updates, cx| updates.check(true, cx));
+        assert!(!retries(&service, cx), "Check Now");
+        finish(cx);
+
+        quiet(cx);
+        service.update(cx, |updates, cx| updates.check(false, cx));
+        assert!(retries(&service, cx), "a scheduled check keeps it");
+        service.update(cx, |updates, cx| updates.cancel(cx));
+        assert!(!retries(&service, cx), "Stop Download");
+        finish(cx);
+
+        quiet(cx);
+        service.update(cx, |updates, cx| updates.check(false, cx));
+        adapter.emit(UpdateEvent::UpToDate);
+        finish(cx);
+        assert!(!retries(&service, cx), "SpaceTerm is current");
+
+        quiet(cx);
+        service.update(cx, |updates, cx| updates.check(false, cx));
+        adapter.emit(UpdateEvent::Available("0.1.1".into()));
+        adapter.emit(UpdateEvent::Ready);
+        finish(cx);
+        assert!(!retries(&service, cx), "the download worked");
+
+        quiet(cx);
+        let document = crate::settings::SettingsDocument {
+            updates: UpdatePreferences {
+                automatic_downloads: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let settings = crate::settings::Settings::load(
+            crate::settings::storage::testing::MemoryStorage::with_document(&document),
+        );
+        service.update(cx, |updates, _| updates.attach_settings(settings));
+        assert!(!retries(&service, cx), "automatic downloads are off");
+    }
+
+    /// Relaunch chosen while an automatic download runs makes that download the person's.
+    #[gpui::test]
+    fn relaunch_chosen_during_an_automatic_download_is_asked(cx: &mut gpui::TestAppContext) {
+        let (adapter, service) = launch_fixture(cx);
+        adapter.emit(UpdateEvent::Available("0.1.1".into()));
+        cx.run_until_parked();
+        assert!(!service.read_with(cx, |updates, _| updates.download_asked()));
+        service.update(cx, |updates, cx| updates.relaunch(cx));
+        assert!(service.read_with(cx, |updates, _| updates.download_asked()));
     }
 
     /// Download only downloads, from every state that offers it: a found release, and a known

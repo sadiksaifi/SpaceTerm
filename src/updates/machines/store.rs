@@ -308,7 +308,7 @@ impl MachineUpdates {
             MachineAction::Install => Asked::Install,
             _ => return,
         };
-        let Some(work) = self.asked.iter_mut().find(|work| {
+        let Some(index) = self.asked.iter().position(|work| {
             work.machine == machine && work.asked == asked && matches!(work.phase, Phase::Requested)
         }) else {
             return;
@@ -318,11 +318,20 @@ impl MachineUpdates {
             .and_then(|update| update.facts.as_ref())
             .map(|facts| facts.revision);
         self.tried.insert(machine, revision);
+        // A request the Core refused ran no work of the person's. An operation its facts
+        // report is the Core's own.
+        if outcome.is_err() {
+            self.asked.remove(index);
+            return;
+        }
+        // This Mac or This Computer has no route to try again.
         let unreachable = update
+            .filter(|update| !update.local)
             .map(|update| &update.link)
             .filter(|link| !matches!(link, MachineLink::Connected | MachineLink::Incompatible(_)));
+        let work = &mut self.asked[index];
         work.phase = match unreachable {
-            Some(link) if asked == Asked::Check && outcome.is_ok() => {
+            Some(link) if asked == Asked::Check => {
                 let serial = work.serial;
                 cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(RECONNECT_WAIT).await;
@@ -831,6 +840,123 @@ mod tests {
         adapter.emit(MachineUpdatesEvent::Changed(Box::new(checking)));
         cx.run_until_parked();
         assert_eq!(asked(cx), None);
+    }
+
+    /// A request the Core refuses ran no work of the person's, so its mark ends with the answer
+    /// and the Core's own operation stays nobody's.
+    #[gpui::test]
+    fn a_refused_request_marks_nothing(cx: &mut gpui::TestAppContext) {
+        let (adapter, store) = installed(cx);
+        let penguin = update("0.8.0", None);
+        let machine = penguin.machine;
+        let mut checking = penguin.clone();
+        checking.facts.as_mut().unwrap().operation = Some(Operation::Checking);
+        let mut installing = penguin.clone();
+        installing.facts.as_mut().unwrap().operation = Some(Operation::Installing {
+            version: Version::parse("0.9.0").unwrap(),
+            received: 1,
+            total: 2,
+        });
+        adapter.emit(MachineUpdatesEvent::Machines(vec![checking]));
+        cx.run_until_parked();
+        store.update(cx, |store, cx| {
+            store.perform(machine, MachineAction::CheckAgain, Surface::Window, cx);
+        });
+        adapter.emit(MachineUpdatesEvent::Finished {
+            machine,
+            action: MachineAction::CheckAgain,
+            outcome: Err(ActionFailure::Busy),
+        });
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(installing)));
+        cx.run_until_parked();
+        assert_eq!(
+            store.read_with(cx, |store, _| store.machines()[0].asked),
+            None
+        );
+    }
+
+    /// A mark ends with its Machine: when the Machine goes out of reach after the request
+    /// answered, and when it is removed.
+    #[gpui::test]
+    fn a_mark_ends_when_its_machine_goes_out_of_reach_or_is_removed(cx: &mut gpui::TestAppContext) {
+        let (adapter, store) = installed(cx);
+        let penguin = update("0.8.0", None);
+        let machine = penguin.machine;
+        let mut installing = penguin.clone();
+        installing.facts.as_mut().unwrap().operation = Some(Operation::Installing {
+            version: Version::parse("0.9.0").unwrap(),
+            received: 1,
+            total: 2,
+        });
+        let asked = |cx: &mut gpui::TestAppContext| {
+            store.read_with(cx, |store, _| {
+                store.machines().first().and_then(|update| update.asked)
+            })
+        };
+        let install = |cx: &mut gpui::TestAppContext| {
+            store.update(cx, |store, cx| {
+                store.perform(machine, MachineAction::Install, Surface::Window, cx);
+            });
+        };
+        adapter.emit(MachineUpdatesEvent::Machines(vec![penguin.clone()]));
+        cx.run_until_parked();
+
+        install(cx);
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(installing.clone())));
+        adapter.emit(MachineUpdatesEvent::Finished {
+            machine,
+            action: MachineAction::Install,
+            outcome: Ok(()),
+        });
+        cx.run_until_parked();
+        assert_eq!(asked(cx), Some(Asked::Install));
+        // The Machine keeps its last facts while no route reaches it.
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(MachineUpdate {
+            link: super::super::MachineLink::Offline { since: 1 },
+            ..installing
+        })));
+        cx.run_until_parked();
+        assert_eq!(asked(cx), None);
+
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(penguin.clone())));
+        cx.run_until_parked();
+        install(cx);
+        assert_eq!(asked(cx), Some(Asked::Install));
+        adapter.emit(MachineUpdatesEvent::Machines(Vec::new()));
+        adapter.emit(MachineUpdatesEvent::Machines(vec![penguin]));
+        cx.run_until_parked();
+        assert_eq!(asked(cx), None);
+    }
+
+    /// Check Again on This Mac or This Computer has no route to try again, so no wait follows
+    /// its answer.
+    #[gpui::test]
+    fn check_again_on_the_local_machine_waits_for_no_reconnect(cx: &mut gpui::TestAppContext) {
+        let (adapter, store) = installed(cx);
+        let local = MachineUpdate {
+            local: true,
+            link: super::super::MachineLink::Unconfirmed {
+                expected: Version::parse("0.9.0").unwrap(),
+                since: 1,
+            },
+            ..update("0.8.0", None)
+        };
+        let machine = local.machine;
+        adapter.emit(MachineUpdatesEvent::Machines(vec![local]));
+        cx.run_until_parked();
+        store.update(cx, |store, cx| {
+            store.perform(machine, MachineAction::CheckAgain, Surface::Window, cx);
+        });
+        adapter.emit(MachineUpdatesEvent::Finished {
+            machine,
+            action: MachineAction::CheckAgain,
+            outcome: Ok(()),
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            store.read_with(cx, |store, _| store.machines()[0].asked),
+            None
+        );
     }
 
     /// The bundled Core's automatic install is not a person's, so it is not marked.

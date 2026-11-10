@@ -562,6 +562,19 @@ fn check_again_shows_checking_until_the_check_ends() {
         );
     }
 
+    // A check that found a release reads as its install, which is still the person's.
+    let mut installing = machine(PENGUIN, "penguin", 0);
+    installing.facts.as_mut().unwrap().operation = Some(Operation::Installing {
+        version: version("0.9.0"),
+        received: 0,
+        total: 0,
+    });
+    installing.asked = Some(Asked::Check);
+    assert_eq!(
+        single(&present(&[installing])).label.as_ref(),
+        "Installing on penguin…"
+    );
+
     // A Machine that went offline during the check reads as offline.
     let mut offline = machine(PENGUIN, "penguin", 0);
     offline.link = MachineLink::Offline { since: NOW - 60 };
