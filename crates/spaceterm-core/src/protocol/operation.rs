@@ -281,6 +281,26 @@ impl Operation {
 }
 
 impl ReplyBody {
+    /// This reply as a connection whose admission selected the work version `work` reads it.
+    /// A sender never sends anything the selected minor lacks (ADR 0035).
+    #[must_use]
+    pub fn for_selected(self, work: super::version::ProtocolVersion) -> Self {
+        use crate::hierarchy::{Outcome, RetainedOutcome};
+        match self {
+            Self::Worktree(Err(error)) => Self::Worktree(Err(error.for_selected(work))),
+            Self::Outcome(RetainedOutcome {
+                sequence,
+                mutation,
+                outcome: Outcome::WorktreeFailed(error),
+            }) => Self::Outcome(RetainedOutcome {
+                sequence,
+                mutation,
+                outcome: Outcome::WorktreeFailed(error.for_selected(work)),
+            }),
+            body => body,
+        }
+    }
+
     /// Bulk replies travel at L2 in chunks of at most [`limits::BULK_CHUNK_BYTES`].
     pub fn bulk(&self) -> bool {
         matches!(self, Self::Page(_) | Self::Graphics(_))

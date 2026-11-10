@@ -1264,7 +1264,10 @@ mod tests {
                                 name,
                                 work: protocol::version::WORK,
                             },
-                            crate::connection::outbox::Outbox::new(wake),
+                            crate::connection::outbox::Outbox::new(
+                                wake,
+                                crate::protocol::version::WORK,
+                            ),
                             waker,
                             &environment,
                         );

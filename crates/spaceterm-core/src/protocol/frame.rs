@@ -13,6 +13,7 @@ use super::message::{
     EffectDone, Fatal, Frame, FrameAck, Input, InventoryRevision, PaneMessage, Ping, Pong, Reply,
     Request, View,
 };
+use super::version::ProtocolVersion;
 use crate::update::facts::UpdateFacts;
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -42,6 +43,10 @@ pub enum Kind {
     Goodbye = 0x48,
     Accessibility = 0x49,
     UpdateFacts = 0x4a,
+    /// The inventory with [`crate::repository::DirectoryFacts::inside_git_directory`]. Since
+    /// work [`super::inventory_1_0::MINOR_GIT_DIRECTORY_INVENTORY`], which sends it in place of
+    /// [`Kind::Inventory`].
+    GitDirectoryInventory = 0x4b,
 }
 
 impl Kind {
@@ -67,6 +72,7 @@ impl Kind {
             0x48 => Self::Goodbye,
             0x49 => Self::Accessibility,
             0x4a => Self::UpdateFacts,
+            0x4b => Self::GitDirectoryInventory,
             _ => return None,
         })
     }
@@ -96,7 +102,7 @@ impl Kind {
             Self::Frame => limits::MAX_UPDATE_BYTES,
             Self::Accessibility => limits::MAX_ACCESSIBILITY_BYTES,
             Self::Pane => limits::MAX_PANE_EVENT_BYTES,
-            Self::Inventory => limits::MAX_INVENTORY_BYTES,
+            Self::Inventory | Self::GitDirectoryInventory => limits::MAX_INVENTORY_BYTES,
             Self::UpdateFacts => limits::MAX_UPDATE_FACTS_BYTES,
         }
     }
@@ -227,11 +233,32 @@ pub fn encode_core(message: &CoreMessage) -> Result<WireMessage, EncodeError> {
         CoreMessage::Frame(value) => encode(Kind::Frame, value),
         CoreMessage::Accessibility(value) => encode(Kind::Accessibility, value),
         CoreMessage::Pane(value) => encode(Kind::Pane, value),
-        CoreMessage::Inventory(value) => encode(Kind::Inventory, value),
+        CoreMessage::Inventory(value) => encode(Kind::GitDirectoryInventory, value),
         CoreMessage::UpdateFacts(value) => encode(Kind::UpdateFacts, value),
         CoreMessage::Ping(value) => encode(Kind::CorePing, value),
         CoreMessage::Pong(value) => encode(Kind::CorePong, value),
         CoreMessage::Goodbye(value) => encode(Kind::Goodbye, value),
+    }
+}
+
+/// `revision` as a connection whose admission selected the work version `work` reads it. A
+/// sender never sends anything the selected minor lacks (ADR 0035), so work 1.0 gets the
+/// inventory without `inside_git_directory`. [`encode_core`] encodes the current version.
+pub fn encode_inventory(
+    revision: InventoryRevision,
+    work: ProtocolVersion,
+) -> Result<WireMessage, EncodeError> {
+    let since = ProtocolVersion {
+        major: 1,
+        minor: super::inventory_1_0::MINOR_GIT_DIRECTORY_INVENTORY,
+    };
+    if work >= since {
+        encode(Kind::GitDirectoryInventory, &revision)
+    } else {
+        encode(
+            Kind::Inventory,
+            &super::inventory_1_0::InventoryRevision::from(revision),
+        )
     }
 }
 
@@ -345,7 +372,10 @@ impl Assembler {
                 CoreMessage::Accessibility(Box::new(decode::<AccessibilityMessage>(&body)?))
             }
             Kind::Pane => CoreMessage::Pane(decode::<PaneMessage>(&body)?),
-            Kind::Inventory => {
+            Kind::Inventory => CoreMessage::Inventory(Box::new(
+                decode::<super::inventory_1_0::InventoryRevision>(&body)?.into(),
+            )),
+            Kind::GitDirectoryInventory => {
                 CoreMessage::Inventory(Box::new(decode::<InventoryRevision>(&body)?))
             }
             Kind::UpdateFacts => CoreMessage::UpdateFacts(Box::new(decode::<UpdateFacts>(&body)?)),

@@ -146,7 +146,7 @@ impl Bench {
             .id;
         let mut served = Served::new(binding);
         served.ticker(Arc::new(|| {}));
-        let outbox = Outbox::new(Arc::new(|| {}));
+        let outbox = Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK);
         served.admitted(&AGENT, "Agent".into(), outbox.clone());
         let mut bench = Self {
             served,
@@ -570,7 +570,7 @@ fn zsh_runs_settle_when_the_session_ends_or_control_moves() {
         bench.run_at_prompt(3, "sleep 30"),
         RunReply::Admitted { .. }
     ));
-    let outbox = Outbox::new(Arc::new(|| {}));
+    let outbox = Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK);
     bench.served.admitted(&PERSON, "Person".into(), outbox);
     let session = bench.session();
     let takeover = bench.claim(
@@ -655,7 +655,7 @@ struct Client {
 
 impl Client {
     fn admit(served: &mut Served<WorkspaceHost>, peer: Peer, name: &str) -> Self {
-        let outbox = Outbox::new(Arc::new(|| {}));
+        let outbox = Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK);
         served.admitted(&peer, name.into(), outbox.clone());
         Self {
             peer,

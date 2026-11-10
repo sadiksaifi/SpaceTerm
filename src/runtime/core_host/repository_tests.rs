@@ -2006,7 +2006,7 @@ fn an_idle_core_with_a_visible_pane_and_a_repository_subscriber_wakes_and_sends_
     HostCommands::ticker(&mut host, Arc::new(wake));
     HostCommands::set_notifier(&mut host, counter(&rings));
     host.prepare_initial_organization().unwrap();
-    let outbox = Outbox::new(Arc::new(|| {}));
+    let outbox = Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK);
     HostCommands::connected(&mut host, [1; 32], [1; 32], &outbox);
     let pane = workspace_inventory(&mut host).workspaces[0].tabs[0].root_pane;
     let Reply::Attached { lease } = host.request(

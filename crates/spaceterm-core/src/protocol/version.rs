@@ -11,7 +11,10 @@ pub struct ProtocolVersion {
 }
 
 /// This build's work protocol version. Each version is 1.0 at the first release. Work 1.1 adds
-/// the update fact values of [`crate::update::facts::MINOR_RESTART_FACTS`].
+/// the update fact values of [`crate::update::facts::MINOR_RESTART_FACTS`], the
+/// [`super::Kind::GitDirectoryInventory`] frame kind of
+/// [`super::inventory_1_0::MINOR_GIT_DIRECTORY_INVENTORY`], and the Worktree error of
+/// [`crate::worktree::MINOR_CHANGED_AFTER_CLOSING`].
 pub const WORK: ProtocolVersion = ProtocolVersion { major: 1, minor: 1 };
 // The build document's major is the work major.
 const _: () = assert!(super::MAJOR == WORK.major);

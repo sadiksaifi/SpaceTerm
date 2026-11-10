@@ -85,7 +85,7 @@ impl Core {
         self.clients += 1;
         let (core, peer_end) = Loopback::pair(64).unwrap();
         let (waker, wake) = Waker::new().unwrap();
-        let outbox = Outbox::new(wake);
+        let outbox = Outbox::new(wake, spaceterm_core::protocol::version::WORK);
         let peer = Peer {
             client: [client; 32],
             connection: [self.clients; 32],

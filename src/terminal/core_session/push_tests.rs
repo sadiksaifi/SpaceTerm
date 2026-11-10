@@ -250,7 +250,8 @@ impl ConnectedPane {
                     starting: None,
                 };
                 let (waker, wake) = io::Waker::new().unwrap();
-                let outbox = Outbox::new(Arc::clone(&wake));
+                let outbox =
+                    Outbox::new(Arc::clone(&wake), spaceterm_core::protocol::version::WORK);
                 let mut id = [1; 32];
                 id[..8]
                     .copy_from_slice(&(count.fetch_add(1, Ordering::SeqCst) as u64).to_le_bytes());

@@ -197,7 +197,10 @@ pub(crate) mod testing {
 
         /// A new connection with the channel open and visible, and no demand.
         pub(crate) fn connect() -> Self {
-            let outbox = spaceterm_core::connection::outbox::Outbox::new(Arc::new(|| {}));
+            let outbox = spaceterm_core::connection::outbox::Outbox::new(
+                Arc::new(|| {}),
+                spaceterm_core::protocol::version::WORK,
+            );
             outbox
                 .open(Self::CHANNEL)
                 .expect("a new connection opens a channel");

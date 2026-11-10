@@ -1670,7 +1670,7 @@ pub(crate) fn serve(
     };
     let connection = crate::protocol::random()?;
     let route = stream.destination();
-    let outbox = crate::connection::outbox::Outbox::new(Arc::clone(&wake));
+    let outbox = crate::connection::outbox::Outbox::new(Arc::clone(&wake), status.work);
     let carrier = stream.into_carrier();
     // A new name past the limit may evict only a name that holds nothing. The idle names stay
     // held while the pane service reports which hold something, and the two locks are never
@@ -2259,7 +2259,8 @@ pub(super) mod tests {
         // A failed atomic save leaves its durable outcome uncertain. Its next authority
         // check reloads the document and replaces the Network Access listener before registering a stream.
         state.uncertain = true;
-        let outbox = crate::connection::outbox::Outbox::new(Arc::new(|| {}));
+        let outbox =
+            crate::connection::outbox::Outbox::new(Arc::new(|| {}), crate::protocol::version::WORK);
         let registered = state.register(
             &paired,
             generation,

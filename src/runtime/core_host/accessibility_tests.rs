@@ -542,7 +542,7 @@ fn a_complete_ten_thousand_by_eighty_document_is_written_one_bounded_message_per
     let mut revisions = Revisions::new();
     let threads = Threads::here();
     let channel = Channel(u32::MAX);
-    let outbox = Outbox::new(Arc::new(|| {}));
+    let outbox = Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK);
     outbox.open(channel).unwrap();
     let mut io = LiveBytes::default();
     let mut demand = |io: &mut LiveBytes, generation| {

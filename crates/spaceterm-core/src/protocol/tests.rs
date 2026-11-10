@@ -1,6 +1,8 @@
 //! Golden vectors pin the wire bytes. Round trips cover every operation and every reused payload
 //! type, including optional fields in both states, because postcard has no field names.
-use super::frame::{Assembler, DecodeError, FrameReader, Kind, encode_client, encode_core};
+use super::frame::{
+    Assembler, DecodeError, FrameReader, Kind, encode_client, encode_core, encode_inventory,
+};
 use super::screen::{
     Cells, Cursor, CursorPosition, Geometry, History, Row, Run, ScrollShift, Style,
     StyleDefinition, StyleRef,
@@ -583,6 +585,111 @@ fn inventory() -> hierarchy::Inventory {
             controls: Vec::new(),
         }),
     }
+}
+
+/// A revision whose one directory is inside a Git directory, the fact work 1.1 added.
+fn git_directory_revision() -> InventoryRevision {
+    use crate::repository::{DirectoryFacts, GitToolStatus, PinCheckState, Snapshot};
+    InventoryRevision {
+        inventory: hierarchy::Inventory {
+            repositories: Some(Snapshot {
+                boot: [1; 32],
+                revision: 2,
+                git: GitToolStatus::NotFound,
+                directories: vec![DirectoryFacts {
+                    directory: PathBuf::from("/r"),
+                    repository: None,
+                    worktrees: None,
+                    failure: None,
+                    inside_git_directory: true,
+                }],
+                pinned_worktrees: vec![],
+                pin_check: PinCheckState::Checking,
+            }),
+            revision: 4,
+            workspaces: vec![],
+            close: None,
+        },
+        next_sequence: 9,
+    }
+}
+
+fn decoded_inventory(frames: &[Vec<u8>]) -> hierarchy::Inventory {
+    let mut assembler = Assembler::default();
+    let mut decoded = None;
+    for frame in frames {
+        assert!(decoded.is_none());
+        decoded = assembler.core(RawFrame::parse(frame).unwrap()).unwrap();
+    }
+    let Some(CoreMessage::Inventory(revision)) = decoded else {
+        panic!("not an inventory");
+    };
+    revision.inventory
+}
+
+/// Work 1.0 is what v0.11 Cores and clients speak, so its inventory keeps their bytes: no
+/// `inside_git_directory` after each directory's failure (ADR 0035).
+#[test]
+fn work_1_0_reads_and_writes_the_inventory_without_the_git_directory_fact() {
+    let wire = encode_inventory(
+        git_directory_revision(),
+        version::ProtocolVersion { major: 1, minor: 0 },
+    )
+    .unwrap();
+    let mut body = vec![1];
+    body.extend([1; 32]);
+    body.extend([
+        2, 3, // revision, git: NotFound
+        1, 2, b'/', b'r', 0, 0, 0, // one directory: path, repository, worktrees, failure
+        0, 1, // pinned worktrees, pin check: Checking
+        4, 0, 0, 9, // revision, workspaces, close, next sequence
+    ]);
+    let mut frame = vec![0, 0, 0, 49, 0x45];
+    frame.extend(&body);
+    assert_eq!(wire.kind, Kind::Inventory);
+    assert_eq!(wire.frames, [frame]);
+
+    let mut expected = git_directory_revision().inventory;
+    expected.repositories.as_mut().unwrap().directories[0].inside_git_directory = false;
+    assert_eq!(decoded_inventory(&wire.frames), expected);
+}
+
+#[test]
+fn work_1_1_carries_the_git_directory_fact_in_its_own_kind() {
+    let wire = encode_inventory(git_directory_revision(), version::WORK).unwrap();
+    assert_eq!(wire.kind, Kind::GitDirectoryInventory);
+    assert_eq!(wire.frames[0][4], 0x4b);
+    assert_eq!(
+        decoded_inventory(&wire.frames),
+        git_directory_revision().inventory
+    );
+    assert_eq!(
+        encode_core(&CoreMessage::Inventory(Box::new(git_directory_revision()))).unwrap(),
+        wire
+    );
+}
+
+/// Worktree errors keep their v0.11 positions, and work 1.0 reads the error 1.1 added as the
+/// nearest one it has (ADR 0035).
+#[test]
+fn worktree_errors_keep_their_work_1_0_positions() {
+    use crate::worktree::Error;
+    let position = |error: Error| postcard::to_allocvec(&error).unwrap()[0];
+    assert_eq!(position(Error::Changed), 4);
+    assert_eq!(position(Error::Location), 5);
+    assert_eq!(position(Error::Unavailable), 11);
+    assert_eq!(position(Error::Interrupted), 12);
+    assert_eq!(position(Error::ChangedAfterClosing), 14);
+    let older = version::ProtocolVersion { major: 1, minor: 0 };
+    assert_eq!(
+        Error::ChangedAfterClosing.for_selected(older),
+        Error::Changed
+    );
+    assert_eq!(
+        Error::ChangedAfterClosing.for_selected(version::WORK),
+        Error::ChangedAfterClosing
+    );
+    assert_eq!(Error::Location.for_selected(older), Error::Location);
 }
 
 #[test]

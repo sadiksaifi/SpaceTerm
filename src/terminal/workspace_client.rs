@@ -832,7 +832,8 @@ mod tests {
             ) -> (CoreLink, Connection) {
                 let (near, far) = Loopback::pair(1 << 20).unwrap();
                 let (waker, wake) = Waker::new().unwrap();
-                let outbox = Outbox::new(Arc::clone(&wake));
+                let outbox =
+                    Outbox::new(Arc::clone(&wake), spaceterm_core::protocol::version::WORK);
                 let mut connection = [0; 32];
                 getrandom::fill(&mut connection).unwrap();
                 let peer = Peer {

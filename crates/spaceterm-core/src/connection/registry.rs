@@ -139,7 +139,9 @@ mod tests {
     fn revocation_and_retired_generations_end_only_their_connections() {
         let severed = Arc::new(AtomicUsize::new(0));
         let mut registry = PairedConnections::default();
-        let outboxes: Vec<_> = (0..3).map(|_| Outbox::new(Arc::new(|| {}))).collect();
+        let outboxes: Vec<_> = (0..3)
+            .map(|_| Outbox::new(Arc::new(|| {}), crate::protocol::version::WORK))
+            .collect();
         let pairings = [([1; 32], [7; 32]), ([2; 32], [7; 32]), ([2; 32], [8; 32])];
         for (index, (pairing, generation)) in pairings.into_iter().enumerate() {
             registry

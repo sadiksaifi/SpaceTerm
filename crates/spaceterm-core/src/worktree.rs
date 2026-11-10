@@ -117,9 +117,6 @@ pub enum Error {
     Locked,
     Pinned,
     Changed,
-    /// The Worktree changed after its reviewed Tabs closed and their Terminal Sessions ended, so
-    /// Git kept it.
-    ChangedAfterClosing,
     Location,
     /// Git could not finish creating the Worktree.
     Branch,
@@ -134,6 +131,29 @@ pub enum Error {
     Unavailable,
     Interrupted,
     Template(path_template::WorktreePathTemplateError),
+    /// The Worktree changed after its reviewed Tabs closed and their Terminal Sessions ended, so
+    /// Git kept it. Since work [`MINOR_CHANGED_AFTER_CLOSING`].
+    ChangedAfterClosing,
+}
+
+/// The work minor of major 1 that first carries [`Error::ChangedAfterClosing`].
+pub const MINOR_CHANGED_AFTER_CLOSING: u16 = 1;
+
+impl Error {
+    /// This error as a connection whose admission selected the work version `work` reads it. A
+    /// sender never sends a variant the selected minor lacks (ADR 0035), so work 1.0 reads
+    /// [`Error::ChangedAfterClosing`] as [`Error::Changed`], the nearest error it has.
+    #[must_use]
+    pub fn for_selected(self, work: crate::protocol::version::ProtocolVersion) -> Self {
+        let since = crate::protocol::version::ProtocolVersion {
+            major: 1,
+            minor: MINOR_CHANGED_AFTER_CLOSING,
+        };
+        match self {
+            Self::ChangedAfterClosing if work < since => Self::Changed,
+            error => error,
+        }
+    }
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Settings {

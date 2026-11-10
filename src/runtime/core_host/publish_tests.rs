@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 const CHANNEL: Channel = Channel(1);
 
 fn outbox() -> Outbox {
-    Outbox::new(Arc::new(|| {}))
+    Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK)
 }
 
 /// A screen whose rows read `text`, as wire generation `generation`.
@@ -553,10 +553,13 @@ mod wakes {
                 let rings = Arc::clone(&rings);
                 move || rings.ring(|rang| rang.host = true)
             }));
-            let outbox = Outbox::new(Arc::new({
-                let rings = Arc::clone(&rings);
-                move || rings.ring(|rang| rang.connection = true)
-            }));
+            let outbox = Outbox::new(
+                Arc::new({
+                    let rings = Arc::clone(&rings);
+                    move || rings.ring(|rang| rang.connection = true)
+                }),
+                spaceterm_core::protocol::version::WORK,
+            );
             served.admitted(&FIRST, "First".into(), outbox.clone());
             let mut fixture = Self {
                 served,
