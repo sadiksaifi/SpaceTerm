@@ -149,7 +149,13 @@ fn reconcile(workspace: &mut Workspace, snapshot: &Snapshot) -> bool {
                 (Place::Outside, WorktreeMembership::Following | WorktreeMembership::Repaired) => {
                     changed |= leave(tab)
                 }
-                (Place::Worktree { root, repository }, WorktreeMembership::Following) => {
+                // A repaired Tab keeps the Worktree it has and joins no other (ADR 0044). One
+                // with no Worktree has none to keep.
+                (Place::Worktree { root, repository }, membership)
+                    if membership == WorktreeMembership::Following
+                        || (membership == WorktreeMembership::Repaired
+                            && tab.worktree.is_none()) =>
+                {
                     changed |= join(tab, root, repository);
                 }
                 _ => {}
@@ -625,6 +631,27 @@ mod tests {
             ".dotfiles",
             "an ordinary repository in a dot-named directory keeps its own name"
         );
+    }
+
+    /// Choose Directory on a Workspace in no repository picks a directory inside one. The
+    /// repaired Tab has no Worktree to keep, so it joins. It then joins no other Worktree.
+    #[test]
+    fn a_repaired_root_tab_with_no_worktree_takes_its_workspace_into_a_repository() {
+        let mut state = workspace_in("/tmp");
+        state.reconcile_worktrees(&reads());
+
+        state
+            .repair_directory(root_pane(&state, 0), "/repo".into())
+            .unwrap();
+        state.reconcile_worktrees(&reads());
+        assert_eq!(
+            (worktrees(&state), name(&state)),
+            (vec![Some("/repo")], "repo")
+        );
+
+        state.confirm_directory(root_pane(&state, 0), "/feature".into());
+        state.reconcile_worktrees(&reads());
+        assert_eq!(worktrees(&state), [Some("/repo")]);
     }
 
     /// A Core before this rule let the Root Tab leave while other Tabs stayed, and let a Tab
