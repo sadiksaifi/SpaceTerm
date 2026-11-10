@@ -482,9 +482,11 @@ impl MachineView {
             core_too_old: update.link == MachineLink::Incompatible(Incompatible::ListenerTooOld),
             skipped: facts.and_then(|facts| facts.skipped.clone()),
             asked: update.asked,
-            retrying: update
-                .retrying_since
-                .is_some_and(|since| now.saturating_sub(since) < RETRY_QUIETLY_FOR),
+            // This desktop's failed push is tried again by nobody, so it is never quiet.
+            retrying: update.failed_push.is_none()
+                && update
+                    .retrying_since
+                    .is_some_and(|since| now.saturating_sub(since) < RETRY_QUIETLY_FOR),
             state: machine_state(update, dismissed, now),
         }
     }

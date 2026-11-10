@@ -49,10 +49,10 @@ pub(crate) struct MachineUpdate {
     /// shared store records it, so the title bar shows that work and keeps quiet about the work
     /// a Core starts by itself. Adapters leave it None.
     pub(crate) asked: Option<Asked>,
-    /// When the Core's own download of an update first failed, while the Core tries it again by
-    /// itself. None when a person's own try from this desktop failed, or when the failure is
-    /// older than this run, so no first time is known. The shared store records it. Adapters
-    /// leave it None.
+    /// When this desktop first saw the Core's own download of an update fail, while the Core
+    /// tries it again by itself. None when a person's own try from this desktop failed, or when
+    /// the failure began unseen, so no first time is known. The shared store records it.
+    /// Adapters leave it None.
     pub(crate) retrying_since: Option<u64>,
 }
 

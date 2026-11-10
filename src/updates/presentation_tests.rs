@@ -489,6 +489,13 @@ fn a_download_a_core_retries_by_itself_stays_out_of_the_title_bar_for_a_day() {
     let facts = behind.facts.as_mut().unwrap();
     facts.sessions = 2;
     facts.last_failure.as_mut().unwrap().version = version("0.9.1");
+    // So does this desktop's failed push, which nothing tries again.
+    let mut pushed = failed(InstallFailure::Download, Some(NOW - 60));
+    pushed.push = Some(version("0.9.0"));
+    pushed.failed_push = Some(crate::updates::machines::FailedPush {
+        version: version("0.9.0"),
+        failure: ActionFailure::Unreachable,
+    });
     for shown in [
         // It kept failing for a day.
         failed(InstallFailure::Download, Some(NOW - DAY)),
@@ -497,6 +504,7 @@ fn a_download_a_core_retries_by_itself_stays_out_of_the_title_bar_for_a_day() {
         // Nothing but a download is tried again by itself.
         failed(InstallFailure::DiskFull, Some(NOW - 60)),
         behind,
+        pushed,
     ] {
         assert_eq!(
             single(&present(&[shown])).label.as_ref(),

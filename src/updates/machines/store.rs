@@ -57,8 +57,9 @@ enum Phase {
 struct Retrying {
     /// The ID of the latest failure, which each try that fails replaces.
     failure: u64,
-    /// When the download first failed. None when a person's own try from this desktop failed,
-    /// or when the failure is older than this run, so that failure shows at once.
+    /// When this desktop first saw the download fail, on its own clock. None when a person's
+    /// own try from this desktop failed, or when the failure began unseen, before this run or
+    /// while the Machine was out of reach, so that failure shows at once.
     since: Option<u64>,
 }
 
@@ -181,8 +182,8 @@ pub(crate) struct MachineUpdates {
     /// Machines where a person's check or install answered, with the facts revision then. The
     /// next revision is that work's result, so a failure it records is the person's own.
     tried: HashMap<MachineId, Option<u64>>,
-    /// Machines whose facts this run has received. A failure in a Machine's first facts is
-    /// older than this run.
+    /// Machines in reach whose facts this run has received. A failure in the first facts of a
+    /// Machine, or in its first after it was out of reach, began unseen.
     heard: HashSet<MachineId>,
     /// Each bundled Core version installed automatically in this run, by Machine.
     offered: HashSet<(MachineId, Version)>,
@@ -353,11 +354,14 @@ impl MachineUpdates {
                 .and_then(|facts| facts.last_failure.as_ref())
                 .filter(|failure| failure.kind == FailureKind::Install(InstallFailure::Download));
             match (failure, self.retrying.get_mut(&machine)) {
+                // A Machine out of reach reports nothing, which ends no failure.
+                (None, _) if facts.is_none() => {}
                 (None, _) => {
                     self.retrying.remove(&machine);
                 }
                 (Some(failure), None) => {
-                    let since = (!own && self.heard.contains(&machine)).then_some(failure.at);
+                    // The day counts on this desktop's clock, which the presentation reads.
+                    let since = (!own && self.heard.contains(&machine)).then(crate::updates::now);
                     self.retrying.insert(
                         machine,
                         Retrying {
@@ -380,13 +384,16 @@ impl MachineUpdates {
             {
                 self.tried.remove(&machine);
             }
-            if facts.is_some() {
-                self.heard.insert(machine);
-            }
-            let working = matches!(
+            let reachable = matches!(
                 update.link,
                 MachineLink::Connected | MachineLink::Incompatible(_)
-            ) && facts.is_some_and(|facts| facts.operation.is_some());
+            );
+            if reachable && facts.is_some() {
+                self.heard.insert(machine);
+            } else {
+                self.heard.remove(&machine);
+            }
+            let working = reachable && facts.is_some_and(|facts| facts.operation.is_some());
             self.asked.retain(|work| {
                 work.machine != machine
                     || match &work.phase {
@@ -891,23 +898,38 @@ mod tests {
         };
         adapter.emit(MachineUpdatesEvent::Machines(vec![update("0.8.0", None)]));
         cx.run_until_parked();
+        // The Machine's clock is far behind. The day counts on this desktop's clock.
+        let began = crate::updates::now();
         changed(failed(1, 500, InstallFailure::Download), cx);
-        assert_eq!(since(cx), Some(500));
+        let first = since(cx);
+        assert!(first.is_some_and(|since| since >= began));
         // The Core tries again and fails again.
         changed(failed(2, 900, InstallFailure::Download), cx);
-        assert_eq!(since(cx), Some(500));
+        assert_eq!(since(cx), first);
+        // A Machine out of reach for a moment keeps the day it began.
+        changed(
+            MachineUpdate {
+                link: super::super::MachineLink::Offline { since: 1 },
+                facts: None,
+                ..update("0.8.0", None)
+            },
+            cx,
+        );
+        changed(failed(2, 900, InstallFailure::Download), cx);
+        assert_eq!(since(cx), first);
         // Only a download is tried again by itself.
         changed(failed(3, 950, InstallFailure::DiskFull), cx);
         assert_eq!(since(cx), None);
         changed(failed(4, 2_000, InstallFailure::Download), cx);
-        assert_eq!(since(cx), Some(2_000));
+        let first = since(cx);
+        assert!(first.is_some());
 
         // The person's try ends the quiet only once it fails, whether its answer or the facts
         // that record the failure arrive first.
         try_again(cx);
-        assert_eq!(since(cx), Some(2_000), "the old failure stays quiet");
+        assert_eq!(since(cx), first, "the old failure stays quiet");
         answer(cx);
-        assert_eq!(since(cx), Some(2_000));
+        assert_eq!(since(cx), first);
         changed(failed(5, 2_100, InstallFailure::Download), cx);
         assert_eq!(since(cx), None, "the person's own try failed");
         // The Core's later tries change nothing while that failure stands.
@@ -917,7 +939,7 @@ mod tests {
         // A download that works ends it, and a later failure is dated anew.
         changed(update("0.8.0", None), cx);
         changed(failed(7, 3_000, InstallFailure::Download), cx);
-        assert_eq!(since(cx), Some(3_000));
+        assert!(since(cx).is_some());
         try_again(cx);
         changed(failed(8, 3_100, InstallFailure::Download), cx);
         assert_eq!(since(cx), None, "the person's own try failed");
@@ -925,10 +947,10 @@ mod tests {
         assert_eq!(since(cx), None);
     }
 
-    /// A failure a Machine already reports when this run first hears from it has no known
-    /// first time, so it is not dated and shows at once.
+    /// A failure a Machine already reports when this run first hears from it, or when it comes
+    /// back into reach, has no known first time, so it is not dated and shows at once.
     #[gpui::test]
-    fn a_failed_download_older_than_this_run_is_not_dated(cx: &mut gpui::TestAppContext) {
+    fn a_failed_download_that_began_unseen_is_not_dated(cx: &mut gpui::TestAppContext) {
         let (adapter, store) = installed(cx);
         let mut failed = update("0.8.0", None);
         failed.facts.as_mut().unwrap().last_failure = Some(UpdateFailure {
@@ -937,12 +959,25 @@ mod tests {
             version: Version::parse("0.9.0").unwrap(),
             kind: FailureKind::Install(InstallFailure::Download),
         });
-        adapter.emit(MachineUpdatesEvent::Machines(vec![failed]));
+        let since = |cx: &mut gpui::TestAppContext| {
+            store.read_with(cx, |store, _| store.machines()[0].retrying_since)
+        };
+        adapter.emit(MachineUpdatesEvent::Machines(vec![failed.clone()]));
         cx.run_until_parked();
-        assert_eq!(
-            store.read_with(cx, |store, _| store.machines()[0].retrying_since),
-            None
-        );
+        assert_eq!(since(cx), None, "older than this run");
+
+        for update in [
+            update("0.8.0", None),
+            MachineUpdate {
+                link: super::super::MachineLink::Offline { since: 1 },
+                ..update("0.8.0", None)
+            },
+            failed,
+        ] {
+            adapter.emit(MachineUpdatesEvent::Changed(Box::new(update)));
+            cx.run_until_parked();
+        }
+        assert_eq!(since(cx), None, "it failed while out of reach");
     }
 
     /// Check Again on a Machine no route reaches answers at once while its routes try again.

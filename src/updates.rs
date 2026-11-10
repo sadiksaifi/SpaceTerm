@@ -887,6 +887,8 @@ impl ApplicationUpdates {
             UpdateState::Idle | UpdateState::UpToDate | UpdateState::Failed { .. } => {
                 self.retry_download(cx);
             }
+            // The check in progress downloads what it finds, as the person's own download.
+            UpdateState::Checking => self.download_requested = true,
             _ => {}
         }
     }
@@ -1919,6 +1921,21 @@ mod tests {
         adapter.emit(UpdateEvent::Available("0.1.1".into()));
         cx.run_until_parked();
         assert_eq!(adapter.downloads.get(), 2);
+        assert!(service.read_with(cx, |updates, _| updates.download_asked()));
+    }
+
+    /// Download chosen while a scheduled check runs is the person's own download.
+    #[gpui::test]
+    fn download_chosen_during_a_scheduled_check_is_asked(cx: &mut gpui::TestAppContext) {
+        let (adapter, service) = launch_fixture(cx);
+        assert_eq!(
+            service.read_with(cx, |updates, _| updates.state().clone()),
+            UpdateState::Checking
+        );
+        service.update(cx, |updates, cx| updates.download_now(cx));
+        adapter.emit(UpdateEvent::Available("0.1.1".into()));
+        cx.run_until_parked();
+        assert_eq!(adapter.downloads.get(), 1);
         assert!(service.read_with(cx, |updates, _| updates.download_asked()));
     }
 
