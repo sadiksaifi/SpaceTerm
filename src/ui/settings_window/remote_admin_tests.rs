@@ -5,9 +5,7 @@ use spaceterm_core::service::lane::{
 };
 use spaceterm_ui::a11y_testing::A11yTree;
 
-use super::super::machine_list::tests::{
-    Machines, click, connected_paired, disconnected, open_with, settle,
-};
+use super::super::machine_list::tests::{Machines, click, connected_paired, open_with, settle};
 use super::testing::ScriptedRemote;
 use super::*;
 
@@ -227,18 +225,49 @@ fn footnote(machines: &Machines<'_>) -> String {
     })
 }
 
+/// A paired machine that is not ready takes no lane step. A request made while another step is
+/// underway reaches no lane, and a machine SpaceTerm holds no connection to offers no Restart.
 #[gpui::test]
-fn a_disconnected_paired_machine_takes_no_lane_step(cx: &mut TestAppContext) {
+fn a_paired_machine_that_is_not_ready_takes_no_lane_step(cx: &mut TestAppContext) {
     use crate::updates::machines::{MachineLink, MachineUpdate, MachineUpdatesEvent};
     use crate::updates::machines::{store::MachineUpdates, testing::ScriptedMachines};
     use spaceterm_core::protocol::capability::{Capabilities, Capability};
     let adapter = std::rc::Rc::new(ScriptedMachines::default());
     cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
     let remote = ScriptedRemote::new();
-    let paired = disconnected(&["penguin"]);
-    cx.update(|cx| remote.install(cx));
-    let machines = open_with(false, paired, cx);
+    let machines = open_penguin(&remote, cx);
     let route = machines.routes[0];
+    let ready = |machines: &Machines<'_>| {
+        machines.window.read_with(machines.cx, |settings, cx| {
+            settings.remote_ready(&route, cx)
+        })
+    };
+
+    // SpaceTerm holds a connection to penguin, so only the step underway keeps the request from
+    // its lane.
+    assert!(ready(&machines));
+    machines.window.update(machines.cx, |settings, _| {
+        settings.remote_mut(route).work = Some(Work::Confirming);
+    });
+    assert!(!ready(&machines));
+    let window = machines.window.clone();
+    machines.cx.update(|settings_window, cx| {
+        let handle = settings_window.window_handle();
+        window.update(cx, |settings, cx| {
+            settings.request_remote_change(route, Change::Remove, handle, cx)
+        });
+    });
+    machines.cx.run_until_parked();
+    assert!(
+        remote.prepared.lock().unwrap().is_empty(),
+        "a step underway admits no second step"
+    );
+
+    // With no step underway, only the missing connection keeps penguin from ready.
+    machines.window.update(machines.cx, |settings, _| {
+        settings.remote_mut(route).work = None;
+    });
+    machines.direct.disconnect(&route);
     adapter.emit(MachineUpdatesEvent::Machines(vec![MachineUpdate {
         machine: machines.direct.route(&route).unwrap().paired.pin.core,
         name: "penguin".into(),
@@ -254,25 +283,13 @@ fn a_disconnected_paired_machine_takes_no_lane_step(cx: &mut TestAppContext) {
     }]));
     machines.cx.run_until_parked();
 
-    let ready = machines.window.read_with(machines.cx, |settings, cx| {
-        settings.remote_ready(&route, cx)
-    });
-    assert!(!ready);
+    assert!(!ready(&machines));
     click(super::super::machine_card::MENU_SELECTOR, machines.cx);
     let tree = A11yTree::read(machines.cx);
     assert_eq!(
         tree.node("Restart SpaceTerm Core on penguin\u{2026}")["aria"]["disabled"],
         true
     );
-    let window = machines.window.clone();
-    machines.cx.update(|settings_window, cx| {
-        let handle = settings_window.window_handle();
-        window.update(cx, |settings, cx| {
-            settings.request_remote_change(route, Change::Remove, handle, cx)
-        });
-    });
-    machines.cx.run_until_parked();
-    assert!(remote.prepared.lock().unwrap().is_empty());
     assert!(
         footnote(&machines).contains("Connect to penguin to change these settings."),
         "got {:?}",

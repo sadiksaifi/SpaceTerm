@@ -102,7 +102,6 @@ struct DeliveryState {
     generation: u64,
     latest: Option<(u64, u32)>,
     authorization_in_flight: bool,
-    failure: Option<AttentionFailure>,
 }
 
 struct DeliveryOwner {
@@ -121,18 +120,14 @@ impl DeliveryOwner {
             if state.latest != Some((generation, count)) {
                 return;
             }
-            let settings = match settings {
-                Ok(settings) => settings,
-                Err(failure) => {
-                    state.failure = Some(failure);
-                    return;
-                }
+            let Ok(settings) = settings else {
+                return;
             };
             match authorization_decision(settings) {
                 AuthorizationDecision::Submit => {
                     // Submit and clear serialize through the same lock. A cleared generation can
                     // never publish after its native clear even when callbacks arrive concurrently.
-                    state.failure = owner.adapter.submit(count).err();
+                    let _ = owner.adapter.submit(count);
                 }
                 AuthorizationDecision::RequestProvisional => {
                     if state.authorization_in_flight {
@@ -149,8 +144,7 @@ impl DeliveryOwner {
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
                             state.authorization_in_flight = false;
-                            if let Err(failure) = result {
-                                state.failure = Some(failure);
+                            if result.is_err() {
                                 return;
                             }
                             let latest = state.latest;
@@ -160,9 +154,7 @@ impl DeliveryOwner {
                             }
                         }));
                 }
-                AuthorizationDecision::Suppress => {
-                    state.failure = Some(AttentionFailure::Denied);
-                }
+                AuthorizationDecision::Suppress => {}
             }
         }));
     }
@@ -174,7 +166,7 @@ impl DeliveryOwner {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.latest = None;
         state.generation = state.generation.wrapping_add(1);
-        state.failure = self.adapter.clear().err();
+        let _ = self.adapter.clear();
     }
 }
 

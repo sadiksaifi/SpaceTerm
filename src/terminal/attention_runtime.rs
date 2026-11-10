@@ -77,7 +77,6 @@ struct DockAttentionCoordinator<D: DockAttentionDriver> {
     windows: BTreeMap<AttentionPaneId, gpui::AnyWindowHandle>,
     outstanding: bool,
     last_request: Option<Instant>,
-    last_failure: Option<AttentionFailure>,
     application_active: bool,
     scheduled: Option<DockAttentionSchedule>,
     next_schedule_token: u64,
@@ -91,7 +90,6 @@ impl<D: DockAttentionDriver> DockAttentionCoordinator<D> {
             windows: BTreeMap::new(),
             outstanding: false,
             last_request: None,
-            last_failure: None,
             application_active: false,
             scheduled: None,
             next_schedule_token: 0,
@@ -117,9 +115,7 @@ impl<D: DockAttentionDriver> DockAttentionCoordinator<D> {
         }
 
         self.invalidate_schedule();
-        let result = self.driver.request();
-        self.outstanding = result.is_ok();
-        self.last_failure = result.err();
+        self.outstanding = self.driver.request().is_ok();
         self.last_request = Some(now);
         None
     }

@@ -2390,7 +2390,7 @@ fn grouped_cards_preserve_content_alignment_and_spacing(cx: &mut TestAppContext)
         cards.len() > 1,
         "the Terminal section should present more than one card"
     );
-    let widest_row_gap = rows
+    let row_gaps: Vec<gpui::Pixels> = rows
         .windows(2)
         .filter(|pair| pair[0].descriptor().group == pair[1].descriptor().group)
         .map(|pair| {
@@ -2402,8 +2402,8 @@ fn grouped_cards_preserve_content_alignment_and_spacing(cx: &mut TestAppContext)
                 .expect("row bounds");
             bottom.top() - top.bottom()
         })
-        .fold(px(0.0), gpui::Pixels::max);
-    let narrowest_group_gap = rows
+        .collect();
+    let group_gaps: Vec<gpui::Pixels> = rows
         .windows(2)
         .filter(|pair| pair[0].descriptor().group != pair[1].descriptor().group)
         .map(|pair| {
@@ -2415,6 +2415,16 @@ fn grouped_cards_preserve_content_alignment_and_spacing(cx: &mut TestAppContext)
                 .expect("row bounds");
             bottom.top() - top.bottom()
         })
+        .collect();
+    assert!(
+        !row_gaps.is_empty() && !group_gaps.is_empty(),
+        "the section should hold neighbouring rows in one group and in two, got {row_gaps:?} \
+         inside groups and {group_gaps:?} between them"
+    );
+    let widest_row_gap = row_gaps.iter().copied().fold(px(0.0), gpui::Pixels::max);
+    let narrowest_group_gap = group_gaps
+        .iter()
+        .copied()
         .fold(px(f32::MAX), gpui::Pixels::min);
     assert!(
         narrowest_group_gap > widest_row_gap,

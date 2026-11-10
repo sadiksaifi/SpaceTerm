@@ -389,8 +389,12 @@ class CoreArchiveTests(unittest.TestCase):
             self.unpack()
         self.assertFalse((self.root / "unpacked").exists())
         self.signature.unlink()
-        with self.assertRaises(TaskError):
+        with self.assertRaises(core_package.ArtifactVerificationError) as failure:
             self.unpack()
+        self.assertEqual(failure.exception.cause, core_package.ArtifactCause.MISSING)
+        with self.assertRaises(core_package.ArtifactVerificationError) as failure:
+            core_package.verified_copy(self.archive, self.signature, self.root, self.info)
+        self.assertEqual(failure.exception.cause, core_package.ArtifactCause.MISSING)
 
     def test_signed_wrong_target_build_or_commit_is_refused(self):
         for key, value in [

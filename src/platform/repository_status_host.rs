@@ -58,20 +58,32 @@ mod tests {
 
     #[test]
     fn only_listed_variables_reach_the_github_cli() {
-        let environment = github_cli_environment(|key| match key {
-            "HTTPS_PROXY" => Some("http://proxy:3128".into()),
-            "GH_HOST" => Some("github.example.com".into()),
-            // The launch environment sets these, and the passthrough list names neither.
-            "SSH_AUTH_SOCK" => Some("/private/agent.sock".into()),
-            "AWS_SECRET_ACCESS_KEY" => Some("secret".into()),
-            _ => None,
-        });
-        assert_eq!(
-            environment,
-            [
-                ("GH_HOST".into(), "github.example.com".into()),
-                ("HTTPS_PROXY".into(), "http://proxy:3128".into()),
-            ]
-        );
+        // The launch environment answers every name, so the result is the whole passthrough
+        // list. Adding or removing a name there has to change the names written out here.
+        let environment = github_cli_environment(|key| Some(format!("value-of-{key}").into()));
+        let expected: Vec<(OsString, OsString)> = [
+            "GH_CONFIG_DIR",
+            "GH_HOST",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "GH_ENTERPRISE_TOKEN",
+            "GITHUB_ENTERPRISE_TOKEN",
+            "XDG_CONFIG_HOME",
+            "XDG_STATE_HOME",
+            "XDG_DATA_HOME",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "no_proxy",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+        ]
+        .into_iter()
+        .map(|name| (name.into(), format!("value-of-{name}").into()))
+        .collect();
+        assert_eq!(environment, expected);
     }
 }

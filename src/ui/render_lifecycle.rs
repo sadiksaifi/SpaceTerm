@@ -346,6 +346,9 @@ mod tests {
         let mut lifecycle = RenderLifecycle::new(visible());
         assert_eq!(lifecycle.update_scale(2.0), ScaleChange::ScaleResources);
         assert_eq!(lifecycle.update_scale(2.0), ScaleChange::Unchanged);
+        let pending = PresentationGeneration::test(1);
+        lifecycle.observe_snapshot(pending);
+        assert_eq!(lifecycle.take_frame(), Some(pending));
         lifecycle.release();
         assert!(!lifecycle.effects().animations_active);
         assert_eq!(lifecycle.take_frame(), None);
