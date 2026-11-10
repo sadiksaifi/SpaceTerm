@@ -65,7 +65,7 @@ impl CoreRepositories {
             };
             let unchanged = previous
                 .as_ref()
-                .and_then(|previous| find(previous, &facts.directory))
+                .and_then(|previous| previous.facts(&facts.directory))
                 .and_then(|previous| previous.repository.as_ref())
                 .is_some_and(|previous| previous == repository);
             let at = self
@@ -83,7 +83,7 @@ impl CoreRepositories {
 
     /// The facts the server read for one directory it reported.
     pub(crate) fn facts(&self, directory: &Path) -> Option<&DirectoryFacts> {
-        find(self.snapshot.as_ref()?, directory)
+        self.snapshot.as_ref()?.facts(directory)
     }
 
     /// The owning server resolves pins across all its Workspaces on its own filesystem.
@@ -101,77 +101,15 @@ impl CoreRepositories {
     }
 
     /// The Worktrees of the repository containing one directory, as git on the server lists them.
-    ///
-    /// A failed read keeps the directory's last listing, which a removed Worktree would keep
-    /// forever. Another directory in the same repository that the server still reads lists its
-    /// current Worktrees instead; the first by path is chosen so every reading picks the same one.
+    /// [`Snapshot::directory_worktrees`] owns the rule for a failed read.
     pub(crate) fn worktrees(&self, directory: &Path) -> Option<&WorktreeInventory> {
-        let facts = self.facts(directory)?;
-        let last = facts.worktrees.as_ref()?;
-        if facts.failure.is_none() {
-            return Some(last);
-        }
-        self.snapshot
-            .iter()
-            .flat_map(|snapshot| &snapshot.directories)
-            .filter(|sibling| sibling.failure.is_none())
-            .filter_map(|sibling| Some((&sibling.directory, sibling.worktrees.as_ref()?)))
-            .filter(|(_, inventory)| inventory.main_root == last.main_root)
-            .min_by_key(|(directory, _)| *directory)
-            .map_or(Some(last), |(_, current)| Some(current))
+        self.snapshot.as_ref()?.directory_worktrees(directory)
     }
 
     /// The Worktrees of the repository a Workspace's row reads, as git on the server lists them.
-    ///
-    /// A restarted server keeps no facts for a directory it cannot read, so a row in a removed
-    /// Worktree has no listing of its own. The Main Worktree saved with the Tab membership that
-    /// contains the row's directory then locates the repository, when the server reads it. The
-    /// saved Main Worktree is only where to look: what the server reads there decides the listing,
-    /// and a row the server reads outside any repository lists nothing.
-    ///
-    /// The server publishes an unpinned Root Pane's new directory before it reads Git there. Its
-    /// read reports the directory's repository before it lists that repository's Worktrees, and
-    /// the server keeps the Root Tab's saved membership until the listing arrives. Until then the
-    /// row lists the repository the Root Tab is still in, so a `cd` into another repository
-    /// switches the row once, when the listing arrives.
+    /// [`spaceterm_core::organize::workspace_listing`] owns the rule the CLI shares.
     pub(crate) fn workspace_worktrees(&self, workspace: &Workspace) -> Option<&WorktreeInventory> {
-        let directory = workspace_directory(workspace)?;
-        if let Some(inventory) = self.worktrees(directory) {
-            return Some(inventory);
-        }
-        let facts = self.facts(directory);
-        let listing_pending = facts.is_none_or(|facts| {
-            facts.failure.is_none() && facts.repository.is_some() && facts.worktrees.is_none()
-        });
-        if facts.is_some_and(|facts| facts.failure.is_none()) && !listing_pending {
-            return None;
-        }
-        let containing = workspace
-            .tabs
-            .iter()
-            .filter_map(|tab| {
-                Some((
-                    tab.worktree.as_deref()?,
-                    tab.worktree_repository.as_deref()?,
-                ))
-            })
-            .filter(|(worktree, _)| directory.starts_with(worktree))
-            .max_by_key(|(worktree, _)| worktree.components().count())
-            .map(|(_, repository)| repository);
-        let followed = || {
-            if workspace.pinned_directory.is_some() || !listing_pending {
-                return None;
-            }
-            workspace
-                .tabs
-                .iter()
-                .find(|tab| tab.id == workspace.root_tab)?
-                .worktree_repository
-                .as_deref()
-        };
-        containing
-            .or_else(followed)
-            .and_then(|repository| self.worktrees(repository))
+        spaceterm_core::organize::workspace_listing(workspace, self.snapshot.as_ref()?)
     }
 
     /// The Pull Request lookups the presented repositories need, one per branch and upstream.
@@ -234,13 +172,6 @@ impl CoreRepositories {
             read_failure: facts.failure,
         }))
     }
-}
-
-fn find<'a>(snapshot: &'a Snapshot, directory: &Path) -> Option<&'a DirectoryFacts> {
-    snapshot
-        .directories
-        .iter()
-        .find(|facts| facts.directory == directory)
 }
 
 /// The lookup one repository's branch needs. The server sends only the parsed query; raw remote

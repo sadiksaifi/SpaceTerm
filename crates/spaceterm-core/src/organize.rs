@@ -1,5 +1,5 @@
 //! Shared organization plans, so the desktop and the CLI create and close work identically.
-use crate::hierarchy::{Axis, CreateControl, Id, Inventory, Mutation};
+use crate::hierarchy::{Axis, CreateControl, Id, Inventory, Mutation, Workspace};
 use crate::{repository, worktree};
 use std::path::Path;
 
@@ -33,26 +33,69 @@ pub fn workspace_worktrees<'a>(
     repos: &'a repository::Snapshot,
     workspace: Id,
 ) -> Option<&'a repository::WorktreeInventory> {
-    let workspace = inv.workspaces.iter().find(|w| w.id == workspace)?;
-    let root_tab = workspace.tabs.iter().find(|t| t.id == workspace.root_tab)?;
-    let root_pane = root_tab.panes.iter().find(|p| p.id == root_tab.root_pane)?;
-    let directory = workspace
-        .pinned_directory
-        .as_deref()
-        .unwrap_or_else(|| root_pane.repository_directory());
-    repos
-        .directories
-        .iter()
-        .find(|d| d.directory == directory)
-        .and_then(|d| d.worktrees.as_ref())
-        .or_else(|| {
-            let root = root_tab.worktree_repository.as_ref()?;
-            repos
-                .directories
+    workspace_listing(inv.workspaces.iter().find(|w| w.id == workspace)?, repos)
+}
+
+/// The Worktrees of the repository a Workspace's row reads, as git on the server lists them.
+///
+/// A restarted server keeps no facts for a directory it cannot read, so a row in a removed
+/// Worktree has no listing of its own. The Main Worktree saved with the Tab membership that
+/// contains the row's directory then locates the repository, when the server reads it. The saved
+/// Main Worktree is only where to look: what the server reads there decides the listing, and a
+/// row the server reads outside any repository lists nothing.
+///
+/// The server publishes an unpinned Root Pane's new directory before it reads Git there. Its read
+/// reports the directory's repository before it lists that repository's Worktrees, and the server
+/// keeps the Root Tab's saved membership until the listing arrives. Until then the row lists the
+/// repository the Root Tab is still in, so a `cd` into another repository switches the row once,
+/// when the listing arrives.
+pub fn workspace_listing<'a>(
+    workspace: &Workspace,
+    repos: &'a repository::Snapshot,
+) -> Option<&'a repository::WorktreeInventory> {
+    let root_tab = workspace.tabs.iter().find(|t| t.id == workspace.root_tab);
+    let directory = match &workspace.pinned_directory {
+        Some(pinned) => pinned.as_path(),
+        None => {
+            let root_tab = root_tab?;
+            root_tab
+                .panes
                 .iter()
-                .filter_map(|d| d.worktrees.as_ref())
-                .find(|w| &w.main_root == root)
+                .find(|p| p.id == root_tab.root_pane)?
+                .repository_directory()
+        }
+    };
+    if let Some(inventory) = repos.directory_worktrees(directory) {
+        return Some(inventory);
+    }
+    let facts = repos.facts(directory);
+    let listing_pending = facts.is_none_or(|facts| {
+        facts.failure.is_none() && facts.repository.is_some() && facts.worktrees.is_none()
+    });
+    if facts.is_some_and(|facts| facts.failure.is_none()) && !listing_pending {
+        return None;
+    }
+    let containing = workspace
+        .tabs
+        .iter()
+        .filter_map(|tab| {
+            Some((
+                tab.worktree.as_deref()?,
+                tab.worktree_repository.as_deref()?,
+            ))
         })
+        .filter(|(worktree, _)| directory.starts_with(worktree))
+        .max_by_key(|(worktree, _)| worktree.components().count())
+        .map(|(_, repository)| repository);
+    let followed = || {
+        if workspace.pinned_directory.is_some() || !listing_pending {
+            return None;
+        }
+        root_tab?.worktree_repository.as_deref()
+    };
+    containing
+        .or_else(followed)
+        .and_then(|repository| repos.directory_worktrees(repository))
 }
 
 pub fn new_tab(
@@ -183,11 +226,10 @@ pub fn worktree_close_plan(
         .map(|t| t.id)
         .collect();
     let fallback = if tabs.len() == w.tabs.len() {
-        let trees = repos
-            .directories
-            .iter()
-            .filter_map(|d| d.worktrees.as_ref())
-            .find(|trees| Some(&trees.main_root) == anchor.worktree_repository.as_ref())
+        let trees = anchor
+            .worktree_repository
+            .as_deref()
+            .and_then(|repository| repos.repository_worktrees(repository))
             .ok_or(OrganizeError::NoFallbackWorktree)?;
         let outside = fallback_destination(trees, path).ok_or(OrganizeError::NoFallbackWorktree)?;
         Some(worktree::Operation::OpenTab {
@@ -211,6 +253,7 @@ mod tests {
         DirectoryFacts, GitToolStatus, PinCheckState, WorktreeHead, WorktreeInventory,
         WorktreeRecord,
     };
+    use std::path::PathBuf;
 
     fn state(pin: Option<&str>) -> State {
         let mut state = State::empty();
@@ -424,5 +467,74 @@ mod tests {
                 tabs: vec![anchor]
             }
         );
+    }
+
+    fn listing(directory: &str, main_root: &str, roots: &[&str]) -> DirectoryFacts {
+        DirectoryFacts {
+            directory: directory.into(),
+            repository: None,
+            failure: None,
+            worktrees: Some(WorktreeInventory {
+                main_root: main_root.into(),
+                current: None,
+                worktrees: roots
+                    .iter()
+                    .map(|root| WorktreeRecord {
+                        root: root.into(),
+                        head: WorktreeHead::Branch("main".into()),
+                        locked: false,
+                        missing: false,
+                    })
+                    .collect(),
+            }),
+        }
+    }
+
+    fn listed(inv: &Inventory, repos: &repository::Snapshot) -> Option<Vec<PathBuf>> {
+        let trees = workspace_worktrees(inv, repos, inv.workspaces[0].id)?;
+        Some(trees.worktrees.iter().map(|r| r.root.clone()).collect())
+    }
+
+    /// Another shell ran `git worktree remove --force` on the Root Pane's Worktree. The Core
+    /// keeps that directory's last listing for its failed read, and the Main Worktree's read
+    /// no longer lists it.
+    #[test]
+    fn a_failed_read_lists_the_repository_another_directory_still_reads() {
+        let state = state(None);
+        let mut repos = trees();
+        repos.directories = vec![
+            DirectoryFacts {
+                failure: Some(repository::RepositoryReadError::Unavailable),
+                ..listing("/repo/source", "/repo", &["/repo", "/repo/source"])
+            },
+            listing("/repo", "/repo", &["/repo"]),
+        ];
+
+        assert_eq!(
+            listed(&state.inventory, &repos),
+            Some(vec![PathBuf::from("/repo")])
+        );
+    }
+
+    /// A pinned Workspace outside any repository whose Root Tab still names the repository its
+    /// Root Pane is in lists nothing, as the desktop does.
+    #[test]
+    fn a_workspace_read_outside_any_repository_lists_nothing() {
+        let mut state = state(Some("/outside"));
+        let workspace = &mut state.inventory.workspaces[0];
+        workspace.tabs[0].worktree = Some("/repo".into());
+        workspace.tabs[0].worktree_repository = Some("/repo".into());
+        let mut repos = trees();
+        repos.directories = vec![
+            DirectoryFacts {
+                directory: "/outside".into(),
+                repository: None,
+                worktrees: None,
+                failure: None,
+            },
+            listing("/repo", "/repo", &["/repo"]),
+        ];
+
+        assert_eq!(listed(&state.inventory, &repos), None);
     }
 }
