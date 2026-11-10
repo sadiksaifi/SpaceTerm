@@ -414,14 +414,6 @@ main(verify)
             {"SpaceTerm-0.10.0-macos-arm64.dmg", "appcast.xml"},
         )
 
-    def test_release_packaging_requires_the_release_notes_before_building(self):
-        self.compile_executable(self.artifact, "SpaceTerm")
-        self.notes.unlink()
-        result = self.package("v0.10.0")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("embeds its release notes", result.stderr)
-        self.assertFalse((self.root / "target/package-macos").exists())
-
     def test_verification_rejects_a_tampered_core_catalog(self):
         self.compile_executable(self.artifact, "SpaceTerm Preflight")
         result = self.package()

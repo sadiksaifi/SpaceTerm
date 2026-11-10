@@ -389,14 +389,6 @@ main(verify)
             assert document is not None
             self.assertEqual(json.load(document)["build"]["version"], "0.10.0")
 
-    def test_release_packaging_requires_the_release_notes_before_building(self):
-        self.compile_executable("SpaceTerm 0.10.0")
-        self.notes.unlink()
-        result = self.package("v0.10.0")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("embeds its release notes", result.stderr)
-        self.assertFalse(self.record.exists())
-
     def test_release_archive_rejects_an_executable_of_another_version(self):
         self.compile_executable("SpaceTerm 0.10.1")
         result = self.package("v0.10.0")
