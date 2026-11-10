@@ -584,6 +584,8 @@ fn a_paired_card_updates_through_the_shared_store_and_shows_its_progress(cx: &mu
         push: None,
         bundled: None,
         failed_push: None,
+        asked: None,
+        retrying_since: None,
     };
     adapter.emit(MachineUpdatesEvent::Machines(vec![update.clone()]));
     machines.cx.run_until_parked();

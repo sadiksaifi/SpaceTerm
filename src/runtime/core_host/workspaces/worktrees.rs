@@ -1497,7 +1497,9 @@ mod tests {
     }
 
     /// The shell in the reviewed Tab writes a file as its Session ends, so Git finds the
-    /// Worktree changed only after the removal closed its Tab.
+    /// Worktree changed only after the removal closed its Tab. The shell runs a foreground loop,
+    /// because one that waits at its prompt runs a hangup trap on macOS and not on Linux. It
+    /// writes the file itself, because a program it started for that is hung up with it.
     #[test]
     fn a_change_after_the_reviewed_tabs_close_fails_as_changed_after_closing() {
         use crate::runtime::core_host::tests::{await_text, command};
@@ -1543,7 +1545,8 @@ mod tests {
             &mut host,
             2,
             lease,
-            "trap 'touch \"$PWD/late\"; exit' HUP TERM; printf '\\nTRAP-%s\\n' SET\n",
+            "trap ': > \"$PWD/late\"; exit' HUP TERM; printf '\\nTRAP-%s\\n' SET; \
+             while :; do sleep 0.05; done\n",
         );
         await_text(&mut host, lease, "TRAP-SET");
         let review = review_removal(&mut host, &git.0, &tree);

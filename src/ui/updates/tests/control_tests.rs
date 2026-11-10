@@ -45,6 +45,8 @@ fn waiting(machine: MachineId, name: &'static str, sessions: u32) -> MachineUpda
         push: None,
         bundled: None,
         failed_push: None,
+        asked: None,
+        retrying_since: None,
     }
 }
 
@@ -502,6 +504,43 @@ fn a_core_install_stays_out_of_the_title_bar_and_is_readable_in_the_menu(
 }
 
 #[gpui::test]
+fn check_again_turns_the_control_into_a_checking_status_until_the_check_ends(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_, _, machines) = services(cx);
+    let visual = hosted(cx);
+    let mut cant_check = waiting(PENGUIN, "penguin", 0);
+    let facts = cant_check.facts.as_mut().unwrap();
+    facts.pending = None;
+    facts.check = UpdateCheck::Failing {
+        since: crate::updates::now() - 2 * crate::updates::policy::DAY,
+        last_success: None,
+        reason: spaceterm_core::update::facts::CheckFailure::Network,
+    };
+    machines.emit(MachineUpdatesEvent::Machines(vec![cant_check.clone()]));
+    visual.run_until_parked();
+
+    click("update-control", visual);
+    assert_eq!(machines.performed(), [(PENGUIN, MachineAction::CheckAgain)]);
+    let tree = A11yTree::read(visual);
+    assert_eq!(tree.node("Checking penguin…")["aria"]["role"], "Status");
+    assert!(tree.with_role("Button").is_empty(), "nothing to press");
+
+    let mut current = cant_check;
+    current.facts.as_mut().unwrap().check = UpdateCheck::Succeeded {
+        at: crate::updates::now(),
+    };
+    machines.emit(MachineUpdatesEvent::Finished {
+        machine: PENGUIN,
+        action: MachineAction::CheckAgain,
+        outcome: Ok(()),
+    });
+    machines.emit(MachineUpdatesEvent::Changed(Box::new(current)));
+    visual.run_until_parked();
+    assert!(visual.debug_bounds("update-control").is_none());
+}
+
+#[gpui::test]
 fn work_in_progress_is_a_focusable_status(cx: &mut gpui::TestAppContext) {
     let (_, _, machines) = services(cx);
     let visual = hosted(cx);
@@ -545,14 +584,14 @@ fn the_menu_reads_in_full_and_its_information_stays_reachable(cx: &mut gpui::Tes
     visual.run_until_parked();
 
     let tree = A11yTree::read(visual);
-    let trigger = tree.node("2 Updates");
+    let trigger = tree.node("2 in Progress");
     assert_ne!(
         trigger["aria"]["disabled"], true,
         "two working items still open the menu"
     );
     assert_eq!(
         trigger["aria"]["description"],
-        "2 updates need you. Open the menu to see each machine."
+        "2 updates are in progress. Open the menu to see each machine."
     );
 
     click("update-control-menu", visual);

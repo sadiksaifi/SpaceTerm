@@ -21,13 +21,16 @@ use spaceterm_core::update::facts::{
 
 use super::machines::store::MachineUpdates;
 use super::machines::{
-    ActionFailure, MachineAction, MachineId, MachineLink, MachinePreview, MachineUpdate,
+    ActionFailure, Asked, MachineAction, MachineId, MachineLink, MachinePreview, MachineUpdate,
 };
 use super::policy::{DAY, UpdateStage};
 use super::{UpdateError, UpdateService, UpdateState};
 
 /// How long a Machine's update checks fail before it shows "Can't check".
 pub(crate) const CANT_CHECK_AFTER: u64 = DAY;
+/// How long a download that SpaceTerm or a Core tries again by itself keeps failing before the
+/// title bar shows it. Settings and the menu bar extra show it at once.
+pub(crate) const RETRY_QUIETLY_FOR: u64 = DAY;
 
 /// Blue for action and progress, orange for problems and overdue states.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,6 +205,8 @@ pub(crate) enum DesktopState {
     Downloading {
         version: String,
         fraction: Option<f32>,
+        /// The person started this download. An automatic one stays out of the title bar.
+        asked: bool,
     },
     /// Downloaded and verified. Relaunching installs it.
     Ready {
@@ -225,6 +230,9 @@ pub(crate) enum DesktopState {
         /// The updater still holds the installer of a failed relaunch, so Relaunch can finish
         /// it. Otherwise a new check must download the release again.
         held: bool,
+        /// SpaceTerm tries this automatic download again by itself and has for less than
+        /// [`RETRY_QUIETLY_FOR`], so the failure stays out of the title bar.
+        retrying: bool,
     },
     Relaunching {
         version: String,
@@ -256,6 +264,11 @@ pub(crate) struct DesktopFacts<'a> {
     /// A failed relaunch left its installer with the updater. It stays held after the person
     /// acknowledges the failure, until a relaunch or quit installs it.
     pub(crate) relaunch_held: bool,
+    /// The person started the download in progress.
+    pub(crate) download_asked: bool,
+    /// An automatic download failed, and SpaceTerm has tried it again by itself for less than
+    /// [`RETRY_QUIETLY_FOR`].
+    pub(crate) retrying: bool,
 }
 
 /// One Machine's update state.
@@ -301,6 +314,7 @@ pub(crate) enum MachineState {
     Restarting {
         to: Version,
     },
+    /// A check a person asked for on this desktop. A Core's own check is no state.
     Checking,
     Stopping,
     Uninstalling,
@@ -347,24 +361,6 @@ pub(crate) enum CheckProblem {
 }
 
 impl MachineState {
-    /// Whether the title-bar control counts this state as an item.
-    pub(crate) fn pending(&self) -> bool {
-        !matches!(
-            self,
-            Self::Current
-                | Self::Available { .. }
-                | Self::BelowFloor { .. }
-                | Self::Connecting
-                | Self::Installing { .. }
-                | Self::DesktopTooOld
-                | Self::Stopping
-                | Self::Uninstalling
-                | Self::Stopped
-                | Self::Unpaired
-                | Self::Offline { .. }
-        )
-    }
-
     /// The waiting Pending Version, whether it is breaking, and the devices it strands.
     fn waiting(&self) -> Option<(&Version, bool, &[String])> {
         match self {
@@ -427,10 +423,6 @@ impl MachineState {
         }
     }
 
-    fn working(&self) -> bool {
-        self.glyph() == Some(Glyph::Working)
-    }
-
     /// Lower is more urgent. "N updates" shows the most urgent item's glyph.
     fn urgency(&self) -> u8 {
         match self {
@@ -465,6 +457,11 @@ pub(crate) struct MachineView {
     unobserved: bool,
     core_too_old: bool,
     skipped: Option<Version>,
+    /// The work a person started on this desktop that the Core has not ended.
+    asked: Option<Asked>,
+    /// The Core tries its own failed download again by itself and has for less than
+    /// [`RETRY_QUIETLY_FOR`].
+    retrying: bool,
     pub(crate) state: MachineState,
 }
 
@@ -484,7 +481,52 @@ impl MachineView {
             unobserved: false,
             core_too_old: update.link == MachineLink::Incompatible(Incompatible::ListenerTooOld),
             skipped: facts.and_then(|facts| facts.skipped.clone()),
+            asked: update.asked,
+            // This desktop's failed push is tried again by nobody, so it is never quiet.
+            retrying: update.failed_push.is_none()
+                && update
+                    .retrying_since
+                    .is_some_and(|since| now.saturating_sub(since) < RETRY_QUIETLY_FOR),
             state: machine_state(update, dismissed, now),
+        }
+    }
+
+    /// Whether the title-bar control counts this Machine as an item. A state that needs the
+    /// person is one. Work in progress is one only when the person started it on this desktop,
+    /// so a Core's own check or install stays quiet, and so does its failed download while the
+    /// Core still tries again by itself. A restart is always one, because the Machine's
+    /// Workspaces wait for it.
+    fn in_title_bar(&self) -> bool {
+        match &self.state {
+            MachineState::Current
+            | MachineState::Available { .. }
+            | MachineState::BelowFloor { .. }
+            | MachineState::Connecting
+            | MachineState::DesktopTooOld
+            | MachineState::Stopping
+            | MachineState::Uninstalling
+            | MachineState::Stopped
+            | MachineState::Unpaired
+            | MachineState::Offline { .. } => false,
+            MachineState::Installing { .. } => self.asked.is_some(),
+            // A restart that asks nothing happens by itself, unless the Core is too old to
+            // open its Workspaces until then.
+            MachineState::Ready { .. } | MachineState::Overdue { .. } => {
+                self.restart_asks() || self.core_too_old
+            }
+            // A Pending Version that waits behind the failure still needs the person.
+            MachineState::InstallFailed {
+                reason: InstallFailure::Download,
+                ..
+            } => !self.retrying || self.pending.is_some(),
+            MachineState::Restarting { .. }
+            | MachineState::Checking
+            | MachineState::CoreTooOld { .. }
+            | MachineState::UpdateFailed { .. }
+            | MachineState::InstallFailed { .. }
+            | MachineState::PushFailed { .. }
+            | MachineState::CantConfirm { .. }
+            | MachineState::CantCheck { .. } => true,
         }
     }
 
@@ -1206,16 +1248,22 @@ pub(crate) const READ_ONLY_REMEDY: &str = "Install SpaceTerm in Applications to 
 #[cfg(not(target_os = "macos"))]
 pub(crate) const READ_ONLY_REMEDY: &str = "Run the SpaceTerm install script to install the update.";
 
+/// Only a check a person asked for on this desktop reads as Checking, until the Core ends it or
+/// turns it into an install. A Core's own check changes no surface. A Machine that changes or
+/// went out of reach during the check reads as that.
 fn machine_state(update: &MachineUpdate, dismissed: &Dismissed, now: u64) -> MachineState {
-    let facts = update.facts.as_ref();
-    let checking = facts.is_some_and(|facts| facts.operation == Some(Operation::Checking));
     let state = base_state(update, dismissed, now);
-    if checking
-        && matches!(
-            state,
-            MachineState::Current | MachineState::Available { .. }
-        )
-    {
+    let outranks = matches!(
+        state,
+        MachineState::Installing { .. }
+            | MachineState::Restarting { .. }
+            | MachineState::Stopping
+            | MachineState::Uninstalling
+            | MachineState::Stopped
+            | MachineState::Unpaired
+            | MachineState::Offline { .. }
+    );
+    if update.asked == Some(Asked::Check) && !outranks {
         MachineState::Checking
     } else {
         state
@@ -1417,6 +1465,8 @@ impl DesktopState {
     pub(crate) fn new(facts: DesktopFacts<'_>, too_old_for: Option<SharedString>) -> Self {
         let pending = facts.pending.map(str::to_owned);
         let overdue = facts.stage == UpdateStage::Overdue;
+        // An overdue release, and one a Machine needs, are the person's to act on.
+        let retrying = facts.retrying && !overdue && too_old_for.is_none();
         let state = match facts.state {
             // Acknowledging the failure hides its notice, not the way to finish the relaunch.
             UpdateState::Idle if facts.relaunch_held => Self::RelaunchHeld {
@@ -1445,10 +1495,12 @@ impl DesktopState {
             } => Self::Downloading {
                 version: version.clone(),
                 fraction: (*total > 0).then(|| (*received as f64 / *total as f64) as f32),
+                asked: facts.download_asked,
             },
             UpdateState::Verifying { version } => Self::Downloading {
                 version: version.clone(),
                 fraction: None,
+                asked: facts.download_asked,
             },
             UpdateState::Installing { version } => Self::Relaunching {
                 version: version.clone(),
@@ -1469,6 +1521,18 @@ impl DesktopState {
                 version: pending,
                 error: *error,
                 held: facts.relaunch_held,
+                retrying: retrying && *error == UpdateError::Download,
+            },
+            // SpaceTerm tries the failed download again by itself. Its check for that, or that
+            // check failing, keeps the failure rather than offering the download for a moment.
+            UpdateState::Checking
+            | UpdateState::Failed {
+                error: UpdateError::Check,
+            } if retrying && pending.is_some() => Self::InstallFailed {
+                version: pending,
+                error: UpdateError::Download,
+                held: false,
+                retrying: true,
             },
             UpdateState::Idle | UpdateState::Checking | UpdateState::Failed { .. }
                 if overdue && pending.is_some() =>
@@ -1510,11 +1574,15 @@ impl DesktopState {
         }
     }
 
+    /// Whether the title-bar control counts the desktop as an item. A download shows only
+    /// when the person started it, and a failed download SpaceTerm still retries by itself
+    /// stays quiet.
     pub(crate) fn pending(&self) -> bool {
         !matches!(
             self,
             Self::Current
-                | Self::Downloading { .. }
+                | Self::Downloading { asked: false, .. }
+                | Self::InstallFailed { retrying: true, .. }
                 | Self::WhatsNew { .. }
                 | Self::Relaunching { .. }
                 | Self::NeedsNewerSystem
@@ -1952,7 +2020,10 @@ impl Presentation {
             label: self.desktop.control_label().into(),
             tone: self.desktop.tone(),
             glyph: self.desktop.glyph().unwrap_or(Glyph::Restart),
-            fraction: None,
+            fraction: match &self.desktop {
+                DesktopState::Downloading { fraction, .. } => *fraction,
+                _ => None,
+            },
             sentence: self.desktop.sentence(),
             command: self.desktop.control_command(),
             urgency: self.desktop.urgency(),
@@ -1960,10 +2031,7 @@ impl Presentation {
         let machines = self
             .machines
             .iter()
-            .filter(|view| {
-                view.state.pending()
-                    && (view.state.waiting().is_none() || view.restart_asks() || view.core_too_old)
-            })
+            .filter(|view| view.in_title_bar())
             .map(|view| Item {
                 key: ItemKey::Machine(view.machine),
                 label: view.control_label().into(),
@@ -1982,21 +2050,41 @@ impl Presentation {
         match items.len() {
             0 => Control::Hidden,
             1 => Control::Single(items.remove(0)),
-            n => {
+            _ => {
                 let urgent = items
                     .iter()
                     .min_by_key(|item| item.urgency)
                     .expect("two or more items");
+                // Only an item with a command needs the person. The others report work.
+                let needing = items.iter().filter(|item| item.command.is_some()).count();
+                let working = items.len() - needing;
+                let needs = match needing {
+                    1 => "1 update needs you".to_owned(),
+                    n => format!("{n} updates need you"),
+                };
+                let works = match working {
+                    1 => "1 is in progress".to_owned(),
+                    n => format!("{n} are in progress"),
+                };
+                let label = match needing {
+                    0 => format!("{working} in Progress"),
+                    1 => "1 Update".to_owned(),
+                    n => format!("{n} Updates"),
+                };
+                let summary = match (needing, working) {
+                    (0, n) => format!("{n} updates are in progress"),
+                    (_, 0) => needs,
+                    _ => format!("{needs} and {works}"),
+                };
                 Control::Menu {
-                    label: format!("{n} Updates").into(),
+                    label: label.into(),
                     tone: if items.iter().any(|item| item.tone == Tone::Problem) {
                         Tone::Problem
                     } else {
                         Tone::Action
                     },
                     glyph: urgent.glyph,
-                    sentence: format!("{n} updates need you. Open the menu to see each machine.")
-                        .into(),
+                    sentence: format!("{summary}. Open the menu to see each machine.").into(),
                 }
             }
         }
@@ -2267,6 +2355,7 @@ impl Presentation {
 pub(crate) fn current(cx: &App) -> Presentation {
     let unavailable = UpdateState::Unavailable;
     let running = env!("SPACETERM_VERSION");
+    let now = super::now();
     let desktop = cx
         .try_global::<UpdateService>()
         .map(|service| service.0.read(cx));
@@ -2280,6 +2369,8 @@ pub(crate) fn current(cx: &App) -> Presentation {
                 && updates.release_notes_unread(),
             running,
             relaunch_held: updates.holds_failed_relaunch(),
+            download_asked: updates.download_asked(),
+            retrying: updates.retries_download(),
         },
         None => DesktopFacts {
             state: &unavailable,
@@ -2288,9 +2379,10 @@ pub(crate) fn current(cx: &App) -> Presentation {
             notes_unread: false,
             running,
             relaunch_held: false,
+            download_asked: false,
+            retrying: false,
         },
     };
-    let now = super::now();
     match MachineUpdates::global(cx) {
         Some(store) => {
             let store = store.read(cx);

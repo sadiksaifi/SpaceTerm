@@ -34,6 +34,8 @@ fn machine(id: MachineId, name: &'static str, sessions: u32) -> MachineUpdate {
         push: None,
         bundled: None,
         failed_push: None,
+        asked: None,
+        retrying_since: None,
     }
 }
 
@@ -58,6 +60,8 @@ fn desktop(state: &UpdateState, stage: UpdateStage) -> DesktopFacts<'_> {
         notes_unread: false,
         running: "0.8.0",
         relaunch_held: false,
+        download_asked: false,
+        retrying: false,
     }
 }
 
@@ -253,6 +257,54 @@ fn two_items_open_a_menu_with_restart_all() {
 }
 
 #[test]
+fn the_menu_counts_only_the_items_that_need_the_person() {
+    let menu = |machines: &[MachineUpdate]| match present(machines).control() {
+        Control::Menu {
+            label, sentence, ..
+        } => (label.to_string(), sentence.to_string()),
+        other => panic!("expected a menu, got {other:?}"),
+    };
+    let restarting = |id, name| {
+        let mut update = machine(id, name, 0);
+        update.facts.as_mut().unwrap().operation = Some(Operation::Restarting {
+            to: version("0.9.0"),
+        });
+        update
+    };
+    let needs = waiting(machine(LOCAL, "This Mac", 3), NOW - 60);
+    assert_eq!(
+        menu(&[needs.clone(), restarting(PENGUIN, "penguin")]),
+        (
+            "1 Update".to_owned(),
+            "1 update needs you and 1 is in progress. Open the menu to see each machine."
+                .to_owned()
+        )
+    );
+    assert_eq!(
+        menu(&[
+            needs.clone(),
+            waiting(machine(BUILD_BOX, "build-box", 1), NOW - 60),
+            restarting(PENGUIN, "penguin"),
+        ]),
+        (
+            "2 Updates".to_owned(),
+            "2 updates need you and 1 is in progress. Open the menu to see each machine."
+                .to_owned()
+        )
+    );
+    assert_eq!(
+        menu(&[
+            restarting(PENGUIN, "penguin"),
+            restarting(BUILD_BOX, "build-box")
+        ]),
+        (
+            "2 in Progress".to_owned(),
+            "2 updates are in progress. Open the menu to see each machine.".to_owned()
+        )
+    );
+}
+
+#[test]
 fn a_problem_turns_the_menu_orange_and_leads_its_glyph() {
     let mut failed = machine(PENGUIN, "penguin", 0);
     failed.facts.as_mut().unwrap().last_failure = Some(UpdateFailure {
@@ -387,20 +439,163 @@ fn the_named_states_match_the_mockup() {
 }
 
 #[test]
-fn work_in_progress_is_a_status_with_a_spinner() {
+fn an_install_shows_in_the_title_bar_only_when_a_person_started_it() {
     let mut installing = machine(PENGUIN, "penguin", 0);
     installing.facts.as_mut().unwrap().operation = Some(Operation::Installing {
         version: version("0.9.0"),
         received: 5,
         total: 10,
     });
-    let shown = present(&[installing]);
+    // The Core's feed install and this desktop's automatic push stay quiet.
+    let shown = present(std::slice::from_ref(&installing));
     assert_eq!(shown.control(), Control::Hidden);
     let rows = shown.machine_rows();
     assert_eq!(rows[0].status.as_ref(), "Installing 0.9.0…");
     assert_eq!(rows[0].glyph, Some(Glyph::Working));
     assert_eq!(rows[0].fraction, Some(0.5));
     assert_eq!(rows[0].button, None);
+
+    installing.asked = Some(Asked::Install);
+    let item = single(&present(&[installing]));
+    assert_eq!(
+        (item.label.as_ref(), item.glyph, item.fraction, item.command),
+        ("Installing on penguin…", Glyph::Working, Some(0.5), None)
+    );
+}
+
+#[test]
+fn a_download_a_core_retries_by_itself_stays_out_of_the_title_bar_for_a_day() {
+    let failed = |reason, retrying_since| {
+        let mut update = machine(PENGUIN, "penguin", 0);
+        update.facts.as_mut().unwrap().last_failure = Some(UpdateFailure {
+            id: 7,
+            at: NOW - 60,
+            version: version("0.9.0"),
+            kind: FailureKind::Install(reason),
+        });
+        update.retrying_since = retrying_since;
+        update
+    };
+    let quiet = present(&[failed(InstallFailure::Download, Some(NOW - DAY + 1))]);
+    assert_eq!(quiet.control(), Control::Hidden);
+    // Settings and the menu bar extra show it at once.
+    let row = quiet.machine(PENGUIN).unwrap().settings_row();
+    assert_eq!(row.status.as_ref(), "Install failed");
+    assert_eq!(row.button.unwrap().label.as_ref(), "Try Again");
+    assert_eq!(quiet.extra_rows()[0].tone, Tone::Problem);
+
+    // A Pending Version that waits behind the failure still needs the person.
+    let mut behind = waiting(failed(InstallFailure::Download, Some(NOW - 60)), NOW - 120);
+    let facts = behind.facts.as_mut().unwrap();
+    facts.sessions = 2;
+    facts.last_failure.as_mut().unwrap().version = version("0.9.1");
+    // So does this desktop's failed push, which nothing tries again.
+    let mut pushed = failed(InstallFailure::Download, Some(NOW - 60));
+    pushed.push = Some(version("0.9.0"));
+    pushed.failed_push = Some(crate::updates::machines::FailedPush {
+        version: version("0.9.0"),
+        failure: ActionFailure::Unreachable,
+    });
+    for shown in [
+        // It kept failing for a day.
+        failed(InstallFailure::Download, Some(NOW - DAY)),
+        // A person tried it from this desktop.
+        failed(InstallFailure::Download, None),
+        // Nothing but a download is tried again by itself.
+        failed(InstallFailure::DiskFull, Some(NOW - 60)),
+        behind,
+        pushed,
+    ] {
+        assert_eq!(
+            single(&present(&[shown])).label.as_ref(),
+            "penguin Install Failed"
+        );
+    }
+}
+
+#[test]
+fn a_cores_own_check_changes_no_surface() {
+    let quiet = machine(PENGUIN, "penguin", 3);
+    let mut checking = quiet.clone();
+    checking.facts.as_mut().unwrap().operation = Some(Operation::Checking);
+    let (before, during) = (present(&[quiet]), present(&[checking]));
+    assert_eq!(during.control(), Control::Hidden);
+    assert_eq!(during, before);
+    assert_eq!(during.extra_rows()[0].state.as_ref(), "3 Terminal Sessions");
+
+    // A newer bundled Core stays on offer while the Core checks its own feed.
+    let mut offered = machine(PENGUIN, "penguin", 0);
+    offered.push = Some(version("0.9.0"));
+    offered.facts.as_mut().unwrap().operation = Some(Operation::Checking);
+    assert_eq!(
+        present(&[offered]).machine(PENGUIN).unwrap().state,
+        MachineState::Available {
+            to: version("0.9.0")
+        }
+    );
+}
+
+#[test]
+fn check_again_shows_checking_until_the_check_ends() {
+    let mut cant_check = machine(PENGUIN, "penguin", 0);
+    cant_check.facts.as_mut().unwrap().check = UpdateCheck::Failing {
+        since: NOW - 2 * DAY,
+        last_success: None,
+        reason: CheckFailure::Network,
+    };
+    let mut cant_confirm = machine(PENGUIN, "penguin", 0);
+    cant_confirm.link = MachineLink::Unconfirmed {
+        expected: version("0.9.0"),
+        since: NOW - 60,
+    };
+    for mut update in [cant_check, cant_confirm] {
+        let before = single(&present(std::slice::from_ref(&update)));
+        assert_eq!(
+            before.command,
+            Some(Command::Machine(PENGUIN, MachineAction::CheckAgain))
+        );
+        update.asked = Some(Asked::Check);
+        let item = single(&present(&[update]));
+        assert_eq!(
+            (item.label.as_ref(), item.glyph, item.tone, item.command),
+            ("Checking penguin…", Glyph::Working, Tone::Action, None)
+        );
+    }
+
+    // A check that found a release reads as its install, which is still the person's.
+    let mut installing = machine(PENGUIN, "penguin", 0);
+    installing.facts.as_mut().unwrap().operation = Some(Operation::Installing {
+        version: version("0.9.0"),
+        received: 0,
+        total: 0,
+    });
+    installing.asked = Some(Asked::Check);
+    assert_eq!(
+        single(&present(&[installing])).label.as_ref(),
+        "Installing on penguin…"
+    );
+
+    // A Machine that went offline during the check reads as offline.
+    let mut offline = machine(PENGUIN, "penguin", 0);
+    offline.link = MachineLink::Offline { since: NOW - 60 };
+    offline.asked = Some(Asked::Check);
+    assert_eq!(
+        present(&[offline]).machine(PENGUIN).unwrap().state,
+        MachineState::Offline { offered: None }
+    );
+}
+
+#[test]
+fn a_restart_shows_in_the_title_bar_whoever_started_it() {
+    let mut restarting = machine(PENGUIN, "penguin", 0);
+    restarting.facts.as_mut().unwrap().operation = Some(Operation::Restarting {
+        to: version("0.9.0"),
+    });
+    let item = single(&present(&[restarting]));
+    assert_eq!(
+        (item.label.as_ref(), item.command),
+        ("Updating penguin…", None)
+    );
 }
 
 #[test]
@@ -465,6 +660,8 @@ fn every_core_label_names_its_subject() {
             unobserved: false,
             core_too_old: false,
             skipped: None,
+            asked: None,
+            retrying: false,
             state,
         };
         assert!(
@@ -809,6 +1006,95 @@ fn a_release_for_a_newer_system_is_never_called_up_to_date() {
          operating system to install it."
     );
     assert!(shown.extra_header().line.ends_with("Needs a newer system"));
+}
+
+#[test]
+fn a_download_shows_in_the_title_bar_only_when_the_person_started_it() {
+    let downloading = UpdateState::Downloading {
+        version: "0.9.0".into(),
+        received: 5,
+        total: 10,
+    };
+    let shown = |download_asked| {
+        Presentation::new(
+            DesktopFacts {
+                download_asked,
+                ..desktop(&downloading, UpdateStage::Optional)
+            },
+            &[],
+            &Dismissed::new(),
+            NOW,
+        )
+    };
+    assert_eq!(shown(false).control(), Control::Hidden);
+    assert_eq!(
+        shown(false).desktop_row().unwrap().status.as_ref(),
+        "Downloading…"
+    );
+    let item = single(&shown(true));
+    assert_eq!(
+        (item.label.as_ref(), item.glyph, item.fraction, item.command),
+        ("Downloading SpaceTerm…", Glyph::Working, Some(0.5), None)
+    );
+}
+
+#[test]
+fn a_failed_download_spaceterm_retries_by_itself_stays_out_of_the_title_bar() {
+    let failed = UpdateState::Failed {
+        error: UpdateError::Download,
+    };
+    let check_failed = UpdateState::Failed {
+        error: UpdateError::Check,
+    };
+    let shown = |state, retrying| {
+        Presentation::new(
+            DesktopFacts {
+                pending: Some("0.9.0"),
+                retrying,
+                ..desktop(state, UpdateStage::Optional)
+            },
+            &[],
+            &Dismissed::new(),
+            NOW,
+        )
+    };
+    // The retry's own check, and that check failing, keep the failure quiet too.
+    for state in [&failed, &UpdateState::Checking, &check_failed] {
+        let quiet = shown(state, true);
+        assert_eq!(quiet.control(), Control::Hidden, "{state:?}");
+        let row = quiet.desktop_row().unwrap();
+        assert_eq!(row.status.as_ref(), "Install failed");
+        assert_eq!(row.button.unwrap().label.as_ref(), "Try Again");
+    }
+    assert_eq!(
+        single(&shown(&failed, false)).label.as_ref(),
+        "SpaceTerm Install Failed"
+    );
+    // Only a download is tried again by itself.
+    let disk_full = UpdateState::Failed {
+        error: UpdateError::DiskFull,
+    };
+    assert_eq!(
+        single(&shown(&disk_full, true)).label.as_ref(),
+        "SpaceTerm Install Failed"
+    );
+    // An overdue release, and one a Machine needs, are the person's to act on.
+    let facts = |stage| DesktopFacts {
+        pending: Some("0.9.0"),
+        retrying: true,
+        ..desktop(&failed, stage)
+    };
+    let overdue = Presentation::new(facts(UpdateStage::Overdue), &[], &Dismissed::new(), NOW);
+    assert_eq!(single(&overdue).label.as_ref(), "SpaceTerm Install Failed");
+    let mut newer = machine(PENGUIN, "penguin", 0);
+    newer.link = MachineLink::Incompatible(Incompatible::CallerTooOld);
+    let needed = Presentation::new(
+        facts(UpdateStage::Optional),
+        &[newer],
+        &Dismissed::new(),
+        NOW,
+    );
+    assert_eq!(single(&needed).label.as_ref(), "SpaceTerm Install Failed");
 }
 
 #[test]
