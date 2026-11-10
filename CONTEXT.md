@@ -29,7 +29,7 @@ _Avoid_: Window, Terminal Session
 
 **Root Pane**: The stable Pane that supplies a Tab's automatic directory, independent of focus and layout order.
 
-**Root Tab**: The stable Tab whose Root Pane supplies a Workspace's unpinned directory and automatic name.
+**Root Tab**: The stable Tab whose Root Pane supplies the directory and automatic name of an unpinned Workspace that is in no repository.
 
 **Pane Caption**: The header naming a Pane and carrying its direct controls.
 
@@ -311,7 +311,7 @@ _Avoid_: shell token, session secret
 **Pull Request**: The open GitHub pull request whose head is a repository's current branch, found through the local GitHub CLI.
 _Avoid_: PR, merge request
 
-**Worktree**: One of a git repository's working trees, listed under a Workspace whose directory is in that repository. Its Tabs start inside it.
+**Worktree**: One of a git repository's working trees, listed under the Workspace that is in that repository. Its Tabs start inside it and stay in it while their shells change directories.
 _Avoid_: checkout, working copy
 
 **Main Worktree**: The Worktree git lists first, which holds the repository's own working tree. It cannot be removed.
