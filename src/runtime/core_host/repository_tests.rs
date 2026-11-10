@@ -108,7 +108,11 @@ fn repository_sources_follow_owning_prompts_while_osc7_keeps_live_directory_disp
         facts.repository.is_some() && facts.worktrees.is_some()
     });
     let workspace = &current.workspaces[0];
-    assert_eq!(workspace.name, "live-worktree");
+    // The Workspace is named for its repository's Main Worktree, not the linked Worktree.
+    assert_eq!(
+        Some(workspace.name.as_str()),
+        git.0.file_name().and_then(|name| name.to_str())
+    );
     assert_eq!(
         super::repositories::workspace_directory(workspace),
         Some(tree.as_path())
@@ -614,7 +618,7 @@ fn abandoned_core_git_reads_cancel_on_disconnect_and_stop_without_losing_tabs() 
 }
 
 #[test]
-fn non_root_tab_retains_its_repository_until_closed_after_both_shells_change_repositories() {
+fn every_tab_retains_its_repository_after_both_shells_change_repositories() {
     use spaceterm_core::hierarchy::{CloseTarget, Mutation, Outcome};
     use spaceterm_core::repository::RepositoryHead;
     let original = GitFixture::new();
@@ -696,14 +700,10 @@ fn non_root_tab_retains_its_repository_until_closed_after_both_shells_change_rep
             super::repositories::workspace_directory(current),
             Some(destination.0.as_path())
         );
+        // Two Tabs are in the original repository, so no `cd` moves either, the Root Tab's too.
         for tab in &current.tabs {
-            let assigned = if tab.id == root_id {
-                &destination.0
-            } else {
-                &original.0
-            };
-            assert_eq!(tab.worktree.as_ref(), Some(assigned));
-            assert_eq!(tab.worktree_repository.as_ref(), Some(assigned));
+            assert_eq!(tab.worktree.as_ref(), Some(&original.0));
+            assert_eq!(tab.worktree_repository.as_ref(), Some(&original.0));
             if tab.id == tab_id {
                 assert_eq!(
                     tab.panes[0].confirmed_directory.as_ref(),
@@ -741,19 +741,20 @@ fn non_root_tab_retains_its_repository_until_closed_after_both_shells_change_rep
     let closed = workspace_inventory(&mut host);
     assert_eq!(closed.workspaces[0].tabs.len(), 1);
     assert_eq!(closed.workspaces[0].tabs[0].id, root_id);
+    // Closing the other Tab moves nothing: the Tab left alone stays until its next `cd`.
     assert_eq!(
         closed.workspaces[0].tabs[0].worktree.as_ref(),
-        Some(&destination.0)
+        Some(&original.0)
     );
     let facts = &closed.repositories.as_ref().unwrap().directories;
     assert!(facts.iter().any(|facts| facts.directory == destination.0));
-    assert!(facts.iter().all(|facts| facts.directory != original.0));
+    assert!(facts.iter().any(|facts| facts.directory == original.0));
     assert!(original.0.is_dir());
     host.shutdown().unwrap();
 }
 
 #[test]
-fn an_unpinned_root_tab_follows_entering_and_leaving_git_without_moving_other_tabs() {
+fn a_root_pane_leaving_and_entering_git_moves_no_tab_while_another_tab_is_in_the_repository() {
     use spaceterm_core::hierarchy::Mutation;
     let git = GitFixture::new();
     let outside = GitFixture::new();
@@ -813,34 +814,12 @@ fn an_unpinned_root_tab_follows_entering_and_leaving_git_without_moving_other_ta
     let left = git_facts(&mut host, &outside.0, |facts| {
         facts.failure.is_none() && facts.repository.is_none()
     });
-    let tabs = &left.workspaces[0].tabs;
-    assert_eq!(
-        tabs.iter().find(|tab| tab.id == root_id).unwrap().worktree,
-        None
-    );
-    assert_eq!(
-        tabs.iter()
-            .find(|tab| tab.id == root_id)
-            .unwrap()
-            .worktree_repository,
-        None
-    );
-    assert_eq!(
-        tabs.iter()
-            .find(|tab| tab.id == other_id)
-            .unwrap()
-            .worktree
-            .as_ref(),
-        Some(&git.0)
-    );
-    assert_eq!(
-        tabs.iter()
-            .find(|tab| tab.id == other_id)
-            .unwrap()
-            .worktree_repository
-            .as_ref(),
-        Some(&git.0)
-    );
+    let workspace = &left.workspaces[0];
+    for id in [root_id, other_id] {
+        let tab = workspace.tabs.iter().find(|tab| tab.id == id).unwrap();
+        assert_eq!(tab.worktree.as_ref(), Some(&git.0));
+        assert_eq!(tab.worktree_repository.as_ref(), Some(&git.0));
+    }
     command(
         &mut host,
         1,
@@ -862,7 +841,7 @@ fn an_unpinned_root_tab_follows_entering_and_leaving_git_without_moving_other_ta
 }
 
 #[test]
-fn a_tab_promoted_to_root_tab_leaves_its_worktree_with_its_root_pane_and_after_restart() {
+fn a_promoted_only_tab_leaves_its_worktree_at_its_next_cd_and_after_restart() {
     use spaceterm_core::hierarchy::{CloseTarget, Mutation, Outcome, State, WorktreeMembership};
     use spaceterm_core::worktree::Operation;
     let git = GitFixture::new();
@@ -918,7 +897,8 @@ fn a_tab_promoted_to_root_tab_leaves_its_worktree_with_its_root_pane_and_after_r
     assert!(promoted.workspaces[0].pinned_directory.is_none());
     assert_eq!(promoted.workspaces[0].root_tab, opened);
     let tab = &promoted.workspaces[0].tabs[0];
-    assert_eq!(tab.worktree_membership, WorktreeMembership::Following);
+    // Promotion moves no Tab. Its next `cd` as the only Tab does.
+    assert_eq!(tab.worktree_membership, WorktreeMembership::Opened);
     assert_eq!(tab.worktree.as_ref(), Some(&git.0));
     let Reply::Attached { lease } = host.request(
         [1; 32],

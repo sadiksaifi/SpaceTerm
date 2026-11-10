@@ -29,9 +29,7 @@ mod core_repositories {
         HeadGlyph, MAXIMUM_NAME_CHARS, SidebarBadge, chip_tooltip_line, sanitize_for_display,
     };
     use crate::ui::repository_status_store::{CorePullRequestsChanged, InstalledRepositoryStatus};
-    use crate::ui::workspace_sidebar::{
-        WorktreeGroup, WorktreeRemoval, WorktreeRowViewModel, WorktreeSection,
-    };
+    use crate::ui::workspace_sidebar::{WorktreeRemoval, WorktreeRowViewModel, WorktreeSection};
     use crate::ui::workspaces::{
         CoreRepositories, LocalPresentation, pane_directory, workspace_directory,
     };
@@ -222,7 +220,7 @@ mod core_repositories {
 
         /// Names every Worktree the server lists or keeps Tabs in, and tags each Tab with the
         /// Worktree the server says it belongs to. Nothing here moves a Tab on its own: the
-        /// server reconciles membership, including a Root Tab that follows its Root Pane.
+        /// server owns membership under ADR 0020.
         fn reconcile_worktrees(&mut self, workspace_id: WorkspaceId, cx: &mut Context<Self>) {
             let Some(binding) = self.binding.owning(workspace_id) else {
                 return;
@@ -268,6 +266,13 @@ mod core_repositories {
                 };
                 let saved = tab.worktree_repository.as_deref();
                 let key = membership_key(root, saved, inventory, state, repositories);
+                // The Workspace lists one repository. A Core older than that rule can keep a Tab
+                // in another, which has no row here, so the Tab shows with the Workspace row.
+                if inventory
+                    .is_some_and(|inventory| key.repository().main_root() != inventory.main_root)
+                {
+                    continue;
+                }
                 let Ok(id) = state.registry.id_for(&key) else {
                     continue;
                 };
@@ -304,12 +309,50 @@ mod core_repositories {
             }
         }
 
-        /// The Worktrees a Workspace row discloses, or `None` outside a repository.
+        /// The Worktrees a Workspace row discloses, or `None` outside a repository and for a
+        /// repository's Main Worktree alone, which leaves the row as it is outside a repository.
         pub(in crate::ui::workspace_manager) fn core_worktree_section(
             &self,
             workspace_id: WorkspaceId,
             cx: &App,
         ) -> Option<WorktreeSection> {
+            self.core_worktrees(workspace_id, cx)
+                .filter(|section| self.discloses(workspace_id, section, cx))
+        }
+
+        /// Whether a Workspace's Worktrees take rows of their own: two or more do, and so does
+        /// one whose Tabs share the Workspace with a Tab outside every Worktree. Each set of
+        /// Tabs then has a row that shows it. Only a Core older than ADR 0020's one-repository
+        /// rule keeps a Tab outside for longer than one read.
+        fn discloses(
+            &self,
+            workspace_id: WorkspaceId,
+            section: &WorktreeSection,
+            cx: &App,
+        ) -> bool {
+            section.worktrees.len() > 1
+                || (section.rows().any(|row| row.has_tabs)
+                    && self
+                        .workspaces
+                        .workspace(workspace_id)
+                        .is_some_and(|workspace| workspace.payload().read(cx).has_unscoped_tabs()))
+        }
+
+        /// The only Worktree of the repository a Workspace is in, which its row describes in
+        /// place of a section.
+        pub(in crate::ui::workspace_manager) fn core_only_worktree(
+            &self,
+            workspace_id: WorkspaceId,
+            cx: &App,
+        ) -> Option<WorktreeRowViewModel> {
+            let section = self.core_worktrees(workspace_id, cx)?;
+            (!self.discloses(workspace_id, &section, cx))
+                .then(|| section.worktrees.into_iter().next())
+                .flatten()
+        }
+
+        /// Every Worktree of the repository a Workspace is in, or `None` outside a repository.
+        fn core_worktrees(&self, workspace_id: WorkspaceId, cx: &App) -> Option<WorktreeSection> {
             let (core, _) = self.workspace_row_source(workspace_id)?;
             let state = self.workspace_repositories.worktrees.get(&workspace_id)?;
             let manager = self.workspaces.workspace(workspace_id)?.payload().read(cx);
@@ -441,60 +484,40 @@ mod core_repositories {
                                 }))),
                 }
             };
-            let mut groups = Vec::new();
-            if let (Some(inventory), Some(current)) = (inventory, current.as_ref()) {
-                let mut rows: Vec<WorktreeRowViewModel> = inventory
-                    .worktrees
-                    .iter()
-                    .filter(|record| record.head != WorktreeHead::Bare)
-                    .filter_map(|record| {
-                        let key = WorktreeKey::new(current.clone(), record.root.clone());
-                        Some(row(state.registry.id(&key)?, record, false, true))
-                    })
-                    .collect();
-                // A Worktree removed outside SpaceTerm keeps its row while the server keeps Tabs
-                // in it. Nothing recreates its directory.
-                let removed: Vec<WorktreeRowViewModel> = counts
+            let worktrees: Vec<WorktreeRowViewModel> = match (inventory, current.as_ref()) {
+                (Some(inventory), Some(current)) => {
+                    let mut rows: Vec<WorktreeRowViewModel> = inventory
+                        .worktrees
+                        .iter()
+                        .filter(|record| record.head != WorktreeHead::Bare)
+                        .filter_map(|record| {
+                            let key = WorktreeKey::new(current.clone(), record.root.clone());
+                            Some(row(state.registry.id(&key)?, record, false, true))
+                        })
+                        .collect();
+                    // A Worktree removed outside SpaceTerm keeps its row while the server keeps
+                    // Tabs in it. Nothing recreates its directory.
+                    let removed: Vec<WorktreeRowViewModel> = counts
+                        .keys()
+                        .filter_map(|&id| {
+                            let listed = rows.iter().any(|row| row.worktree_id == id);
+                            if state.registry.key(id)?.repository() != current || listed {
+                                return None;
+                            }
+                            Some(row(id, state.records.get(&id)?, true, false))
+                        })
+                        .collect();
+                    rows.extend(removed);
+                    rows
+                }
+                // Until the server reads the repository again, the Worktrees its Tabs are saved
+                // in keep their rows.
+                _ => counts
                     .keys()
-                    .filter_map(|&id| {
-                        let key = state.registry.key(id)?;
-                        let listed = rows.iter().any(|row| row.worktree_id == id);
-                        if key.repository() != current || listed {
-                            return None;
-                        }
-                        Some(row(id, state.records.get(&id)?, true, false))
-                    })
-                    .collect();
-                rows.extend(removed);
-                groups.push(WorktreeGroup {
-                    former_repository: None,
-                    rows,
-                });
-            }
-            let mut former: BTreeMap<&RepositoryIdentity, Vec<WorktreeRowViewModel>> =
-                BTreeMap::new();
-            for &id in counts.keys() {
-                let Some(key) = state.registry.key(id) else {
-                    continue;
-                };
-                if Some(key.repository()) == current.as_ref() {
-                    continue;
-                }
-                if let Some(record) = state.records.get(&id) {
-                    former
-                        .entry(key.repository())
-                        .or_default()
-                        .push(row(id, record, false, false));
-                }
-            }
-            groups.extend(former.into_iter().map(|(repository, rows)| WorktreeGroup {
-                former_repository: Some(directory_name(repository.main_root())),
-                rows,
-            }));
-            // A repository's Main Worktree alone leaves the row as it is outside a repository.
-            if groups.iter().map(|group| group.rows.len()).sum::<usize>() < 2
-                && groups.iter().all(|group| group.former_repository.is_none())
-            {
+                    .filter_map(|&id| Some(row(id, state.records.get(&id)?, false, false)))
+                    .collect(),
+            };
+            if worktrees.is_empty() {
                 return None;
             }
             Some(WorktreeSection {
@@ -506,7 +529,7 @@ mod core_repositories {
                     )
                     .into()
                 }),
-                groups,
+                worktrees,
             })
         }
 

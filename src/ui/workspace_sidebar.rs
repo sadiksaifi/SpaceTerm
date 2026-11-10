@@ -236,22 +236,15 @@ pub(super) struct WorktreeSection {
     pub(super) expanded: bool,
     /// The listed repository's Main Worktree, as the expanded Workspace row describes it.
     pub(super) repository: Option<SharedString>,
-    /// The read repository's Worktrees first, then each former repository's Worktrees that still
-    /// have Tabs.
-    pub(super) groups: Vec<WorktreeGroup>,
+    /// The Worktrees git lists in the Workspace's repository, then those removed outside
+    /// SpaceTerm that still have Tabs.
+    pub(super) worktrees: Vec<WorktreeRowViewModel>,
 }
 
 impl WorktreeSection {
     pub(super) fn rows(&self) -> impl Iterator<Item = &WorktreeRowViewModel> {
-        self.groups.iter().flat_map(|group| &group.rows)
+        self.worktrees.iter()
     }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(super) struct WorktreeGroup {
-    /// The name of a repository the Workspace no longer reads, shown above its Worktrees.
-    pub(super) former_repository: Option<SharedString>,
-    pub(super) rows: Vec<WorktreeRowViewModel>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -322,35 +315,11 @@ enum GroupRow {
     /// The Workspace row that heads the group.
     Workspace,
     Worktree(WorktreeId),
-    /// The label above a former repository's Worktrees, by a digest of its name and how many
-    /// labels before it share that name, so it keeps its place while its Worktrees change.
-    FormerRepository(u64),
 }
 
-/// What one row below a Workspace row shows.
-#[derive(Clone, Copy, Debug)]
-enum GroupRowContent<'a> {
-    /// A Worktree row, with its position among its repository's Worktree rows and their count.
-    Worktree(&'a WorktreeRowViewModel, (usize, usize)),
-    /// The label above a former repository's Worktrees.
-    FormerRepository(&'a SharedString),
-}
-
-/// A row that left its Workspace group, kept to draw while its place closes.
-#[derive(Clone, Debug)]
-enum DepartedRow {
-    Worktree(Box<WorktreeRowViewModel>),
-    FormerRepository(SharedString),
-}
-
-impl DepartedRow {
-    fn content(&self) -> GroupRowContent<'_> {
-        match self {
-            Self::Worktree(row) => GroupRowContent::Worktree(row, (1, 1)),
-            Self::FormerRepository(name) => GroupRowContent::FormerRepository(name),
-        }
-    }
-}
+/// A Worktree row below a Workspace row, with its position among the Worktree rows and their
+/// count.
+type WorktreeRowContent<'a> = (&'a WorktreeRowViewModel, (usize, usize));
 
 /// How one Workspace group moves as its Worktree rows disclose, come, and go.
 struct GroupMotion {
@@ -366,7 +335,7 @@ struct GroupMotion {
     /// afresh each time they are disclosed, so disclosure never reads as rows arriving.
     rows: ReorderableStrip<GroupRow>,
     /// The rows that left the group, which draw in their closing places.
-    departed: std::collections::HashMap<GroupRow, DepartedRow>,
+    departed: std::collections::HashMap<GroupRow, WorktreeRowViewModel>,
     /// The group's rows as last painted.
     items: ScrollHandle,
     /// How the current frame presents the group.
@@ -445,19 +414,10 @@ impl GroupMotion {
                         .into_iter()
                         .map(|(row, _)| row)
                         .collect::<Vec<_>>();
-                    for (row, content) in worktree_group_rows(&previous) {
-                        if current.contains(&row) {
-                            continue;
+                    for (row, (worktree, _)) in worktree_group_rows(&previous) {
+                        if !current.contains(&row) {
+                            self.departed.insert(row, worktree.clone());
                         }
-                        let departed = match content {
-                            GroupRowContent::Worktree(worktree, _) => {
-                                DepartedRow::Worktree(Box::new(worktree.clone()))
-                            }
-                            GroupRowContent::FormerRepository(name) => {
-                                DepartedRow::FormerRepository(name.clone())
-                            }
-                        };
-                        self.departed.insert(row, departed);
                     }
                 }
             }
@@ -491,8 +451,8 @@ impl GroupMotion {
         &self,
         row: GroupRow,
     ) -> (
-        Vec<(Option<&DepartedRow>, Pixels)>,
-        Vec<(Option<&DepartedRow>, Pixels)>,
+        Vec<(Option<&WorktreeRowViewModel>, Pixels)>,
+        Vec<(Option<&WorktreeRowViewModel>, Pixels)>,
     ) {
         let (before, after) = self.rows.leaving_beside(row);
         let departed = |rows: &[super::drag_and_drop::Leaving<GroupRow>]| {
@@ -508,30 +468,19 @@ impl GroupMotion {
 }
 
 /// Each row a Worktree section draws below its Workspace row, in order, with what it shows.
-fn worktree_group_rows(section: &WorktreeSection) -> Vec<(GroupRow, GroupRowContent<'_>)> {
-    use std::hash::{Hash as _, Hasher as _};
-    let mut rows = Vec::new();
-    let mut labels = Vec::new();
-    for group in &section.groups {
-        if let (Some(name), false) = (&group.former_repository, group.rows.is_empty()) {
-            let earlier = labels.iter().filter(|label| *label == name).count();
-            labels.push(name.clone());
-            let mut digest = std::hash::DefaultHasher::new();
-            (name.as_ref(), earlier).hash(&mut digest);
-            rows.push((
-                GroupRow::FormerRepository(digest.finish()),
-                GroupRowContent::FormerRepository(name),
-            ));
-        }
-        let count = group.rows.len();
-        rows.extend(group.rows.iter().enumerate().map(|(index, row)| {
+fn worktree_group_rows(section: &WorktreeSection) -> Vec<(GroupRow, WorktreeRowContent<'_>)> {
+    let count = section.worktrees.len();
+    section
+        .worktrees
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
             (
                 GroupRow::Worktree(row.worktree_id),
-                GroupRowContent::Worktree(row, (index + 1, count)),
+                (row, (index + 1, count)),
             )
-        }));
-    }
-    rows
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
