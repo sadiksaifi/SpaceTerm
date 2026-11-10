@@ -13136,11 +13136,10 @@ mod workspace_repositories {
             (MAIN_ROOT.to_owned(), Some("main".to_owned())),
             "the row keeps its repository's directory and branch"
         );
-        assert!(
-            row.tooltip
-                .contains(&format!("{OUTSIDE_PANE_LABEL}: {ORBIT_ROOT}")),
-            "the tooltip names where the Pane is, got {:?}",
-            row.tooltip
+        assert_eq!(
+            row.tooltip.as_ref(),
+            format!("{CORE_WORKSPACE_BADGE}: {MAIN_ROOT}\n{OUTSIDE_PANE_LABEL}: {ORBIT_ROOT}"),
+            "the tooltip names the Worktree the row shows, then where the Pane is"
         );
     }
 

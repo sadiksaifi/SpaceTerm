@@ -2565,17 +2565,22 @@ impl WorkspaceManager {
                 // its shells are, as a collapsed row describes its Active Worktree. A pinned one
                 // keeps its Pinned Directory, which its pin marks.
                 if worktrees.is_none()
-                    && !binding.as_ref().is_some_and(|binding| binding.pinned)
+                    && let Some(binding) = binding.as_ref().filter(|binding| !binding.pinned)
                     && let Some(worktree) = self.core_only_worktree(workspace.id(), cx)
                 {
                     // Another computer's directory is shown as that computer reports it.
-                    path = if binding
-                        .as_ref()
-                        .is_some_and(|binding| binding.machine.is_some())
-                    {
-                        worktree.directory_tooltip.clone()
-                    } else {
-                        worktree.directory.clone()
+                    (path, tooltip) = match &binding.machine {
+                        Some(machine) => (
+                            worktree.directory_tooltip.clone(),
+                            format!(
+                                "{CORE_WORKSPACE_BADGE} on {machine}: {}",
+                                worktree.directory_tooltip
+                            ),
+                        ),
+                        None => (
+                            worktree.directory.clone(),
+                            format!("{CORE_WORKSPACE_BADGE}: {}", worktree.directory_tooltip),
+                        ),
                     };
                     repository = worktree.repository.clone();
                     if let Some(pane) = &worktree.outside_pane_directory {
