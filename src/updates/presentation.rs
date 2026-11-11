@@ -39,39 +39,7 @@ pub(crate) enum Tone {
     Problem,
 }
 
-/// One glyph per state. App-drawn surfaces map these to Lucide icons; native menus use their
-/// own symbols.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Glyph {
-    /// A spinner, determinate when the item carries a fraction.
-    Working,
-    /// Download a desktop release that is not downloaded yet.
-    Download,
-    /// Relaunch the desktop.
-    Restart,
-    Overdue,
-    /// The desktop is too old for a Machine.
-    UpdateDesktop,
-    /// A Machine's Core is too old for this desktop.
-    UpdateCore,
-    WhatsNew,
-    UpdateFailed,
-    InstallFailed,
-    CantConfirm,
-    CantCheck,
-}
-
-/// What a click does.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Command {
-    Desktop(DesktopAction),
-    /// Performs the action at once.
-    Machine(MachineId, MachineAction),
-    /// Asks first, then performs every action.
-    Confirm(Confirmation),
-    /// Opens an alert with the full sentence. OK then runs `then`.
-    Explain(Explanation),
-}
+pub(crate) use super::state::{Command, Glyph};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DesktopAction {

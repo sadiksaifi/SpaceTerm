@@ -3,6 +3,7 @@
 #[cfg(feature = "developer-tools")]
 pub(crate) mod preview;
 
+pub(crate) mod copy;
 pub(crate) mod ladder;
 pub(crate) mod machines;
 pub(crate) mod policy;
@@ -11,6 +12,7 @@ pub(crate) mod push;
 pub(crate) mod release_feed;
 pub(crate) mod release_notes;
 pub(crate) mod reminders;
+pub(crate) mod state;
 
 use policy::{UpdateHistory, UpdatePreferences, UpdateStage};
 use std::rc::Rc;
