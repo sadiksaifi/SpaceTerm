@@ -746,7 +746,9 @@ impl MachineUpdates {
         let refused = action == MachineAction::Restart
             && matches!(
                 outcome,
-                Err(ActionFailure::Busy | ActionFailure::Unreachable | ActionFailure::Unavailable(_))
+                Err(ActionFailure::Busy
+                    | ActionFailure::Unreachable
+                    | ActionFailure::Unavailable(_))
             );
         self.notify_outcome(machine, action, surface, outcome, refused, cx);
     }
