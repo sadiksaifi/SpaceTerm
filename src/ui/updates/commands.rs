@@ -17,8 +17,7 @@ use crate::updates::confirm::{Confirmation, Explanation};
 use crate::updates::copy::dialogs;
 use crate::updates::machines::store::{self, MachineUpdates, MachineUpdatesNotice, Surface};
 use crate::updates::machines::{ActionFailure, MachineAction, MachineId};
-use crate::updates::presentation::ItemKey;
-use crate::updates::state::{self, Command, DesktopAction};
+use crate::updates::state::{self, Command, DesktopAction, Target};
 
 const OK: &str = "OK";
 const CANCEL: &str = "Cancel";
@@ -298,13 +297,13 @@ pub(super) fn receive_failure(notice: &MachineUpdatesNotice, cx: &mut App) {
 
 /// The person clicked the reminder about `key`: bring a Workspace Window forward with the click's
 /// activation `token`, and perform the step. SpaceTerm relaunches; a Core opens its confirmation.
-pub(super) fn reminder_clicked(key: ItemKey, token: Option<&str>, cx: &mut App) {
+pub(super) fn reminder_clicked(key: Target, token: Option<&str>, cx: &mut App) {
     crate::app::activate_default_window(cx, token);
     cx.activate(true);
     let view = state::current(cx);
     let row = match key {
-        ItemKey::Desktop => Some(view.app_row()),
-        ItemKey::Machine(machine) => view.machine_row(machine),
+        Target::App => Some(view.app_row()),
+        Target::Machine(machine) => view.machine_row(machine),
     };
     if let Some(action) = row.and_then(|row| row.action) {
         perform(action.command, Presenter::Front, cx);

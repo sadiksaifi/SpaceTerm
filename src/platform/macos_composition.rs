@@ -80,7 +80,7 @@ fn desktop_profile(
                 reveal_file: "Show in Finder",
                 read_only_update: (
                     "Move SpaceTerm to Applications",
-                    crate::updates::presentation::READ_ONLY_REMEDY,
+                    crate::updates::copy::dialogs::READ_ONLY_REMEDY,
                 ),
                 uninstall_description: "Removes SpaceTerm and SpaceTerm Core from this Mac.",
                 uninstall_app_remedy: "move SpaceTerm to the Trash",

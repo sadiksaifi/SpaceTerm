@@ -173,7 +173,7 @@ fn desktop_profile(
                 reveal_file: "Show in Folder",
                 read_only_update: (
                     "Reinstall SpaceTerm to Update",
-                    crate::updates::presentation::READ_ONLY_REMEDY,
+                    crate::updates::copy::dialogs::READ_ONLY_REMEDY,
                 ),
                 uninstall_description: "Removes SpaceTerm and SpaceTerm Core from this computer.",
                 uninstall_app_remedy: "run install.sh --uninstall",

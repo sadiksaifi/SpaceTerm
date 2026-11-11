@@ -931,26 +931,25 @@ mod tests {
         for alert in alerts {
             assert_eq!(alert.validate(&policy), Ok(()));
         }
-        let confirmation = crate::updates::presentation::Confirmation {
+        let confirmation = crate::updates::confirm::Confirmation {
             title: "Restart SpaceTerm Core on penguin?".into(),
             message: "SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 3 Terminal Sessions. Workspaces, Tabs and Panes stay.".into(),
             button: "Restart Core".into(),
             actions: Vec::new(),
-            approval: crate::updates::presentation::Approval::default(),
+            approval: crate::updates::confirm::Approval::default(),
         };
         assert_eq!(
             commands::confirmation_alert(&confirmation).validate(&policy),
             Ok(())
         );
-        let failure = |then: Option<crate::updates::state::Command>| {
-            crate::updates::presentation::Explanation {
+        let failure =
+            |then: Option<crate::updates::state::Command>| crate::updates::confirm::Explanation {
                 title: "Couldn't Restart SpaceTerm Core on penguin".into(),
                 message: "SpaceTerm can't reach penguin. Try again when it's connected.".into(),
                 then: then.map(Box::new),
                 proceed: None,
                 dismiss: None,
-            }
-        };
+            };
         for then in [
             None,
             Some(crate::updates::state::Command::Machine(

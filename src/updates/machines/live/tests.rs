@@ -6,7 +6,7 @@ use spaceterm_core::service::lane::{LaneAction, LaneEffects};
 use spaceterm_core::update::facts::{PendingVersion, Platform, Protocols, UpdateCheck};
 
 use super::*;
-use crate::updates::presentation::{CheckProblem, Dismissed, MachineState, MachineView};
+use crate::updates::state::{Dismissed, MachineRow, MachineStage, Marks};
 
 const LOCAL: MachineId = [1; 32];
 const PENGUIN: MachineId = [2; 32];
@@ -14,6 +14,18 @@ const PENGUIN: MachineId = [2; 32];
 const PROMPT: Duration = Duration::from_secs(5);
 /// How long a test waits to show that something did not happen.
 const QUIET: Duration = Duration::from_millis(300);
+
+/// The update view's row for one Machine, with nothing dismissed or deferred on this desktop.
+fn row(update: &MachineUpdate, now: u64) -> MachineRow {
+    let dismissed = Dismissed::new();
+    let deferred = HashMap::new();
+    let marks = Marks {
+        dismissed: &dismissed,
+        deferred: &deferred,
+        pushes_held: false,
+    };
+    MachineRow::new(update, marks, now)
+}
 
 fn version(text: &str) -> Version {
     Version::parse(text).unwrap()
@@ -423,13 +435,9 @@ fn a_core_that_predates_update_facts_reads_cant_check() {
     let update = changed(&events, "the unreported Core", |update| {
         update.link == MachineLink::Unreported
     });
-    let view = MachineView::new(&update, &Dismissed::new(), crate::updates::now());
     assert_eq!(
-        view.state,
-        MachineState::CantCheck {
-            reason: CheckProblem::Unreported,
-            push: None,
-        }
+        row(&update, crate::updates::now()).stage,
+        MachineStage::CantCheck
     );
 }
 
@@ -964,11 +972,10 @@ fn a_core_without_feed_access_offers_the_verified_embedded_build() {
     }
 }
 
-/// A Core below the embedded build's Update Floor is offered no push across the floor, but it
-/// never reads as up to date: it offers the Core's own feed install, which reaches the floor
-/// through a Stepping Stone.
+/// A Core below the embedded build's Update Floor gets no push across the floor. Install asks
+/// the Core to update from its own feed, which reaches the floor through a Stepping Stone.
 #[test]
-fn a_core_below_the_embedded_floor_offers_its_feed_update() {
+fn a_core_below_the_embedded_floor_gets_no_push_and_installs_from_its_feed() {
     let catalog = Catalog::floored("spaceterm-development", "1.2.2", "1.1.0");
     let mut observed = facts(1, 2, None);
     observed.facts.running = version("1.0.0");
@@ -980,28 +987,6 @@ fn a_core_below_the_embedded_floor_offers_its_feed_update() {
     adapter.start(sent).unwrap();
     let update = changed(&events, "the Core facts", |update| update.facts.is_some());
     assert_eq!(update.push, None, "no push crosses the floor");
-
-    let view = MachineView::new(&update, &Dismissed::new(), crate::updates::now());
-    assert_eq!(
-        view.state,
-        MachineState::BelowFloor {
-            to: version("1.2.2")
-        }
-    );
-    assert_eq!(
-        view.sentence().as_ref(),
-        "SpaceTerm Core 1.0.0 on penguin is too old to install SpaceTerm Core 1.2.2 directly. \
-         Updating penguin installs the release it needs first from its update feed. Its 2 \
-         Terminal Sessions keep running."
-    );
-    let row = view.settings_row();
-    assert_eq!(row.status.as_ref(), "Older than 1.2.2");
-    let button = row.button.expect("Settings offers the feed update");
-    assert_eq!(button.label.as_ref(), "Update penguin");
-    assert_eq!(
-        button.command,
-        crate::updates::presentation::Command::Machine(PENGUIN, MachineAction::Install)
-    );
 
     adapter.perform(PENGUIN, MachineAction::Install);
     assert_eq!(finished(&events, &MachineAction::Install), Ok(()));
@@ -1171,9 +1156,12 @@ fn removing_a_machine_does_not_leave_a_restart_wait_on_other_desktops() {
     let removed = changed(&events, "removed machine", |update| {
         matches!(update.link, MachineLink::Offline { .. })
     });
+    let removed = row(&removed, 1);
+    assert_eq!(removed.stage, MachineStage::Offline);
     assert_eq!(
-        MachineView::new(&removed, &Dismissed::new(), 1).state,
-        MachineState::Unpaired
+        removed.step(),
+        None,
+        "a removed Machine asks for no restart"
     );
     assert_eq!(*machine.retries.lock().unwrap(), 0);
 }

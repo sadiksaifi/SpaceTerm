@@ -13,7 +13,7 @@ use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription,
 
 use super::machines::store::MachineUpdates;
 use super::machines::{MachineId, MachineLink, MachineUpdate};
-use super::presentation::ItemKey;
+use super::state::Target;
 use super::{UpdateService, UpdateState, copy, ladder};
 use spaceterm_core::update::facts::PendingVersion;
 
@@ -42,7 +42,7 @@ pub(crate) trait UpdateReminderAdapter {
 /// the click come forward where the desktop requires one, such as Wayland.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ReminderActivated {
-    pub(crate) key: ItemKey,
+    pub(crate) key: Target,
     pub(crate) token: Option<String>,
 }
 
@@ -64,16 +64,16 @@ impl Global for InstalledReminders {}
 impl EventEmitter<ReminderActivated> for UpdateReminders {}
 
 /// The notification key of `key`: "desktop", or the Machine ID in hex.
-fn key_text(key: ItemKey) -> String {
+fn key_text(key: Target) -> String {
     match key {
-        ItemKey::Desktop => "desktop".to_owned(),
-        ItemKey::Machine(machine) => machine.iter().map(|byte| format!("{byte:02x}")).collect(),
+        Target::App => "desktop".to_owned(),
+        Target::Machine(machine) => machine.iter().map(|byte| format!("{byte:02x}")).collect(),
     }
 }
 
-fn parse_key(text: &str) -> Option<ItemKey> {
+fn parse_key(text: &str) -> Option<Target> {
     if text == "desktop" {
-        return Some(ItemKey::Desktop);
+        return Some(Target::App);
     }
     let bytes = text.as_bytes();
     if bytes.len() != 64 {
@@ -83,7 +83,7 @@ fn parse_key(text: &str) -> Option<ItemKey> {
     for (slot, pair) in machine.iter_mut().zip(bytes.chunks(2)) {
         *slot = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
     }
-    Some(ItemKey::Machine(machine))
+    Some(Target::Machine(machine))
 }
 
 /// The Pending Version a Machine waits with, from facts that are current: a Machine that is
@@ -187,7 +187,7 @@ impl UpdateReminders {
             .collect();
         for (machine, title, body) in due {
             self.adapter
-                .notify(&key_text(ItemKey::Machine(machine)), &title, &body);
+                .notify(&key_text(Target::Machine(machine)), &title, &body);
             self.named.insert(machine, now);
         }
     }
@@ -210,8 +210,7 @@ impl UpdateReminders {
             .waiting_since()
             .map_or(0, |since| updates.now().saturating_sub(since));
         let (title, body) = copy::reminders::app(version, downloaded, waited);
-        self.adapter
-            .notify(&key_text(ItemKey::Desktop), &title, &body);
+        self.adapter.notify(&key_text(Target::App), &title, &body);
         cx.defer(move |cx| {
             service
                 .0

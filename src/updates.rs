@@ -8,7 +8,6 @@ pub(crate) mod copy;
 pub(crate) mod ladder;
 pub(crate) mod machines;
 pub(crate) mod policy;
-pub(crate) mod presentation;
 pub(crate) mod push;
 pub(crate) mod release_feed;
 pub(crate) mod release_notes;
@@ -16,7 +15,7 @@ pub(crate) mod reminders;
 pub(crate) mod state;
 
 use ladder::Stage;
-use policy::{UpdateHistory, UpdatePreferences, UpdateStage};
+use policy::{UpdateHistory, UpdatePreferences};
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -444,6 +443,9 @@ impl UpdateModel {
 }
 
 /// How long an approved relaunch may take before SpaceTerm reports that it is still running.
+/// How long a download that SpaceTerm tries again by itself keeps failing before the title bar
+/// shows it. Settings and the menu bar extra show it at once.
+const RETRY_QUIETLY_FOR: u64 = policy::DAY;
 const RELAUNCH_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Whether Sparkle may install the appcast item: a stable release whose enclosure is that
@@ -849,11 +851,6 @@ impl ApplicationUpdates {
     pub(crate) fn reminder(&self) -> Option<Stage> {
         self.reminder
     }
-    /// The stored name of [`Self::ladder_stage`], which the presentation reads until it reads
-    /// the ladder.
-    pub(crate) fn stage(&self) -> UpdateStage {
-        self.stage.into()
-    }
     /// The ladder stage of the waiting SpaceTerm update, from the earliest publication among
     /// the versions it has waited for. Offer when nothing waits.
     pub(crate) fn ladder_stage(&self) -> Stage {
@@ -1038,12 +1035,12 @@ impl ApplicationUpdates {
     }
 
     /// Whether an automatic download failed and SpaceTerm has tried it again by itself for less
-    /// than [`presentation::RETRY_QUIETLY_FOR`]. The failure then stays out of the title bar.
+    /// than [`RETRY_QUIETLY_FOR`]. The failure then stays out of the title bar.
     pub(crate) fn retries_download(&self) -> bool {
         self.preferences().automatic_downloads
-            && self.retrying_since.is_some_and(|since| {
-                self.adapter.now().saturating_sub(since) < presentation::RETRY_QUIETLY_FOR
-            })
+            && self
+                .retrying_since
+                .is_some_and(|since| self.adapter.now().saturating_sub(since) < RETRY_QUIETLY_FOR)
     }
 
     pub(crate) fn cancel(&mut self, cx: &mut Context<Self>) {

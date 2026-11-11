@@ -12,6 +12,13 @@ use crate::updates::state::{
     PUSH_FAILURE, STEPPING_STONE,
 };
 
+/// How to update an installation SpaceTerm can't replace, as each platform installs SpaceTerm.
+/// The failure alert's own wording comes from the platform's desktop wording.
+#[cfg(target_os = "macos")]
+pub(crate) const READ_ONLY_REMEDY: &str = "Install SpaceTerm in Applications to update.";
+#[cfg(not(target_os = "macos"))]
+pub(crate) const READ_ONLY_REMEDY: &str = "Run the SpaceTerm install script to install the update.";
+
 /// The destructive button of D1 and D2.
 pub(crate) const RESTART_BUTTON: &str = "Restart Core";
 pub(crate) const STOP_BUTTON: &str = "Stop";
