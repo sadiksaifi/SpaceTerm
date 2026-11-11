@@ -1363,6 +1363,7 @@ pub struct ComboButton<A: Clone + 'static> {
     shape: ButtonShape,
     contextual_style: Option<(ButtonVariantStyle, Rgba)>,
     menu_indicator: Option<Box<dyn FnOnce(Rgba) -> AnyElement>>,
+    primary_opens_menu: bool,
 }
 
 impl<A: Clone + 'static> ComboButton<A> {
@@ -1391,7 +1392,16 @@ impl<A: Clone + 'static> ComboButton<A> {
             shape: ButtonShape::default(),
             contextual_style: None,
             menu_indicator: None,
+            primary_opens_menu: false,
         }
+    }
+
+    /// Makes the primary segment open the menu instead of performing a command, while the
+    /// control keeps both segments, its divider and its menu. A control whose primary command
+    /// is unavailable for a while, such as one showing progress, keeps its shape this way.
+    pub fn primary_opens_menu(mut self, opens: bool) -> Self {
+        self.primary_opens_menu = opens;
+        self
     }
 
     pub fn variant(mut self, variant: ButtonVariant) -> Self {
@@ -1618,8 +1628,17 @@ impl<A: Clone + 'static> RenderOnce for ComboButton<A> {
         // The chevron's ink sits about one label gap from each edge of the square menu segment.
         // The primary segment spaces its edges, label, and Shortcut by the same gap, so every
         // space across the control reads alike.
-        let button = self
-            .button
+        let button = if self.primary_opens_menu {
+            let menu_state = window
+                .use_keyed_state(self.menu.id.clone(), cx, MenuState::new)
+                .downgrade();
+            self.button.on_activate(move |_, window, cx| {
+                toggle_menu(&menu_state, None, window, cx);
+            })
+        } else {
+            self.button
+        };
+        let button = button
             .focus_handle(focus_handle)
             .parent_draws_focus_ring()
             .joined_edge(JoinedEdge::Trailing)
@@ -4398,6 +4417,56 @@ pub(crate) mod tests {
             cx.update(|window, cx| window_menu_is_open(window, cx)),
             "the whole button must open its menu"
         );
+    }
+
+    #[gpui::test]
+    fn a_primary_segment_that_opens_the_menu_keeps_both_segments(cx: &mut TestAppContext) {
+        struct Split;
+        impl Render for Split {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().p(px(16.0)).child(
+                    ComboButton::new(
+                        "split",
+                        "Restarting",
+                        vec![MenuEntry::action("Open", ()).debug_selector("split-open")],
+                    )
+                    .shape(ButtonShape::Capsule)
+                    .primary_opens_menu(true)
+                    .debug_selector("split")
+                    .on_menu_activate(|_, _, _| {}),
+                )
+            }
+        }
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        let paint = crate::ButtonPaint::new(rgba(0x252530ff), rgba(0xcdcdcdff), rgba(0x00000000));
+        let variant = ButtonVariantStyle::new(paint, paint, paint, paint);
+        let metrics = crate::button::ButtonMetrics::new(px(22.0));
+        cx.set_global(crate::button::ButtonTheme::new(
+            crate::button::ButtonVariants::new(
+                variant, variant, variant, variant, variant, variant, variant,
+            ),
+            crate::button::ButtonSizes::new(metrics, metrics, metrics, metrics),
+            rgba(0x405065ff),
+        ));
+        let (_, cx) = cx.add_window_view(|_, _| Split);
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("split-menu").is_some(),
+            "the menu segment stays"
+        );
+        assert!(
+            cx.debug_bounds("combo-button-divider").is_some(),
+            "with its divider"
+        );
+        let primary = cx.debug_bounds("split").unwrap();
+        cx.simulate_click(primary.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("split-open").is_some(),
+            "the primary segment opens the menu"
+        );
+        assert!(cx.debug_bounds("split-menu").is_some());
     }
 
     #[gpui::test]
