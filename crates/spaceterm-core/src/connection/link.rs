@@ -550,9 +550,23 @@ impl CoreLink {
 
     fn sink(&self, channel: Channel, last: bool) -> Option<Arc<dyn ChannelSink>> {
         let mut state = self.lock();
-        let channel = state.channels.get_mut(&channel)?;
-        channel.ended |= last;
-        Some(Arc::clone(&channel.sink))
+        let owned = state.channels.get_mut(&channel)?;
+        owned.ended |= last;
+        let sink = Arc::clone(&owned.sink);
+        if last {
+            let input = std::mem::take(&mut owned.input)
+                .into_values()
+                .flatten()
+                .collect::<Vec<_>>();
+            if !input.is_empty() {
+                state
+                    .unconfirmed_input
+                    .entry(channel)
+                    .or_default()
+                    .extend(input);
+            }
+        }
+        Some(sink)
     }
 
     /// I/O thread: pings or ends the link from traffic, and returns when to check again.
@@ -1293,41 +1307,51 @@ mod tests {
     }
     #[test]
     fn a_lost_refusal_keeps_input_unconfirmed_after_the_channel_drops() {
-        let now = Instant::now();
-        let link = CoreLink::new(Arc::new(|_: LinkEvent| {}), Arc::new(|| {}), now);
-        let channel = link.open_channel(Arc::new(|_: ChannelEvent| {})).unwrap();
-        let _claim = channel
-            .claim(
-                crate::attachments::Attachment {
-                    workspace: [1; 32],
-                    generation: 1,
-                },
-                [2; 32],
-                AttachmentClaim::Select { explicit: true },
-                PaneSize {
-                    columns: 80,
-                    rows: 24,
-                    cell_width: 8,
-                    cell_height: 16,
-                },
-                None,
-            )
-            .unwrap();
-        let id = channel.channel().unwrap();
-        channel
-            .input(
-                1,
-                vec![InputEvent::Paste {
-                    text: "delivery unknown".into(),
-                    last: true,
-                }],
-            )
-            .unwrap();
-        link.fail(LinkError::Closed);
-        drop(channel);
-        let retained = link.take_unconfirmed_input(id);
-        assert!(
-            matches!(&retained[..], [InputEvent::Paste { text, .. }] if text == "delivery unknown")
-        );
+        for ended in [false, true] {
+            let now = Instant::now();
+            let link = CoreLink::new(Arc::new(|_: LinkEvent| {}), Arc::new(|| {}), now);
+            let channel = link.open_channel(Arc::new(|_: ChannelEvent| {})).unwrap();
+            let _claim = channel
+                .claim(
+                    crate::attachments::Attachment {
+                        workspace: [1; 32],
+                        generation: 1,
+                    },
+                    [2; 32],
+                    AttachmentClaim::Select { explicit: true },
+                    PaneSize {
+                        columns: 80,
+                        rows: 24,
+                        cell_width: 8,
+                        cell_height: 16,
+                    },
+                    None,
+                )
+                .unwrap();
+            let id = channel.channel().unwrap();
+            channel
+                .input(
+                    1,
+                    vec![InputEvent::Paste {
+                        text: "delivery unknown".into(),
+                        last: true,
+                    }],
+                )
+                .unwrap();
+            if ended {
+                link.dispatch(CoreMessage::Pane(PaneMessage {
+                    channel: id,
+                    event: PaneEvent::Ended,
+                }))
+                .unwrap();
+            } else {
+                link.fail(LinkError::Closed);
+            }
+            drop(channel);
+            let retained = link.take_unconfirmed_input(id);
+            assert!(
+                matches!(&retained[..], [InputEvent::Paste { text, .. }] if text == "delivery unknown")
+            );
+        }
     }
 }

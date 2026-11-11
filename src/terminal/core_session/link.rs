@@ -778,6 +778,14 @@ impl PaneLink {
                     event @ (ChannelEvent::Frame(_)
                     | ChannelEvent::Pane(_)
                     | ChannelEvent::Accessibility(_)) => {
+                        if matches!(&event, ChannelEvent::Pane(event) if event.last()) {
+                            retaining_input.store(true, Ordering::Release);
+                            let channel = Channel(bound_channel.load(Ordering::Acquire));
+                            unconfirmed
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .extend(returned.take_unconfirmed_input(channel));
+                        }
                         drop(received);
                         // The inbox wakes the worker.
                         pushed.deliver(event);
@@ -2077,6 +2085,80 @@ mod tests {
             _ => {}
         }
         Ok(Reply::Unchanged)
+    }
+
+    #[test]
+    fn an_encoded_restart_refusal_or_channel_end_preserves_the_original_client_input() {
+        use protocol::{
+            CoreMessage, PaneMessage,
+            frame::{RawFrame, encode_core},
+        };
+        use spaceterm_core::connection::link::LinkEvent;
+        for ended in [false, true] {
+            let now = std::time::Instant::now();
+            let link = CoreLink::new(Arc::new(|_: LinkEvent| {}), Arc::new(|| {}), now);
+            let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+            let client = PaneLink::new(link.clone(), None, Arc::clone(&notify));
+            let channel = link
+                .open_channel(client.sink(super::super::inbox::Inbox::new(notify)))
+                .unwrap();
+            let _claim = channel
+                .claim(
+                    spaceterm_core::attachments::Attachment {
+                        workspace: [1; 32],
+                        generation: 1,
+                    },
+                    [2; 32],
+                    pane::AttachmentClaim::Select { explicit: true },
+                    pane::PaneSize {
+                        columns: 80,
+                        rows: 24,
+                        cell_width: 8,
+                        cell_height: 16,
+                    },
+                    None,
+                )
+                .unwrap();
+            let id = channel.channel().unwrap();
+            client.bound_channel.store(id.0, Ordering::Release);
+            let serial = channel
+                .input(
+                    1,
+                    vec![InputEvent::Paste {
+                        text: "kept".into(),
+                        last: true,
+                    }],
+                )
+                .unwrap();
+            while link.next_frame().is_some() {}
+            let event = if ended {
+                PaneEvent::Ended
+            } else {
+                PaneEvent::InputRestarting {
+                    channel: id,
+                    serial,
+                }
+            };
+            let wire = encode_core(&CoreMessage::Pane(PaneMessage { channel: id, event })).unwrap();
+            for bytes in &wire.frames {
+                link.receive(RawFrame::parse(bytes).unwrap(), now).unwrap();
+            }
+            let retained = if ended {
+                &client.unconfirmed_input
+            } else {
+                &client.unsent_input
+            }
+            .lock()
+            .unwrap();
+            assert!(
+                matches!(&retained[..], [InputEvent::Paste { text, last: true }] if text == "kept")
+            );
+            assert!(client.retaining_input.load(Ordering::Acquire));
+            assert!(
+                link.next_frame().is_none(),
+                "retained bytes are never replayed"
+            );
+        }
     }
 
     #[test]
