@@ -140,6 +140,15 @@ pub enum LaneRequest {
     ResetPermission {
         permission: SystemPermission,
     },
+    /// Reads the Core's detailed update facts: the facts and what only its update engine knows,
+    /// as one snapshot. Since service [`crate::update::facts::MINOR_DETAILED_FACTS`].
+    DetailedFacts {},
+    /// As [`LaneRequest::WaitFacts`], answering with the detailed update facts. Since service
+    /// [`crate::update::facts::MINOR_DETAILED_FACTS`].
+    WaitDetailedFacts {
+        boot: String,
+        revision: u64,
+    },
 }
 
 impl LaneReply {
@@ -186,7 +195,13 @@ impl LaneRequest {
     /// that its admission's selected version lacks, and the lane refuses one as `unsupported`.
     /// A minor adds a request by appending a variant above and naming its minor here.
     pub const fn since(&self) -> crate::protocol::version::ProtocolVersion {
-        crate::protocol::version::ProtocolVersion { major: 1, minor: 0 }
+        let minor = match self {
+            Self::DetailedFacts {} | Self::WaitDetailedFacts { .. } => {
+                crate::update::facts::MINOR_DETAILED_FACTS
+            }
+            _ => 0,
+        };
+        crate::protocol::version::ProtocolVersion { major: 1, minor }
     }
 }
 
@@ -216,6 +231,12 @@ pub enum LaneReply {
     Facts {
         boot: String,
         facts: Box<crate::update::facts::UpdateFacts>,
+    },
+    /// The detailed update facts of the Core run `boot`. Only a connection that selected
+    /// service [`crate::update::facts::MINOR_DETAILED_FACTS`] or later asks for them.
+    DetailedFacts {
+        boot: String,
+        detailed: Box<crate::update::facts::DetailedUpdateFacts>,
     },
     /// `StageFetch` or a push's last `UploadChunk` finished. `installed` is false when the feed
     /// named no newer version.
@@ -357,6 +378,11 @@ pub trait LaneHost: Send + Sync {
     /// Session is refused with `ServiceBusy`.
     fn fence(&self, admit: &mut dyn FnMut(&[Id]) -> Result<(), CoreError>)
     -> Result<(), CoreError>;
+    /// How many live Terminal Sessions have work going on (ADR 0065). A host that cannot tell
+    /// counts every one.
+    fn working(&self) -> u32 {
+        u32::try_from(self.sessions().len()).unwrap_or(u32::MAX)
+    }
     /// Clears the membership fence.
     fn release_fence(&self);
     /// The live Terminal Session IDs.
@@ -666,6 +692,16 @@ impl LaneCore {
                     .flatten();
                 self.facts_reply(waited.unwrap_or_else(|| updates.facts()))
             }),
+            LaneRequest::DetailedFacts {} => self
+                .updates()
+                .map(|updates| self.detailed_reply(FactsSource::detailed(updates))),
+            LaneRequest::WaitDetailedFacts { boot, revision } => self.updates().map(|updates| {
+                // A stopping server answers with its facts now, then closes the lane.
+                let waited = (boot == hex(&self.boot))
+                    .then(|| updates.wait_detailed(revision, WAIT_FACTS_LIMIT))
+                    .flatten();
+                self.detailed_reply(waited.unwrap_or_else(|| FactsSource::detailed(updates)))
+            }),
             LaneRequest::Check => return (sourced(self.check()), None),
             LaneRequest::StageFetch => return (sourced(self.stage_fetch()), None),
             LaneRequest::StageUpload {
@@ -767,6 +803,13 @@ impl LaneCore {
     /// The Core's update facts now.
     fn facts(&self) -> Result<UpdateFacts, CoreError> {
         self.updates().map(FactsSource::facts)
+    }
+
+    fn detailed_reply(&self, detailed: crate::update::facts::DetailedUpdateFacts) -> LaneReply {
+        LaneReply::DetailedFacts {
+            boot: hex(&self.boot),
+            detailed: Box::new(detailed),
+        }
     }
 
     fn facts_reply(&self, facts: UpdateFacts) -> LaneReply {
@@ -1553,9 +1596,9 @@ impl runtime::updates::Restarter for LaneCore {
     fn restart(
         self: Arc<Self>,
         candidate: Option<[u8; 32]>,
-        silent: bool,
+        fence: runtime::updates::Fence,
     ) -> Result<runtime::updates::Launch, runtime::updates::RestartRefusal> {
-        use runtime::updates::RestartRefusal;
+        use runtime::updates::{Fence, RestartRefusal};
         let id = OperationId::random().map_err(RestartRefusal::Core)?;
         let record = Record {
             id,
@@ -1578,7 +1621,7 @@ impl runtime::updates::Restarter for LaneCore {
             let mut open = false;
             let mut admitted = None;
             let fenced = self.host.fence(&mut |sessions| {
-                if silent && !sessions.is_empty() {
+                if fence == Fence::NoSessions && !sessions.is_empty() {
                     open = true;
                     return Err(CoreError::Changed);
                 }

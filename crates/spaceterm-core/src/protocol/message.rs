@@ -51,6 +51,10 @@ pub enum CoreMessage {
     /// The Core's update facts: the first message after admission, then again after every
     /// change. A newer value replaces one not yet written.
     UpdateFacts(Box<crate::update::facts::UpdateFacts>),
+    /// The Core's detailed update facts, in place of `UpdateFacts` for a connection whose
+    /// admission selected work [`crate::update::facts::MINOR_DETAILED_FACTS`] or later. A newer
+    /// value replaces one not yet written.
+    DetailedUpdateFacts(Box<crate::update::facts::DetailedUpdateFacts>),
     Ping(Ping),
     Pong(Pong),
     /// The server closes the connection after this message.
@@ -354,6 +358,7 @@ impl CoreMessage {
                 Ok(())
             }
             Self::UpdateFacts(facts) => check(facts.validate().is_ok()),
+            Self::DetailedUpdateFacts(detailed) => check(detailed.validate().is_ok()),
             Self::Pane(_) | Self::Ping(_) | Self::Pong(_) | Self::Goodbye(_) => Ok(()),
         }
     }

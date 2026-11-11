@@ -223,6 +223,32 @@ pub fn facts(session: &mut Session) -> Result<(String, UpdateFacts), LaneError> 
     }
 }
 
+/// The Core's detailed update facts and the run of the Core that reported them. None from a
+/// Core whose service lane selected a minor below
+/// [`crate::update::facts::MINOR_DETAILED_FACTS`]; read [`facts`] and
+/// [`crate::update::continuation`] from such a Core.
+pub fn detailed_facts(
+    session: &mut Session,
+) -> Result<Option<crate::update::facts::DetailedUpdateFacts>, LaneError> {
+    Ok(detailed_facts_of_run(session)?.map(|(_, detailed)| detailed))
+}
+
+/// As [`detailed_facts`], with the run of the Core that reported them.
+pub fn detailed_facts_of_run(
+    session: &mut Session,
+) -> Result<Option<(String, crate::update::facts::DetailedUpdateFacts)>, LaneError> {
+    if session.selected().minor < crate::update::facts::MINOR_DETAILED_FACTS {
+        return Ok(None);
+    }
+    match session.call(
+        &LaneRequest::DetailedFacts {},
+        Instant::now() + REQUEST_LIMIT,
+    )? {
+        LaneReply::DetailedFacts { boot, detailed } => Ok(Some((boot, *detailed))),
+        _ => Err(LaneError::Core(CoreError::Protocol)),
+    }
+}
+
 /// Asks the Core to install the release its own feed names. Returns whether it installed a
 /// version now, and its facts after. A Core that never fetches a feed answers `no_update_feed`.
 pub fn install_from_feed(session: &mut Session) -> Result<(bool, UpdateFacts), LaneError> {

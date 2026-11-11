@@ -196,6 +196,9 @@ struct State {
     inventory: Option<(u64, Arc<InventoryRevision>)>,
     /// The newest update facts this link received.
     update_facts: Option<Arc<UpdateFacts>>,
+    /// The newest detailed update facts, from a Core whose work admission selected
+    /// [`crate::update::facts::MINOR_DETAILED_FACTS`] or later.
+    detailed_update_facts: Option<Arc<crate::update::facts::DetailedUpdateFacts>>,
     /// Bytes of every frame received, headers included.
     received_bytes: u64,
 }
@@ -231,6 +234,7 @@ impl CoreLink {
                     closed: None,
                     inventory: None,
                     update_facts: None,
+                    detailed_update_facts: None,
                     received_bytes: 0,
                 }),
                 revisions: Condvar::new(),
@@ -276,6 +280,12 @@ impl CoreLink {
     /// after admission and again after every change.
     pub fn update_facts(&self) -> Option<Arc<UpdateFacts>> {
         self.lock().update_facts.clone()
+    }
+
+    /// The newest detailed update facts. None from a Core older than work
+    /// [`crate::update::facts::MINOR_DETAILED_FACTS`], and before the first.
+    pub fn detailed_update_facts(&self) -> Option<Arc<crate::update::facts::DetailedUpdateFacts>> {
+        self.lock().detailed_update_facts.clone()
     }
 
     /// Waits until this link received more than `seen` revisions, and returns the newest. Fails
@@ -472,6 +482,16 @@ impl CoreLink {
             CoreMessage::UpdateFacts(facts) => {
                 let facts: Arc<UpdateFacts> = Arc::from(facts);
                 self.lock().update_facts = Some(Arc::clone(&facts));
+                self.shared.events.deliver(LinkEvent::UpdateFacts(facts));
+            }
+            // Every reader of the facts reads them from the detailed facts too.
+            CoreMessage::DetailedUpdateFacts(detailed) => {
+                let facts = Arc::new(detailed.facts.clone());
+                {
+                    let mut state = self.lock();
+                    state.update_facts = Some(Arc::clone(&facts));
+                    state.detailed_update_facts = Some(Arc::from(detailed));
+                }
                 self.shared.events.deliver(LinkEvent::UpdateFacts(facts));
             }
             CoreMessage::Goodbye(fatal) => {

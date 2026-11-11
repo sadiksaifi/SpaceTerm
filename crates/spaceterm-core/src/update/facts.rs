@@ -89,7 +89,8 @@ pub enum RestartCause {
     /// SpaceTerm Core decided on its own, with no live Terminal Session.
     NoSessions,
     /// SpaceTerm Core decided on its own: no live Terminal Session had work going on for the
-    /// idle period, and the restart ends them.
+    /// idle period, and the restart ends them. No Core sends it yet; see
+    /// [`super::continuation::Continuation::WhenNothingRuns`].
     NothingRunning,
 }
 

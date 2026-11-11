@@ -5126,3 +5126,163 @@ fn a_hidden_session_reports_retitles_at_most_once_per_interval() {
     );
     worker.finish();
 }
+
+/// Process facts a test sets: `Some(others)`, or `None` for a failed read.
+struct FixedProbe(Option<bool>);
+impl crate::platform::native_pty::SessionProbe for FixedProbe {
+    fn others(&self) -> io::Result<bool> {
+        self.0.ok_or_else(|| io::Error::other("unreadable"))
+    }
+}
+
+/// A worker whose shell marks its prompts as owner `0f1e`, whose PTY reports `line`, and whose
+/// terminal session holds `others`.
+fn idle_worker(line: LineMode, others: Option<bool>) -> TerminalWorker {
+    let records = ScriptedPtyRecords::default();
+    records.update(|state| state.line_mode = line);
+    let (_command_tx, commands) = mpsc::channel();
+    let (_reader_events, reader_events) = reader_output::reader_output(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (events, _receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
+    let context = crate::terminal::metadata::TerminalMetadataContext::local(
+        crate::local_path::LocalPathSemantics::Posix,
+        "/initial",
+        crate::terminal::metadata::LocalMachine::new(None, Some("mac.local"), None),
+    )
+    .with_prompt_owner(crate::terminal::metadata::PromptOwner::fixture("0f1e"));
+    let worker = TerminalWorker {
+        metadata_state: TerminalSessionMetadataState::default(),
+        native_pty: direct_native_pty(records),
+        input: PtyInput::default(),
+        emulator: TerminalEmulator::new_with_metadata_context(
+            test_geometry(),
+            context,
+            "zsh",
+            "xterm-256color",
+            Instant::now(),
+        )
+        .unwrap(),
+        commands: WorkerCommands::new(commands, Arc::default()),
+        reader_events,
+        events: events.into(),
+        accessibility,
+        pending_command: None,
+        terminal_input_focused: true,
+        focus_reporting_enabled: false,
+        held_keys: HeldKeys::default(),
+        schedules: WorkerSchedules::new(Instant::now(), ScheduleInput::default()),
+        osc52_filter: Osc52Filter::default(),
+        permission_requests: PermissionRequestFilter::default(),
+        clipboard: WorkerClipboard::default(),
+        progress: Default::default(),
+    };
+    worker
+        .events
+        .set_probe(Some(Arc::new(FixedProbe(others)) as Arc<_>));
+    worker
+}
+
+use super::activity::IDLE_PERIOD;
+
+const SHELL_FOREGROUND: LineMode = LineMode {
+    canonical: false,
+    echo: false,
+    signals: true,
+    shell_foreground: true,
+};
+const OWNED_PROMPT: &[u8] = b"\x1b]133;A;spaceterm=0f1e\x07% \x1b]133;B;spaceterm=0f1e\x07";
+
+/// The worker printed `output` and read its PTY's line mode, as after any output.
+fn shows(worker: &mut TerminalWorker, output: &[u8]) {
+    assert!(worker.feed_test_output(vec![output.to_vec()]));
+    worker.read_line_mode();
+}
+
+#[test]
+fn a_bare_integrated_shell_has_no_work_going_on_only_after_an_hour_of_silence() {
+    let mut worker = idle_worker(SHELL_FOREGROUND, Some(false));
+    shows(&mut worker, OWNED_PROMPT);
+    let shown = Instant::now();
+    assert!(worker.events.work_going_on(shown + IDLE_PERIOD / 2));
+    assert!(!worker.events.work_going_on(shown + IDLE_PERIOD * 2));
+    // New output starts the hour again.
+    shows(&mut worker, OWNED_PROMPT);
+    assert!(
+        worker
+            .events
+            .work_going_on(Instant::now() + IDLE_PERIOD / 2)
+    );
+    worker.finish();
+}
+
+#[test]
+fn unsent_input_at_the_prompt_is_work() {
+    let mut worker = idle_worker(SHELL_FOREGROUND, Some(false));
+    shows(&mut worker, OWNED_PROMPT);
+    worker.emulator.note_input(2);
+    assert!(worker.write_pty(b"ls"));
+    assert!(
+        worker
+            .events
+            .work_going_on(Instant::now() + IDLE_PERIOD * 2)
+    );
+    worker.finish();
+}
+
+#[test]
+fn a_prompt_without_the_owner_marker_is_work() {
+    let mut worker = idle_worker(SHELL_FOREGROUND, Some(false));
+    shows(&mut worker, b"\x1b]133;A\x07$ \x1b]133;B\x07");
+    assert!(
+        worker
+            .events
+            .work_going_on(Instant::now() + IDLE_PERIOD * 2)
+    );
+    worker.finish();
+}
+
+#[test]
+fn a_running_command_behind_the_prompt_is_work() {
+    let mut worker = idle_worker(SHELL_FOREGROUND, Some(false));
+    shows(&mut worker, OWNED_PROMPT);
+    shows(&mut worker, b"\x1b]133;C;spaceterm=0f1e\x07");
+    assert!(
+        worker
+            .events
+            .work_going_on(Instant::now() + IDLE_PERIOD * 2)
+    );
+    worker.finish();
+}
+
+#[test]
+fn a_program_in_the_foreground_or_an_unreadable_line_mode_is_work() {
+    let editor = LineMode {
+        shell_foreground: false,
+        ..SHELL_FOREGROUND
+    };
+    for line in [editor, LineMode::UNKNOWN] {
+        let mut worker = idle_worker(line, Some(false));
+        shows(&mut worker, OWNED_PROMPT);
+        assert!(
+            worker
+                .events
+                .work_going_on(Instant::now() + IDLE_PERIOD * 2)
+        );
+        worker.finish();
+    }
+}
+
+#[test]
+fn a_job_beside_the_shell_or_an_unreadable_terminal_session_is_work() {
+    // A stopped or background job, or a helper the prompt starts, is another process.
+    for others in [Some(true), None] {
+        let mut worker = idle_worker(SHELL_FOREGROUND, others);
+        shows(&mut worker, OWNED_PROMPT);
+        assert!(
+            worker
+                .events
+                .work_going_on(Instant::now() + IDLE_PERIOD * 2)
+        );
+        worker.finish();
+    }
+}

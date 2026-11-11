@@ -116,6 +116,11 @@ pub trait PaneService: Send {
     fn sessions(&self) -> Vec<[u8; 32]> {
         Vec::new()
     }
+    /// How many live Terminal Sessions have work going on (ADR 0065). A service that cannot
+    /// tell counts every one.
+    fn working(&self) -> u32 {
+        u32::try_from(self.sessions().len()).unwrap_or(u32::MAX)
+    }
 }
 
 /// The host's direct-network administration, answering `Operation::Direct`. It runs on the sync

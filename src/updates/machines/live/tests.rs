@@ -22,6 +22,7 @@ fn version(text: &str) -> Version {
 fn facts(revision: u64, sessions: u32, pending: Option<&str>) -> Observed {
     Observed {
         boot: "boot-1".into(),
+        detailed: None,
         facts: UpdateFacts {
             revision,
             platform: Platform::LinuxX86_64,

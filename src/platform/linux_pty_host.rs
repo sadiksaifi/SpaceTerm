@@ -19,6 +19,19 @@ impl UnixPtyHost for LinuxPtyHost {
         read_process_stat(process).map(|stat| stat.observation)
     }
 
+    fn observe_exactly(&self, process: i32) -> io::Result<Option<ProcessObservation>> {
+        if process < 1 {
+            return Ok(None);
+        }
+        let stat = match std::fs::read(format!("/proc/{process}/stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        exact_stat(process, &stat)
+    }
+
     fn process_ids(&self) -> io::Result<Vec<i32>> {
         let mut processes = Vec::new();
         for entry in std::fs::read_dir("/proc")? {
@@ -37,6 +50,42 @@ impl UnixPtyHost for LinuxPtyHost {
             MasterReadError::Failure
         }
     }
+}
+
+/// A `/proc/<pid>/stat` record for a decision that must not miss a process: a dead record
+/// (`X`) is gone, a zombie still counts, a kernel thread belongs to session 0, and a record
+/// that does not parse is an error.
+fn exact_stat(process: i32, stat: &[u8]) -> io::Result<Option<ProcessObservation>> {
+    let unreadable = || io::Error::other("the process record could not be read");
+    let name_end = stat
+        .iter()
+        .rposition(|byte| *byte == b')')
+        .ok_or_else(unreadable)?;
+    let fields = std::str::from_utf8(&stat[name_end + 1..]).map_err(|_| unreadable())?;
+    let fields = fields.split_ascii_whitespace().collect::<Vec<_>>();
+    let state = *fields.first().ok_or_else(unreadable)?;
+    if matches!(state, "X" | "x") {
+        return Ok(None);
+    }
+    let number = |index: usize| {
+        fields
+            .get(index)
+            .and_then(|field| field.parse::<i64>().ok())
+    };
+    let (Some(group), Some(session), Some(start)) = (number(2), number(3), number(19)) else {
+        return Err(unreadable());
+    };
+    Ok(Some(ProcessObservation {
+        identity: ProcessIdentity {
+            process,
+            start: ProcessStart {
+                coarse: u64::try_from(start).map_err(|_| unreadable())?,
+                fine: 0,
+            },
+        },
+        process_group: i32::try_from(group).map_err(|_| unreadable())?,
+        session: i32::try_from(session).map_err(|_| unreadable())?,
+    }))
 }
 
 struct ProcessStat {
@@ -126,6 +175,29 @@ mod tests {
         assert!(parse_process_stat(1, &stat("kthreadd", "S", 0, 0, 1)).is_none());
         assert!(parse_process_stat(1, b"1 (truncated").is_none());
         assert!(parse_process_stat(1, b"1 (short) S 1 2").is_none());
+    }
+
+    #[test]
+    fn an_exact_read_tells_a_dead_record_from_one_it_cannot_read() {
+        let member = exact_stat(4242, &stat("sleep", "T", 4243, 4240, 9))
+            .unwrap()
+            .unwrap();
+        assert_eq!((member.process_group, member.session), (4243, 4240));
+        let zombie = exact_stat(4242, &stat("sleep", "Z", 4243, 4240, 9)).unwrap();
+        assert_eq!(
+            zombie.map(|z| z.session),
+            Some(4240),
+            "a zombie still counts"
+        );
+        let kernel = exact_stat(2, &stat("kthreadd", "S", 0, 0, 1)).unwrap();
+        assert_eq!(kernel.map(|k| k.session), Some(0));
+        assert_eq!(
+            exact_stat(4242, &stat("sleep", "X", 1, 1, 1)).unwrap(),
+            None
+        );
+        assert!(exact_stat(4242, b"4242 (truncated").is_err());
+        assert!(exact_stat(4242, b"4242 (short) S 1 2").is_err());
+        assert_eq!(LinuxPtyHost.observe_exactly(i32::MAX).unwrap(), None);
     }
 
     #[cfg(feature = "native-tests")]

@@ -143,8 +143,17 @@ struct SharedLink {
     generation: std::sync::atomic::AtomicU64,
     /// The last facts a link received while the Core restarted, and when they arrived. They
     /// outlast that link until another link's facts arrive, or for [`RESTART_FACTS_LIMIT`].
-    restart: Mutex<Option<(std::time::Instant, Arc<crate::update::facts::UpdateFacts>)>>,
+    restart: Mutex<Option<RestartFacts>>,
 }
+
+/// The facts a link received while the Core restarted, when they arrived, and the detailed
+/// facts of the same revision from a Core of work
+/// [`crate::update::facts::MINOR_DETAILED_FACTS`] or later.
+type RestartFacts = (
+    std::time::Instant,
+    Arc<crate::update::facts::UpdateFacts>,
+    Option<Arc<crate::update::facts::DetailedUpdateFacts>>,
+);
 
 /// How long [`MachineConnection::update_facts`] keeps a restart's facts without a link that
 /// reports newer ones. It matches how long a client follows a Core that replaces itself.
@@ -188,8 +197,15 @@ impl LinkSink for Fanout {
                 }
             }
             LinkEvent::UpdateFacts(facts) => {
-                *shared.restart.lock().unwrap_or_else(|e| e.into_inner()) =
-                    restarting(&facts).then(|| (std::time::Instant::now(), Arc::clone(&facts)));
+                // The link stores its detailed facts before it reports the facts in them.
+                let detailed = || {
+                    let link = shared.link.try_lock().ok()?;
+                    link.as_ref()?
+                        .detailed_update_facts()
+                        .filter(|detailed| detailed.facts == *facts)
+                };
+                *shared.restart.lock().unwrap_or_else(|e| e.into_inner()) = restarting(&facts)
+                    .then(|| (std::time::Instant::now(), Arc::clone(&facts), detailed()));
                 for sink in subscribers {
                     sink.deliver(LinkEvent::UpdateFacts(Arc::clone(&facts)));
                 }
@@ -653,8 +669,25 @@ impl MachineConnection {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .as_ref()
-                    .filter(|(at, _)| at.elapsed() < RESTART_FACTS_LIMIT)
-                    .map(|(_, facts)| Arc::clone(facts))
+                    .filter(|(at, _, _)| at.elapsed() < RESTART_FACTS_LIMIT)
+                    .map(|(_, facts, _)| Arc::clone(facts))
+            })
+    }
+    /// The newest detailed update facts the shared live connection received, kept through a
+    /// restart as [`Self::update_facts`] keeps the facts. `restart` in the facts that announced
+    /// a restart says why it began. None from a Core older than work
+    /// [`crate::update::facts::MINOR_DETAILED_FACTS`].
+    pub fn detailed_update_facts(&self) -> Option<Arc<crate::update::facts::DetailedUpdateFacts>> {
+        self.live_link()
+            .and_then(|link| link.detailed_update_facts())
+            .or_else(|| {
+                self.shared
+                    .restart
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                    .filter(|(at, _, _)| at.elapsed() < RESTART_FACTS_LIMIT)
+                    .and_then(|(_, _, detailed)| detailed.clone())
             })
     }
     /// Opens a new connection of its own, separate from the shared one. `events` receives its

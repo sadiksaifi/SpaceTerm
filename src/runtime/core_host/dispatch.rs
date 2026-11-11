@@ -284,6 +284,10 @@ pub trait HostCommands: Send {
     fn sessions(&self) -> Vec<[u8; 32]> {
         Vec::new()
     }
+    /// How many live Terminal Sessions have work going on. See `PaneService::working`.
+    fn working(&self) -> u32 {
+        u32::try_from(self.sessions().len()).unwrap_or(u32::MAX)
+    }
     /// The Terminal Diagnostics counters this host's Terminal Sessions and publications record
     /// into.
     fn terminal_counters(&self) -> Arc<spaceterm_core::diagnostics::TerminalCounters>;
@@ -1428,6 +1432,9 @@ impl<H: HostCommands> ConnectionService for Served<H> {
     }
     fn sessions(&self) -> Vec<[u8; 32]> {
         self.host.sessions()
+    }
+    fn working(&self) -> u32 {
+        self.host.working()
     }
 }
 

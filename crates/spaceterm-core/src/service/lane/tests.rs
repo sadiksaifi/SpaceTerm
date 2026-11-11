@@ -1298,17 +1298,22 @@ fn a_restart_moves_into_the_pending_version_when_one_waits() {
 
 #[test]
 fn a_restart_the_core_decides_on_waits_for_zero_sessions_and_leaves_no_record() {
-    use runtime::updates::{RestartRefusal, Restarter};
+    use runtime::updates::{Fence, RestartRefusal, Restarter};
     with_lane(|lane| {
         lane.host.sessions.lock().unwrap().push([3; 32]);
         assert_eq!(
-            Arc::clone(&lane.lane).restart(None, true).err(),
+            Arc::clone(&lane.lane)
+                .restart(None, Fence::NoSessions)
+                .err(),
             Some(RestartRefusal::SessionsOpen)
         );
         assert_eq!(lane.launches.load(Ordering::SeqCst), 0);
         assert!(!lane.host.fenced.load(Ordering::SeqCst));
         lane.host.sessions.lock().unwrap().clear();
-        let launch = Arc::clone(&lane.lane).restart(None, true).ok().unwrap();
+        let launch = Arc::clone(&lane.lane)
+            .restart(None, Fence::NoSessions)
+            .ok()
+            .unwrap();
         // Admission launches nothing: the engine publishes the restart first.
         assert_eq!(lane.launches.load(Ordering::SeqCst), 0);
         launch();
@@ -2277,6 +2282,141 @@ mod flow {
         let mut sent = Vec::new();
         std::io::Read::read_to_end(&mut core, &mut sent).unwrap();
         assert!(sent.is_empty(), "the Core received {} bytes", sent.len());
+    }
+
+    /// The service minor before the detailed update facts.
+    const BEFORE_DETAILED: crate::protocol::version::ProtocolVersion =
+        crate::protocol::version::ProtocolVersion { major: 1, minor: 1 };
+
+    /// Serves `requests` on a connection whose admission selected `selected`, and returns the
+    /// replies.
+    fn served(
+        lane: &Lane,
+        selected: crate::protocol::version::ProtocolVersion,
+        requests: Vec<LaneRequest>,
+    ) -> Vec<LaneReply> {
+        let (mut client, mut core) = UnixStream::pair().unwrap();
+        let peer = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut replies = Vec::new();
+            for request in requests {
+                client
+                    .send(&serde_json::to_vec(&request).unwrap(), deadline)
+                    .unwrap();
+                replies.push(
+                    serde_json::from_slice::<LaneReply>(
+                        &client.receive(MAX_FRAME, deadline).unwrap(),
+                    )
+                    .unwrap(),
+                );
+            }
+            replies
+        });
+        let admitted = crate::protocol::AdmittedLane {
+            actor: LOCAL,
+            selected,
+        };
+        let _ = lane.lane.serve(&mut core, admitted, None, &|| Ok(()));
+        peer.join().unwrap()
+    }
+
+    #[test]
+    fn a_service_1_2_peer_reads_the_detailed_update_facts_as_one_snapshot() {
+        with_lane(|lane| {
+            let replies = served(
+                &lane,
+                crate::protocol::version::SERVICE,
+                vec![
+                    LaneRequest::Facts {},
+                    LaneRequest::DetailedFacts {},
+                    // Another boot answers at once.
+                    LaneRequest::WaitDetailedFacts {
+                        boot: "another".into(),
+                        revision: 0,
+                    },
+                ],
+            );
+            let LaneReply::Facts { boot, facts } = &replies[0] else {
+                panic!("{:?}", replies[0]);
+            };
+            for reply in &replies[1..] {
+                let LaneReply::DetailedFacts {
+                    boot: detailed_boot,
+                    detailed,
+                } = reply
+                else {
+                    panic!("{reply:?}");
+                };
+                assert_eq!(detailed_boot, boot);
+                assert_eq!(detailed.facts, **facts);
+                assert_eq!(detailed.validate(), Ok(()));
+                assert_eq!(detailed.continuation, None, "nothing waits");
+            }
+        });
+    }
+
+    #[test]
+    fn a_service_1_1_peer_never_receives_the_detailed_update_facts() {
+        with_lane(|lane| {
+            let replies = served(
+                &lane,
+                BEFORE_DETAILED,
+                vec![
+                    LaneRequest::DetailedFacts {},
+                    LaneRequest::WaitDetailedFacts {
+                        boot: "another".into(),
+                        revision: 0,
+                    },
+                    LaneRequest::Facts {},
+                ],
+            );
+            let unsupported = LaneReply::Error {
+                code: "unsupported".into(),
+            };
+            assert_eq!(replies[..2], [unsupported.clone(), unsupported]);
+            assert!(matches!(replies[2], LaneReply::Facts { .. }));
+        });
+    }
+
+    #[test]
+    fn a_client_asks_a_service_1_1_core_for_no_detailed_update_facts() {
+        /// Admits at service 1.1 and keeps the Core's end of the connection.
+        #[derive(Default)]
+        struct Older(Mutex<Option<UnixStream>>);
+        impl Connector for Older {
+            fn connect(&self, _: Instant) -> Result<client::Connected, CoreError> {
+                let (client, core) = UnixStream::pair().map_err(|_| CoreError::Protocol)?;
+                *self.0.lock().unwrap() = Some(core);
+                Ok((Box::new(client), BEFORE_DETAILED, BEFORE_DETAILED))
+            }
+        }
+        let older = Older::default();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut session = Session::open(&older, deadline).unwrap();
+        assert_eq!(admin::detailed_facts(&mut session), Ok(None));
+        drop(session);
+        let mut core = older.0.lock().unwrap().take().unwrap();
+        let mut sent = Vec::new();
+        std::io::Read::read_to_end(&mut core, &mut sent).unwrap();
+        assert!(sent.is_empty(), "the Core received {} bytes", sent.len());
+    }
+
+    #[test]
+    fn detailed_facts_messages_keep_their_json_shape() {
+        assert_eq!(
+            serde_json::to_value(LaneRequest::DetailedFacts {}).unwrap(),
+            serde_json::json!({ "request": "detailed_facts" })
+        );
+        assert_eq!(
+            serde_json::from_str::<LaneRequest>(
+                r#"{"request":"wait_detailed_facts","boot":"b1","revision":4}"#
+            )
+            .unwrap(),
+            LaneRequest::WaitDetailedFacts {
+                boot: "b1".into(),
+                revision: 4
+            }
+        );
     }
 }
 

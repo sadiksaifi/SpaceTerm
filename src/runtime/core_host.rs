@@ -410,6 +410,14 @@ fn nonce() -> Result<[u8; 32], CoreError> {
     Ok(bytes)
 }
 impl CorePaneHost {
+    /// Whether this Pane's running Terminal Session has work going on at `now`. A Pane without
+    /// one has none.
+    pub(crate) fn work_going_on(&self, now: std::time::Instant) -> bool {
+        self.pane
+            .as_ref()
+            .filter(|pane| !pane.ended)
+            .is_some_and(|pane| pane.runtime.work_going_on(now))
+    }
     /// This Pane's running Terminal Session, if one has not ended.
     pub(crate) fn live_session(&self) -> Option<[u8; 32]> {
         self.pane

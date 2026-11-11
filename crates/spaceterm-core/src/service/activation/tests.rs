@@ -1698,16 +1698,16 @@ fn the_previous_runtime_recovers_an_unready_candidate_from_boot_until_the_activa
     }
 }
 
-/// The restarts a running server admitted, as `(candidate, silent)`.
+/// The restarts a running server admitted, as `(candidate, fence)`.
 #[derive(Default)]
-struct Admitted(Mutex<Vec<(Option<[u8; 32]>, bool)>>);
+struct Admitted(Mutex<Vec<(Option<[u8; 32]>, runtime::updates::Fence)>>);
 impl runtime::updates::Restarter for Admitted {
     fn restart(
         self: Arc<Self>,
         candidate: Option<[u8; 32]>,
-        silent: bool,
+        fence: runtime::updates::Fence,
     ) -> Result<runtime::updates::Launch, runtime::updates::RestartRefusal> {
-        self.0.lock().unwrap().push((candidate, silent));
+        self.0.lock().unwrap().push((candidate, fence));
         Ok(Box::new(|| {}))
     }
 }
@@ -1757,7 +1757,10 @@ fn boot_runs_the_approved_version_first_and_then_restarts_into_the_pending_one()
         for (index, byte) in pending.iter_mut().enumerate() {
             *byte = u8::from_str_radix(&digest(&candidate)[index * 2..index * 2 + 2], 16).unwrap();
         }
-        assert_eq!(*admitted.0.lock().unwrap(), [(Some(pending), true)]);
+        assert_eq!(
+            *admitted.0.lock().unwrap(),
+            [(Some(pending), runtime::updates::Fence::NoSessions)]
+        );
     });
 }
 
@@ -1766,6 +1769,7 @@ pub(crate) fn quiet(updates: &runtime::updates::Updates) {
     let idle = runtime::updates::Activity {
         sessions: 0,
         requested: false,
+        working: 0,
     };
     let now = Instant::now();
     updates.observe(idle, now);

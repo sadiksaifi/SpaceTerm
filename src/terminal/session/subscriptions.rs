@@ -49,11 +49,12 @@ pub(super) struct EventState {
     notifier: Option<SubscriptionNotifier>,
     screen: Option<Arc<ScreenSnapshot>>,
     finished: Option<Result<TerminalSessionExit, TerminalSessionFailure>>,
-    stopped: bool,
-    line: LineState,
+    pub(super) stopped: bool,
+    pub(super) line: LineState,
     client_effects: std::collections::VecDeque<ClientEffectRequest>,
     pub(super) progress: super::run::Progress,
     pub(super) run_observations: std::collections::VecDeque<spaceterm_core::pane::run::Observation>,
+    pub(super) activity: super::activity::ActivityState,
 }
 
 impl From<async_channel::Sender<TerminalSessionEvent>> for TerminalEventPublisher {
@@ -68,6 +69,7 @@ impl From<async_channel::Sender<TerminalSessionEvent>> for TerminalEventPublishe
             client_effects: std::collections::VecDeque::new(),
             progress: super::run::Progress::default(),
             run_observations: std::collections::VecDeque::new(),
+            activity: super::activity::ActivityState::default(),
         })))
     }
 }

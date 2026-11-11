@@ -1249,6 +1249,33 @@ fn update_facts_travel_as_their_own_kind_within_their_bound() {
     let wire = encode_core(&message).unwrap();
     assert_eq!(wire.frames[0][4], 0x4a);
     core_round_trip(message);
+    // The detailed facts carry the largest facts within their own bound.
+    let detailed = crate::update::facts::DetailedUpdateFacts {
+        facts: largest.clone(),
+        continuation: Some(crate::update::Continuation::NeedsConfirmation),
+        working: u32::MAX,
+        restart: None,
+    };
+    let message = CoreMessage::DetailedUpdateFacts(Box::new(detailed.clone()));
+    let wire = encode_core(&message).unwrap();
+    assert_eq!(wire.frames[0][4], 0x4c);
+    core_round_trip(message);
+    // More working Terminal Sessions than live ones break the bound.
+    let inflated = crate::update::facts::DetailedUpdateFacts {
+        facts: UpdateFacts {
+            sessions: 1,
+            ..largest.clone()
+        },
+        working: 2,
+        ..detailed
+    };
+    let wire = encode_core(&CoreMessage::DetailedUpdateFacts(Box::new(inflated))).unwrap();
+    assert_eq!(
+        Assembler::default()
+            .core(RawFrame::parse(&wire.frames[0]).unwrap())
+            .err(),
+        Some(DecodeError::OutOfBounds)
+    );
 
     let regressed = UpdateFacts {
         operation: Some(Operation::Installing {

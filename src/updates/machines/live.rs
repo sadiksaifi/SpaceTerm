@@ -64,6 +64,8 @@ pub(crate) struct Observed {
     /// The Core run the facts belong to.
     pub(crate) boot: String,
     pub(crate) facts: UpdateFacts,
+    /// The detailed facts `facts` came in, from a Core whose service lane offers them.
+    pub(crate) detailed: Option<spaceterm_core::update::DetailedUpdateFacts>,
 }
 
 /// A confirmed change the lane previews and executes.
@@ -764,6 +766,7 @@ impl Shared {
             };
             entry.update.capabilities = reached(work);
             entry.update.facts = Some(observed.facts.clone());
+            entry.update.detailed = observed.detailed.clone();
             entry.boot = Some(observed.boot.clone());
             let restarting = match &observed.facts.operation {
                 Some(Operation::Restarting { to }) => Some(Some(to.clone())),

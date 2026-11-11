@@ -317,6 +317,9 @@ impl PaneService for HostService {
     fn sessions(&self) -> Vec<[u8; 32]> {
         self.inner.sessions()
     }
+    fn working(&self) -> u32 {
+        self.inner.working()
+    }
     fn request(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch {
         // The fence and its check share this service's lock, so no Session starts between an
         // admitted operation's observation and its outcome.
@@ -463,6 +466,12 @@ impl crate::service::lane::LaneHost for HostLane {
         admit(&panes.sessions())?;
         self.fence.store(true, Ordering::Release);
         Ok(())
+    }
+    fn working(&self) -> u32 {
+        self.panes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .working()
     }
     fn release_fence(&self) {
         let _panes = self.panes.lock().unwrap_or_else(|e| e.into_inner());
@@ -778,6 +787,7 @@ fn serve_runtime_ready(
                 crate::service::updates::Activity {
                     sessions: u32::try_from(sessions).unwrap_or(u32::MAX),
                     requested: requested.swap(false, Ordering::AcqRel),
+                    working: crate::service::lane::LaneHost::working(&*host),
                 }
             })
         });
@@ -1135,6 +1145,12 @@ const FOLLOW_RECHECK: std::time::Duration = std::time::Duration::from_secs(1);
 struct FactsFollower {
     ended: Arc<AtomicBool>,
 }
+
+/// One message of the update facts a work connection reads.
+enum FollowedFacts {
+    Facts(crate::update::facts::UpdateFacts),
+    Detailed(crate::update::facts::DetailedUpdateFacts),
+}
 impl FactsFollower {
     /// Follows `source` for a connection whose admission selected `work`, which reads the
     /// facts as that version has them.
@@ -1144,25 +1160,50 @@ impl FactsFollower {
         work: crate::protocol::version::ProtocolVersion,
     ) -> Self {
         let ended = Arc::new(AtomicBool::new(false));
-        let mut sent = source.facts();
-        let _ = outbox.update_facts(sent.clone().for_selected(work));
+        // A connection that selected the detailed facts' minor gets them in place of the facts.
+        let detailed = work.minor >= crate::update::facts::MINOR_DETAILED_FACTS;
+        // The facts once their revision differs from `revision`, or now without one, as the
+        // message this connection reads. None once the server stops.
+        let next = move |revision: Option<u64>| -> Option<(u64, FollowedFacts)> {
+            if detailed {
+                let next = match revision {
+                    None => source.detailed(),
+                    Some(revision) => source.wait_detailed(revision, FOLLOW_RECHECK)?,
+                };
+                Some((next.facts.revision, FollowedFacts::Detailed(next)))
+            } else {
+                let next = match revision {
+                    None => source.facts(),
+                    Some(revision) => source.wait(revision, FOLLOW_RECHECK)?,
+                };
+                Some((next.revision, FollowedFacts::Facts(next.for_selected(work))))
+            }
+        };
+        let deliver = |outbox: &Outbox, message: FollowedFacts| match message {
+            FollowedFacts::Facts(facts) => outbox.update_facts(facts).is_ok(),
+            FollowedFacts::Detailed(detailed) => outbox.detailed_update_facts(detailed).is_ok(),
+        };
+        let mut sent = next(None).map(|(revision, message)| {
+            let _ = deliver(&outbox, message);
+            revision
+        });
         let follow = {
             let ended = Arc::clone(&ended);
             move || {
                 while !ended.load(Ordering::Acquire) {
-                    let Some(facts) = source.wait(sent.revision, FOLLOW_RECHECK) else {
+                    let Some(revision) = sent else {
                         return;
                     };
-                    if facts.revision == sent.revision || ended.load(Ordering::Acquire) {
+                    let Some((changed, message)) = next(Some(revision)) else {
+                        return;
+                    };
+                    if changed == revision || ended.load(Ordering::Acquire) {
                         continue;
                     }
-                    if outbox
-                        .update_facts(facts.clone().for_selected(work))
-                        .is_err()
-                    {
+                    if !deliver(&outbox, message) {
                         return;
                     }
-                    sent = facts;
+                    sent = Some(changed);
                 }
             }
         };
@@ -1631,6 +1672,32 @@ mod tests {
                 Some(Operation::RestartingSameVersion)
             );
             current.close();
+        }
+
+        /// A work 1.2 connection reads the facts inside the detailed facts, and a work 1.1
+        /// connection never receives the detailed facts.
+        #[test]
+        fn only_a_work_1_2_connection_receives_the_detailed_update_facts() {
+            let board = Board::new();
+            let environment = environment(&board);
+            let current = Connection::open(&environment, crate::protocol::version::WORK);
+            board.change(2, 1);
+            assert_eq!(current.events(3), [Some((1, 0)), None, Some((2, 1))]);
+            let detailed = current.link.detailed_update_facts().unwrap();
+            assert_eq!(
+                Some(&detailed.facts),
+                current.link.update_facts().as_deref()
+            );
+            assert_eq!(
+                detailed.working, 1,
+                "a source without an engine counts every one"
+            );
+            current.close();
+            let older = ProtocolVersion { major: 1, minor: 1 };
+            let connection = Connection::open(&environment, older);
+            assert_eq!(connection.events(1).first(), Some(&Some((2, 1))));
+            assert!(connection.link.detailed_update_facts().is_none());
+            connection.close();
         }
 
         /// A selected version without the facts frame never receives it. Every capability is

@@ -17,7 +17,8 @@ pub enum Continuation {
     WhenSessionsEnd,
     /// SpaceTerm Core restarts into it by itself once no Terminal Session is live, or once no
     /// live Terminal Session has had work going on for the idle period. Only the detailed
-    /// update facts report it.
+    /// update facts can report it, and no Core reports it yet: the idle restart of ADR 0065
+    /// waits until its admission can fence Terminal Session input and output.
     WhenNothingRuns,
     /// A work or service major changes: it restarts only when a person confirms it.
     NeedsConfirmation,
@@ -52,4 +53,94 @@ pub fn continuation(facts: &UpdateFacts) -> Option<Continuation> {
     } else {
         Continuation::WhenSessionsEnd
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::update::facts::{
+        InstallFailure, Platform, Protocols, StartFailure, UpdateCheck, UpdateFailure, Version,
+    };
+
+    fn version(text: &str) -> Version {
+        Version::parse(text).unwrap()
+    }
+
+    fn facts(sessions: u32, breaking: bool, failure: Option<(&str, FailureKind)>) -> UpdateFacts {
+        UpdateFacts {
+            revision: 1,
+            platform: Platform::HOST,
+            running: version("0.11.3"),
+            pending: Some(super::super::facts::PendingVersion {
+                version: version("0.11.4"),
+                protocols: Protocols::CURRENT,
+                breaking,
+                installed_at: 1,
+                overdue_since: None,
+                stranded: Vec::new(),
+            }),
+            sessions,
+            operation: None,
+            check: UpdateCheck::Never,
+            skipped: None,
+            last_failure: failure.map(|(text, kind)| UpdateFailure {
+                id: 1,
+                at: 1,
+                version: version(text),
+                kind,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_waiting_version_restarts_soon_without_sessions_and_once_they_end_with_them() {
+        assert_eq!(
+            continuation(&facts(0, false, None)),
+            Some(Continuation::Soon)
+        );
+        assert_eq!(
+            continuation(&facts(2, false, None)),
+            Some(Continuation::WhenSessionsEnd)
+        );
+    }
+
+    #[test]
+    fn a_breaking_version_needs_confirmation_whatever_else_holds() {
+        let start = FailureKind::Start(StartFailure::PortInUse);
+        assert_eq!(
+            continuation(&facts(0, true, Some(("0.11.4", start)))),
+            Some(Continuation::NeedsConfirmation)
+        );
+    }
+
+    #[test]
+    fn a_start_failure_of_the_waiting_version_is_not_retried_and_of_another_is_ignored() {
+        let start = FailureKind::Start(StartFailure::DiskFull);
+        assert_eq!(
+            continuation(&facts(0, false, Some(("0.11.4", start)))),
+            Some(Continuation::StartFailed)
+        );
+        assert_eq!(
+            continuation(&facts(0, false, Some(("0.11.2", start)))),
+            Some(Continuation::Soon)
+        );
+    }
+
+    #[test]
+    fn an_install_failure_hides_whether_a_start_failed() {
+        let install = FailureKind::Install(InstallFailure::Download);
+        assert_eq!(
+            continuation(&facts(1, false, Some(("0.11.5", install)))),
+            Some(Continuation::Unknown)
+        );
+    }
+
+    #[test]
+    fn nothing_waits_without_a_pending_version() {
+        let facts = UpdateFacts {
+            pending: None,
+            ..facts(0, false, None)
+        };
+        assert_eq!(continuation(&facts), None);
+    }
 }

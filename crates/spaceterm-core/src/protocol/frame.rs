@@ -47,6 +47,9 @@ pub enum Kind {
     /// work [`super::inventory_1_0::MINOR_GIT_DIRECTORY_INVENTORY`], which sends it in place of
     /// [`Kind::Inventory`].
     GitDirectoryInventory = 0x4b,
+    /// The update facts with what only the Core's update engine knows. Since work
+    /// [`crate::update::facts::MINOR_DETAILED_FACTS`].
+    DetailedUpdateFacts = 0x4c,
 }
 
 impl Kind {
@@ -73,6 +76,7 @@ impl Kind {
             0x49 => Self::Accessibility,
             0x4a => Self::UpdateFacts,
             0x4b => Self::GitDirectoryInventory,
+            0x4c => Self::DetailedUpdateFacts,
             _ => return None,
         })
     }
@@ -104,6 +108,7 @@ impl Kind {
             Self::Pane => limits::MAX_PANE_EVENT_BYTES,
             Self::Inventory | Self::GitDirectoryInventory => limits::MAX_INVENTORY_BYTES,
             Self::UpdateFacts => limits::MAX_UPDATE_FACTS_BYTES,
+            Self::DetailedUpdateFacts => limits::MAX_DETAILED_UPDATE_FACTS_BYTES,
         }
     }
 
@@ -235,6 +240,7 @@ pub fn encode_core(message: &CoreMessage) -> Result<WireMessage, EncodeError> {
         CoreMessage::Pane(value) => encode(Kind::Pane, value),
         CoreMessage::Inventory(value) => encode(Kind::GitDirectoryInventory, value),
         CoreMessage::UpdateFacts(value) => encode(Kind::UpdateFacts, value),
+        CoreMessage::DetailedUpdateFacts(value) => encode(Kind::DetailedUpdateFacts, value),
         CoreMessage::Ping(value) => encode(Kind::CorePing, value),
         CoreMessage::Pong(value) => encode(Kind::CorePong, value),
         CoreMessage::Goodbye(value) => encode(Kind::Goodbye, value),
@@ -379,6 +385,11 @@ impl Assembler {
                 CoreMessage::Inventory(Box::new(decode::<InventoryRevision>(&body)?))
             }
             Kind::UpdateFacts => CoreMessage::UpdateFacts(Box::new(decode::<UpdateFacts>(&body)?)),
+            Kind::DetailedUpdateFacts => {
+                CoreMessage::DetailedUpdateFacts(Box::new(decode::<
+                    crate::update::facts::DetailedUpdateFacts,
+                >(&body)?))
+            }
             Kind::CorePing => CoreMessage::Ping(decode::<Ping>(&body)?),
             Kind::CorePong => CoreMessage::Pong(decode::<Pong>(&body)?),
             Kind::Goodbye => CoreMessage::Goodbye(decode::<Fatal>(&body)?),

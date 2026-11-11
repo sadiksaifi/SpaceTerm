@@ -19,7 +19,7 @@ use thiserror::Error;
 use crate::platform::native_pty::{
     NativePtyAdapter, NativePtyAdapterConstructionFailure, NativePtyAdapterFactory,
     NativePtyAdapterParts, NativePtyExit, NativePtyOperationFailure, NativePtySize,
-    NativePtyTermination, NativePtyWaitFailure,
+    NativePtyTermination, NativePtyWaitFailure, SessionProbe,
 };
 use crate::platform::shell_launch::PreparedShellLaunch;
 #[cfg(all(test, feature = "native-tests"))]
@@ -105,6 +105,19 @@ pub(super) trait UnixPtyHost: Send + Sync + 'static {
 
     /// List every process identifier currently visible to this user.
     fn process_ids(&self) -> io::Result<Vec<i32>>;
+
+    /// Observe one process for a decision that must not miss one. `Ok(None)` only when the
+    /// process is proven gone; an error when it could not be read or changed while it was read.
+    /// A host that cannot tell the two apart reports every process as unreadable.
+    fn observe_exactly(&self, _process: i32) -> io::Result<Option<ProcessObservation>> {
+        Err(io::Error::other("this host cannot prove a process gone"))
+    }
+
+    /// Every process that may belong to the session `leader` leads: a superset of its members
+    /// that [`Self::observe_exactly`] can read. By default every visible process.
+    fn session_candidates(&self, _leader: i32) -> io::Result<Vec<i32>> {
+        self.process_ids()
+    }
 
     fn master_read_error(&self, error: &io::Error) -> MasterReadError;
 }
@@ -379,6 +392,38 @@ fn process_group_is_alive(process_group: i32) -> io::Result<bool> {
     }
 }
 
+/// The shell's terminal session, read through the host's process facts.
+struct ShellSession {
+    host: Arc<dyn UnixPtyHost>,
+    session: ProcessSessionIdentity,
+}
+
+impl SessionProbe for ShellSession {
+    /// Reads every visible process exactly, unlike cleanup's best-effort enumeration: a
+    /// process that could not be read is an error, never a process that is not there.
+    fn others(&self) -> io::Result<bool> {
+        let leader = self
+            .host
+            .observe_exactly(self.session.session)?
+            .ok_or_else(|| io::Error::other("the shell process is gone"))?;
+        if leader.identity != self.session.leader || leader.session != self.session.session {
+            return Err(io::Error::other("shell process ownership is unresolved"));
+        }
+        for process in self.host.session_candidates(self.session.session)? {
+            if process < 1 || process == self.session.leader.process {
+                continue;
+            }
+            match self.host.observe_exactly(process)? {
+                Some(observation) if observation.session == self.session.session => {
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+        Ok(false)
+    }
+}
+
 fn process_groups_in_session(
     host: &dyn UnixPtyHost,
     session: &ProcessSessionIdentity,
@@ -413,6 +458,92 @@ fn process_groups_in_session(
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
+
+    /// Process facts by PID: `Ok(None)` gone, `Err(())` unreadable.
+    struct Facts(Vec<(i32, Result<Option<ProcessObservation>, ()>)>);
+    impl UnixPtyHost for Facts {
+        fn observe_process(&self, _: i32) -> Option<ProcessObservation> {
+            panic!("the session probe reads processes exactly")
+        }
+        fn process_ids(&self) -> io::Result<Vec<i32>> {
+            Ok(self.0.iter().map(|(process, _)| *process).collect())
+        }
+        fn observe_exactly(&self, process: i32) -> io::Result<Option<ProcessObservation>> {
+            match self.0.iter().find(|(id, _)| *id == process) {
+                Some((_, Ok(observation))) => Ok(*observation),
+                Some((_, Err(()))) => Err(io::Error::other("unreadable")),
+                None => Ok(None),
+            }
+        }
+        fn master_read_error(&self, _: &io::Error) -> MasterReadError {
+            MasterReadError::Failure
+        }
+    }
+
+    fn observed(process: i32, process_group: i32, session: i32) -> ProcessObservation {
+        ProcessObservation {
+            identity: ProcessIdentity {
+                process,
+                start: ProcessStart { coarse: 1, fine: 0 },
+            },
+            process_group,
+            session,
+        }
+    }
+
+    fn probe(others: Vec<(i32, Result<Option<ProcessObservation>, ()>)>) -> io::Result<bool> {
+        let shell = observed(100, 100, 100);
+        let mut facts = vec![(100, Ok(Some(shell)))];
+        facts.extend(others);
+        ShellSession {
+            host: Arc::new(Facts(facts)),
+            session: ProcessSessionIdentity {
+                session: 100,
+                leader: shell.identity,
+            },
+        }
+        .others()
+    }
+
+    #[test]
+    fn a_readable_shell_with_an_unreadable_process_beside_it_is_not_alone() {
+        assert!(probe(vec![(7, Err(()))]).is_err());
+        assert!(probe(vec![(200, Ok(Some(observed(200, 200, 200)))), (7, Err(()))]).is_err());
+    }
+
+    #[test]
+    fn the_session_probe_finds_members_in_every_process_group_of_the_session() {
+        assert!(!probe(vec![(200, Ok(Some(observed(200, 200, 200))))]).unwrap());
+        assert!(
+            !probe(vec![(201, Ok(None))]).unwrap(),
+            "a process proven gone"
+        );
+        // A stopped or background job in its own process group, as job control places it.
+        assert!(probe(vec![(101, Ok(Some(observed(101, 101, 100))))]).unwrap());
+        assert!(probe(vec![(102, Ok(Some(observed(102, 100, 100))))]).unwrap());
+    }
+
+    #[test]
+    fn a_shell_that_is_gone_or_replaced_is_not_alone() {
+        let shell = observed(100, 100, 100);
+        let reused = ProcessObservation {
+            identity: ProcessIdentity {
+                start: ProcessStart { coarse: 2, fine: 0 },
+                ..shell.identity
+            },
+            ..shell
+        };
+        for leader in [Ok(None), Ok(Some(reused)), Err(())] {
+            let probe = ShellSession {
+                host: Arc::new(Facts(vec![(100, leader)])),
+                session: ProcessSessionIdentity {
+                    session: 100,
+                    leader: shell.identity,
+                },
+            };
+            assert!(probe.others().is_err());
+        }
+    }
     struct ReusedLeader(ProcessObservation);
     impl UnixPtyHost for ReusedLeader {
         fn observe_process(&self, _: i32) -> Option<ProcessObservation> {
@@ -513,6 +644,7 @@ struct SpawnedPty {
     writer: Box<dyn Write + Send>,
     /// The shell's process group, which leads its own session.
     shell_process_group: libc::pid_t,
+    probe: Arc<ShellSession>,
     // Fields drop in declaration order. Close the PTY handles before waiting for a child whose
     // kernel exit can be waiting for terminal teardown.
     process: SpawnedChild,
@@ -808,6 +940,10 @@ impl NativePtyAdapter for SpawnedPty {
         Self::line_mode(self).map_err(|error| NativePtyOperationFailure::new(error.kind()))
     }
 
+    fn session_probe(&self) -> Option<Arc<dyn SessionProbe>> {
+        Some(Arc::clone(&self.probe) as Arc<dyn SessionProbe>)
+    }
+
     fn wait_for_exit(&mut self, timeout: Duration) -> Result<NativePtyExit, NativePtyWaitFailure> {
         let exit = self
             .process
@@ -1020,6 +1156,10 @@ fn spawn_command_in_pty(
         session: observation.session,
         leader: observation.identity,
     };
+    let probe = Arc::new(ShellSession {
+        host: Arc::clone(&host),
+        session,
+    });
     let termination = Arc::new(ChildTermination::new_with_session(
         host,
         process_group,
@@ -1034,6 +1174,7 @@ fn spawn_command_in_pty(
             reader: Some(Box::new(reader)),
             writer,
             shell_process_group: process_group,
+            probe,
             process: SpawnedChild {
                 child: Some(child),
                 termination,
@@ -1376,6 +1517,35 @@ mod tests {
         drop(reader);
         drop(pty);
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn the_session_probe_sees_a_background_job_beside_the_shell() {
+        const NAME: &str =
+            "platform::unix_pty::tests::the_session_probe_sees_a_background_job_beside_the_shell";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _lock = lock_real_pty_test();
+        for (script, others) in [
+            ("printf READY; exec sleep 30", false),
+            ("sleep 30 & printf READY; wait", true),
+            // Job control puts the job in its own process group, and stops it.
+            ("set -m; sleep 30 & kill -STOP $!; printf READY; wait", true),
+        ] {
+            let mut command = CommandBuilder::new("/bin/sh");
+            command.args(["-c", script]);
+            let (mut pty, terminator) =
+                spawn_command_in_pty(test_host(), PtySize::default(), command, Arc::default())
+                    .unwrap();
+            let mut reader = pty.take_reader().unwrap();
+            read_output_marker(&mut reader, b"READY");
+            let probe = NativePtyAdapter::session_probe(&pty).unwrap();
+            assert_eq!(probe.others().unwrap(), others, "{script}");
+            terminator.terminate().unwrap();
+            drop(reader);
+            drop(pty);
+        }
     }
 
     #[test]
@@ -2599,6 +2769,16 @@ mod tests {
                 reader: Some(Box::new(io::empty())),
                 writer: Box::new(io::sink()),
                 shell_process_group: 0,
+                probe: Arc::new(ShellSession {
+                    host: test_host(),
+                    session: ProcessSessionIdentity {
+                        session: 0,
+                        leader: ProcessIdentity {
+                            process: 0,
+                            start: ProcessStart { coarse: 0, fine: 0 },
+                        },
+                    },
+                }),
                 process: SpawnedChild {
                     child: Some(child),
                     termination,

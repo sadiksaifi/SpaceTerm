@@ -9,6 +9,7 @@ mod scrollback;
 pub(crate) use scrollback::ScrollbackReply;
 mod publication;
 pub(crate) use publication::DEFAULT_FRAME_RATE;
+mod activity;
 mod subscriptions;
 pub use clipboard::ClipboardCompletion;
 pub use clipboard::{ClientEffectGrant, ClientEffectRequest, ClipboardRequest};
@@ -1377,6 +1378,8 @@ impl TerminalWorker {
             let _ = graphics_commands.send(Command::GraphicsBudgetAvailable);
         });
 
+        events.set_probe(native_pty.session_probe());
+        events.note_activity(Instant::now(), false);
         let mut worker = Self {
             metadata_state,
             native_pty,
@@ -2171,6 +2174,7 @@ impl TerminalWorker {
             return false;
         }
         self.deliver_run_observations();
+        self.note_activity();
         for event in self.emulator.take_attention_events() {
             let effect = match event {
                 AttentionEvent::Bell => spaceterm_core::pane::effects::Effect::Bell,
@@ -2356,7 +2360,14 @@ impl TerminalWorker {
             );
             return false;
         }
+        self.note_activity();
         self.flush_input()
+    }
+
+    /// Records input or output for the work-going-on predicate.
+    fn note_activity(&self) {
+        self.events
+            .note_activity(Instant::now(), self.emulator.at_empty_prompt());
     }
 
     fn flush_input(&mut self) -> bool {

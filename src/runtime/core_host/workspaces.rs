@@ -1140,6 +1140,15 @@ impl HostCommands for WorkspaceHost {
             .filter_map(CorePaneHost::live_session)
             .collect()
     }
+    fn working(&self) -> u32 {
+        let now = Instant::now();
+        let working = self
+            .panes
+            .values()
+            .filter(|pane| pane.work_going_on(now))
+            .count();
+        u32::try_from(working).unwrap_or(u32::MAX)
+    }
     fn restore(&mut self, store: OrganizationStore) -> Result<(), CoreError> {
         self.retain_in(Box::new(store))
     }

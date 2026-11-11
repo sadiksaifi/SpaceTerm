@@ -137,6 +137,18 @@ pub trait NativePtyAdapter: Write + Send {
         Ok(LineMode::UNKNOWN)
     }
     fn wait_for_exit(&mut self, timeout: Duration) -> Result<NativePtyExit, NativePtyWaitFailure>;
+    /// Reads which processes share the shell's terminal session. None where the platform can't
+    /// tell, so every Terminal Session there counts as work going on.
+    fn session_probe(&self) -> Option<Arc<dyn SessionProbe>> {
+        None
+    }
+}
+
+/// Reads the processes in one shell's terminal session, apart from the PTY's owner.
+pub trait SessionProbe: Send + Sync {
+    /// Whether any process other than the shell runs in its terminal session: a running or
+    /// stopped job, a background job, or any other child. An error means it could not be read.
+    fn others(&self) -> io::Result<bool>;
 }
 
 /// Constructs the platform-neutral parts owned by one Native PTY Owner.
@@ -391,6 +403,11 @@ impl NativePtyOwner {
     pub fn line_mode(&self) -> Result<LineMode, NativePtyOperationFailure> {
         self.counters.record_line_mode_read();
         self.adapter().line_mode()
+    }
+
+    /// See [`NativePtyAdapter::session_probe`].
+    pub fn session_probe(&self) -> Option<Arc<dyn SessionProbe>> {
+        self.adapter().session_probe()
     }
 
     pub fn wait_for_exit(
