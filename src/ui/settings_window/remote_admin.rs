@@ -94,8 +94,6 @@ pub(crate) enum RemoteFailure {
     Unverified,
     /// An earlier update on the server hasn't finished, so it takes no other.
     ActivationUnresolved,
-    /// The server didn't start after the change.
-    StartupFailed,
     /// The server refused this device's pairing.
     Refused,
     /// The server answered in a way this SpaceTerm doesn't read.
@@ -116,7 +114,6 @@ impl RemoteFailure {
             "capacity" => Self::Capacity,
             "candidate_unverified" => Self::Unverified,
             "activation_unresolved" => Self::ActivationUnresolved,
-            "startup_failed" => Self::StartupFailed,
             "authentication_refused"
             | "revoked"
             | "machine_identity_changed"
@@ -167,7 +164,6 @@ impl RemoteFailure {
             Self::ActivationUnresolved => format!(
                 "An earlier update of {name} hasn\u{2019}t finished. Finish it on its own computer with \u{201C}spaceterm update\u{201D}."
             ),
-            Self::StartupFailed => format!("{name} didn\u{2019}t start after the change."),
             Self::Refused => {
                 format!("{name} didn\u{2019}t accept this device. Reconnect, then try again.")
             }
@@ -271,7 +267,8 @@ struct InstalledSource(ControlSource);
 impl Global for InstalledSource {}
 
 /// Makes `source` the desktop's way to reach a paired Machine's service lane. Without it, a
-/// paired Machine's card reads no Status, and Remove Machine only removes the Machine here.
+/// paired Machine's card reads no Status, its Restart is unavailable, and Remove Machine only
+/// removes the Machine here.
 pub(crate) fn install(source: ControlSource, cx: &mut App) {
     cx.set_global(InstalledSource(source));
 }
@@ -325,8 +322,8 @@ pub(super) enum Settlement {
     NotPerformed,
     /// Nothing proves whether the change happened.
     Uncertain,
-    /// The Machine closed the lane after the uninstall was admitted, or may have: it is
-    /// uninstalling or uninstalled, and only its own computer can read the outcome.
+    /// The Machine closed the lane. For an uninstall the lane client reports this only after a
+    /// receipt showed the helper launched; see [`uninstall_started`].
     Shutdown,
 }
 
