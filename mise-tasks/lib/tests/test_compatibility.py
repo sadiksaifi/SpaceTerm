@@ -159,9 +159,9 @@ class CompatibilityPlanTests(unittest.TestCase):
     def test_each_published_release_on_a_paired_major_pairs_with_this_commit_as_each_side(self):
         # A release published on this work major or the previous one pairs with the planned
         # release with no manual step. Older majors, releases from before the greenfield line,
-        # and the planned release itself on a rerun after it published do not.
+        # the planned release itself on a rerun after it published, and newer releases do not.
         mine = PROTOCOLS["work"]["major"]
-        published = {"0.6.8", "1.0.0", "1.1.0", "1.10.0", "1.2.0", "1.20.0"}
+        published = {"0.6.8", "1.0.0", "1.1.0", "1.10.0", "1.2.0", "1.20.0", "1.30.0"}
         majors = {"v1.0.0": mine - 2, "v1.1.0": mine - 1, "v1.2.0": mine, "v1.10.0": mine}
         outputs = self.planned("1.20.0", published, majors)
         self.assertEqual(outputs["any"], "true")
