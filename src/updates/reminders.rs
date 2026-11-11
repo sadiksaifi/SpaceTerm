@@ -1,8 +1,9 @@
-//! Daily notifications about overdue updates. Desktop reminders begin two days after the
-//! release. A Machine's breaking Pending Version is named daily after waiting two days, with
-//! its Terminal Session count. A nonbreaking Pending Version restarts silently after the grace
-//! period with no live Terminal Sessions, so it sends no notification. Reminder cadence stays
-//! with the shared update history.
+//! Update Reminders: operating-system notifications about a waiting update. SpaceTerm and every
+//! SpaceTerm Core follow one cadence by ladder stage: none at Offer, one a day at Ask, one every
+//! four hours at Insist, for any waiting Pending Version, breaking or not. Reminders post only
+//! while a SpaceTerm window is active, and each one replaces the previous one for the same
+//! update. SpaceTerm's own cadence stays with its update history; a Machine's lives in memory for
+//! this run.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -10,25 +11,13 @@ use std::time::Duration;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription, Task};
 
-use super::UpdateService;
-use super::machines::MachineId;
 use super::machines::store::MachineUpdates;
-use super::policy::DAY;
-use super::presentation::{self, ItemKey, Reminder};
-use spaceterm_core::update::facts::{PendingVersion, Version};
+use super::machines::{MachineId, MachineLink, MachineUpdate};
+use super::presentation::ItemKey;
+use super::{UpdateService, UpdateState, copy, ladder};
+use spaceterm_core::update::facts::PendingVersion;
 
-/// The Pending Version `machine` waits with now.
-fn pending(machine: MachineId, cx: &App) -> Option<PendingVersion> {
-    let store = MachineUpdates::global(cx)?;
-    let store = store.read(cx);
-    let update = store
-        .machines()
-        .iter()
-        .find(|update| update.machine == machine)?;
-    update.facts.as_ref()?.pending.clone()
-}
-
-/// How often the schedule is read again when nothing else changes.
+/// The longest the schedule waits before it reads the clock again, so a changed clock is noticed.
 const RECHECK: Duration = Duration::from_secs(60 * 60);
 
 /// A clicked notification's key, with the activation token the notification server passed for
@@ -43,6 +32,10 @@ pub(crate) trait UpdateReminderAdapter {
     fn activations(&self, activated: async_channel::Sender<ReminderClick>);
     /// Shows `title` and `body`, replacing an earlier notification with the same `key`.
     fn notify(&self, key: &str, title: &str, body: &str);
+    /// Seconds since the Unix epoch, the clock Machine reminders are timed by.
+    fn now(&self) -> u64 {
+        super::now()
+    }
 }
 
 /// The person clicked the notification about this item. `token` lets the window that answers
@@ -55,10 +48,11 @@ pub(crate) struct ReminderActivated {
 
 pub(crate) struct UpdateReminders {
     adapter: Rc<dyn UpdateReminderAdapter>,
-    /// When each Machine's overdue restart was last named, and the Pending Version it named.
-    named: HashMap<MachineId, (Version, u64)>,
+    /// When each Machine's waiting update was last named. A newer Pending Version that replaces
+    /// a waiting one inherits its clock, so it keeps this cadence too.
+    named: HashMap<MachineId, u64>,
     _subscriptions: Vec<Subscription>,
-    _recheck: Task<()>,
+    _schedule: Task<()>,
 }
 
 /// Keeps the scheduler alive for the application's life.
@@ -92,6 +86,18 @@ fn parse_key(text: &str) -> Option<ItemKey> {
     Some(ItemKey::Machine(machine))
 }
 
+/// The Pending Version a Machine waits with, from facts that are current: a Machine that is
+/// offline, stopped or unconfirmed gets no reminder from its last facts.
+fn waiting(update: &MachineUpdate) -> Option<&PendingVersion> {
+    if !matches!(
+        update.link,
+        MachineLink::Connected | MachineLink::Incompatible(_)
+    ) {
+        return None;
+    }
+    update.facts.as_ref()?.pending.as_ref()
+}
+
 impl UpdateReminders {
     /// Starts the schedule. The update services must already be installed.
     pub(crate) fn install(adapter: Rc<dyn UpdateReminderAdapter>, cx: &mut App) {
@@ -117,19 +123,26 @@ impl UpdateReminders {
                 }
             })
             .detach();
-            let recheck = cx.spawn(async move |this, cx| {
+            // One timer runs to the next Machine reminder, or at most RECHECK. SpaceTerm's own
+            // reminders come from its update service, which this observes.
+            let schedule = cx.spawn(async move |this, cx| {
                 loop {
-                    cx.background_executor().timer(RECHECK).await;
-                    if this.update(cx, |this, cx| this.deliver(cx)).is_err() {
+                    let Ok(wait) = this.update(cx, |this, cx| {
+                        this.deliver(cx);
+                        let now = this.adapter.now();
+                        this.next_due(now, cx)
+                            .map_or(RECHECK, |due| Duration::from_secs(due - now).min(RECHECK))
+                    }) else {
                         return;
-                    }
+                    };
+                    cx.background_executor().timer(wait).await;
                 }
             });
             Self {
                 adapter,
                 named: HashMap::new(),
                 _subscriptions: subscriptions,
-                _recheck: recheck,
+                _schedule: schedule,
             }
         });
         cx.set_global(InstalledReminders { scheduler: entity });
@@ -141,74 +154,120 @@ impl UpdateReminders {
     }
 
     fn deliver(&mut self, cx: &mut Context<Self>) {
-        let reminders = presentation::current(cx).reminders();
-        let now = super::now();
-        let desktop_due = cx
-            .try_global::<UpdateService>()
-            .is_some_and(|service| service.0.read(cx).reminder().is_some());
         self.forget_resolved(cx);
-        for reminder in reminders {
-            let due = match reminder.key {
-                ItemKey::Desktop => desktop_due,
-                ItemKey::Machine(machine) => {
-                    pending(machine, cx).is_some_and(|pending| pending.breaking)
-                        && self
-                            .named
-                            .get(&machine)
-                            .is_none_or(|(_, last)| now.saturating_sub(*last) >= DAY)
+        // Reminders post only while the person is looking at SpaceTerm.
+        if cx.active_window().is_none() {
+            return;
+        }
+        self.deliver_app(cx);
+        let now = self.adapter.now();
+        let Some(store) = MachineUpdates::global(cx) else {
+            return;
+        };
+        let due: Vec<(MachineId, String, String)> = store
+            .read(cx)
+            .machines()
+            .iter()
+            .filter_map(|update| {
+                let pending = waiting(update)?;
+                let stage = ladder::stage(pending.installed_at, now);
+                let last = self.named.get(&update.machine).copied();
+                if !ladder::reminder_due(stage, last, now) {
+                    return None;
                 }
-            };
-            if !due {
-                continue;
-            }
-            self.show(&reminder);
-            match reminder.key {
-                ItemKey::Desktop => {
-                    if let Some(service) = cx.try_global::<UpdateService>().cloned() {
-                        // Records the reminder, so the next one waits a day.
-                        cx.defer(move |cx| {
-                            service
-                                .0
-                                .update(cx, |updates, cx| updates.dismiss_reminder(cx));
-                        });
-                    }
-                }
-                ItemKey::Machine(machine) => {
-                    if let Some(pending) = pending(machine, cx) {
-                        self.named.insert(machine, (pending.version, now));
-                    }
-                }
-            }
+                let sessions = update.facts.as_ref().map_or(0, |facts| facts.sessions);
+                let (title, body) = copy::reminders::core(
+                    &pending.version.to_string(),
+                    &update.name,
+                    sessions,
+                    now.saturating_sub(pending.installed_at),
+                );
+                Some((update.machine, title, body))
+            })
+            .collect();
+        for (machine, title, body) in due {
+            self.adapter
+                .notify(&key_text(ItemKey::Machine(machine)), &title, &body);
+            self.named.insert(machine, now);
         }
     }
 
-    /// Forgets a Machine's last reminder once it is gone or its Pending Version resolved or
-    /// changed. A temporary state, such as Offline, Checking or Restarting, keeps it, so a
-    /// Machine that comes back overdue is named again only a day after the last time.
+    /// Shows SpaceTerm's own reminder when its update service has one due, and records it, so
+    /// the next one waits for the stage's cadence.
+    fn deliver_app(&self, cx: &mut Context<Self>) {
+        let Some(service) = cx.try_global::<UpdateService>().cloned() else {
+            return;
+        };
+        let updates = service.0.read(cx);
+        if updates.reminder().is_none() {
+            return;
+        }
+        let Some(version) = updates.pending_version() else {
+            return;
+        };
+        let downloaded = matches!(updates.state(), UpdateState::Ready { .. });
+        let waited = updates
+            .waiting_since()
+            .map_or(0, |since| updates.now().saturating_sub(since));
+        let (title, body) = copy::reminders::app(version, downloaded, waited);
+        self.adapter
+            .notify(&key_text(ItemKey::Desktop), &title, &body);
+        cx.defer(move |cx| {
+            service
+                .0
+                .update(cx, |updates, cx| updates.dismiss_reminder(cx));
+        });
+    }
+
+    /// The next time after `now` at which a Machine reminder becomes due: a waiting update
+    /// reaching Ask or Insist, or its stage's cadence passing since it was last named.
+    fn next_due(&self, now: u64, cx: &App) -> Option<u64> {
+        let store = MachineUpdates::global(cx)?;
+        store
+            .read(cx)
+            .machines()
+            .iter()
+            .filter_map(|update| {
+                let pending = waiting(update)?;
+                let since = pending.installed_at;
+                let stage = ladder::stage(since, now);
+                let reminder = self
+                    .named
+                    .get(&update.machine)
+                    .zip(ladder::cadence(stage))
+                    .map(|(last, cadence)| last.saturating_add(cadence));
+                [
+                    Some(since.saturating_add(ladder::ASK_AFTER)),
+                    Some(since.saturating_add(ladder::INSIST_AFTER)),
+                    reminder,
+                ]
+                .into_iter()
+                .flatten()
+                .filter(|due| *due > now)
+                .min()
+            })
+            .min()
+    }
+
+    /// Forgets a Machine's last reminder once it is gone or no Pending Version waits on it. A
+    /// temporary state without facts, such as Offline, keeps it, so a Machine that comes back
+    /// with the same wait keeps its cadence.
     fn forget_resolved(&mut self, cx: &App) {
         let Some(store) = MachineUpdates::global(cx) else {
             self.named.clear();
             return;
         };
         let machines = store.read(cx).machines();
-        self.named.retain(|machine, (named, _)| {
+        self.named.retain(|machine, _| {
             let Some(update) = machines.iter().find(|update| update.machine == *machine) else {
                 return false;
             };
             match &update.facts {
                 // No facts while unreachable: nothing says the update resolved.
                 None => true,
-                Some(facts) => facts
-                    .pending
-                    .as_ref()
-                    .is_some_and(|pending| pending.version == *named),
+                Some(facts) => facts.pending.is_some(),
             }
         });
-    }
-
-    fn show(&self, reminder: &Reminder) {
-        self.adapter
-            .notify(&key_text(reminder.key), &reminder.title, &reminder.body);
     }
 }
 
@@ -221,6 +280,8 @@ pub(crate) mod testing {
     pub(crate) struct RecordingReminders {
         pub(crate) shown: RefCell<Vec<(String, String, String)>>,
         activated: RefCell<Option<async_channel::Sender<super::ReminderClick>>>,
+        /// Replaces the system clock, in seconds since the Unix epoch.
+        pub(crate) clock: std::cell::Cell<Option<u64>>,
     }
 
     impl RecordingReminders {
@@ -245,6 +306,10 @@ pub(crate) mod testing {
                 .borrow_mut()
                 .push((key.to_owned(), title.to_owned(), body.to_owned()));
         }
+
+        fn now(&self) -> u64 {
+            self.clock.get().unwrap_or_else(crate::updates::now)
+        }
     }
 }
 
@@ -252,6 +317,7 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::RecordingReminders;
     use super::*;
+    use crate::updates::ladder::{ASK_AFTER, ASK_CADENCE, INSIST_AFTER, INSIST_CADENCE};
     use crate::updates::machines::testing::ScriptedMachines;
     use crate::updates::machines::{MachineLink, MachineUpdate, MachineUpdatesEvent};
     use spaceterm_core::protocol::capability::{Capabilities, Capability};
@@ -259,22 +325,12 @@ mod tests {
         PendingVersion, Platform, Protocols, UpdateCheck, UpdateFacts, Version,
     };
 
-    fn overdue_penguin(sessions: u32) -> MachineUpdate {
-        let mut update = waiting_penguin(sessions);
-        update
-            .facts
-            .as_mut()
-            .unwrap()
-            .pending
-            .as_mut()
-            .unwrap()
-            .breaking = true;
-        update
-    }
+    /// When penguin's Pending Version was downloaded.
+    const DOWNLOADED: u64 = 1_700_000_000;
+    const PENGUIN: &str = "0202020202020202020202020202020202020202020202020202020202020202";
 
-    /// Penguin's Pending Version, which is not breaking, has waited two days on open Terminal Sessions.
+    /// Penguin waits with 0.9.0, which is not breaking, on `sessions` open Terminal Sessions.
     fn waiting_penguin(sessions: u32) -> MachineUpdate {
-        let now = crate::updates::now();
         MachineUpdate {
             detailed: None,
             machine: [2; 32],
@@ -289,8 +345,9 @@ mod tests {
                     version: Version::parse("0.9.0").unwrap(),
                     protocols: Protocols::CURRENT,
                     breaking: false,
-                    installed_at: now - 2 * DAY - 60,
-                    overdue_since: Some(now - DAY - 60),
+                    installed_at: DOWNLOADED,
+                    // The desktop ignores the Core's own overdue mark.
+                    overdue_since: Some(DOWNLOADED),
                     stranded: Vec::new(),
                 }),
                 sessions,
@@ -307,88 +364,203 @@ mod tests {
         }
     }
 
-    #[gpui::test]
-    fn an_overdue_restart_is_named_once_a_day_with_its_sessions(cx: &mut gpui::TestAppContext) {
-        let machines = Rc::new(ScriptedMachines::default());
-        let reminders = Rc::new(RecordingReminders::default());
-        cx.update(|cx| {
-            MachineUpdates::install(machines.clone(), cx);
-            UpdateReminders::install(reminders.clone(), cx);
-        });
-        machines.emit(MachineUpdatesEvent::Machines(vec![overdue_penguin(3)]));
-        cx.run_until_parked();
-        machines.emit(MachineUpdatesEvent::Changed(Box::new(overdue_penguin(3))));
-        cx.run_until_parked();
-
-        let shown = reminders.shown.borrow().clone();
-        assert_eq!(shown.len(), 1, "one notification a day");
-        assert_eq!(shown[0].1, "Update penguin");
-        assert_eq!(
-            shown[0].2,
-            "SpaceTerm Core 0.9.0 has waited 2 days. Updating ends 3 Terminal Sessions."
-        );
+    struct Fixture {
+        machines: Rc<ScriptedMachines>,
+        reminders: Rc<RecordingReminders>,
+        window: gpui::WindowHandle<gpui::EmptyView>,
     }
 
-    /// A Pending Version that is not breaking waits only on open Terminal Sessions. It keeps
-    /// its menu row but sends no notification.
-    #[gpui::test]
-    fn an_update_that_waits_on_open_sessions_sends_no_notification(cx: &mut gpui::TestAppContext) {
-        let machines = Rc::new(ScriptedMachines::default());
-        let reminders = Rc::new(RecordingReminders::default());
-        cx.update(|cx| {
-            MachineUpdates::install(machines.clone(), cx);
-            UpdateReminders::install(reminders.clone(), cx);
-        });
-        machines.emit(MachineUpdatesEvent::Machines(vec![waiting_penguin(3)]));
-        cx.run_until_parked();
-        machines.emit(MachineUpdatesEvent::Changed(Box::new(waiting_penguin(3))));
-        cx.run_until_parked();
+    impl Fixture {
+        fn new(cx: &mut gpui::TestAppContext) -> Self {
+            let machines = Rc::new(ScriptedMachines::default());
+            let reminders = Rc::new(RecordingReminders::default());
+            reminders.clock.set(Some(DOWNLOADED));
+            let window = cx.add_window(|_, _| gpui::EmptyView);
+            window
+                .update(cx, |_, window, _| window.activate_window())
+                .unwrap();
+            cx.update(|cx| {
+                MachineUpdates::install(machines.clone(), cx);
+                UpdateReminders::install(reminders.clone(), cx);
+            });
+            Self {
+                machines,
+                reminders,
+                window,
+            }
+        }
 
-        assert!(reminders.shown.borrow().is_empty());
-        let rows = cx.read(|cx| presentation::current(cx).extra_rows());
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].tone, presentation::Tone::Problem);
+        /// Sets the clock to `at` and reports `update` again, as a new fact would.
+        fn at(&self, at: u64, update: MachineUpdate, cx: &mut gpui::TestAppContext) {
+            self.reminders.clock.set(Some(at));
+            self.machines
+                .emit(MachineUpdatesEvent::Changed(Box::new(update)));
+            cx.run_until_parked();
+        }
+
+        fn shown(&self) -> usize {
+            self.reminders.shown.borrow().len()
+        }
     }
 
     #[gpui::test]
-    fn a_temporary_state_keeps_the_daily_interval_and_a_new_version_names_again(
+    fn a_waiting_core_update_reminds_daily_from_ask_and_every_four_hours_from_insist(
         cx: &mut gpui::TestAppContext,
     ) {
-        let machines = Rc::new(ScriptedMachines::default());
-        let reminders = Rc::new(RecordingReminders::default());
-        cx.update(|cx| {
-            MachineUpdates::install(machines.clone(), cx);
-            UpdateReminders::install(reminders.clone(), cx);
-        });
-        let changed = |update: MachineUpdate| {
-            machines.emit(MachineUpdatesEvent::Changed(Box::new(update)));
-        };
-        machines.emit(MachineUpdatesEvent::Machines(vec![overdue_penguin(3)]));
+        let fixture = Fixture::new(cx);
+        fixture
+            .machines
+            .emit(MachineUpdatesEvent::Machines(vec![waiting_penguin(3)]));
         cx.run_until_parked();
+        fixture.at(DOWNLOADED + ASK_AFTER - 1, waiting_penguin(3), cx);
+        assert_eq!(fixture.shown(), 0, "Offer sends no reminder");
 
-        let mut offline = overdue_penguin(3);
-        offline.link = MachineLink::Offline {
-            since: crate::updates::now(),
-        };
-        offline.facts = None;
-        changed(offline);
-        cx.run_until_parked();
-        changed(overdue_penguin(3));
-        cx.run_until_parked();
-        let mut checking = overdue_penguin(3);
-        checking.facts.as_mut().unwrap().operation =
-            Some(spaceterm_core::update::facts::Operation::Checking);
-        changed(checking);
-        cx.run_until_parked();
-        changed(overdue_penguin(3));
-        cx.run_until_parked();
+        let ask = DOWNLOADED + ASK_AFTER;
+        fixture.at(ask, waiting_penguin(3), cx);
+        assert_eq!(fixture.shown(), 1);
         assert_eq!(
-            reminders.shown.borrow().len(),
+            fixture.reminders.shown.borrow()[0],
+            (
+                PENGUIN.to_owned(),
+                "SpaceTerm Core 0.9.0 is downloaded on penguin".to_owned(),
+                "An update has waited 2 days. Restarting ends 3 Terminal Sessions.".to_owned()
+            )
+        );
+        fixture.at(ask + ASK_CADENCE - 1, waiting_penguin(3), cx);
+        assert_eq!(fixture.shown(), 1, "one a day at Ask");
+        fixture.at(ask + ASK_CADENCE, waiting_penguin(3), cx);
+        assert_eq!(fixture.shown(), 2);
+
+        let insist = DOWNLOADED + INSIST_AFTER;
+        fixture.at(insist, waiting_penguin(0), cx);
+        assert_eq!(fixture.shown(), 3);
+        assert_eq!(
+            fixture.reminders.shown.borrow()[2].2,
+            "An update has waited 7 days.",
+            "no Terminal Session is open"
+        );
+        fixture.at(insist + INSIST_CADENCE - 1, waiting_penguin(0), cx);
+        assert_eq!(fixture.shown(), 3);
+        fixture.at(insist + INSIST_CADENCE, waiting_penguin(0), cx);
+        assert_eq!(fixture.shown(), 4, "one every four hours at Insist");
+        assert!(
+            fixture
+                .reminders
+                .shown
+                .borrow()
+                .iter()
+                .all(|(key, _, _)| key == PENGUIN),
+            "each reminder replaces the last one for the same update"
+        );
+    }
+
+    #[gpui::test]
+    fn the_schedule_wakes_for_the_next_core_reminder_by_itself(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new(cx);
+        let executor = cx.executor();
+        let began = executor.now();
+        fixture
+            .machines
+            .emit(MachineUpdatesEvent::Machines(vec![waiting_penguin(2)]));
+        cx.run_until_parked();
+        // The test clock follows the executor's, which only timers move.
+        let ask = DOWNLOADED + ASK_AFTER;
+        while fixture.shown() == 0 {
+            assert!(cx.dispatcher.scheduler().advance_clock_to_next_timer());
+            fixture
+                .reminders
+                .clock
+                .set(Some(DOWNLOADED + (executor.now() - began).as_secs()));
+            cx.run_until_parked();
+            assert!(executor.now() - began <= Duration::from_secs(ASK_AFTER + 3600));
+        }
+        assert!(fixture.reminders.clock.get().unwrap() >= ask);
+    }
+
+    #[gpui::test]
+    fn a_breaking_update_and_one_waiting_on_open_sessions_remind_alike(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fixture = Fixture::new(cx);
+        let mut breaking = waiting_penguin(1);
+        breaking.machine = [3; 32];
+        breaking.name = "build-box".into();
+        breaking
+            .facts
+            .as_mut()
+            .unwrap()
+            .pending
+            .as_mut()
+            .unwrap()
+            .breaking = true;
+        fixture.machines.emit(MachineUpdatesEvent::Machines(vec![
+            waiting_penguin(2),
+            breaking.clone(),
+        ]));
+        cx.run_until_parked();
+        fixture.at(DOWNLOADED + ASK_AFTER, breaking, cx);
+        let titles: Vec<String> = fixture
+            .reminders
+            .shown
+            .borrow()
+            .iter()
+            .map(|(_, title, _)| title.clone())
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                "SpaceTerm Core 0.9.0 is downloaded on penguin",
+                "SpaceTerm Core 0.9.0 is downloaded on build-box"
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn reminders_wait_for_an_active_window(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new(cx);
+        gpui::VisualTestContext::from_window(fixture.window.into(), cx).deactivate_window();
+        fixture
+            .machines
+            .emit(MachineUpdatesEvent::Machines(vec![waiting_penguin(3)]));
+        cx.run_until_parked();
+        fixture.at(DOWNLOADED + ASK_AFTER, waiting_penguin(3), cx);
+        assert_eq!(fixture.shown(), 0);
+        fixture
+            .window
+            .update(cx, |_, window, _| window.activate_window())
+            .unwrap();
+        fixture.at(DOWNLOADED + ASK_AFTER + 60, waiting_penguin(3), cx);
+        assert_eq!(fixture.shown(), 1);
+    }
+
+    #[gpui::test]
+    fn offline_keeps_the_cadence_a_newer_version_inherits_it_and_a_restart_ends_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fixture = Fixture::new(cx);
+        fixture
+            .machines
+            .emit(MachineUpdatesEvent::Machines(vec![waiting_penguin(3)]));
+        cx.run_until_parked();
+        let ask = DOWNLOADED + ASK_AFTER;
+        fixture.at(ask, waiting_penguin(3), cx);
+        assert_eq!(fixture.shown(), 1);
+
+        let mut offline = waiting_penguin(3);
+        offline.link = MachineLink::Offline { since: ask };
+        offline.facts = None;
+        fixture.at(ask + 60, offline, cx);
+        fixture.at(ask + 120, waiting_penguin(3), cx);
+        let mut stale = waiting_penguin(3);
+        stale.link = MachineLink::Offline { since: ask };
+        fixture.at(ask + ASK_CADENCE, stale, cx);
+        assert_eq!(
+            fixture.shown(),
             1,
-            "Offline and Checking keep today's reminder"
+            "an offline Machine's last facts remind of nothing"
         );
 
-        let mut newer = overdue_penguin(3);
+        let mut newer = waiting_penguin(3);
         newer
             .facts
             .as_mut()
@@ -397,12 +569,27 @@ mod tests {
             .as_mut()
             .unwrap()
             .version = Version::parse("0.9.1").unwrap();
-        changed(newer);
-        cx.run_until_parked();
+        fixture.at(ask + 180, newer.clone(), cx);
+        assert_eq!(fixture.shown(), 1, "a replacing version keeps the cadence");
+        fixture.at(ask + ASK_CADENCE + 60, newer, cx);
+        assert_eq!(fixture.shown(), 2);
         assert_eq!(
-            reminders.shown.borrow().len(),
-            2,
-            "a replaced Pending Version starts its own reminders"
+            fixture.reminders.shown.borrow()[1].1,
+            "SpaceTerm Core 0.9.1 is downloaded on penguin"
         );
+
+        let mut restarted = waiting_penguin(3);
+        restarted.facts.as_mut().unwrap().pending = None;
+        fixture.at(ask + ASK_CADENCE + 120, restarted, cx);
+        let mut next = waiting_penguin(3);
+        next.facts
+            .as_mut()
+            .unwrap()
+            .pending
+            .as_mut()
+            .unwrap()
+            .installed_at = ask + ASK_CADENCE + 180;
+        fixture.at(ask + ASK_CADENCE + 240, next, cx);
+        assert_eq!(fixture.shown(), 2, "the next update starts at Offer");
     }
 }

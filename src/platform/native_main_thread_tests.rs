@@ -173,5 +173,8 @@ pub(crate) fn run() {
     native_test!(
         macos_pasteboard::tests::native_text_clipboard_preserves_utf8_and_rejects_oversized_text
     );
+    native_test!(super::macos_presence::tests::every_key_click_scroll_and_move_counts_as_input);
+    native_test!(super::macos_presence::tests::a_native_sheet_or_modal_alert_counts_as_presenting);
+    native_test!(super::macos_presence::tests::native_menu_tracking_counts_as_presenting);
     println!("35 native main-thread tests passed");
 }

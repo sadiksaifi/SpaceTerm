@@ -1,5 +1,7 @@
-//! Release age and reminders, independent of transport and presentation.
+//! SpaceTerm's own place on the update ladder and its reminders, independent of transport and
+//! presentation.
 
+use super::ladder::{self, Stage};
 use super::stable_version;
 use serde::{Deserialize, Serialize};
 
@@ -38,12 +40,33 @@ impl Default for UpdatePreferences {
     }
 }
 
+/// The stage of the last reminder as `update-history.json` stores it. The three stored names
+/// predate the update ladder and keep the file's format; [`Stage`] is the one meaning:
+/// `Optional` is Offer, `Warning` is Ask and `Overdue` is Insist.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) enum UpdateStage {
     #[default]
     Optional,
     Warning,
     Overdue,
+}
+impl From<Stage> for UpdateStage {
+    fn from(stage: Stage) -> Self {
+        match stage {
+            Stage::Offer => Self::Optional,
+            Stage::Ask => Self::Warning,
+            Stage::Insist => Self::Overdue,
+        }
+    }
+}
+impl From<UpdateStage> for Stage {
+    fn from(stage: UpdateStage) -> Self {
+        match stage {
+            UpdateStage::Optional => Self::Offer,
+            UpdateStage::Warning => Self::Ask,
+            UpdateStage::Overdue => Self::Insist,
+        }
+    }
 }
 
 /// Cached observations are never installation authority. Sparkle revalidates the signed feed
@@ -129,49 +152,46 @@ impl UpdateHistory {
             .then_some(version)
     }
 
-    pub(crate) fn stage(&mut self, now: u64) -> UpdateStage {
+    /// When the waiting SpaceTerm update started waiting: the earliest publication among the
+    /// versions observed since the installed version passed the first one. `None` when nothing
+    /// waits.
+    pub(crate) fn waiting_since(&self) -> Option<u64> {
+        self.version.as_ref().map(|_| self.published_at)
+    }
+
+    /// The ladder stage of the waiting SpaceTerm update, Offer when nothing waits. A clock set
+    /// back keeps the stage already reached.
+    pub(crate) fn stage(&mut self, now: u64) -> Stage {
         self.high_water = self.high_water.max(now);
-        if self.version.is_none() {
-            return UpdateStage::Optional;
-        }
-        match self.high_water.saturating_sub(self.published_at) {
-            age if age >= 2 * DAY => UpdateStage::Overdue,
-            age if age >= DAY => UpdateStage::Warning,
-            _ => UpdateStage::Optional,
+        match self.waiting_since() {
+            Some(since) => ladder::stage(since, self.high_water),
+            None => Stage::Offer,
         }
     }
 
-    /// Whether the daily reminder is due: the release is a day old or more, and a day has passed
-    /// since the last reminder or the stage changed since it.
+    /// Whether a reminder is due: never at Offer, otherwise by the stage's cadence since the
+    /// last one.
     pub(crate) fn reminder_due(&mut self, now: u64) -> bool {
         let stage = self.stage(now);
-        if stage == UpdateStage::Optional {
-            return false;
-        }
-        if stage != self.reminder_stage {
-            return true;
-        }
-        self.last_reminder
-            .is_none_or(|last| self.high_water.saturating_sub(last) >= DAY)
+        ladder::reminder_due(stage, self.last_reminder, self.high_water)
     }
 
     /// The first time after `now` at which [`Self::stage`] or [`Self::reminder_due`] changes:
-    /// the release turning one or two days old, or a day passing since the last reminder. A
-    /// reminder that is already due changes only when the person sees it, so it adds no time.
+    /// the update reaching Ask or Insist, or the stage's cadence passing since the last
+    /// reminder. A reminder that is already due changes only when the person sees it, so it adds
+    /// no time.
     pub(crate) fn next_change(&mut self, now: u64) -> Option<u64> {
         let stage = self.stage(now);
-        self.version.as_ref()?;
+        let since = self.waiting_since()?;
         // Both rules read the high-water time, which follows the clock once it passes the mark.
         let ahead = |moment: u64| (moment > self.high_water).then_some(moment);
-        let reminder = match self.last_reminder {
-            Some(last) if stage != UpdateStage::Optional && stage == self.reminder_stage => {
-                ahead(last.saturating_add(DAY))
-            }
-            _ => None,
-        };
+        let reminder = self
+            .last_reminder
+            .zip(ladder::cadence(stage))
+            .and_then(|(last, cadence)| ahead(last.saturating_add(cadence)));
         [
-            ahead(self.published_at.saturating_add(DAY)),
-            ahead(self.published_at.saturating_add(2 * DAY)),
+            ahead(since.saturating_add(ladder::ASK_AFTER)),
+            ahead(since.saturating_add(ladder::INSIST_AFTER)),
             reminder,
         ]
         .into_iter()
@@ -180,7 +200,7 @@ impl UpdateHistory {
     }
 
     pub(crate) fn reminded(&mut self, now: u64) {
-        self.reminder_stage = self.stage(now);
+        self.reminder_stage = self.stage(now).into();
         self.last_reminder = Some(self.high_water);
     }
 
@@ -196,19 +216,20 @@ impl UpdateHistory {
         };
     }
 
-    /// Records that this launch runs `installed` at `now`. The first launch ever has nothing new
-    /// to read. A launch of a newer version than the last one finished an update, so Recent
-    /// lists it.
-    pub(crate) fn launched(&mut self, installed: &str, now: u64) {
+    /// Records that this launch runs `installed` at `now`, and returns whether it is the first
+    /// run on a newer version than the last launch, which an update brought. The first launch
+    /// ever has nothing new to read. A launch that came by an update is listed in Recent.
+    pub(crate) fn launched(&mut self, installed: &str, now: u64) -> bool {
         self.notes_read.get_or_insert_with(|| installed.to_owned());
-        if self
+        let updated = self
             .launched
             .as_deref()
-            .is_some_and(|previous| newer(installed, previous))
-        {
+            .is_some_and(|previous| newer(installed, previous));
+        if updated {
             self.record(format!("{DESKTOP_UPDATED}{installed}"), now);
         }
         self.launched = Some(installed.to_owned());
+        updated
     }
 
     /// Adds a finished update to Recent. One release updates SpaceTerm and then each Machine, so
@@ -357,6 +378,16 @@ mod tests {
     }
 
     #[test]
+    fn only_the_first_run_on_a_newer_version_came_by_an_update() {
+        let mut history = UpdateHistory::default();
+        assert!(!history.launched("0.8.0", 0), "a first install");
+        assert!(!history.launched("0.8.0", 1), "the same version again");
+        assert!(history.launched("0.9.0", 2));
+        assert!(!history.launched("0.9.0", 3), "a later run of it");
+        assert!(!history.launched("0.8.0", 4), "going back");
+    }
+
+    #[test]
     fn going_back_to_an_older_version_revives_no_notes() {
         let mut history = UpdateHistory::default();
         history.launched("0.8.0", 0);
@@ -378,62 +409,101 @@ mod tests {
     }
 
     #[test]
-    fn deadlines_survive_newer_releases_restarts_and_clock_rollback() {
+    fn the_clock_inherits_across_newer_releases_and_restarts_and_resets_once_installed() {
+        use ladder::{ASK_AFTER, INSIST_AFTER};
         let mut history = UpdateHistory::default();
+        assert_eq!(history.stage(1_000), Stage::Offer, "nothing waits");
         history.observe("0.1.0", "0.1.1", 1_000, 1_000);
-        assert_eq!(history.stage(87_399), UpdateStage::Optional);
-        assert_eq!(history.stage(87_400), UpdateStage::Warning);
-        assert_eq!(history.stage(173_800), UpdateStage::Overdue);
-        history.observe("0.1.0", "0.1.2", 180_000, 180_000);
+        assert_eq!(history.stage(1_000 + ASK_AFTER - 1), Stage::Offer);
+        assert_eq!(history.stage(1_000 + ASK_AFTER), Stage::Ask);
+        // A newer release replaces the waiting one and keeps its clock, across a relaunch.
+        history.observe("0.1.0", "0.1.2", 1_000 + ASK_AFTER, 1_000 + ASK_AFTER);
         let bytes = serde_json::to_vec(&history).unwrap();
         let mut restored: UpdateHistory = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(restored.stage(2_000), UpdateStage::Overdue);
+        assert_eq!(restored.waiting_since(), Some(1_000));
+        assert_eq!(restored.stage(1_000 + INSIST_AFTER - 1), Stage::Ask);
+        assert_eq!(restored.stage(1_000 + INSIST_AFTER), Stage::Insist);
+        assert_eq!(
+            restored.stage(2_000),
+            Stage::Insist,
+            "a clock set back keeps the stage reached"
+        );
         assert_eq!(restored.pending_version("0.1.0"), Some("0.1.2"));
         assert_eq!(restored.pending_version("0.1.2"), None);
-        restored.observe("0.1.2", "0.1.3", 190_000, 190_000);
-        assert_eq!(restored.stage(190_000), UpdateStage::Optional);
+        // Installing the first waiting version settles the clock; the next release starts its own.
+        let later = 1_000 + INSIST_AFTER + 10;
+        restored.observe("0.1.2", "0.1.3", later, later);
+        assert_eq!(restored.waiting_since(), Some(later));
+        assert_eq!(restored.stage(later), Stage::Offer);
+    }
+
+    #[test]
+    fn the_stored_stage_names_map_to_the_ladder_one_to_one() {
+        for stage in [Stage::Offer, Stage::Ask, Stage::Insist] {
+            assert_eq!(Stage::from(UpdateStage::from(stage)), stage);
+        }
+        let mut history = UpdateHistory::default();
+        history.observe("0.1.0", "0.1.1", 1_000, 1_000);
+        history.reminded(1_000 + ladder::ASK_AFTER);
+        let stored = serde_json::to_value(&history).unwrap();
+        assert_eq!(stored["reminder_stage"], "Warning");
+        assert!(readable_history(&stored));
     }
 
     /// Each moment `next_change` names is the first at which the stage or a due reminder
     /// differs, so a scheduler that waits for it misses nothing and wakes for nothing.
     #[test]
     fn the_next_change_is_the_first_moment_the_stage_or_a_reminder_changes() {
+        use ladder::{ASK_AFTER, ASK_CADENCE, INSIST_AFTER, INSIST_CADENCE};
         let mut history = UpdateHistory::default();
         assert_eq!(history.next_change(1_000), None, "no release, no change");
         history.observe("0.1.0", "0.1.1", 1_000, 1_000);
-        let warning = 1_000 + DAY;
-        assert_eq!(history.next_change(1_001), Some(warning));
-        assert!(!history.clone().reminder_due(warning - 1));
-        assert!(history.clone().reminder_due(warning));
+        let ask = 1_000 + ASK_AFTER;
+        assert_eq!(history.next_change(1_001), Some(ask));
+        assert!(!history.clone().reminder_due(ask - 1));
+        assert!(history.clone().reminder_due(ask));
         assert_eq!(
-            history.next_change(warning),
-            Some(1_000 + 2 * DAY),
+            history.next_change(ask),
+            Some(1_000 + INSIST_AFTER),
             "a due reminder waits for the person, not for time"
         );
-        history.reminded(warning);
-        let overdue = 1_000 + 2 * DAY;
-        assert_eq!(history.next_change(warning), Some(overdue));
-        history.reminded(overdue);
-        let again = overdue + DAY;
-        assert_eq!(history.next_change(overdue), Some(again));
+        history.reminded(ask);
+        let again = ask + ASK_CADENCE;
+        assert_eq!(history.next_change(ask), Some(again));
         assert!(!history.clone().reminder_due(again - 1));
         assert!(history.clone().reminder_due(again));
         // A clock set back changes nothing until it passes the high-water time again.
         assert_eq!(history.next_change(10), Some(again));
+
+        let insist = 1_000 + INSIST_AFTER;
+        history.reminded(insist);
+        assert_eq!(history.next_change(insist), Some(insist + INSIST_CADENCE));
+        assert_eq!(
+            history.next_change(insist + INSIST_CADENCE),
+            None,
+            "Insist is the last stage"
+        );
     }
 
     #[test]
-    fn reminders_start_after_one_day_and_repeat_daily() {
+    fn reminders_start_at_ask_repeat_daily_and_every_four_hours_from_insist() {
+        use ladder::{ASK_AFTER, ASK_CADENCE, INSIST_AFTER, INSIST_CADENCE};
         let mut history = UpdateHistory::default();
         history.observe("0.1.0", "0.1.1", 1_000, 1_000);
         assert!(!history.reminder_due(1_001));
-        assert!(history.reminder_due(87_400));
-        history.reminded(87_400);
-        assert!(!history.reminder_due(100_000));
-        // The stage turns overdue at two days, which reminds at once.
-        assert!(history.reminder_due(173_800));
-        history.reminded(173_800);
-        assert!(!history.reminder_due(173_800 + DAY - 1));
-        assert!(history.reminder_due(173_800 + DAY));
+        assert!(
+            !history.reminder_due(1_000 + ASK_AFTER - 1),
+            "Offer sends no reminder"
+        );
+        let ask = 1_000 + ASK_AFTER;
+        assert!(history.reminder_due(ask));
+        history.reminded(ask);
+        assert!(!history.reminder_due(ask + ASK_CADENCE - 1));
+        assert!(history.reminder_due(ask + ASK_CADENCE));
+
+        let insist = 1_000 + INSIST_AFTER;
+        history.reminded(insist);
+        assert!(!history.reminder_due(insist + INSIST_CADENCE - 1));
+        assert!(history.reminder_due(insist + INSIST_CADENCE));
     }
 }
