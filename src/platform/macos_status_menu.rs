@@ -550,6 +550,7 @@ pub(in crate::platform) mod tests {
     pub(in crate::platform) fn the_native_menu_ends_with_settings_and_quit_and_offers_no_open() {
         let mtm = MainThreadMarker::new().expect("native test must run on the main thread");
         let machine = |id: u8, name: &'static str| MachineUpdate {
+            detailed: None,
             machine: [id; 32],
             name: name.into(),
             local: id == 1,

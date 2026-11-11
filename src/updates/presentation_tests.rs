@@ -15,6 +15,7 @@ fn version(text: &str) -> Version {
 
 fn machine(id: MachineId, name: &'static str, sessions: u32) -> MachineUpdate {
     MachineUpdate {
+        detailed: None,
         machine: id,
         name: name.into(),
         local: id == LOCAL,

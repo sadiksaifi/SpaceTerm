@@ -690,6 +690,7 @@ impl Shared {
                 let wake = Arc::new(Wake::default());
                 let entry = Entry {
                     update: MachineUpdate {
+                        detailed: None,
                         machine: machine.id,
                         name: machine.name.clone(),
                         local: machine.local,

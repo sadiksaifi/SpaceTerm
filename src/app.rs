@@ -2388,6 +2388,7 @@ mod tests {
             Operation, Platform, UpdateCheck, UpdateFacts, Version,
         };
         crate::updates::machines::MachineUpdate {
+            detailed: None,
             machine: [1; 32],
             name: "This Mac".into(),
             local: true,

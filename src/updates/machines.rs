@@ -32,6 +32,10 @@ pub(crate) struct MachineUpdate {
     pub(crate) link: MachineLink,
     /// The latest facts received in this run over either lane. None before the first.
     pub(crate) facts: Option<UpdateFacts>,
+    /// The latest detailed update facts, from a Core whose service lane offers them. They hold
+    /// the same facts as `facts` and the engine's own continuation, which takes precedence over
+    /// [`spaceterm_core::update::continuation`]. None from an older Core.
+    pub(crate) detailed: Option<spaceterm_core::update::DetailedUpdateFacts>,
     pub(crate) capabilities: Capabilities,
     /// This desktop's embedded Core version for the Machine's platform, when it is newer than
     /// `facts.running` and not `facts.skipped`. It drives "Update {Machine}".

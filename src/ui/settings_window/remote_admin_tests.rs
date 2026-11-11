@@ -255,6 +255,7 @@ fn a_paired_machine_that_is_not_ready_takes_no_lane_step(cx: &mut TestAppContext
     });
     machines.direct.disconnect(&route);
     adapter.emit(MachineUpdatesEvent::Machines(vec![MachineUpdate {
+        detailed: None,
         machine: machines.direct.route(&route).unwrap().paired.pin.core,
         name: "penguin".into(),
         local: false,
@@ -500,6 +501,7 @@ fn a_paired_card_updates_through_the_shared_store_and_shows_its_progress(cx: &mu
         .update
         .unwrap();
     let update = MachineUpdate {
+        detailed: None,
         machine: id,
         name: "penguin".into(),
         local: false,

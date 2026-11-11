@@ -22,6 +22,7 @@ const BUILD_BOX: MachineId = [3; 32];
 
 fn machine(id: MachineId, name: &'static str, sessions: u32) -> MachineUpdate {
     MachineUpdate {
+        detailed: None,
         machine: id,
         name: name.into(),
         local: id == LOCAL,

@@ -276,6 +276,7 @@ mod tests {
     fn waiting_penguin(sessions: u32) -> MachineUpdate {
         let now = crate::updates::now();
         MachineUpdate {
+            detailed: None,
             machine: [2; 32],
             name: "penguin".into(),
             local: false,

@@ -521,6 +521,7 @@ fn machine(
     now: u64,
 ) -> MachineUpdate {
     MachineUpdate {
+        detailed: None,
         machine,
         name: name.into(),
         local,

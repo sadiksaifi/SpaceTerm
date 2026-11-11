@@ -742,6 +742,7 @@ mod tests {
 
     fn update(running: &str, pending: Option<&str>) -> MachineUpdate {
         MachineUpdate {
+            detailed: None,
             machine: [2; 32],
             name: "penguin".into(),
             local: false,

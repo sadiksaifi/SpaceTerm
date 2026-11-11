@@ -19,6 +19,7 @@ const BUILD_BOX: MachineId = [3; 32];
 
 fn waiting(machine: MachineId, name: &'static str, sessions: u32) -> MachineUpdate {
     MachineUpdate {
+        detailed: None,
         machine,
         name: name.into(),
         local: false,

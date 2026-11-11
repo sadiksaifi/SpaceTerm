@@ -40,6 +40,59 @@ pub struct UpdateFacts {
     pub last_failure: Option<UpdateFailure>,
 }
 
+/// The work and service minor of major 1 that first carries [`DetailedUpdateFacts`].
+pub const MINOR_DETAILED_FACTS: u16 = 2;
+
+/// One Machine's [`UpdateFacts`] with what only its update engine knows, as one snapshot. Since
+/// work and service minor [`MINOR_DETAILED_FACTS`]; an older peer never receives it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DetailedUpdateFacts {
+    pub facts: UpdateFacts,
+    /// How the Pending Version finishes, as the engine decides it from its own attempt, retry
+    /// and idle state. None without a Pending Version. It takes precedence over
+    /// [`super::continuation::continuation`].
+    pub continuation: Option<super::continuation::Continuation>,
+    /// Live Terminal Sessions with work going on. A Terminal Session whose state the Core
+    /// cannot read counts. At most `facts.sessions`.
+    pub working: u32,
+    /// Why the restart that `facts.operation` reports began. None without one.
+    pub restart: Option<RestartCause>,
+}
+
+impl DetailedUpdateFacts {
+    /// Checks the bounds and invariants that decoding alone does not.
+    pub fn validate(&self) -> Result<(), InvalidFacts> {
+        self.facts.validate()?;
+        let restarting = matches!(
+            self.facts.operation,
+            Some(Operation::Restarting { .. } | Operation::RestartingSameVersion)
+        );
+        let continuation = self.continuation.is_none() || self.facts.pending.is_some();
+        if self.working <= self.facts.sessions
+            && continuation
+            && (self.restart.is_none() || restarting)
+        {
+            Ok(())
+        } else {
+            Err(InvalidFacts)
+        }
+    }
+}
+
+/// Why a SpaceTerm Core restart began. A minor may only append variants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestartCause {
+    /// A person confirmed it.
+    Asked,
+    /// SpaceTerm Core decided on its own, with no live Terminal Session.
+    NoSessions,
+    /// SpaceTerm Core decided on its own: no live Terminal Session had work going on for the
+    /// idle period, and the restart ends them.
+    NothingRunning,
+}
+
 /// The work and service minor of major 1 that first carries [`Operation::RestartingSameVersion`],
 /// [`CheckFailure::ClockBehind`], [`CheckFailure::SteppingStoneSkipped`] and
 /// [`StartFailure::Interrupted`].

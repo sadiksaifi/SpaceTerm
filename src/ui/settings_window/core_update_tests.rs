@@ -20,6 +20,7 @@ const MACHINE: [u8; 32] = [1; 32];
 
 fn machine(pending: Option<&str>, sessions: u32) -> MachineUpdate {
     MachineUpdate {
+        detailed: None,
         machine: MACHINE,
         name: "This Mac".into(),
         local: true,
