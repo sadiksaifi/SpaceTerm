@@ -71,8 +71,6 @@ fn perform_now(command: Command, presenter: Presenter, cx: &mut App) {
                 });
             }
         }
-        // The confirmation is built again from the Cores' previews before it shows.
-        Command::Confirm(confirmation) => request(confirmation.actions, false, presenter, cx),
         Command::Explain(explanation) => explain(explanation, presenter, cx),
         // The title-bar pill opens its own list; no other surface offers this command.
         Command::ShowList => {}

@@ -504,7 +504,7 @@ fn the_main_area_performs_the_step_and_a_row_performs_its_action(cx: &mut gpui::
     let (_, _, machines) = services(cx);
     let script = Script::new(with_pill(pill(
         "Check Again",
-        Glyph::CantCheck,
+        Glyph::UpdateFailed,
         Emphasis::Warning,
         Command::Machine(BUILD_BOX, MachineAction::CheckAgain),
     )));

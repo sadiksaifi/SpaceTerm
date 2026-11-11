@@ -4,10 +4,6 @@
 //!
 //! [`Step`] is the minimum over every row's candidate, so no other code decides the main area,
 //! and the step and the rows come from the same stages.
-#![allow(
-    dead_code,
-    reason = "the title-bar, surfaces, ladder and pane slices each read part of this view"
-)]
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -48,18 +44,13 @@ pub(crate) enum Glyph {
     Download,
     /// Relaunch the desktop.
     Restart,
-    Overdue,
-    /// The desktop is too old for a Machine.
-    UpdateDesktop,
     /// Restart SpaceTerm Core: the package glyph.
     UpdateCore,
     WhatsNew,
     /// A failure: the circle-alert glyph.
     UpdateFailed,
-    InstallFailed,
     /// A restart nobody confirmed: the circle-help glyph.
     CantConfirm,
-    CantCheck,
 }
 
 /// What a click does.
@@ -69,8 +60,6 @@ pub(crate) enum Command {
     /// Performs the action at once. A Restart or Stop previews and asks first wherever its
     /// Core says something ends.
     Machine(MachineId, MachineAction),
-    /// Asks first, then performs every action.
-    Confirm(Confirmation),
     /// Opens an alert with the full sentence.
     Explain(Explanation),
     /// Opens the split pill's list. Only the title bar performs it.
@@ -257,7 +246,6 @@ pub(crate) enum DownloadCause {
     DiskFull,
     Unreachable,
     Busy,
-    NeedsFloor(Floor),
     RelaunchRequired,
     Failed,
 }
@@ -291,18 +279,6 @@ pub(crate) enum ActKind {
     Relaunch,
     RestartCore(MachineId),
     Download,
-}
-
-/// What a row's action or the pill's main area asks for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Action {
-    WhatsNew,
-    Download,
-    RelaunchToUpdate,
-    RestartCore(MachineId),
-    TryAgain(Target),
-    CheckAgain(MachineId),
-    HowToUpdate(MachineId),
 }
 
 /// The split pill, rendered.
@@ -720,14 +696,6 @@ impl MachineRow {
             stage: (!hard_stop).then_some(stage),
             hard_stop,
         })
-    }
-
-    /// The Pending Version that waits, when one does.
-    pub(crate) fn waiting(&self) -> Option<&Version> {
-        match &self.stage {
-            MachineStage::Downloaded { version, .. } => Some(version),
-            _ => None,
-        }
     }
 }
 

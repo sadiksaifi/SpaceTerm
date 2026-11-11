@@ -263,9 +263,6 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) {
         match command {
-            Command::Confirm(confirmation) => {
-                self.request_machine_actions(confirmation.actions, false, window, cx)
-            }
             Command::Machine(machine, action @ (MachineAction::Restart | MachineAction::Stop)) => {
                 self.request_machine_actions(vec![(machine, action)], false, window, cx)
             }

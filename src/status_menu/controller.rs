@@ -273,10 +273,6 @@ impl StatusMenu {
                 action @ (MachineAction::Restart | MachineAction::Stop),
             ) => self.request(vec![(machine, action)], false, activation, cx),
             state::Command::Machine(machine, action) => act(machine, action, cx),
-            // The confirmation is built again from the Cores' previews before it shows.
-            state::Command::Confirm(confirmation) => {
-                self.request(confirmation.actions, false, activation, cx);
-            }
             // Only the title bar opens its list.
             state::Command::ShowList => {}
             state::Command::Explain(explanation) => {

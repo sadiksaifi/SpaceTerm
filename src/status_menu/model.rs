@@ -250,10 +250,6 @@ fn machine_row(update: &MachineUpdate, row: RowView) -> MachineRow {
 fn restarts_core(command: &Command) -> bool {
     match command {
         Command::Update(state::Command::Machine(_, MachineAction::Restart)) => true,
-        Command::Update(state::Command::Confirm(confirmation)) => confirmation
-            .actions
-            .iter()
-            .any(|(_, action)| *action == MachineAction::Restart),
         _ => false,
     }
 }

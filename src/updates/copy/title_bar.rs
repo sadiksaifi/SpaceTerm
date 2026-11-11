@@ -22,6 +22,7 @@ pub(crate) const DOWNLOAD_UPDATE: &str = "Download Update";
 pub(crate) const WHATS_NEW: &str = "What's New";
 
 /// Every main-area label.
+#[cfg(test)]
 pub(crate) const LABELS: [&str; 9] = [
     UPDATE_FAILED,
     RESTART_NOT_CONFIRMED,

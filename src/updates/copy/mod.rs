@@ -1,10 +1,6 @@
 //! Every person-facing update string of the desktop. Each submodule renders one family of
 //! surfaces from [`super::state::UpdateView`]; no other module writes update text. Apostrophes
 //! are straight everywhere; ellipses are U+2026 and the middle dot is U+00B7.
-#![allow(
-    dead_code,
-    reason = "the title-bar, surfaces, ladder and pane slices each render part of this copy"
-)]
 
 pub(crate) mod dialogs;
 pub(crate) mod pane;

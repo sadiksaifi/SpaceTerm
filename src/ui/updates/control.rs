@@ -178,14 +178,10 @@ fn glyph(
         }
         Glyph::Download => icon(IconName::Download),
         Glyph::Restart => icon(IconName::RotateCw),
-        Glyph::Overdue => icon(IconName::Clock),
-        Glyph::UpdateDesktop => icon(IconName::CircleArrowUp),
         Glyph::UpdateCore => icon(IconName::Package),
         Glyph::WhatsNew => icon(IconName::Sparkles),
         Glyph::UpdateFailed => icon(IconName::CircleAlert),
-        Glyph::InstallFailed => icon(IconName::CircleX),
         Glyph::CantConfirm => icon(IconName::CircleHelp),
-        Glyph::CantCheck => icon(IconName::CloudOff),
     }
 }
 

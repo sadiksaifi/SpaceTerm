@@ -200,7 +200,6 @@ pub(crate) fn machine_failure(row: &MachineRow) -> Option<Explanation> {
                 DownloadCause::DiskFull => format!("{name} is out of disk space. "),
                 DownloadCause::Unreachable => format!("{name} stopped answering. "),
                 DownloadCause::Busy => format!("SpaceTerm Core on {name} is busy with another update. "),
-                DownloadCause::NeedsFloor(floor) => format!("{name} needs SpaceTerm Core {floor} first and couldn't get it. "),
                 DownloadCause::RelaunchRequired | DownloadCause::Failed => String::new(),
             };
             Explanation {
