@@ -1018,7 +1018,6 @@ fn too_old_core(
         bundled: None,
         failed_push: None,
         asked: None,
-        retrying_since: None,
     }
 }
 

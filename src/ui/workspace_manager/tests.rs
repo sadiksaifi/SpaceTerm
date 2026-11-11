@@ -8792,7 +8792,6 @@ fn a_blocked_pane_follows_the_cores_download_and_restarts_only_after_approval(
         bundled: None,
         failed_push: None,
         asked: None,
-        retrying_since: None,
     };
     let machines = Rc::new(crate::updates::machines::testing::ScriptedMachines::default());
     cx.update(|cx| {
