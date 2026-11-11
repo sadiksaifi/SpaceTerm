@@ -368,7 +368,7 @@ fn a_real_integrated_shell_needs_a_quiet_hour_and_receives_input_after_a_lease()
     let hour = spaceterm_core::service::updates::IDLE_PERIOD;
     assert!(
         spaceterm_core::idle_restart::Lease::scan(
-            &[observed.clone()],
+            std::slice::from_ref(&observed),
             Instant::now() + hour / 2,
             hour
         )
@@ -377,7 +377,7 @@ fn a_real_integrated_shell_needs_a_quiet_hour_and_receives_input_after_a_lease()
     let deadline = Instant::now() + REAL_SHELL_DEADLINE;
     let lease = loop {
         if let Some(lease) = spaceterm_core::idle_restart::Lease::scan(
-            &[observed.clone()],
+            std::slice::from_ref(&observed),
             Instant::now() + hour * 2,
             hour,
         ) {

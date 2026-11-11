@@ -131,6 +131,15 @@ impl TerminalEventPublisher {
     }
 }
 
+impl spaceterm_core::idle_restart::Session for TerminalEventPublisher {
+    fn activity(&self) -> spaceterm_core::idle_restart::Activity {
+        self.receipt_activity()
+    }
+    fn working(&self, now: Instant) -> bool {
+        !self.receipt_activity().quiet(now, IDLE_PERIOD) || self.work_going_on(now)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,14 +200,5 @@ mod tests {
         };
         assert!(work_going_on(HOUR, false, true, probe));
         assert!(!read.get());
-    }
-}
-
-impl spaceterm_core::idle_restart::Session for TerminalEventPublisher {
-    fn activity(&self) -> spaceterm_core::idle_restart::Activity {
-        self.receipt_activity()
-    }
-    fn working(&self, now: Instant) -> bool {
-        !self.receipt_activity().quiet(now, IDLE_PERIOD) || self.work_going_on(now)
     }
 }
