@@ -13,7 +13,7 @@ use spaceterm_core::pane::{Color, effects};
 use spaceterm_core::protocol::screen::{
     History, Row, ScreenUpdate, Style, StyleDefinition, StyleRef, flags,
 };
-use spaceterm_core::protocol::{PaneEvent, RunReceipt};
+use spaceterm_core::protocol::{InputOutcome, PaneEvent, Refusal, RunReceipt};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
@@ -304,6 +304,10 @@ impl Channel {
             ChannelEvent::Pane(PaneEvent::Input { serial, outcome }) => {
                 Event::Input { serial, outcome }
             }
+            ChannelEvent::Pane(PaneEvent::InputRestarting { serial, .. }) => Event::Input {
+                serial,
+                outcome: InputOutcome::Discarded(Refusal::ServiceBusy),
+            },
             ChannelEvent::Pane(event) if event.last() => Event::Ended(event),
             // The CLI demands no semantics.
             ChannelEvent::Pane(_) | ChannelEvent::Accessibility(_) => return self.next(deadline),
@@ -425,4 +429,47 @@ pub(crate) fn own_grant(takeover: &spaceterm_core::protocol::Takeover) -> bool {
             ..
         }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contract::Code;
+    use spaceterm_core::protocol::Channel as ChannelId;
+    use std::time::Duration;
+
+    #[test]
+    fn restarting_input_is_discarded_as_service_busy() {
+        let link = CoreLink::new(Arc::new(|_| {}), Arc::new(|| {}), Instant::now());
+        for event in [
+            PaneEvent::Input {
+                serial: 7,
+                outcome: InputOutcome::Discarded(Refusal::ServiceBusy),
+            },
+            PaneEvent::InputRestarting {
+                channel: ChannelId(1),
+                serial: 7,
+            },
+        ] {
+            let mut channel = Channel::open(&link).unwrap();
+            channel.inbox.deliver(ChannelEvent::Pane(event));
+            channel
+                .inbox
+                .deliver(ChannelEvent::Closed(LinkError::Closed));
+            let received = channel.next(Deadline::after(Some(Duration::ZERO))).unwrap();
+            let Some(Event::Input {
+                serial,
+                outcome: InputOutcome::Discarded(refusal),
+            }) = received
+            else {
+                panic!("input refusal was lost: {received:?}");
+            };
+            assert_eq!(channel.input, 0);
+            assert_eq!(serial, 7);
+            assert_eq!(refusal, Refusal::ServiceBusy);
+            let failure = crate::io::send::discarded(refusal);
+            assert_eq!(failure.code, Code::ServiceBusy);
+            assert!(failure.code.retryable());
+        }
+    }
 }
