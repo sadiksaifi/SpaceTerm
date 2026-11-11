@@ -11,7 +11,7 @@ A native desktop terminal multiplexer for macOS and Linux, coming soon for Windo
 
 ## Architecture
 
-- Nothing has been released yet, so maintain no backward compatibility for anything. Pick the best solution for every change and replace the old one in place, with no migrations, aliases, fallbacks or readers for old versions. From the first release on, a breaking change to a retained format needs a Data Generation step under [ADR 0064](docs/adr/0064-step-updates-through-update-floors-and-migrate-data-generations.md).
+- SpaceTerm ships releases, so every change stays compatible with what released versions read and speak. Retained formats and update feeds follow [ADR 0064](docs/adr/0064-step-updates-through-update-floors-and-migrate-data-generations.md), wire protocols follow [ADR 0035](docs/adr/0035-negotiate-protocol-versions-per-connection.md), and CLI output follows [ADR 0055](docs/adr/0055-define-the-cli-output-contract-and-scope-model.md). Everywhere else, pick the best solution and replace the old one in place, with no aliases, fallbacks or shims.
 - Each SpaceTerm Core owns its Machine's Workspaces, Tabs, Panes, and Terminal Sessions. Each SpaceTerm Client owns its presentation and client view over account-local IPC or paired QUIC connections. SSH is temporary provisioning authority inside the desktop's Add Machine.
 - Put behavior, invariants, and cleanup in deep modules with narrow interfaces. Expose intentional operations and typed recoverable failures.
 - Keep product policy portable. Reach frameworks, external systems, and operating system capabilities through narrow adapters chosen by constructor injection. Add a boundary only for durable replaceability or locality.
