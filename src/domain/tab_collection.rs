@@ -795,11 +795,11 @@ mod tests {
     }
 
     #[test]
-    fn new_tabs_should_join_the_active_worktree_after_its_last_tab() {
+    fn a_tab_created_in_a_worktree_should_follow_its_last_tab_and_become_active() {
         let mut tabs = two_worktrees();
-        tabs.activate_tab(TabId::new(1)).unwrap();
+        assert_eq!(tabs.active_scope(), FEATURE);
 
-        let created = tabs.create_tab(|_| "main-3").unwrap();
+        let created = tabs.create_tab_in(MAIN, |_| "main-3").unwrap();
 
         assert_eq!(
             (

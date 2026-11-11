@@ -722,6 +722,8 @@ mod tests {
                     c.destructive_pressed_foreground,
                     c.destructive_pressed_background,
                 ),
+                (c.row_secondary, c.row_background),
+                (c.row_hover_secondary, c.row_hover_background),
                 (c.row_selected_foreground, c.row_selected_background),
                 (c.row_selected_secondary, c.row_selected_background),
                 (c.row_selected_match, c.row_selected_background),

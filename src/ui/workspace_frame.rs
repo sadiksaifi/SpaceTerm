@@ -292,6 +292,13 @@ mod tests {
                 px(0.0),
                 "{density:?} the sidebar chip's own margin is the whole gap beside the Pane"
             );
+            // A chip's paint starts on its strip's leading edge, so the control before the strip
+            // supplies the whole gap by itself.
+            assert_eq!(
+                frame.chip_strip_leading_offset() + frame.strip_chip_leading_inset(),
+                px(0.0),
+                "{density:?} a first chip should paint on the strip edge"
+            );
         }
     }
 
@@ -312,25 +319,6 @@ mod tests {
             px(30.0),
             "the gap never resizes a top chip"
         );
-    }
-
-    /// Two neighbouring chips each contribute a share of one visible gap.
-    #[test]
-    fn paired_chips_should_sum_to_one_visible_gap() {
-        for density in [ChromeDensity::Compact, ChromeDensity::Comfortable] {
-            let frame = frame(density, standard_window());
-            assert_eq!(
-                frame.strip_chip_trailing_inset() + frame.strip_chip_leading_inset(),
-                frame.space()
-            );
-            // A chip's paint starts on its strip's leading edge, so the control before the strip
-            // supplies the whole gap by itself.
-            assert_eq!(
-                frame.chip_strip_leading_offset() + frame.strip_chip_leading_inset(),
-                px(0.0),
-                "{density:?} a first chip should paint on the strip edge"
-            );
-        }
     }
 
     /// Pane corners stay concentric with the native window while selection uses one fixed role.

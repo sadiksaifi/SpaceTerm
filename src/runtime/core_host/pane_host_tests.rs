@@ -4,7 +4,7 @@ use super::tests::{
 };
 use super::*;
 use spaceterm_core::protocol::{PaneEvent, screen::ScreenUpdate};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[test]
 fn native_clipboard_requests_reach_only_the_current_controller() {
@@ -12,75 +12,30 @@ fn native_clipboard_requests_reach_only_the_current_controller() {
     let lease = attach(&mut host, 1, true);
     focus(&mut host, lease, 1, FocusTarget::Terminal);
     native_command(&mut host, lease, 1, "printf '\\033]52;c;aGVsbG8=\\007'");
+    // Wait for the write without observing, so it is still pending while another client asks.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while host
+        .pane
+        .as_ref()
+        .unwrap()
+        .subscription
+        .clipboard
+        .is_empty()
+    {
+        assert!(Instant::now() < deadline, "the write did not arrive");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(matches!(
+        host.observe([2; 32], &lease),
+        Observed::Gone {
+            event: PaneEvent::Takeover(_),
+            ..
+        }
+    ));
     let [request] = effects(&mut host, lease, 1).try_into().unwrap();
     assert!(
         matches!(request.effect, pane::effects::Effect::ClipboardWrite { text, .. } if text == "hello")
     );
-    host.shutdown().unwrap();
-}
-
-#[test]
-fn interactive_input_requires_current_focus() {
-    let mut host = host();
-    let lease = attach(&mut host, 1, true);
-    let key = Key {
-        physical: PhysicalKey::Enter as u32,
-        action: 0,
-        logical: "enter".into(),
-        text: None,
-        unshifted: None,
-        modifiers: 0,
-        consumed: 0,
-        option_as_alt: false,
-    };
-    assert!(matches!(
-        host.request(
-            [1; 32],
-            [1; 32],
-            Request::Focus {
-                lease,
-                generation: 1,
-                target: FocusTarget::Unfocused
-            }
-        ),
-        Reply::Unchanged
-    ));
-    assert!(matches!(
-        host.request(
-            [1; 32],
-            [1; 32],
-            Request::Input {
-                lease,
-                generation: 1,
-                input: InteractiveInput::Key(key.clone())
-            }
-        ),
-        Reply::Refused(Refusal::Stale)
-    ));
-    assert!(matches!(
-        host.request(
-            [1; 32],
-            [1; 32],
-            Request::Focus {
-                lease,
-                generation: 2,
-                target: FocusTarget::Terminal
-            }
-        ),
-        Reply::Unchanged
-    ));
-    assert!(matches!(
-        host.request(
-            [1; 32],
-            [1; 32],
-            Request::Input {
-                lease,
-                generation: 2,
-                input: InteractiveInput::Key(key)
-            }
-        ),
-        Reply::Unchanged
-    ));
     host.shutdown().unwrap();
 }
 

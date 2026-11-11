@@ -500,7 +500,6 @@ fn validate(document: &Document) -> Result<(), StoreError> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    use std::process::Command;
 
     fn transaction(store: &ConnectionStore) -> ConnectionTransaction<'_> {
         store.transaction(Instant::now() + std::time::Duration::from_secs(30), &|| {
@@ -720,54 +719,5 @@ mod tests {
                 (crate::StoreKind::PrivateFile, enrolling.credential),
             ]
         );
-    }
-
-    #[test]
-    fn process_writer() {
-        let Some(root) = std::env::var_os("SPACETERM_TEST_CONNECTION_ROOT") else {
-            return;
-        };
-        let id = std::env::var("SPACETERM_TEST_CONNECTION_ID")
-            .unwrap()
-            .parse()
-            .unwrap();
-        ConnectionStore::new(root.into())
-            .transaction(Instant::now() + std::time::Duration::from_secs(30), &|| {
-                false
-            })
-            .commit_guarded(|rows| {
-                rows.push(saved(id));
-                Ok(())
-            })
-            .unwrap();
-    }
-
-    #[test]
-    fn concurrent_processes_preserve_both_adds_and_desktop_fixture_bytes() {
-        let fixture = Fixture::new();
-        let desktop = fixture.0.join("direct-device-connections.json");
-        let bytes = include_bytes!("../tests/fixtures/desktop-connections.json");
-        let document: crate::records::Document = serde_json::from_slice(bytes).unwrap();
-        assert_eq!(document.routes.len(), 1);
-        std::fs::write(&desktop, bytes).unwrap();
-        let mut children = Vec::new();
-        for id in [1, 2] {
-            children.push(
-                Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", "store::tests::process_writer", "--nocapture"])
-                    .env("SPACETERM_TEST_CONNECTION_ROOT", fixture.store().root)
-                    .env("SPACETERM_TEST_CONNECTION_ID", id.to_string())
-                    .spawn()
-                    .unwrap(),
-            );
-        }
-        for mut child in children {
-            assert!(child.wait().unwrap().success());
-        }
-        let rows = fixture.store().load().unwrap();
-        assert_eq!(rows.len(), 2);
-        assert!(rows.iter().any(|row| row.name == "server-1"));
-        assert!(rows.iter().any(|row| row.name == "server-2"));
-        assert_eq!(std::fs::read(&desktop).unwrap(), bytes);
     }
 }

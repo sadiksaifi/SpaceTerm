@@ -2181,6 +2181,13 @@ fn increased_contrast_app_owned_state_pairs_reach_their_final_material_hosts() {
         let prepared = ChromeAppearance::prepare_for_activity(&resolved.chrome, active);
         let panel = &prepared.panel_controls.reference;
         let panel_host = prepared.control_host_background(spaceterm_ui::ControlHost::Panel);
+        if active {
+            let focus = panel.sidebar_focus.source_over(panel_host);
+            assert!(
+                focus.contrast_ratio(panel_host) >= 4.5,
+                "sidebar focus {focus:?} must reach 4.5:1 on its final Panel host {panel_host:?}"
+            );
+        }
         for (name, fill, primary, secondary, icon, selected, border) in [
             (
                 "row idle",
@@ -2235,7 +2242,7 @@ fn increased_contrast_app_owned_state_pairs_reach_their_final_material_hosts() {
             );
             let background = overlay.source_over(panel_host);
             assert!(
-                primary.contrast_ratio(background) >= 7.0,
+                primary.source_over(background).contrast_ratio(background) >= 7.0,
                 "{name}, active={active}: primary={primary:?}, background={background:?}"
             );
             for (role, content) in [("secondary", secondary), ("icon", icon)] {
@@ -2348,40 +2355,6 @@ fn increased_contrast_app_owned_state_pairs_reach_their_final_material_hosts() {
             }
         }
     }
-}
-
-#[test]
-fn focused_selected_sidebar_row_uses_panel_prepared_focus_and_selection_roles() {
-    let (mut resolved, _) =
-        resolve_case(Appearance::Light, ChromeDensity::Compact, 0.0, true, true);
-    let chrome = std::sync::Arc::make_mut(&mut resolved.chrome);
-    chrome.composition.capabilities.increase_contrast = true;
-
-    let prepared = ChromeAppearance::prepare(&resolved.chrome);
-    let host = prepared.control_host_background(spaceterm_ui::ControlHost::Panel);
-    let colors = prepared.host_colors(spaceterm_ui::ControlHost::Panel);
-    let focus = colors.sidebar_focus.source_over(host);
-    assert!(
-        focus.contrast_ratio(host) >= 4.5,
-        "sidebar focus {focus:?} must reach 4.5:1 on its final Panel host {host:?}"
-    );
-
-    let selected = prepared
-        .materials
-        .paint(
-            crate::appearance::SurfaceRole::Surface,
-            colors.panel_background,
-            colors.navigation_selected_background,
-        )
-        .source_over(host);
-    assert!(selected.contrast_ratio(host) >= 1.4);
-    assert!(
-        colors
-            .navigation_selected_foreground
-            .source_over(selected)
-            .contrast_ratio(selected)
-            >= 7.0
-    );
 }
 
 #[test]

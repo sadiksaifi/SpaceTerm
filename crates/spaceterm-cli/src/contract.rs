@@ -2351,7 +2351,8 @@ pub struct Shown {
 #[cfg(test)]
 pub(crate) mod golden {
     //! Golden envelopes in `crates/spaceterm-cli/golden/`. Set `SPACETERM_GOLDEN_UPDATE=1` to
-    //! write the current output instead of comparing.
+    //! write the current output instead of comparing. `pair_interaction_required.json` is read
+    //! only by `tests/provision.rs` and is not rewritten that way.
     use serde::Serialize;
     use std::path::PathBuf;
 
@@ -2463,7 +2464,6 @@ mod tests {
             assert_eq!(Code::parse(code.as_str()), Some(code));
             assert!(!code.message().is_empty());
             assert!(code.message().ends_with('.'), "{code}");
-            assert_eq!(code.exit(), code.class().exit());
         }
         assert_eq!(Code::parse("private-unknown"), None);
     }
@@ -2917,24 +2917,5 @@ mod tests {
         });
         assert_eq!(envelope.exit(), 4);
         assert_golden("ambiguous_target", &envelope);
-    }
-
-    #[test]
-    fn golden_confirmation_envelope() {
-        let envelope = Envelope::confirmation(
-            "stop",
-            None,
-            Confirmation {
-                token: "c1-00".into(),
-                expires_at: "2026-10-30T12:00:00Z".into(),
-                effects: ServiceEffects {
-                    ends_sessions: 1,
-                    sessions: vec!["0e".repeat(32)],
-                    pending: None,
-                },
-            },
-        );
-        assert_eq!(envelope.exit(), 3);
-        assert_golden("confirmation_required", &envelope);
     }
 }

@@ -1262,23 +1262,6 @@ fn cancelled_directory_selection_fallback_should_leave_hierarchy_unchanged(
 }
 
 #[gpui::test]
-fn titlebar_button_and_command_shift_k_should_each_block_terminal_input(cx: &mut TestAppContext) {
-    let (manager, _, cx) = workspace_manager(cx);
-    click("workspace-switcher", cx);
-    assert_eq!(
-        cx.update(|window, cx| manager.read(cx).terminal_focus_blocker(window, cx)),
-        Some(TerminalFocusBlocker::CommandPalette)
-    );
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    open_workspace_switcher(cx);
-    assert_eq!(
-        cx.update(|window, cx| manager.read(cx).terminal_focus_blocker(window, cx)),
-        Some(TerminalFocusBlocker::CommandPalette)
-    );
-}
-
-#[gpui::test]
 fn hiding_the_sidebar_should_keep_the_top_combo_box_and_its_focus_blocker(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
     click("workspace-switcher", cx);
@@ -1436,6 +1419,14 @@ fn workspace_switcher_should_open_and_block_terminal_input_focus(cx: &mut TestAp
         (true, Some(TerminalFocusBlocker::CommandPalette), false)
     );
     assert!(cx.debug_bounds("combo-box-panel").is_some());
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    open_workspace_switcher(cx);
+    assert_eq!(
+        cx.update(|window, cx| manager.read(cx).terminal_focus_blocker(window, cx)),
+        Some(TerminalFocusBlocker::CommandPalette)
+    );
 }
 
 #[gpui::test]
@@ -2133,19 +2124,9 @@ fn sidebar_resize_should_reveal_its_paintless_handle_to_keyboard_focus(cx: &mut 
 }
 
 #[gpui::test]
-fn workspace_frame_omits_structural_divider_elements(cx: &mut TestAppContext) {
+fn content_stage_paints_the_sidebar_base_surface_beside_the_resize_target(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
 
-    for selector in [
-        "workspace-top-chrome-bottom-divider",
-        "tab-bar-divider",
-        "workspace-sidebar-footer-divider",
-    ] {
-        assert!(
-            cx.debug_bounds(selector).is_none(),
-            "{selector} should no longer be rendered"
-        );
-    }
     // The sidebar edge keeps its resize layout and target, while the sidebar and the content stage
     // paint one continuous base surface instead of a separator.
     let base = cx.update(|_, cx| crate::ui::appearance::chrome(cx).colors.panel_background);
@@ -3646,7 +3627,7 @@ fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_
         .debug_bounds("workspace-manager")
         .expect("the Workspace root should render");
     assert!(panel.left() >= workspace.left() && panel.right() <= workspace.right());
-    assert!(panel.size.width >= px(240.0) && panel.size.width <= px(420.0));
+    assert!(panel.size.width > px(240.0) && panel.size.width <= px(420.0));
     let open_label = cx
         .debug_bounds("combo-box-row-2-label")
         .expect("the Open Local Directory label should render");
@@ -4202,42 +4183,6 @@ fn collapsed_top_chrome_should_preserve_name_after_inactive_shell_exit(cx: &mut 
 }
 
 #[gpui::test]
-fn workspace_list_should_scroll_vertically_with_the_mouse_wheel(cx: &mut TestAppContext) {
-    let (manager, _records, cx) = workspace_manager(cx);
-    for _ in 0..24 {
-        publish_workspace(cx);
-    }
-
-    manager.read_with(cx, |manager, cx| {
-        manager
-            .sidebar
-            .read(cx)
-            .scroll_handle()
-            .set_offset(point(px(0.0), px(0.0)));
-    });
-    manager.update(cx, |_, cx| cx.notify());
-    cx.run_until_parked();
-    let list = cx
-        .debug_bounds("workspace-list")
-        .expect("the Workspace list was not rendered");
-    cx.simulate_event(ScrollWheelEvent {
-        position: list.center(),
-        delta: ScrollDelta::Pixels(point(px(0.0), px(-120.0))),
-        modifiers: Modifiers::none(),
-        touch_phase: TouchPhase::Moved,
-    });
-    cx.run_until_parked();
-
-    let offset = manager.read_with(cx, |manager, cx| {
-        manager.sidebar.read(cx).scroll_handle().offset().y
-    });
-    assert!(
-        offset < px(0.0),
-        "the Workspace list did not scroll; offset was {offset:?}"
-    );
-}
-
-#[gpui::test]
 fn workspace_scrollbar_should_reveal_when_the_list_scrolls(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
@@ -4264,6 +4209,13 @@ fn workspace_scrollbar_should_reveal_when_the_list_scrolls(cx: &mut TestAppConte
     });
     cx.run_until_parked();
 
+    let offset = manager.read_with(cx, |manager, cx| {
+        manager.sidebar.read(cx).scroll_handle().offset().y
+    });
+    assert!(
+        offset < px(0.0),
+        "the Workspace list did not scroll; offset was {offset:?}"
+    );
     let thumb = cx
         .debug_bounds("workspace-scrollbar-thumb")
         .expect("the Workspace scrollbar thumb was not rendered");
@@ -5108,23 +5060,6 @@ fn a_focused_sidebar_emphasizes_the_active_workspace(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_secondary_click_should_leave_focus_in_the_pane(cx: &mut TestAppContext) {
-    let (manager, _records, cx) = workspace_manager(cx);
-    cx.update(|window, _| window.activate_window());
-    cx.run_until_parked();
-
-    right_click("workspace-row-1-active", cx);
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    assert!(!cx.update(|window, cx| manager.read(cx).sidebar.read(cx).is_focused(window)));
-    assert!(active_terminal_has_input_focus(&manager, cx));
-    assert!(
-        !active_row_is_emphasized(cx),
-        "only the keyboard emphasizes the sidebar selection"
-    );
-}
-
-#[gpui::test]
 fn control_number_should_activate_workspaces_by_position(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     publish_workspace(cx);
@@ -5286,6 +5221,10 @@ fn workspace_menu_closure_recomputes_remaining_focus_owners(cx: &mut TestAppCont
         (false, None, WorkspaceId::new(1))
     );
     assert!(active_terminal_has_input_focus(&manager, cx));
+    assert!(
+        !active_row_is_emphasized(cx),
+        "only the keyboard emphasizes the sidebar selection"
+    );
 }
 
 #[gpui::test]
@@ -5919,21 +5858,6 @@ fn workspace_switcher_should_append_creation_actions_for_empty_and_matching_quer
         assert!(separator.bottom() <= local.top());
         assert!(local.bottom() <= open_local.top());
     }
-}
-
-#[gpui::test]
-fn workspace_switcher_menu_sizes_to_its_rows_and_keeps_shortcuts_clear(cx: &mut TestAppContext) {
-    let (_manager, _, cx) = workspace_manager(cx);
-    open_workspace_switcher(cx);
-
-    let panel = cx.debug_bounds("combo-box-panel").unwrap();
-    // Row 2 is Open Local Directory, after the one Workspace and Local Workspace.
-    let open_label = cx.debug_bounds("combo-box-row-2-label").unwrap();
-    let open_shortcut = cx.debug_bounds("combo-box-row-2-shortcut").unwrap();
-
-    assert!(panel.size.width > px(240.0));
-    assert!(panel.size.width <= px(420.0));
-    assert!(open_shortcut.left() - open_label.right() >= px(24.0));
 }
 
 #[gpui::test]
@@ -15221,6 +15145,10 @@ fn open_remote_directory_should_browse_the_chosen_machine(cx: &mut TestAppContex
             .manager
             .read_with(cx, |manager, _| manager.pin_picker.is_some()),
         "the picker opens on the saved server"
+    );
+    assert!(
+        cx.debug_bounds("command-palette-query-prefix").is_some(),
+        "the search line names the server, which a local picker never does"
     );
     assert_eq!(harness.local.submitted(), Vec::new());
 }

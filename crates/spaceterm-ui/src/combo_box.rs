@@ -3948,6 +3948,8 @@ pub(crate) mod tests {
 
     #[gpui::test]
     fn caller_owned_status_copy_should_update_an_open_popup(cx: &mut gpui::TestAppContext) {
+        use crate::a11y_testing::A11yTree;
+
         struct StatusCopyRoot {
             handle: ComboBoxHandle<u8>,
             copy: ComboBoxCopy,
@@ -3978,6 +3980,10 @@ pub(crate) mod tests {
         cx.simulate_click(trigger.center(), gpui::Modifiers::none());
         cx.run_until_parked();
         assert!(cx.debug_bounds("combo-box-empty").is_some());
+        assert_eq!(
+            A11yTree::read(cx).node("Filter options")["aria"]["placeholder"],
+            "Search"
+        );
 
         root.update(cx, |root, cx| {
             root.copy = ComboBoxCopy::new("Filter workspaces", "Find a workspace")
@@ -3986,6 +3992,13 @@ pub(crate) mod tests {
             cx.notify();
         });
         cx.run_until_parked();
+        let tree = A11yTree::read(cx);
+        assert!(tree.find("Filter options").is_none());
+        assert_eq!(
+            tree.node("Filter workspaces")["aria"]["placeholder"],
+            "Find a workspace"
+        );
+        // The status row publishes no accessible text, so its copy is read from the popup's state.
         let handle = root.read_with(cx, |root, _| root.handle.clone());
         let state = handle
             .state
@@ -3994,8 +4007,6 @@ pub(crate) mod tests {
             .and_then(WeakEntity::upgrade)
             .expect("the mounted control should retain its state");
         let copy = state.read_with(cx, |state, _| state.copy.clone());
-        assert_eq!(copy.filter_name, "Filter workspaces");
-        assert_eq!(copy.filter_placeholder, "Find a workspace");
         assert_eq!(copy.busy_status, "Refreshing");
         assert_eq!(copy.empty_status, "Nothing available");
         assert!(cx.debug_bounds("combo-box-empty").is_some());

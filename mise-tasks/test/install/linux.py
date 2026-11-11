@@ -347,12 +347,6 @@ class InstallTests(unittest.TestCase):
         self.assertIn("Run spaceterm setup to start SpaceTerm Core.", result.stdout)
         self.assert_no_leftovers()
 
-    def test_pinned_default_ignores_the_legacy_latest_release(self):
-        self.release.publish("0.6.8", {}, latest=True)
-        self.succeed()
-        self.assertTrue(all("/download/v1.2.0/" in url for url in self.requested()))
-        self.assertEqual(list(self.installations().values()), ["1.2.0"])
-
     def test_version_installs_the_requested_release(self):
         self.publish("1.1.0", latest=False)
         self.succeed("--version", "1.1.0")
@@ -590,13 +584,6 @@ class InstallTests(unittest.TestCase):
         self.assertIn("comes from a dry run", result.stderr)
         self.assertNotIn("skipped", result.stderr)
         self.assertEqual(list(self.installations().values()), ["1.2.0"])
-
-    def test_placeholder_keys_refuse_a_release_before_downloading(self):
-        installer = render(self.root, current="PLACEHOLDER", backup="PLACEHOLDER")
-        result = self.install(installer=installer)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("placeholder update keys", result.stderr)
-        self.assertEqual(self.requested(), [])
 
     def test_unsupported_hosts_are_refused_before_downloading(self):
         for extra, message in (

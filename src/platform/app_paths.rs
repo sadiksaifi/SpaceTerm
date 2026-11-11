@@ -433,49 +433,6 @@ mod tests {
         }
     }
     #[test]
-    fn resolve_should_apply_xdg_precedence_and_validate_spelling() {
-        let environment = AppDirectoryEnvironment {
-            xdg_config_home: Some("/explicit/../config".into()),
-            xdg_runtime_dir: Some("relative".into()),
-            ..environment()
-        };
-        let paths = resolve(
-            &environment,
-            Some("/runtime"),
-            200,
-            Arc::new(RecordingFilesystem::default()),
-        );
-        assert_eq!(
-            paths.directories().config.as_path(),
-            Path::new("/explicit/../config/spaceterm")
-        );
-        assert_eq!(
-            paths.directories().runtime.as_deref().unwrap(),
-            Path::new("/runtime/spaceterm")
-        );
-    }
-
-    #[test]
-    fn resolve_should_preserve_explicit_runtime_spelling_without_fallback_facts() {
-        let environment = AppDirectoryEnvironment {
-            xdg_runtime_dir: Some("/explicit/../runtime".into()),
-            ..environment()
-        };
-
-        let paths = resolve(
-            &environment,
-            None,
-            200,
-            Arc::new(RecordingFilesystem::default()),
-        );
-
-        assert_eq!(
-            paths.directories().runtime.as_deref().unwrap().as_os_str(),
-            OsStr::new("/explicit/../runtime/spaceterm")
-        );
-    }
-
-    #[test]
     fn runtime_owner_should_report_an_unavailable_runtime_directory() {
         let paths = resolve(
             &environment(),

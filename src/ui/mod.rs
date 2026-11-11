@@ -70,14 +70,8 @@ mod worktree_form;
 
 use gpui::{App, actions};
 
-#[cfg(test)]
-pub(crate) use render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
 pub(crate) use tab_manager::{TabManager, TabManagerEvent};
 pub(crate) use tab_view::{TabIdentity, TabView, TabViewEvent};
-#[cfg(test)]
-pub(crate) use terminal_focus::{
-    TerminalFocusBlocker, TerminalFocusCoordinator, TerminalFocusFacts,
-};
 pub(crate) use terminal_pane::{PaneOrigin, TerminalPane, TerminalPaneEvent};
 pub(crate) use workspace_frame::WorkspaceFrame;
 #[cfg(test)]

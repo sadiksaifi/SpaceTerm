@@ -2045,7 +2045,8 @@ fn start_machine_chosen_during_a_read_that_finds_it_running_does_nothing(cx: &mu
     assert_eq!(status(&window, cx), "Running");
 }
 
-/// The Server row keeps its height whether it offers a button or not.
+/// A read that succeeds makes the Start automatically change that waited on it, even while an
+/// earlier operation's failure is still shown.
 #[gpui::test]
 fn a_successful_read_makes_a_waiting_change_after_an_earlier_failure(cx: &mut TestAppContext) {
     let (window, _core, service, cx) = open_machines_with_service(Ok(running()), cx);

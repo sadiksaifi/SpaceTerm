@@ -420,7 +420,7 @@ mod tests {
             "{explanation}"
         );
         assert!(
-            !explanation.contains("hasn\u{2019}t confirmed"),
+            !explanation.contains("still confirming") && !explanation.contains("to confirm"),
             "a validated revocation is never called unconfirmed: {explanation}"
         );
     }

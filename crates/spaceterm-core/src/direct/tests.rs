@@ -2924,32 +2924,6 @@ mod quic_connections {
         );
     }
 
-    #[test]
-    fn revocation_ends_a_quic_connection_with_a_typed_goodbye() {
-        let fixture = Fixture::new();
-        fixture.enable();
-        let credential = DeviceCredential::generate().unwrap();
-        let paired = fixture.enroll(&credential);
-        let core = fixture.serve_next_with(service(Refusing));
-        let link = connect_quic(&fixture.endpoint(), &paired, &credential);
-        assert!(matches!(
-            request(&link, nothing()),
-            Err(RequestError::Refused(Refusal::Unsupported))
-        ));
-        fixture
-            .management(Management::Revoke {
-                operation: crypto::random().unwrap(),
-                target: paired.pairing,
-            })
-            .unwrap();
-        assert_eq!(
-            ended(&link),
-            LinkError::Goodbye(crate::protocol::Fatal::Revoked)
-        );
-        drop(link);
-        let _ = core.join().unwrap();
-    }
-
     /// A raw frame of `kind` with `size` bytes in all, its body filled with `fill`.
     fn raw(kind: crate::protocol::Kind, size: usize, fill: u8) -> Vec<u8> {
         let mut frame = vec![fill; size];

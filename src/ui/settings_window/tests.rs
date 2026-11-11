@@ -921,28 +921,6 @@ fn auto_theme_slots_publish_a_radio_group_that_selects_on_press(cx: &mut TestApp
     assert_eq!(slots[1]["aria"]["toggled"], "False");
 }
 
-#[gpui::test]
-fn resetting_appearance_mode_preserves_all_theme_choices(cx: &mut TestAppContext) {
-    let (window, _harness, cx) = open_settings_with(
-        cx,
-        MemoryStorage::with_document(&distinct_appearance_document()),
-    );
-    select_section(SettingsSectionId::Themes, cx);
-    click("settings-appearance-mode-light", cx);
-    let mut expected = document_of(&window, cx).appearance;
-    expected.mode = AppearanceMode::default();
-    assert_ne!(
-        expected.window,
-        SettingsDocument::default().appearance.window
-    );
-    assert_ne!(
-        expected.terminal,
-        SettingsDocument::default().appearance.terminal
-    );
-    click("settings-row-appearance-mode-reset", cx);
-    assert_eq!(document_of(&window, cx).appearance, expected);
-}
-
 /// A row's Use button applies its theme to the slot the list shows: the fixed mode's slot, or the
 /// slot selected under Auto. The other slot and the mode stay as they were.
 #[gpui::test]
@@ -1376,30 +1354,6 @@ fn every_appearance_row_reset_restores_only_its_field(cx: &mut TestAppContext) {
             cx.run_until_parked();
         }
     }
-}
-
-#[gpui::test]
-fn a_row_reset_appears_only_once_the_row_differs_and_restores_the_default(cx: &mut TestAppContext) {
-    let (window, _harness, cx) = open_settings(cx);
-    assert!(!window.read_with(cx, |window, cx| {
-        window.pending_reset(SettingsRowId::Density, cx).is_some()
-    }));
-
-    click("settings-density-comfortable", cx);
-
-    assert!(window.read_with(cx, |window, cx| {
-        window.pending_reset(SettingsRowId::Density, cx).is_some()
-    }));
-
-    click("settings-row-density-reset", cx);
-
-    assert_eq!(
-        document_of(&window, cx).appearance.window.density,
-        ChromeDensity::Compact
-    );
-    assert!(!window.read_with(cx, |window, cx| {
-        window.pending_reset(SettingsRowId::Density, cx).is_some()
-    }));
 }
 
 #[gpui::test]
@@ -2436,7 +2390,7 @@ fn grouped_cards_preserve_content_alignment_and_spacing(cx: &mut TestAppContext)
         cards.len() > 1,
         "the Terminal section should present more than one card"
     );
-    let widest_row_gap = rows
+    let row_gaps: Vec<gpui::Pixels> = rows
         .windows(2)
         .filter(|pair| pair[0].descriptor().group == pair[1].descriptor().group)
         .map(|pair| {
@@ -2448,7 +2402,35 @@ fn grouped_cards_preserve_content_alignment_and_spacing(cx: &mut TestAppContext)
                 .expect("row bounds");
             bottom.top() - top.bottom()
         })
-        .fold(px(0.0), gpui::Pixels::max);
+        .collect();
+    let group_gaps: Vec<gpui::Pixels> = rows
+        .windows(2)
+        .filter(|pair| pair[0].descriptor().group != pair[1].descriptor().group)
+        .map(|pair| {
+            let top = cx
+                .debug_bounds(pair[0].descriptor().selector)
+                .expect("row bounds");
+            let bottom = cx
+                .debug_bounds(pair[1].descriptor().selector)
+                .expect("row bounds");
+            bottom.top() - top.bottom()
+        })
+        .collect();
+    assert!(
+        !row_gaps.is_empty() && !group_gaps.is_empty(),
+        "the section should hold neighbouring rows in one group and in two, got {row_gaps:?} \
+         inside groups and {group_gaps:?} between them"
+    );
+    let widest_row_gap = row_gaps.iter().copied().fold(px(0.0), gpui::Pixels::max);
+    let narrowest_group_gap = group_gaps
+        .iter()
+        .copied()
+        .fold(px(f32::MAX), gpui::Pixels::min);
+    assert!(
+        narrowest_group_gap > widest_row_gap,
+        "rows in neighbouring groups should separate more than the rows inside one do, got \
+         {narrowest_group_gap:?} against {widest_row_gap:?}"
+    );
     for pair in cards.windows(2) {
         let gap = pair[1].1.top() - pair[0].1.bottom();
         assert!(
@@ -2956,49 +2938,6 @@ fn guidance_sits_under_its_label_and_stops_before_the_control(cx: &mut TestAppCo
     assert!(
         control.left() >= label.left(),
         "guidance should stop before the control, got {label:?} against {control:?}"
-    );
-}
-
-/// Group cards keep their inset row separators and leave more space between cards than rows.
-#[gpui::test]
-fn a_group_reads_as_a_group_because_its_rows_sit_closer_than_its_neighbours(
-    cx: &mut TestAppContext,
-) {
-    let (window, _harness, cx) = open_settings(cx);
-    select_section(SettingsSectionId::Font, cx);
-
-    let rows = window.read_with(cx, |window, _| window.rows_for(SettingsSectionId::Font));
-    let bounds = rows
-        .iter()
-        .map(|row| {
-            let descriptor = row.descriptor();
-            let bounds = cx
-                .debug_bounds(descriptor.selector)
-                .unwrap_or_else(|| panic!("{row:?} should render"));
-            (descriptor.group, bounds)
-        })
-        .collect::<Vec<_>>();
-
-    let mut within = Vec::new();
-    let mut between = Vec::new();
-    for pair in bounds.windows(2) {
-        let gap = pair[1].1.top() - pair[0].1.bottom();
-        if pair[0].0 == pair[1].0 {
-            within.push(gap);
-        } else {
-            between.push(gap);
-        }
-    }
-    assert!(!within.is_empty() && !between.is_empty());
-
-    let widest_within = within.iter().copied().fold(px(0.0), gpui::Pixels::max);
-    let narrowest_between = between
-        .iter()
-        .copied()
-        .fold(px(f32::MAX), gpui::Pixels::min);
-    assert!(
-        narrowest_between > widest_within,
-        "groups should separate more than their own rows do, got {between:?} against {within:?}"
     );
 }
 

@@ -132,12 +132,6 @@ int main(int argc, char **argv) {{
         collect_target(catalog, destination, self.identity, info["target"], source_digest)
         self.assertEqual((destination / "artifact.tar.gz").read_bytes(), archive.read_bytes())
 
-    def test_native_headless_check_accepts_success(self):
-        archive, signature, info = self.artifact(self.target)
-        with tempfile.TemporaryDirectory(dir=self.root) as temporary:
-            tree, _, _ = core_package.verified_copy(archive, signature, Path(temporary), info)
-            self.assertEqual(json.loads((tree / "build.json").read_text()), info)
-
     def test_static_catalog_staging_and_verification_do_not_run_native_products(self):
         archive, signature, _ = self.artifact(self.target, check_exit=99)
         catalog = self.root / "static-catalog"

@@ -330,8 +330,6 @@ pub struct Icon {
     size: Pixels,
     tint: Option<Rgba>,
     rotation: gpui::Radians,
-    #[cfg(test)]
-    tint_observer: Option<Arc<std::sync::Mutex<Vec<Hsla>>>>,
 }
 
 impl Icon {
@@ -342,8 +340,6 @@ impl Icon {
             size,
             tint: Some(tint),
             rotation: gpui::radians(0.0),
-            #[cfg(test)]
-            tint_observer: None,
         }
     }
 
@@ -354,8 +350,6 @@ impl Icon {
             size,
             tint: None,
             rotation: gpui::radians(0.0),
-            #[cfg(test)]
-            tint_observer: None,
         }
     }
 
@@ -367,8 +361,6 @@ impl Icon {
             size,
             tint: Some(tint),
             rotation: gpui::radians(0.0),
-            #[cfg(test)]
-            tint_observer: None,
         }
     }
 
@@ -376,12 +368,6 @@ impl Icon {
     /// glyph drawn from the icon font, outside the bundled artwork sizes, stays upright.
     pub fn rotated(mut self, angle: gpui::Radians) -> Self {
         self.rotation = angle;
-        self
-    }
-
-    #[cfg(test)]
-    fn observe_tint(mut self, observer: Arc<std::sync::Mutex<Vec<Hsla>>>) -> Self {
-        self.tint_observer = Some(observer);
         self
     }
 }
@@ -397,8 +383,6 @@ impl RenderOnce for Icon {
                     self.rotation,
                     IconTint {
                         explicit: self.tint,
-                        #[cfg(test)]
-                        observer: self.tint_observer.clone(),
                     },
                 )
                 .into_any_element(),
@@ -420,8 +404,6 @@ impl RenderOnce for Icon {
                 self.rotation,
                 IconTint {
                     explicit: self.tint,
-                    #[cfg(test)]
-                    observer: self.tint_observer.clone(),
                 },
             )
             .into_any_element(),
@@ -438,21 +420,13 @@ impl RenderOnce for Icon {
 
 struct IconTint {
     explicit: Option<Rgba>,
-    #[cfg(test)]
-    observer: Option<Arc<std::sync::Mutex<Vec<Hsla>>>>,
 }
 
 impl IconTint {
     fn resolve(&self, window: &Window) -> Hsla {
-        let tint = self
-            .explicit
+        self.explicit
             .map(Into::into)
-            .unwrap_or_else(|| window.text_style().color);
-        #[cfg(test)]
-        if let Some(observer) = &self.observer {
-            observer.lock().expect("tint observation lock").push(tint);
-        }
-        tint
+            .unwrap_or_else(|| window.text_style().color)
     }
 }
 
@@ -531,12 +505,59 @@ pub use lucide_icons::Icon as IconName;
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::HashSet,
-        sync::{Arc, Mutex},
+    use std::collections::HashSet;
+
+    use gpui::{
+        Context, InteractiveElement as _, Render, TestAppContext, VisualTestContext, Window, size,
     };
 
-    use gpui::{Context, InteractiveElement as _, Render, TestAppContext, Window, size};
+    /// TestAppContext has an empty asset source. This supplies the real embedded asset to its
+    /// atlas with transparent paint; only the Icon's own paint can emit a visible sprite.
+    fn transparent_asset_preload(path: SharedString, artwork_size: Pixels) -> impl IntoElement {
+        gpui::canvas(
+            |_, _, _| (),
+            move |bounds, (), window, cx| {
+                let bytes = EmbeddedAssets
+                    .load(&path)
+                    .expect("asset lookup")
+                    .expect("the fixture asset is embedded");
+                window
+                    .paint_svg(
+                        gpui::Bounds::new(
+                            bounds.center() - gpui::point(artwork_size / 2.0, artwork_size / 2.0),
+                            size(artwork_size, artwork_size),
+                        ),
+                        path,
+                        Some(&bytes),
+                        Default::default(),
+                        gpui::rgba(0).into(),
+                        cx,
+                    )
+                    .expect("the asset rasterizes");
+            },
+        )
+        .absolute()
+        .size_full()
+    }
+
+    /// Returns the tint of the one visible sprite painted inside the element with this selector.
+    fn painted_tint(cx: &mut VisualTestContext, id: &'static str) -> Hsla {
+        let bounds = cx
+            .debug_bounds(id)
+            .unwrap_or_else(|| panic!("{id} should be painted"));
+        let sprites = cx.update(|window, _| {
+            let bounds = bounds.scale(window.scale_factor());
+            window
+                .painted_monochrome_sprites()
+                .into_iter()
+                .filter(|sprite| {
+                    sprite.bounds.intersects(&bounds) && !sprite.color.is_transparent()
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(sprites.len(), 1, "{id} must paint its artwork");
+        sprites[0].color
+    }
 
     struct IconTestRoot;
 
@@ -553,37 +574,11 @@ mod tests {
                     let logical_size = gpui::px(logical_size);
                     let artwork_size = gpui::px(artwork_size);
                     let path = format!("spaceterm-ui/lucide/{asset}/1.svg");
-                    // TestAppContext has an empty asset source. Supply the real embedded asset to
-                    // its atlas with transparent paint; only the Icon's own paint can emit a
-                    // visible sprite.
-                    let preload = gpui::canvas(
-                        |_, _, _| (),
-                        move |bounds, (), window, cx| {
-                            let bytes = EmbeddedAssets
-                                .load(&path)
-                                .expect("asset lookup")
-                                .expect("the fixture asset is embedded");
-                            window
-                                .paint_svg(
-                                    gpui::Bounds::new(
-                                        bounds.center()
-                                            - gpui::point(artwork_size / 2.0, artwork_size / 2.0),
-                                        size(artwork_size, artwork_size),
-                                    ),
-                                    path.into(),
-                                    Some(&bytes),
-                                    Default::default(),
-                                    gpui::rgba(0).into(),
-                                    cx,
-                                )
-                                .expect("the asset rasterizes");
-                        },
-                    );
                     div()
                         .id(id)
                         .debug_selector(move || id.to_owned())
                         .relative()
-                        .child(preload.absolute().size_full())
+                        .child(transparent_asset_preload(path.into(), artwork_size))
                         .child(Icon::new(name, logical_size, gpui::rgba(0x8f9aafff)))
                 }),
             )
@@ -591,9 +586,6 @@ mod tests {
     }
 
     struct InheritedIconTintRoot {
-        inherited: Arc<Mutex<Vec<Hsla>>>,
-        disabled: Arc<Mutex<Vec<Hsla>>>,
-        explicit: Arc<Mutex<Vec<Hsla>>>,
         base: Hsla,
         hovered: Hsla,
         disabled_tint: Hsla,
@@ -602,6 +594,17 @@ mod tests {
 
     impl Render for InheritedIconTintRoot {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let size = gpui::px(14.0);
+            let slot = |id: &'static str, name: IconName, icon: Icon| {
+                let path =
+                    lucide_asset_path(name, size, size).expect("the fixture glyph is embedded");
+                div()
+                    .debug_selector(move || id.to_owned())
+                    .relative()
+                    .size(size)
+                    .child(transparent_asset_preload(path, size))
+                    .child(icon)
+            };
             div()
                 .flex()
                 .child(
@@ -617,10 +620,11 @@ mod tests {
                                     let hovered = self.hovered;
                                     move |style| style.text_color(hovered)
                                 })
-                                .child(
-                                    Icon::inherited(IconName::Terminal, gpui::px(14.0))
-                                        .observe_tint(self.inherited.clone()),
-                                ),
+                                .child(slot(
+                                    "inherited-icon",
+                                    IconName::Terminal,
+                                    Icon::inherited(IconName::Terminal, size),
+                                )),
                         )
                         .child(
                             div()
@@ -628,18 +632,18 @@ mod tests {
                                 .group_hover("inherited-icon-hover-group", |style| {
                                     style.text_color(gpui::rgba(0xffffffff))
                                 })
-                                .child(
-                                    Icon::new(IconName::Cog, gpui::px(14.0), self.explicit_tint)
-                                        .observe_tint(self.explicit.clone()),
-                                ),
+                                .child(slot(
+                                    "explicit-icon",
+                                    IconName::Cog,
+                                    Icon::new(IconName::Cog, size, self.explicit_tint),
+                                )),
                         ),
                 )
-                .child(
-                    div().text_color(self.disabled_tint).child(
-                        Icon::inherited(IconName::Shield, gpui::px(14.0))
-                            .observe_tint(self.disabled.clone()),
-                    ),
-                )
+                .child(div().text_color(self.disabled_tint).child(slot(
+                    "disabled-icon",
+                    IconName::Shield,
+                    Icon::inherited(IconName::Shield, size),
+                )))
         }
     }
 
@@ -683,27 +687,17 @@ mod tests {
 
     #[gpui::test]
     fn inherited_svg_icon_should_resolve_parent_tint_and_nonempty_artwork(cx: &mut TestAppContext) {
-        let inherited = Arc::new(Mutex::new(Vec::new()));
-        let disabled = Arc::new(Mutex::new(Vec::new()));
-        let explicit = Arc::new(Mutex::new(Vec::new()));
-        let base = gpui::rgba(0x4a90e2ff).into();
-        let hovered = gpui::rgba(0xe24a90ff).into();
-        let disabled_tint = gpui::rgba(0x727272ff).into();
+        let base: Hsla = gpui::rgba(0x4a90e2ff).into();
+        let hovered: Hsla = gpui::rgba(0xe24a90ff).into();
+        let disabled_tint: Hsla = gpui::rgba(0x727272ff).into();
         let explicit_tint = gpui::rgba(0x24aa68ff);
-        let (_, cx) = cx.add_window_view({
-            let inherited = inherited.clone();
-            let disabled = disabled.clone();
-            let explicit = explicit.clone();
-            move |_, _| InheritedIconTintRoot {
-                inherited,
-                disabled,
-                explicit,
-                base,
-                hovered,
-                disabled_tint,
-                explicit_tint,
-            }
+        let (_, cx) = cx.add_window_view(move |_, _| InheritedIconTintRoot {
+            base,
+            hovered,
+            disabled_tint,
+            explicit_tint,
         });
+        cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
 
         let bounds = cx
@@ -720,30 +714,18 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(
-            inherited
-                .lock()
-                .expect("inherited tint observation lock")
-                .last()
-                .copied(),
-            Some(base),
+            painted_tint(cx, "inherited-icon"),
+            base,
             "the SVG paint must receive the surrounding semantic foreground"
         );
         assert_eq!(
-            disabled
-                .lock()
-                .expect("disabled tint observation lock")
-                .last()
-                .copied(),
-            Some(disabled_tint),
+            painted_tint(cx, "disabled-icon"),
+            disabled_tint,
             "disabled inherited SVGs must receive their semantic parent tint"
         );
         assert_eq!(
-            explicit
-                .lock()
-                .expect("explicit tint observation lock")
-                .last()
-                .copied(),
-            Some(explicit_tint.into()),
+            painted_tint(cx, "explicit-icon"),
+            explicit_tint.into(),
             "an explicit tint must override its parent state"
         );
 
@@ -751,21 +733,13 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(
-            inherited
-                .lock()
-                .expect("inherited tint observation lock")
-                .last()
-                .copied(),
-            Some(hovered),
+            painted_tint(cx, "inherited-icon"),
+            hovered,
             "an inherited SVG must follow its parent's live group-hover foreground"
         );
         assert_eq!(
-            explicit
-                .lock()
-                .expect("explicit tint observation lock")
-                .last()
-                .copied(),
-            Some(explicit_tint.into()),
+            painted_tint(cx, "explicit-icon"),
+            explicit_tint.into(),
             "an explicit tint must remain unchanged across parent hover"
         );
 

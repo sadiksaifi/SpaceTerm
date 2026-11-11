@@ -1,6 +1,6 @@
 //! Shared policy for local control surfaces. Preparing a confirmation never changes service state.
 
-use super::{LingerAuthorization, RetainedInstallation, Service, ServiceStartup, ServiceStatus};
+use super::{LingerAuthorization, Service, ServiceStartup, ServiceStatus};
 use crate::CoreError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -126,139 +126,6 @@ impl Wording {
             }
         }
     }
-}
-
-/// Shared copy for confirming one exact SpaceTerm Core update, without service access or an
-/// authority grant. Each build is named by version and abbreviated commit, so two builds of one
-/// version read apart.
-pub struct UpdateWording {
-    /// The Machine the copy names: This Mac, This Computer, or the selected machine's name.
-    machine: String,
-    previous: String,
-    candidate: String,
-    running: bool,
-    stopped: bool,
-}
-
-impl UpdateWording {
-    /// `previous` is the approved build and `candidate` the verified build it changes to.
-    /// `running` and `stopped` are the observation the confirmation binds.
-    pub fn local(
-        previous: &RetainedInstallation,
-        candidate: &RetainedInstallation,
-        running: bool,
-        stopped: bool,
-    ) -> Self {
-        Self::for_machine(
-            this_computer(),
-            BuildName::of(previous),
-            BuildName::of(candidate),
-            running,
-            stopped,
-        )
-    }
-
-    /// Names the server from a supplied name and each build from supplied nonsecret values, so a
-    /// remote confirmation names the machine the person selected and the builds a remote service
-    /// reported, without a local installation directory.
-    pub fn for_machine(
-        machine: &str,
-        previous: BuildName<'_>,
-        candidate: BuildName<'_>,
-        running: bool,
-        stopped: bool,
-    ) -> Self {
-        let (previous, candidate) = build_labels(previous, candidate);
-        Self {
-            machine: machine.into(),
-            previous,
-            candidate,
-            running,
-            stopped,
-        }
-    }
-
-    pub fn title(&self) -> &'static str {
-        "Update SpaceTerm Core"
-    }
-
-    pub fn confirm_label(&self) -> String {
-        self.title().into()
-    }
-
-    pub fn message(&self) -> String {
-        let Self {
-            machine, candidate, ..
-        } = self;
-        if self.stopped && !self.running {
-            format!("Update the stopped SpaceTerm Core on {machine} to {candidate}?")
-        } else {
-            format!("Update SpaceTerm Core on {machine} to {candidate}?")
-        }
-    }
-
-    /// What changes, what ends, and what is kept.
-    pub fn detail(&self) -> String {
-        let Self {
-            previous,
-            candidate,
-            ..
-        } = self;
-        if self.running {
-            format!(
-                "It changes from {previous} to {candidate}. All Terminal Sessions on it end for \
-                 every client, and Workspaces are kept."
-            )
-        } else if self.stopped {
-            format!(
-                "It changes from {previous} to {candidate}. It isn\u{2019}t running, so no \
-                 Terminal Sessions end, and it stays stopped until you start it."
-            )
-        } else {
-            format!(
-                "It changes from {previous} to {candidate}. It isn\u{2019}t running, so no \
-                 Terminal Sessions end."
-            )
-        }
-    }
-}
-
-/// What names a server build to a person: its version, source commit, and package digest.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct BuildName<'a> {
-    pub version: &'a str,
-    pub commit: &'a str,
-    /// The whole signed package's digest. Two packages of one version and commit differ here.
-    pub package: &'a str,
-}
-
-impl<'a> BuildName<'a> {
-    pub fn of(installation: &'a RetainedInstallation) -> Self {
-        Self {
-            version: &installation.version,
-            commit: &installation.commit,
-            package: installation
-                .directory
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default(),
-        }
-    }
-}
-
-/// Names two builds so they read apart. Version and commit name each build, and the package
-/// digest's prefix is added only when those match, since the packages then differ elsewhere.
-pub fn build_labels(first: BuildName<'_>, second: BuildName<'_>) -> (String, String) {
-    let name = |build: BuildName<'_>| {
-        let commit = build.commit.get(..7).unwrap_or(build.commit);
-        format!("{} (commit {commit}", build.version)
-    };
-    let ambiguous = name(first) == name(second) && first.package != second.package;
-    let label = |build: BuildName<'_>| match build.package.get(..8) {
-        Some(package) if ambiguous => format!("{}, package {package})", name(build)),
-        _ => format!("{})", name(build)),
-    };
-    (label(first), label(second))
 }
 
 /// How confirmations name the computer this process runs on.
@@ -430,40 +297,6 @@ mod tests {
             uninstall(false, ServiceStartup::AtBoot),
             "It no longer starts when the computer starts. Workspaces are kept, so you can \
              install it again later."
-        );
-    }
-
-    #[test]
-    fn a_remote_update_confirmation_names_the_selected_machine_and_candidate() {
-        let build = |version: &'static str| BuildName {
-            version,
-            commit: "0123456789abcdef0123456789abcdef01234567",
-            package: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
-        };
-        let wording =
-            UpdateWording::for_machine("penguin", build("0.6.8"), build("0.7.0"), true, false);
-        assert_eq!(
-            wording.message(),
-            "Update SpaceTerm Core on penguin to 0.7.0 (commit 0123456)?"
-        );
-        assert_eq!(
-            wording.detail(),
-            "It changes from 0.6.8 (commit 0123456) to 0.7.0 (commit 0123456). All Terminal \
-             Sessions on it end for every client, and Workspaces are kept."
-        );
-        let observed = |running, stopped| {
-            UpdateWording::for_machine("penguin", build("0.6.8"), build("0.7.0"), running, stopped)
-                .detail()
-        };
-        assert_eq!(
-            observed(false, true),
-            "It changes from 0.6.8 (commit 0123456) to 0.7.0 (commit 0123456). It isn\u{2019}t \
-             running, so no Terminal Sessions end, and it stays stopped until you start it."
-        );
-        assert_eq!(
-            observed(false, false),
-            "It changes from 0.6.8 (commit 0123456) to 0.7.0 (commit 0123456). It isn\u{2019}t \
-             running, so no Terminal Sessions end."
         );
     }
 }

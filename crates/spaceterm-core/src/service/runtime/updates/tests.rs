@@ -792,12 +792,20 @@ fn a_version_that_never_became_ready_is_skipped_and_a_transient_failure_stays_pe
             facts.last_failure.as_ref().map(|f| (f.id, f.kind)),
             Some((1, FailureKind::Start(StartFailure::PortInUse)))
         );
+        record_start_failure(&data, [3; 32], &digest, "1.1.0", StartFailure::DiskFull).unwrap();
+        let facts = Updates::stored(&machine.service).unwrap();
+        assert_eq!(facts.pending.unwrap().version, version("1.1.0"));
+        assert_eq!(facts.skipped, None);
+        assert_eq!(
+            facts.last_failure.as_ref().map(|f| (f.id, f.kind)),
+            Some((2, FailureKind::Start(StartFailure::DiskFull)))
+        );
         record_start_failure(&data, [2; 32], &digest, "1.1.0", StartFailure::NotReady).unwrap();
         let updates = Updates::open(machine.service.clone()).unwrap();
         let facts = updates.facts();
         assert_eq!(facts.pending, None);
         assert_eq!(facts.skipped, Some(version("1.1.0")));
-        assert_eq!(facts.last_failure.map(|f| f.id), Some(2));
+        assert_eq!(facts.last_failure.map(|f| f.id), Some(3));
         assert_eq!(
             updates.admits(&candidate("1.1.0")),
             Err(InstallError::Skipped)
@@ -1313,31 +1321,5 @@ fn a_second_engine_refuses_an_older_release_than_one_another_engine_installed() 
             Err(InstallError::NotNewer)
         );
         assert_eq!(installations(&machine), ["1.0.0", "1.2.0"]);
-    });
-}
-
-#[test]
-fn a_full_disk_at_start_keeps_the_version_pending() {
-    with_fixture_trust(|| {
-        let machine = machine("1.0.0");
-        let data = Directory::open(&machine.fixture.paths.data, false).unwrap();
-        let updates = Updates::open(machine.service.clone()).unwrap();
-        install(
-            &updates,
-            &machine,
-            "1.1.0",
-            Protocols::CURRENT,
-            Source::Feed,
-        )
-        .unwrap();
-        let digest = pending_digest(&data).unwrap().unwrap();
-        record_start_failure(&data, [3; 32], &digest, "1.1.0", StartFailure::DiskFull).unwrap();
-        let facts = Updates::stored(&machine.service).unwrap();
-        assert_eq!(facts.pending.map(|p| p.version), Some(version("1.1.0")));
-        assert_eq!(facts.skipped, None);
-        assert_eq!(
-            facts.last_failure.map(|f| f.kind),
-            Some(FailureKind::Start(StartFailure::DiskFull))
-        );
     });
 }

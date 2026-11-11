@@ -304,14 +304,6 @@ impl SecureFilesystem for RecordingFilesystem {
             .remove(&Self::path(directory)?.join(name));
         Ok(())
     }
-    #[cfg(feature = "native-tests")]
-    fn create_private_artifact(
-        &self,
-        _: &SecureDirectory,
-        _: &OsStr,
-    ) -> Result<(), SecureFilesystemError> {
-        Ok(())
-    }
 }
 
 impl RecordingFilesystem {

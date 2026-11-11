@@ -3,9 +3,8 @@ use super::{lifecycle, status, unpair, update};
 use crate::contract::golden::assert_golden;
 use crate::contract::{
     Code, CoreSetup, CoreStart, CoreUnpair, DeviceRef, Envelope, Failure, HeldOutcomes, Launcher,
-    MachineRef, Receipt, ReceiptState, RecoveredIdentity, RecoveredKind, RecoveredOperation,
-    RecoveredOutcome, RecoveredState, ServiceAction, SetupNetwork, SetupStep, SetupStepName,
-    StepResult, Version,
+    MachineRef, RecoveredIdentity, RecoveredKind, RecoveredOperation, RecoveredOutcome,
+    RecoveredState, ServiceAction, SetupNetwork, SetupStep, SetupStepName, StepResult, Version,
 };
 use spaceterm_core::diagnostics::{PaneWorkerWaits, TerminalCounterSnapshot};
 use spaceterm_core::service::lane::client::Outcome;
@@ -969,36 +968,4 @@ fn start_succeeds_locally_and_is_local_only_remotely() {
     );
     assert_exit(&remote, 5);
     assert_golden("start_local_only", &remote);
-}
-
-#[test]
-fn pair_without_a_terminal_needs_interaction() {
-    let envelope = Envelope::error(
-        "pair",
-        None,
-        Failure::new(Code::InteractionRequired),
-        crate::contract::Empty {},
-    );
-    assert_exit(&envelope, 3);
-    assert_golden("pair_interaction_required", &envelope);
-}
-
-#[test]
-fn receipts_keep_the_lane_state_and_code() {
-    let receipt = lifecycle::receipt_of(&receipt(
-        LaneAction::Restart,
-        LaneOperationState::Failed,
-        Some("startup_failed"),
-        BOOT,
-    ));
-    assert_eq!(
-        receipt,
-        Receipt {
-            operation: OPERATION.into(),
-            action: ServiceAction::Restart,
-            state: ReceiptState::Failed,
-            code: Some(Code::StartupFailed),
-            boot: BOOT.into(),
-        }
-    );
 }

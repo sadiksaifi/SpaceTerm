@@ -642,7 +642,7 @@ fn unconfirmed(receipt: &LaneReceipt) -> Failure {
     }
 }
 
-pub fn receipt_of(receipt: &LaneReceipt) -> Receipt {
+fn receipt_of(receipt: &LaneReceipt) -> Receipt {
     Receipt {
         operation: receipt.operation.clone(),
         action: match receipt.action {

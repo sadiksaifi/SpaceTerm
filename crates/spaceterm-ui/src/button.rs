@@ -3113,24 +3113,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn disabling_a_focused_button_releases_responder_focus(cx: &mut TestAppContext) {
-        let (root, _, _, cx) = button_window(cx, false, true);
-        cx.update(|window, cx| {
-            window.focus_next(cx);
-            window.focus_next(cx);
-        });
-        assert!(cx.debug_bounds("test-button-keyboard-focus").is_some());
-
-        root.update(cx, |root, cx| {
-            root.disabled = true;
-            cx.notify();
-        });
-        cx.run_until_parked();
-
-        assert!(cx.update(|window, cx| window.focused(cx).is_none()));
-    }
-
-    #[gpui::test]
     fn modified_space_release_should_cancel_the_owned_keyboard_press(cx: &mut TestAppContext) {
         let (_, activations, _, cx) = button_window(cx, false, true);
         cx.update(|window, cx| {

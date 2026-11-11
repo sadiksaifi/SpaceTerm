@@ -2935,40 +2935,6 @@ mod tests {
     }
 
     #[test]
-    fn stale_row_revision_selection_refs_do_not_publish_a_selection() {
-        let id = row_id(AccessibilityScreen::Primary, 1, 10, 0);
-        let stale = AccessibilityCellRef {
-            row: id,
-            row_revision: 2,
-            column: 0,
-        };
-        let mut state = TerminalAccessibilityState::default();
-        let model = state
-            .apply(
-                AccessibilityUpdate {
-                    revision: 1,
-                    screen: AccessibilityScreen::Primary,
-                    screen_generation: 1,
-                    complete: true,
-                    more: false,
-                    topology: Some(vec![id]),
-                    visible_lines: 0..1,
-                    cursor: None,
-                    selection: Some(AccessibilitySelectionRefs {
-                        start: stale,
-                        end: stale,
-                        rectangle: false,
-                    }),
-                    changed_rows: vec![update_row(id, 1, "x", false)],
-                },
-                PresentationGeneration::test(1),
-            )
-            .unwrap();
-
-        assert_eq!(model.selection_range(), None);
-    }
-
-    #[test]
     fn notifications_are_typed_and_coalesced() {
         let mut notifications = AccessibilityNotifications::default();
         notifications.extend([

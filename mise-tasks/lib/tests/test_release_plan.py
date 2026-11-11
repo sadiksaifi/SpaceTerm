@@ -97,14 +97,17 @@ class ReleasePlanTests(unittest.TestCase):
             "GITHUB_REF": "refs/heads/main",
             "GITHUB_SHA": source_sha,
         }
-        for changed in (
-            {"GITHUB_REPOSITORY": "other/fork"},
-            {"GITHUB_REF": "refs/heads/feature"},
-            {"GITHUB_SHA": "f" * 40},
+        for changed, message in (
+            ({"GITHUB_REPOSITORY": "other/fork"}, "^releases run only in the intended repository$"),
+            ({"GITHUB_REF": "refs/heads/feature"}, "^release dispatches must select main$"),
+            ({"GITHUB_SHA": "f" * 40}, "^a release must build the dispatch's exact source$"),
         ):
-            with patch.dict(os.environ, {**environment, **changed}, clear=True):
-                with self.assertRaises(TaskError):
-                    release_plan.create("v0.10.0", root=self.root, published=lambda: set())
+            with (
+                self.subTest(changed=changed),
+                patch.dict(os.environ, {**environment, **changed}, clear=True),
+                self.assertRaisesRegex(TaskError, message),
+            ):
+                release_plan.create("v0.10.0", root=self.root, published=lambda: set())
 
     def test_publication_rechecks_the_tag_object_with_the_ordinary_token(self):
         plan = self.plan()

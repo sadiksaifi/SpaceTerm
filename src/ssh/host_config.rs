@@ -1266,42 +1266,44 @@ mod tests {
             )
             .file("/home/test/.ssh/deep.conf", "Host deep\n")
             .file("/home/test/.ssh/second.conf", "Host second\n");
-        let limits = HostDiscoveryLimits {
-            include_depth: 1,
-            files: 2,
-            total_bytes: 80,
-            ..HostDiscoveryLimits::default()
-        };
-
-        let discovery = discover_ssh_hosts(&filesystem, &roots(), limits);
-
-        assert!(
-            discovery
-                .issues
-                .iter()
-                .any(|issue| { issue.kind() == HostConfigIssueKind::IncludeDepthLimit })
-        );
-        assert!(
-            discovery
-                .issues
-                .iter()
-                .any(|issue| issue.kind() == HostConfigIssueKind::FileLimit)
-        );
-
-        let total_limited = discover_ssh_hosts(
-            &filesystem,
-            &roots(),
-            HostDiscoveryLimits {
-                total_bytes: 8,
-                ..HostDiscoveryLimits::default()
-            },
-        );
-        assert!(
-            total_limited
-                .issues
-                .iter()
-                .any(|issue| issue.kind() == HostConfigIssueKind::TotalByteLimit)
-        );
+        let cases: [(HostDiscoveryLimits, HostConfigIssueKind, &[&str]); 3] = [
+            // `deep` is one Include too deep.
+            (
+                HostDiscoveryLimits {
+                    include_depth: 1,
+                    ..HostDiscoveryLimits::default()
+                },
+                HostConfigIssueKind::IncludeDepthLimit,
+                &["first", "second", "root"],
+            ),
+            // `deep` and `second` are the third and fourth files.
+            (
+                HostDiscoveryLimits {
+                    files: 2,
+                    ..HostDiscoveryLimits::default()
+                },
+                HostConfigIssueKind::FileLimit,
+                &["first", "root"],
+            ),
+            // No file is over 60 bytes. The root file and `first` together are, and `first` is
+            // the only way to `deep`. The root file and `second` together are not.
+            (
+                HostDiscoveryLimits {
+                    total_bytes: 60,
+                    ..HostDiscoveryLimits::default()
+                },
+                HostConfigIssueKind::TotalByteLimit,
+                &["second", "root"],
+            ),
+        ];
+        for (limits, kind, hosts) in cases {
+            let discovery = discover_ssh_hosts(&filesystem, &roots(), limits);
+            assert_eq!(aliases(&discovery), hosts, "wrong hosts under {kind:?}");
+            assert!(
+                discovery.issues.iter().any(|issue| issue.kind() == kind),
+                "missing {kind:?}"
+            );
+        }
     }
 
     #[test]
@@ -1313,20 +1315,24 @@ mod tests {
             )
             .file("/home/test/.ssh/parts/a.conf", "Host a\n")
             .file("/home/test/.ssh/parts/b.conf", "Host b\n");
-        for (limits, kind) in [
+        let cases: [(HostDiscoveryLimits, HostConfigIssueKind, &[&str]); 4] = [
+            // The root file is over the limit, so nothing in it is read.
             (
                 HostDiscoveryLimits {
                     file_bytes: 8,
                     ..HostDiscoveryLimits::default()
                 },
                 HostConfigIssueKind::FileByteLimit,
+                &[],
             ),
+            // An Include that matches more files than the limit includes none of them.
             (
                 HostDiscoveryLimits {
                     glob_matches: 1,
                     ..HostDiscoveryLimits::default()
                 },
                 HostConfigIssueKind::GlobLimit,
+                &["first", "second", "third"],
             ),
             (
                 HostDiscoveryLimits {
@@ -1334,16 +1340,21 @@ mod tests {
                     ..HostDiscoveryLimits::default()
                 },
                 HostConfigIssueKind::ResultLimit,
+                &["a"],
             ),
+            // `Include` and `second` are both longer than the limit, so neither line is read.
             (
                 HostDiscoveryLimits {
                     token_bytes: 5,
                     ..HostDiscoveryLimits::default()
                 },
                 HostConfigIssueKind::TokenLimit,
+                &[],
             ),
-        ] {
+        ];
+        for (limits, kind, hosts) in cases {
             let discovery = discover_ssh_hosts(&filesystem, &roots(), limits);
+            assert_eq!(aliases(&discovery), hosts, "wrong hosts under {kind:?}");
             assert!(
                 discovery.issues.iter().any(|issue| issue.kind() == kind),
                 "missing {kind:?}"

@@ -816,17 +816,6 @@ mod tests {
     }
 
     #[test]
-    fn modal_policy_allows_intentionally_absent_default() {
-        let policy = ModalDesktopPolicy::mac_os();
-        let actions = vec![
-            action("save", ModalActionRole::Affirmative, "save"),
-            action("cancel", ModalActionRole::Cancel, "cancel"),
-        ];
-
-        assert_eq!(policy.return_action(&actions), None);
-    }
-
-    #[test]
     fn mac_os_horizontal_ltr_arranges_shared_typed_facts() {
         let policy = ModalDesktopPolicy::mac_os();
         let actions = vec![
@@ -910,12 +899,20 @@ mod tests {
     #[test]
     fn return_activates_only_explicit_enabled_default() {
         let policy = ModalDesktopPolicy::mac_os();
-        let actions = vec![
-            action("save", ModalActionRole::Affirmative, "save"),
-            action("cancel", ModalActionRole::Cancel, "cancel"),
-        ];
+        let actions = |save: ModalAction<&'static str>| {
+            vec![save, action("cancel", ModalActionRole::Cancel, "cancel")]
+        };
+        let save = || action("save", ModalActionRole::Affirmative, "save");
 
-        assert_eq!(policy.return_action(&actions), None);
+        assert_eq!(policy.return_action(&actions(save())), None);
+        assert_eq!(
+            policy.return_action(&actions(save().default_action(true))),
+            Some(0)
+        );
+        assert_eq!(
+            policy.return_action(&actions(save().default_action(true).enabled(false))),
+            None
+        );
     }
 
     #[test]
@@ -951,15 +948,6 @@ mod tests {
             DeterminateProgress::new(f64::INFINITY),
             Err(super::super::ProgressValueError::NotFinite)
         );
-    }
-
-    #[test]
-    fn determinate_progress_maximum_does_not_encode_completion() {
-        let progress = ProgressState::Determinate(
-            DeterminateProgress::new(1.0).expect("finite progress should normalize"),
-        );
-
-        assert!(matches!(progress, ProgressState::Determinate(value) if value.is_maximum()));
     }
 
     #[test]

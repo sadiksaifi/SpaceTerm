@@ -90,6 +90,15 @@ class ArtifactVerificationError(TaskError):
         super().__init__(f"SpaceTerm Core artifact verification failed: {cause.value}")
 
 
+def access_failure(error):
+    """The typed failure for an operating-system error during artifact verification."""
+    if isinstance(error, FileNotFoundError):
+        return ArtifactVerificationError(ArtifactCause.MISSING)
+    if isinstance(error, PermissionError):
+        return ArtifactVerificationError(ArtifactCause.UNREADABLE)
+    return ArtifactVerificationError(ArtifactCause.OS_ERROR)
+
+
 def protocol_line(constant):
     """Matches the one-line declaration of the protocol version `constant`."""
     return re.compile(
@@ -338,7 +347,11 @@ def unpack_verified(
     Callers use a private temporary copy, preventing replacement between signature
     verification, extraction, executable checks, and installation.
     """
-    if archive.stat().st_size > MAX_ARCHIVE or signature.stat().st_size != 64:
+    try:
+        invalid = archive.stat().st_size > MAX_ARCHIVE or signature.stat().st_size != 64
+    except OSError as error:
+        raise access_failure(error) from None
+    if invalid:
         raise TaskError("the signed server artifact has an invalid size")
     trust_identity = identity or (expected["identity"] if expected is not None else None)
     try:
@@ -638,12 +651,15 @@ def verified_copy(
 ):
     archive = Path(archive)
     signature = Path(signature)
-    if archive.stat().st_size > MAX_ARCHIVE or signature.stat().st_size != 64:
-        raise TaskError("the signed server artifact has an invalid size")
     private = directory / "artifact.tar.gz"
     raw = directory / "artifact.sig"
-    shutil.copyfile(archive, private)
-    shutil.copyfile(signature, raw)
+    try:
+        if archive.stat().st_size > MAX_ARCHIVE or signature.stat().st_size != 64:
+            raise TaskError("the signed server artifact has an invalid size")
+        shutil.copyfile(archive, private)
+        shutil.copyfile(signature, raw)
+    except OSError as error:
+        raise access_failure(error) from None
     info = unpack_verified(
         private,
         raw,
@@ -1018,11 +1034,7 @@ def verify_desktop_artifact(
                 expected_sha256=pin,
                 execute=execute,
             )
-    except FileNotFoundError:
-        raise ArtifactVerificationError(ArtifactCause.MISSING) from None
-    except PermissionError:
-        raise ArtifactVerificationError(ArtifactCause.UNREADABLE) from None
     except subprocess.TimeoutExpired:
         raise ArtifactVerificationError(ArtifactCause.TIMED_OUT) from None
-    except OSError:
-        raise ArtifactVerificationError(ArtifactCause.OS_ERROR) from None
+    except OSError as error:
+        raise access_failure(error) from None

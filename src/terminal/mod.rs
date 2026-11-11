@@ -30,6 +30,9 @@ pub(crate) mod emulator;
     )
 )]
 pub(crate) mod failure;
+pub(crate) mod find;
+pub(crate) mod geometry;
+pub(crate) mod graphics;
 #[cfg_attr(
     not(feature = "desktop"),
     allow(
@@ -40,11 +43,6 @@ pub(crate) mod failure;
 pub(crate) mod secure_input;
 #[cfg(feature = "desktop")]
 pub(crate) mod wheel_phase;
-#[cfg(test)]
-pub(crate) use native_services::file_insertion;
-pub(crate) mod find;
-pub(crate) mod geometry;
-pub(crate) mod graphics;
 pub(crate) use native_services::hyperlink;
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 pub(crate) mod core_metadata;

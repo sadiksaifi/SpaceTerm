@@ -203,7 +203,11 @@ fn a_different_core_boot_offers_start_new_shell_again() {
 
     assert!(matches!(
         view.screen(),
-        Some(CorePaneScreen::Restored { offered: true, .. })
+        Some(CorePaneScreen::Restored {
+            unconfirmed: false,
+            offered: true,
+            ..
+        })
     ));
     assert!(view.can_start_shell());
 }
@@ -453,22 +457,6 @@ fn a_pane_does_not_claim_an_update_when_the_core_returns_to_its_previous_version
         view.dormant_copy(None).detail.as_ref(),
         super::RESTORED_DETAIL
     );
-}
-
-#[test]
-fn a_resolved_start_clears_its_unconfirmed_message_after_reconnect() {
-    let (connection, mut view) = lost_start();
-    connection.set_start_unconfirmed(false);
-    connection.answer(CorePaneStatus::Restored);
-    view.sync();
-    assert!(matches!(
-        view.screen(),
-        Some(CorePaneScreen::Restored {
-            unconfirmed: false,
-            offered: true,
-            ..
-        })
-    ));
 }
 
 #[test]

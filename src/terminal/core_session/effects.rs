@@ -201,6 +201,15 @@ mod tests {
         adapter.handle.interactive_focus(true, true);
         let (mut effects, requests) = ClientEffects::new(Arc::new(|| {}));
         let (events, _receiver) = async_channel::bounded(8);
+        let password = pane::LineState {
+            epoch: 1,
+            mode: pane::LineMode {
+                canonical: true,
+                signals: true,
+                ..pane::LineMode::UNKNOWN
+            },
+        };
+        effects.line(state, &events, password).unwrap();
         effects
             .request(
                 state,
@@ -218,6 +227,7 @@ mod tests {
             .unwrap();
         assert!(requests.try_recv().is_err());
         assert!(adapter.handle.take_client_effects().is_empty());
+        assert_eq!(adapter.handle.hidden_input(), Some(true));
     }
 
     #[test]
@@ -314,42 +324,5 @@ mod tests {
                 })
             );
         }
-    }
-
-    #[test]
-    fn a_request_crossing_local_focus_loss_never_reaches_the_native_effect_queue() {
-        let adapter = Adapter::new();
-        let (mut effects, requests) = ClientEffects::new(Arc::new(|| {}));
-        let (events, _receiver) = async_channel::bounded(8);
-        let state = &adapter.handle.state;
-        let generation = state.interaction.lock().unwrap().focus_generation;
-        adapter.handle.interactive_focus(false, false);
-        adapter.handle.interactive_focus(true, true);
-        let password = pane::LineState {
-            epoch: 1,
-            mode: pane::LineMode {
-                canonical: true,
-                signals: true,
-                ..pane::LineMode::UNKNOWN
-            },
-        };
-        effects.line(state, &events, password).unwrap();
-        effects
-            .request(
-                state,
-                Some(generation),
-                &events,
-                pane::effects::Request {
-                    id: 1,
-                    generation,
-                    remaining_ms: 1000,
-                    effect: Effect::ClipboardRead {
-                        target: ClipboardTarget::Standard,
-                    },
-                },
-            )
-            .unwrap();
-        assert!(requests.try_recv().is_err());
-        assert_eq!(adapter.handle.hidden_input(), Some(true));
     }
 }

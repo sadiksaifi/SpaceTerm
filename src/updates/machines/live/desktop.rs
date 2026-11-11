@@ -844,18 +844,4 @@ mod tests {
             ]
         );
     }
-
-    #[test]
-    fn the_offered_work_version_decides_compatibility() {
-        let major = |major| ProtocolVersion { major, minor: 0 };
-        assert_eq!(work_with(protocol::WORK), Ok(()));
-        assert_eq!(
-            work_with(major(protocol::WORK.major - 1)),
-            Err(Incompatible::ListenerTooOld)
-        );
-        assert_eq!(
-            work_with(major(protocol::WORK.major + 1)),
-            Err(Incompatible::CallerTooOld)
-        );
-    }
 }

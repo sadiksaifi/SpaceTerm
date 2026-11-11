@@ -474,34 +474,6 @@ fn spawn_reader(
         })
 }
 
-#[cfg(all(test, feature = "desktop"))]
-pub fn conformance_initialization() -> Result<Option<(PathBuf, NativePtySize)>, String> {
-    tests::observe_initialization()
-}
-
-#[cfg(all(test, feature = "desktop"))]
-pub struct ShutdownObservation {
-    pub after_factory_drop: usize,
-    pub after_owner_drop: usize,
-    pub after_repeated_close: usize,
-    pub termination_completed: bool,
-    pub dropped_before_termination: bool,
-}
-
-#[cfg(all(test, feature = "desktop"))]
-pub fn conformance_shutdown() -> Result<ShutdownObservation, String> {
-    let (after_factory_drop, after_owner_drop) = tests::observe_retention(false)?;
-    let (_, after_repeated_close) = tests::observe_retention(true)?;
-    let (termination_completed, dropped_before_termination) = tests::observe_drop_order()?;
-    Ok(ShutdownObservation {
-        after_factory_drop,
-        after_owner_drop,
-        after_repeated_close,
-        termination_completed,
-        dropped_before_termination,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
@@ -631,7 +603,7 @@ mod tests {
         }
     }
 
-    pub(super) fn observe_initialization() -> Result<Option<(PathBuf, NativePtySize)>, String> {
+    fn observe_initialization() -> Result<Option<(PathBuf, NativePtySize)>, String> {
         let construction = Arc::new(Mutex::new(None));
         let factory = RecordingAdapterFactory {
             construction: Arc::clone(&construction),
@@ -661,7 +633,7 @@ mod tests {
         Ok(observed)
     }
 
-    pub(super) fn observe_retention(repeat_close: bool) -> Result<(usize, usize), String> {
+    fn observe_retention(repeat_close: bool) -> Result<(usize, usize), String> {
         let termination_count = Arc::new(AtomicUsize::new(0));
         let factory = RecordingAdapterFactory {
             construction: Arc::new(Mutex::new(None)),
@@ -961,7 +933,7 @@ mod tests {
         }
     }
 
-    pub(super) fn observe_drop_order() -> Result<(bool, bool), String> {
+    fn observe_drop_order() -> Result<(bool, bool), String> {
         let termination_completed = Arc::new(AtomicBool::new(false));
         let dropped_before_termination = Arc::new(AtomicBool::new(false));
         let factory = OneShotAdapterFactory(Mutex::new(Some(NativePtyAdapterParts {

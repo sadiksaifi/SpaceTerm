@@ -3,8 +3,6 @@ use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardTypeHTML, NSPast
 use objc2_foundation::{NSArray, NSString, NSURL, NSUTF8StringEncoding};
 use std::path::PathBuf;
 
-#[cfg(all(test, feature = "native-tests"))]
-use crate::terminal::native_services::clipboard::PasteboardRepresentation;
 use crate::terminal::native_services::clipboard::{
     ClipboardError, ClipboardRead, FileClipboard, HTML_MIME, PLAIN_TEXT_MIME, SelectionClipboard,
     TextClipboard, TextClipboardTarget, selection_representations,
@@ -525,37 +523,6 @@ pub(in crate::platform) mod tests {
         .unwrap();
 
         assert_eq!(paths, vec![file.path.clone(), PathBuf::from("/plain path")]);
-    }
-
-    #[test]
-    fn selection_copy_preserves_exact_plain_and_html_representation_values() {
-        let representations =
-            selection_representations("alpha & beta", Some("<pre>alpha &amp; beta</pre>"));
-
-        assert_eq!(
-            representations,
-            vec![
-                PasteboardRepresentation {
-                    mime: PLAIN_TEXT_MIME,
-                    text: "alpha & beta",
-                },
-                PasteboardRepresentation {
-                    mime: HTML_MIME,
-                    text: "<pre>alpha &amp; beta</pre>",
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn absent_rich_text_publishes_only_plain_text() {
-        assert_eq!(
-            selection_representations("plain", None),
-            vec![PasteboardRepresentation {
-                mime: PLAIN_TEXT_MIME,
-                text: "plain",
-            }]
-        );
     }
 
     pub(in crate::platform) fn native_write_declares_every_representation_before_publishing_data() {

@@ -901,6 +901,9 @@ mod tests {
 
     #[test]
     fn unix_repository_program_runs_hardened_git_status_without_hooks_or_index_writes() {
+        use crate::repository_status::FsmonitorPolicy;
+        use crate::repository_status::local_read::{git_arguments, git_environment};
+
         let Some(git) = installed_git() else {
             eprintln!("skipping: git is not installed");
             return;
@@ -918,8 +921,15 @@ mod tests {
             &repository,
             &["-c", "init.defaultBranch=main", "init", "-q"],
         );
+        let refreshed = repository.join("refreshed.txt");
         std::fs::write(repository.join("tracked.txt"), "first\n").unwrap();
-        fixture_git(&git, &home, &repository, &["add", "tracked.txt"]);
+        std::fs::write(&refreshed, "same\n").unwrap();
+        fixture_git(
+            &git,
+            &home,
+            &repository,
+            &["add", "tracked.txt", "refreshed.txt"],
+        );
         fixture_git(
             &git,
             &home,
@@ -961,46 +971,42 @@ mod tests {
             &repository,
             &["config", "core.hooksPath", &hooks.to_string_lossy()],
         );
-        // A newer file with the same size makes the index stat information stale, which a
-        // status without --no-optional-locks would refresh and write.
-        std::thread::sleep(Duration::from_millis(1100));
-        std::fs::write(repository.join("tracked.txt"), "other\n").unwrap();
+        std::fs::write(repository.join("tracked.txt"), "changed content\n").unwrap();
         std::fs::write(repository.join("untracked.txt"), "new\n").unwrap();
-        let index_before = std::fs::read(repository.join(".git/index")).unwrap();
+        // Another modification time on unchanged bytes makes the file's index entry stale, which
+        // a status that may take optional locks refreshes and writes.
+        let make_stale = |seconds: u64| {
+            std::fs::File::options()
+                .write(true)
+                .open(&refreshed)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(seconds))
+                .unwrap();
+        };
+        make_stale(1_000_000_000);
+        let index = repository.join(".git/index");
+        let hooks_that_ran = || {
+            let mut names: Vec<_> = std::fs::read_dir(&ran)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+        let index_before = std::fs::read(&index).unwrap();
 
-        let mut arguments = vec!["--no-optional-locks", "--no-pager"];
-        for setting in [
-            "core.fsmonitor=false",
-            "core.hooksPath=/dev/null",
-            "color.ui=false",
-            "core.quotePath=false",
-            "status.relativePaths=false",
-            "advice.statusHints=false",
-        ] {
-            arguments.extend(["-c", setting]);
-        }
-        let repository_argument = repository.to_string_lossy().into_owned();
-        arguments.extend(["-C", &repository_argument]);
-        arguments.extend(["status", "--porcelain=v2", "--branch", "-z"]);
-        let git_directory = git.parent().unwrap().as_os_str().to_owned();
-        let mut path = git_directory;
-        path.push(":/usr/bin:/bin");
-        let mut request = request(&git.to_string_lossy(), &arguments);
+        let mut request = request(&git.to_string_lossy(), &[]);
+        request.arguments = git_arguments(
+            &repository,
+            FsmonitorPolicy::Disabled,
+            &["status", "--porcelain=v2", "--branch", "-z"],
+        );
         request.directory = repository.clone();
-        request.environment = [
-            ("HOME", home.as_os_str().to_owned()),
-            ("PATH", path),
-            ("LC_ALL", "C".into()),
-            ("GIT_TERMINAL_PROMPT", "0".into()),
-            ("GIT_OPTIONAL_LOCKS", "0".into()),
-            ("GIT_PAGER", "cat".into()),
-            ("PAGER", "cat".into()),
-            ("GIT_NO_LAZY_FETCH", "1".into()),
-            ("GIT_CONFIG_NOSYSTEM", "1".into()),
-        ]
-        .into_iter()
-        .map(|(name, value)| (OsString::from(name), value))
-        .collect();
+        request.environment = git_environment(&git, &home);
+        // The host's system configuration stays out of the fixture.
+        request
+            .environment
+            .push(("GIT_CONFIG_NOSYSTEM".into(), "1".into()));
 
         let (result, output, _) = run(&request);
 
@@ -1014,23 +1020,49 @@ mod tests {
         );
         assert!(records.contains(&b"? untracked.txt".as_slice()));
         assert_eq!(
-            std::fs::read_dir(&ran).unwrap().count(),
-            0,
+            hooks_that_ran(),
+            Vec::<OsString>::new(),
             "a hook or hook-program fsmonitor ran"
         );
         assert!(!repository.join(".git/index.lock").exists());
         assert_eq!(
-            std::fs::read(repository.join(".git/index")).unwrap(),
-            index_before
+            std::fs::read(&index).unwrap(),
+            index_before,
+            "the read wrote the index"
         );
 
-        // The same status without the hardening runs the hook program, so the fixture is armed.
-        let mut unhardened = request.clone();
+        // Without the optional-locks protection the same status writes the refreshed entry, so
+        // the fixture gives git an index write to skip. The hook pins still hold on their own.
+        let mut unlocked = request.clone();
+        unlocked
+            .arguments
+            .retain(|argument| argument != "--no-optional-locks");
+        unlocked
+            .environment
+            .retain(|(name, _)| name != "GIT_OPTIONAL_LOCKS");
+        assert_eq!(run(&unlocked).0, Ok(ProgramExit { code: Some(0) }));
+        let index_refreshed = std::fs::read(&index).unwrap();
+        assert_ne!(
+            index_refreshed, index_before,
+            "the fixture gave git no index entry to refresh"
+        );
+        assert_eq!(
+            hooks_that_ran(),
+            Vec::<OsString>::new(),
+            "an index write ran a hook or hook-program fsmonitor"
+        );
+
+        // With no hardening at all, the next stale entry runs the hook program, writes the index
+        // and runs its hook, so each pin above stops something the repository configures.
+        make_stale(1_000_000_100);
+        let repository_argument = repository.to_string_lossy().into_owned();
+        let mut unhardened = unlocked.clone();
         unhardened.arguments = ["-C", &repository_argument, "status", "--porcelain=v2"]
             .into_iter()
             .map(OsString::from)
             .collect();
         assert_eq!(run(&unhardened).0, Ok(ProgramExit { code: Some(0) }));
-        assert!(ran.join("fsmonitor").exists());
+        assert_eq!(hooks_that_ran(), ["fsmonitor", "post-index-change"]);
+        assert_ne!(std::fs::read(&index).unwrap(), index_refreshed);
     }
 }

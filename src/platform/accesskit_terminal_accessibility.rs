@@ -1758,49 +1758,18 @@ mod tests {
             full_consumer
                 .update_and_process_changes(update_with(&mut full, true), &mut IgnoreChanges);
             assert_equivalent(&incremental_consumer, &full_consumer);
+            let terminal = incremental_consumer
+                .state()
+                .root()
+                .children()
+                .next()
+                .unwrap();
+            assert_eq!(
+                terminal.document_range().text(),
+                incremental.model.text(),
+                "step {step}"
+            );
         }
-    }
-
-    #[test]
-    fn accesskit_native_terminal_output_refreshes_cached_rows() {
-        use crate::terminal::geometry::{
-            BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry,
-        };
-        let mut emulator =
-            crate::terminal::testing::TerminalEmulator::new(TerminalGeometry::from_grid(
-                CellGridSize::new(80, 4),
-                LogicalCellSize::new(8.0, 18.0),
-                BackingScale::ONE,
-            ))
-            .unwrap();
-        emulator.feed(b"prompt$ ");
-        emulator.snapshot().unwrap().unwrap();
-        let initial = loop {
-            let (model, more) = emulator
-                .accessibility_snapshot_for_current_presentation()
-                .unwrap();
-            if !more {
-                break model.unwrap();
-            }
-        };
-        let mut tree = pane_tree(initial.as_ref().clone());
-        let mut consumer = accesskit_consumer::Tree::new(update(&mut tree), true);
-
-        emulator.feed(b"printf fixture\r\nspaceterm-a11y\r\nprompt$ ");
-        emulator.snapshot().unwrap().unwrap();
-        let current = loop {
-            let (model, more) = emulator
-                .accessibility_snapshot_for_current_presentation()
-                .unwrap();
-            if !more {
-                break model.unwrap();
-            }
-        };
-        tree.model = current.as_ref().clone();
-        assert!(tree.model.text().contains("spaceterm-a11y"));
-        consumer.update_and_process_changes(update(&mut tree), &mut IgnoreChanges);
-        let terminal = consumer.state().root().children().next().unwrap();
-        assert_eq!(terminal.document_range().text(), tree.model.text());
     }
 
     #[test]

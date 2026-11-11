@@ -481,6 +481,22 @@ mod tests {
             Some(Path::new("/temporary/spaceterm"))
         );
         assert!(directories.runtime_in_shared_temporary());
+
+        // An absolute override keeps its spelling, `..` components included.
+        let spelled = AppDirectoryEnvironment {
+            xdg_config_home: Some("/explicit/../config".into()),
+            xdg_runtime_dir: Some("/explicit/../runtime".into()),
+            ..environment
+        };
+        let directories = AppDirectories::resolve_xdg(APP_DIR_NAME, &spelled, None).unwrap();
+        assert_eq!(
+            directories.config,
+            Path::new("/explicit/../config/spaceterm")
+        );
+        assert_eq!(
+            directories.runtime.as_deref().map(Path::as_os_str),
+            Some(OsStr::new("/explicit/../runtime/spaceterm"))
+        );
     }
 
     #[test]

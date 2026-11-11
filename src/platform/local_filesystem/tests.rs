@@ -165,11 +165,6 @@ fn errors_and_retained_identities_do_not_disclose_content() {
         authority.revalidate_directory(&unavailable),
         Err(LocalFilesystemError::IdentityChanged)
     );
-    assert_eq!(
-        LocalDirectoryIdentity::for_test(31),
-        LocalDirectoryIdentity::for_test(31)
-    );
-    assert_ne!(directory.identity(), LocalDirectoryIdentity::for_test(31));
 }
 
 struct ScriptedIdentities(Mutex<VecDeque<Result<LocalIdentityObservation, LocalFilesystemError>>>);

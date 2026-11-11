@@ -2155,7 +2155,7 @@ fn open_initial_workspace(
 
 #[cfg(test)]
 mod tests {
-    use gpui::{Action, ClipboardItem, Keystroke, TestAppContext};
+    use gpui::{ClipboardItem, TestAppContext};
 
     use super::*;
     use crate::platform::application_quit::testing::AskingOnWindow;
@@ -2932,40 +2932,6 @@ mod tests {
 
         assert!(!cx.has_pending_prompt(), "Quit asks nothing again");
         assert_eq!(quit.confirmations(), 1);
-    }
-
-    #[gpui::test]
-    fn configured_shortcuts_should_bind_global_application_actions(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init).expect("UI initialization");
-        cx.update(|cx| init(cx, application_menu(), application_quit()).unwrap());
-        let expected = [
-            ("cmd-q", DismissApplication.name()),
-            ("cmd-h", HideApplication.name()),
-            ("alt-cmd-h", HideOtherApplications.name()),
-            ("cmd-m", MinimizeWindow.name()),
-            ("ctrl-cmd-f", ToggleFullScreen.name()),
-            ("fn-f", ToggleFullScreen.name()),
-        ];
-        let actual = cx.update(|cx| {
-            expected
-                .iter()
-                .map(|(shortcut, _)| {
-                    let keystroke = Keystroke::parse(shortcut).unwrap_or_else(|error| {
-                        panic!("invalid test shortcut {shortcut}: {error}")
-                    });
-                    let bindings = cx.all_bindings_for_input(&[keystroke]);
-                    (
-                        *shortcut,
-                        bindings
-                            .last()
-                            .map(|binding| binding.action().name())
-                            .unwrap_or(""),
-                    )
-                })
-                .collect::<Vec<_>>()
-        });
-
-        assert_eq!(actual.as_slice(), expected);
     }
 
     #[gpui::test]

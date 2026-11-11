@@ -58,17 +58,34 @@ mod tests {
 
     #[test]
     fn only_listed_variables_reach_the_github_cli() {
-        let environment = github_cli_environment(|key| match key {
-            "HTTPS_PROXY" => Some("http://proxy:3128".into()),
-            "GH_HOST" => Some("github.example.com".into()),
-            _ => None,
+        // The launch environment answers every name but one, so the result is the passthrough
+        // list without that unset name. Adding or removing a name there has to change the names
+        // written out here.
+        let environment = github_cli_environment(|key| {
+            (key != "SSL_CERT_DIR").then(|| format!("value-of-{key}").into())
         });
-        assert_eq!(
-            environment,
-            [
-                ("GH_HOST".into(), "github.example.com".into()),
-                ("HTTPS_PROXY".into(), "http://proxy:3128".into()),
-            ]
-        );
+        let expected: Vec<(OsString, OsString)> = [
+            "GH_CONFIG_DIR",
+            "GH_HOST",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "GH_ENTERPRISE_TOKEN",
+            "GITHUB_ENTERPRISE_TOKEN",
+            "XDG_CONFIG_HOME",
+            "XDG_STATE_HOME",
+            "XDG_DATA_HOME",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "no_proxy",
+            "SSL_CERT_FILE",
+        ]
+        .into_iter()
+        .map(|name| (name.into(), format!("value-of-{name}").into()))
+        .collect();
+        assert_eq!(environment, expected);
     }
 }

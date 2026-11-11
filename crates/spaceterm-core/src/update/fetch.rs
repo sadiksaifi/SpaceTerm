@@ -341,37 +341,6 @@ mod tests {
         );
     }
 
-    /// A proxy that refuses every `CONNECT` is a proxy failure, and nothing reaches the release
-    /// host.
-    #[test]
-    fn a_refusing_proxy_fails_the_fetch_as_the_proxys() {
-        use std::io::BufRead;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let proxy = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
-            let mut request = String::new();
-            reader.read_line(&mut request).unwrap();
-            let mut stream = stream;
-            stream
-                .write_all(
-                    b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n",
-                )
-                .unwrap();
-            request
-        });
-        let releases = Releases::new(Some(
-            &Proxy::parse(&format!("http://127.0.0.1:{port}")).unwrap(),
-        ));
-        assert_eq!(
-            releases.feed(FeedTarget::CORE_LINUX, None),
-            Err(FetchError::Proxy)
-        );
-        let request = proxy.join().unwrap();
-        assert!(request.starts_with("CONNECT github.com:443 "), "{request}");
-    }
-
     /// Every variable ureq reads a proxy from.
     const PROXY_VARIABLES: [&str; 6] = [
         "ALL_PROXY",

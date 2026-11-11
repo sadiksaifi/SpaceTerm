@@ -556,34 +556,13 @@ impl ObservedAskPassPresenter {
     }
 }
 
-struct PromptActivity<'a>(&'a AtomicBool);
-
-impl PromptActivity<'_> {
-    fn begin(active: &AtomicBool) -> PromptActivity<'_> {
-        active.store(true, Ordering::Release);
-        PromptActivity(active)
-    }
-}
-
-impl Drop for PromptActivity<'_> {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
-    }
-}
-
 impl AskPassPresenter for ObservedAskPassPresenter {
     fn present(
         &self,
         request: AskPassRequest,
         stop: &AtomicBool,
     ) -> Result<AskPassProtocolReply, AskPassPresentationFailure> {
-        self.observation
-            .state
-            .prompt_started
-            .store(true, Ordering::Release);
-        let activity = PromptActivity::begin(&self.observation.state.prompt_active);
         let answer = self.inner.present(request, stop);
-        drop(activity);
         if matches!(answer, Ok(AskPassProtocolReply::Cancelled)) {
             self.observation
                 .state
@@ -1169,7 +1148,7 @@ impl AskPassBrokerLease {
     }
 }
 #[derive(Clone, Default)]
-/// Content-free observation of authentication prompt activity and user cancellation.
+/// Content-free observation of user cancellation at an authentication prompt.
 ///
 /// It is scoped to one connection attempt and carries no prompt or response bytes.
 pub(crate) struct AskPassAttemptObservation {
@@ -1178,27 +1157,10 @@ pub(crate) struct AskPassAttemptObservation {
 
 #[derive(Default)]
 pub(super) struct AskPassAttemptObservationState {
-    pub(super) prompt_started: AtomicBool,
-    pub(super) prompt_active: AtomicBool,
     pub(super) cancelled: Arc<AtomicBool>,
 }
 
 impl AskPassAttemptObservation {
-    #[cfg(test)]
-    pub(crate) fn prompt_started(&self) -> bool {
-        self.state.prompt_started.load(Ordering::Acquire)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn prompt_active(&self) -> bool {
-        self.state.prompt_active.load(Ordering::Acquire)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn cancelled(&self) -> bool {
-        self.state.cancelled.load(Ordering::Acquire)
-    }
-
     pub(crate) fn cancellation_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.state.cancelled)
     }
@@ -1594,7 +1556,7 @@ mod tests {
     }
 
     #[test]
-    fn observation_tracks_one_prompt_and_clears_activity_after_settlement() {
+    fn observation_marks_the_attempt_cancelled_once_the_person_cancels_the_prompt() {
         let observation = AskPassAttemptObservation::default();
         let (commands, receiver) = async_channel::bounded(2);
         let presenter = ObservedAskPassPresenter::new(
@@ -1613,18 +1575,15 @@ mod tests {
             AskPassUiCommand::Present { job, .. } => job.response,
             AskPassUiCommand::Cancel { .. } => panic!("expected presentation"),
         };
-        let started_while_blocked = observation.prompt_started();
-        let active_while_blocked = observation.prompt_active();
-        let cancelled_while_blocked = observation.cancelled();
+        let cancelled = observation.cancellation_flag();
+        let cancelled_while_blocked = cancelled.load(Ordering::Acquire);
         response.send(Ok(AskPassProtocolReply::Cancelled)).unwrap();
         assert!(matches!(
             worker.join().unwrap(),
             Ok(AskPassProtocolReply::Cancelled)
         ));
-        assert!(started_while_blocked && active_while_blocked && !cancelled_while_blocked);
-        assert!(observation.prompt_started());
-        assert!(!observation.prompt_active());
-        assert!(observation.cancelled());
+        assert!(!cancelled_while_blocked);
+        assert!(cancelled.load(Ordering::Acquire));
     }
 
     #[test]

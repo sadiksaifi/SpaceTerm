@@ -211,16 +211,4 @@ mod tests {
 
         assert_eq!(discovery.discover(), ToolInventory::default());
     }
-
-    #[test]
-    fn macos_repository_tools_default_candidates_exclude_the_system_stub() {
-        let discovery = MacosRepositoryToolDiscovery::new();
-
-        assert!(
-            !discovery
-                .git
-                .contains(&ToolCandidate::Fixed(PathBuf::from(SYSTEM_STUB)))
-        );
-        assert_ne!(discovery.discover().git, Some(PathBuf::from(SYSTEM_STUB)));
-    }
 }

@@ -181,9 +181,25 @@ mod tests {
         let oversized = vec![b'x'; (MAXIMUM_IMPORT_BYTES + 1) as usize];
         std::fs::write(&path, &oversized).expect("fixture");
 
+        /// Opens the file for writing only, so reading any of its bytes fails.
+        struct UnreadableFileOpener;
+
+        impl SelectedFileOpener for UnreadableFileOpener {
+            fn open(
+                &self,
+                path: &Path,
+            ) -> Result<File, crate::platform::selected_file::SelectedFileOpenError> {
+                File::options()
+                    .write(true)
+                    .open(path)
+                    .map_err(|_| crate::platform::selected_file::SelectedFileOpenError)
+            }
+        }
+
         assert_eq!(
-            read_selected_document(&path, &FixtureFileOpener),
-            Err(ImportError::TooLarge)
+            read_selected_document(&path, &UnreadableFileOpener),
+            Err(ImportError::TooLarge),
+            "the size refuses the file before a read could fail"
         );
     }
 

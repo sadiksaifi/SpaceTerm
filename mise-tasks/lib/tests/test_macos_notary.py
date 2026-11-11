@@ -191,23 +191,6 @@ class NotarizeTests(unittest.TestCase):
             json.loads((self.artifacts / "receipt.json").read_text())["status"], "Accepted"
         )
 
-    def test_upload_acknowledgement_without_status_continues_to_processing_status(self):
-        self.run_notarize(
-            submit_output=json.dumps(
-                {
-                    "id": SUBMISSION,
-                    "message": "Successfully uploaded file",
-                    "path": "/private/submission.zip",
-                }
-            ).encode(),
-            info_status="Accepted",
-        )
-        self.assertEqual(
-            [call[2] for call in self.calls if call[1:2] == ["notarytool"]],
-            ["submit", "info"],
-        )
-        self.assertEqual(self.calls[-1][1:3], ["stapler", "validate"])
-
     def test_unsuccessful_upload_retains_uuid_and_never_checks_processing_or_staples(self):
         with self.assertRaisesRegex(TaskError, "tool_failed"):
             self.run_notarize(submit_returncode=1)

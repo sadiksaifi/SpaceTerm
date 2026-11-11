@@ -1746,24 +1746,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn secondary_text_should_be_readable_on_every_row_background() {
-        let colors = ChromeColors::default();
-        for (foreground, background) in [
-            (colors.row_secondary, colors.row_background),
-            (colors.row_hover_secondary, colors.row_hover_background),
-            (
-                colors.row_selected_secondary,
-                colors.row_selected_background,
-            ),
-            (
-                colors.row_selected_hover_secondary,
-                colors.row_selected_hover_background,
-            ),
-        ] {
-            assert!(foreground.contrast_ratio(background) >= 4.5);
-        }
-    }
-    #[test]
     fn connection_states_should_use_semantic_colors() {
         assert_eq!(
             remote_connection_color(

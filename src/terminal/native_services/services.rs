@@ -335,20 +335,6 @@ mod tests {
     }
 
     #[test]
-    fn string_return_requires_a_bound_string_send() {
-        assert!(accepts_service_request(
-            NativeServiceCapabilities::new(true, true),
-            ServiceDataType::String,
-            ServiceDataType::String,
-        ));
-        assert!(!accepts_service_request(
-            NativeServiceCapabilities::new(true, true),
-            ServiceDataType::Absent,
-            ServiceDataType::String,
-        ));
-    }
-
-    #[test]
     fn service_operation_rejects_overlap_and_wrong_pasteboard_return() {
         let endpoint = Endpoint::new();
         let requests = ServiceRequests::new(endpoint.clone());

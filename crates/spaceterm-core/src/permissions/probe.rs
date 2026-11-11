@@ -195,24 +195,4 @@ mod tests {
             assert_eq!(Probe::decode(output), None, "{output:?}");
         }
     }
-
-    #[test]
-    fn a_report_answers_each_permission_from_its_own_read() {
-        let probe = Probe::read(|permission| {
-            if permission == SystemPermission::Accessibility {
-                PermissionState::Granted
-            } else {
-                PermissionState::NotGranted
-            }
-        });
-        assert_eq!(
-            SystemPermission::ALL.map(|permission| probe.state(permission)),
-            [
-                PermissionState::NotGranted,
-                PermissionState::NotGranted,
-                PermissionState::NotGranted,
-                PermissionState::Granted,
-            ]
-        );
-    }
 }

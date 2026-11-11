@@ -702,15 +702,6 @@ mod tests {
     }
 
     #[test]
-    fn password_should_require_nonempty_response() {
-        let presentation = request("root@example.test's password:", AskPassPromptKind::Secret)
-            .secret_presentation("this Mac")
-            .unwrap();
-
-        assert!(presentation.requires_nonempty());
-    }
-
-    #[test]
     fn password_should_present_account_and_host_details() {
         let presentation = request("root@example.test's password:", AskPassPromptKind::Secret)
             .secret_presentation("this Mac")
@@ -725,17 +716,6 @@ mod tests {
             presentation.note(),
             Some("SpaceTerm sends it to SSH and doesn\u{2019}t store it.")
         );
-    }
-
-    #[test]
-    fn key_passphrase_should_require_nonempty_response() {
-        let presentation = request(
-            "Enter passphrase for key '/Users/dev/.ssh/id_ed25519':",
-            AskPassPromptKind::Secret,
-        )
-        .secret_presentation("this Mac")
-        .unwrap();
-
         assert!(presentation.requires_nonempty());
     }
 

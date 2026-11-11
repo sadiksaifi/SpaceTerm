@@ -155,11 +155,16 @@ fn unavailable_window_effects_show_defaults_and_refuse_preview_edits(cx: &mut Te
 
 #[test]
 fn every_section_is_reachable_by_its_launch_argument() {
-    for section in WorkbenchSection::ALL {
-        assert_eq!(
-            WorkbenchSection::from_argument(section.argument()),
-            Some(section)
-        );
+    // The `choices` of `development:workbench` in `.mise.toml`.
+    for (argument, section) in [
+        ("appearance", WorkbenchSection::Appearance),
+        ("controls", WorkbenchSection::Controls),
+        ("floating-surfaces", WorkbenchSection::FloatingSurfaces),
+        ("modals", WorkbenchSection::Modals),
+        ("terminal", WorkbenchSection::Terminal),
+        ("document", WorkbenchSection::Document),
+    ] {
+        assert_eq!(WorkbenchSection::from_argument(argument), Some(section));
     }
     assert_eq!(WorkbenchSection::from_argument("Appearance"), None);
     assert_eq!(WorkbenchSection::from_argument(""), None);

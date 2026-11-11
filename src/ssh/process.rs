@@ -41,8 +41,6 @@ impl ProcessExit {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProcessSignal {
-    #[cfg(all(test, feature = "native-tests"))]
-    Terminate,
     Kill,
 }
 
@@ -375,14 +373,6 @@ impl SshProcessEnvironment {
         agent_socket: Option<OsString>,
     ) -> Result<Self, SshProcessEnvironmentError> {
         Self::validated(home, None, StartupSshEnvironment::for_test(agent_socket))
-    }
-
-    #[cfg(test)]
-    pub(super) fn new_without_authentication_from_startup(
-        home: PathBuf,
-        startup: &StartupSshEnvironment,
-    ) -> Result<Self, SshProcessEnvironmentError> {
-        Self::validated(home, None, startup.clone())
     }
 
     fn launch_parts(
@@ -1109,26 +1099,6 @@ mod tests {
             Some(&agent_socket)
         );
         assert!(!entries.contains_key(std::ffi::OsStr::new("SPACETERM_UNKNOWN")));
-    }
-
-    #[test]
-    fn launch_environment_preserves_captured_path() {
-        let home = PathBuf::from("/captured/home");
-        let startup = StartupSshEnvironment::for_test_with_path(
-            OsString::from("/captured/bin:/usr/bin:/bin"),
-            None,
-        );
-        let environment =
-            SshProcessEnvironment::new_without_authentication_from_startup(home.clone(), &startup)
-                .unwrap();
-        let (directory, entries, askpass_capability) = environment.launch_parts();
-
-        assert_eq!(directory, home);
-        assert!(askpass_capability.is_none());
-        assert!(entries.contains(&(
-            OsString::from("PATH"),
-            OsString::from("/captured/bin:/usr/bin:/bin")
-        )));
     }
 
     #[test]

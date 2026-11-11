@@ -1124,9 +1124,8 @@ fn vt_sequences_update_the_screen_without_leaking_escape_bytes() {
         .map(|cell| cell.text.as_str())
         .collect::<String>();
 
-    assert!(first_row.starts_with("hello"));
-    assert!(second_row.starts_with("red"));
-    assert!(!first_row.contains('\x1b'));
+    assert_eq!(first_row.trim_end(), "hello");
+    assert_eq!(second_row.trim_end(), "red");
     assert_eq!(
         snapshot.rows[1][0].foreground_source,
         TerminalColor::Palette(1)
@@ -3531,20 +3530,6 @@ fn synchronized_output_deadline_should_follow_the_last_output_activity() {
 }
 
 #[test]
-fn unchanged_rows_reuse_their_cell_storage() {
-    let mut emulator = emulator(10, 3);
-    let first = emulator.snapshot().unwrap().unwrap();
-
-    emulator.feed(b"x");
-    let second = emulator.snapshot().unwrap().unwrap();
-
-    assert!(!Arc::ptr_eq(&first.rows[0], &second.rows[0]));
-    assert!(Arc::ptr_eq(&first.rows[1], &second.rows[1]));
-    assert!(Arc::ptr_eq(&first.rows[2], &second.rows[2]));
-    assert!(Arc::ptr_eq(&first.title, &second.title));
-}
-
-#[test]
 fn row_dirty_update_reports_only_the_changed_row() {
     let mut emulator = emulator(10, 3);
     let first = emulator.snapshot().unwrap().unwrap();
@@ -3555,6 +3540,7 @@ fn row_dirty_update_reports_only_the_changed_row() {
     assert!(!Arc::ptr_eq(&first.rows[0], &second.rows[0]));
     assert!(Arc::ptr_eq(&first.rows[1], &second.rows[1]));
     assert!(Arc::ptr_eq(&first.rows[2], &second.rows[2]));
+    assert!(Arc::ptr_eq(&first.title, &second.title));
     assert_eq!(
         second.damage,
         SnapshotDamage {
@@ -4267,6 +4253,7 @@ fn mouse_tracking_reports_bytes_but_shift_override_reaches_no_program() {
     );
     let shifted_press = emulator.pointer(input).unwrap();
     assert!(shifted_press.bytes.is_empty());
+    assert!(!shifted_press.screen_changed);
     assert_eq!(emulator.selection_text().unwrap(), None);
 }
 
@@ -4469,13 +4456,6 @@ fn auxiliary_buttons_and_hover_only_report_when_tracking_allows() {
         .pointer(pointer(PointerPhase::Motion, None, 21.0, 1.0, true))
         .unwrap();
     assert!(shifted_hover.bytes.is_empty());
-}
-
-#[test]
-fn screen_snapshots_are_send_and_sync() {
-    fn assert_send_sync<T: Send + Sync>() {}
-
-    assert_send_sync::<ScreenSnapshot>();
 }
 
 #[test]

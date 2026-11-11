@@ -131,19 +131,14 @@ mod tests {
             trust.verify(b"another message", &current.sign(message)),
             Err(BadSignature)
         );
-    }
-
-    #[test]
-    fn each_key_binds_its_signature_to_the_exact_bytes() {
-        let (current, backup) = (TestKey::generate(), TestKey::generate());
-        let trust = trust(&current, &backup);
-        let message = b"feed";
-        for key in [&current, &backup] {
-            let signature = key.sign(message);
-            assert_eq!(trust.verify(message, &signature), Ok(()));
-            assert_eq!(trust.verify(b"fees", &signature), Err(BadSignature));
-            assert_eq!(trust.verify(b"feed\n", &signature), Err(BadSignature));
-        }
+        assert_eq!(
+            trust.verify(b"another message", &backup.sign(message)),
+            Err(BadSignature)
+        );
+        // A signature covers the exact bytes, so a trailing newline makes another message.
+        let signature = backup.sign(b"feed");
+        assert_eq!(trust.verify(b"feed", &signature), Ok(()));
+        assert_eq!(trust.verify(b"feed\n", &signature), Err(BadSignature));
     }
 
     #[test]

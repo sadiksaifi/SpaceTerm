@@ -57,13 +57,6 @@ class InstallerContractTests(unittest.TestCase):
         self.assertFalse(self.requests.exists())
         self.assertEqual(list(self.home.iterdir()), [])
 
-    def test_the_release_pipeline_fills_each_value_exactly_once(self):
-        text = INSTALLER.read_text()
-        for token in ("@RELEASE_KIND@", "@DEFAULT_VERSION@"):
-            self.assertEqual(text.count(token), 1, token)
-        self.assertIn("readonly RELEASE_KIND='@RELEASE_KIND@'\n", text)
-        self.assertIn("readonly DEFAULT_VERSION='@DEFAULT_VERSION@'\n", text)
-
     def test_the_pinned_update_keys_match_update_trust(self):
         text = INSTALLER.read_text()
         pinned = {

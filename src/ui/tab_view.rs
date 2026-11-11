@@ -664,8 +664,6 @@ pub(crate) struct TabView {
     /// Where each Pane's caption Split and Close controls took presses in the last frame.
     pane_unselecting_controls: BTreeMap<(PaneId, PaneCaptionAction), gpui::Hitbox>,
     pane_layout_size: Option<PaneSize>,
-    /// A Split that waits for the next Pane measurement, because the retained bounds are stale.
-    pending_split: Option<(PaneId, SplitAxis)>,
     split_bounds: BTreeMap<SplitId, Bounds<Pixels>>,
     pane_titles: BTreeMap<PaneId, gpui::SharedString>,
     pane_captions: BTreeMap<PaneId, PaneCaptionText>,
@@ -764,7 +762,6 @@ impl TabView {
             pane_surfaces: BTreeMap::new(),
             pane_unselecting_controls: BTreeMap::new(),
             pane_layout_size: None,
-            pending_split: None,
             split_bounds: BTreeMap::new(),
             pane_titles: BTreeMap::from([(initial_pane_id, initial_title)]),
             pane_captions: BTreeMap::from([(initial_pane_id, initial_caption)]),
@@ -959,23 +956,6 @@ impl TabView {
         self.tab.pane_count()
     }
 
-    /// Splits the Focused Pane after this Tab next measures its Panes, unless that Pane closes first.
-    #[cfg(test)]
-    pub(crate) fn split_focused_after_layout(&mut self, axis: SplitAxis, cx: &mut Context<Self>) {
-        self.pending_split = Some((self.tab.focused_pane_id(), axis));
-        cx.notify();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn close_pane_authorized(
-        &mut self,
-        pane_id: PaneId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.close_pane(pane_id, window, cx);
-    }
-
     #[cfg(test)]
     pub(crate) fn terminal_panes<'a>(
         &'a self,
@@ -1061,7 +1041,6 @@ impl TabView {
     }
 
     pub(crate) fn deactivate(&mut self, cx: &mut Context<Self>) {
-        self.pending_split = None;
         self.set_focus_branch(false, None, cx);
         cx.notify();
     }
@@ -3795,7 +3774,7 @@ impl Render for TabView {
                     let Some(bounds) = children.first() else {
                         return;
                     };
-                    let (resized, pending_split) = view
+                    let resized = view
                         .update(cx, |view, cx| {
                             let measured = pane_size(*bounds).ok();
                             let resized = view.pane_layout_size != measured && measured.is_some();
@@ -3808,7 +3787,7 @@ impl Render for TabView {
                             if resized {
                                 view.pane_motion.restart_change();
                             }
-                            (resized, view.pending_split.take())
+                            resized
                         })
                         .unwrap_or_default();
                     // This frame laid out its Panes for the previous size. Pane motion starts from
@@ -3817,16 +3796,6 @@ impl Render for TabView {
                         let view = view.clone();
                         window.defer(cx, move |_, cx| {
                             let _ = view.update(cx, |_, cx| cx.notify());
-                        });
-                    }
-                    if let Some((pane_id, axis)) = pending_split {
-                        let view = view.clone();
-                        window.defer(cx, move |window, cx| {
-                            let _ = view.update(cx, |view, cx| {
-                                if view.tab.pane(pane_id).is_some() {
-                                    view.split_pane(pane_id, axis, window, cx);
-                                }
-                            });
                         });
                     }
                 }
@@ -7036,11 +7005,7 @@ mod tests {
         let removed_caption = view.read_with(cx, |view, _| {
             format!("Pane Caption, {}", view.pane_captions[&focused].name)
         });
-        cx.update(|window, cx| {
-            view.update(cx, |view, cx| {
-                view.close_pane_authorized(focused, window, cx)
-            })
-        });
+        cx.update(|window, cx| view.update(cx, |view, cx| view.close_pane(focused, window, cx)));
         let tree = A11yTree::read(cx);
         assert_eq!(tree.with_role("Terminal").len(), 2);
         assert!(tree.find(&removed_caption).is_none());
@@ -7827,15 +7792,14 @@ mod tests {
     }
 
     #[test]
-    fn cached_reported_glyph_should_follow_each_current_font_check() {
-        let cached = Some(gpui::SharedString::from("π"));
+    fn reported_glyph_should_be_drawable_only_when_the_font_check_accepts_it() {
+        let reported = Some(gpui::SharedString::from("π"));
 
-        assert_eq!(drawable_reported_glyph(cached.as_ref(), |_| false), None);
+        assert_eq!(drawable_reported_glyph(reported.as_ref(), |_| false), None);
         assert_eq!(
-            drawable_reported_glyph(cached.as_ref(), |_| true),
+            drawable_reported_glyph(reported.as_ref(), |_| true),
             Some(gpui::SharedString::from("π"))
         );
-        assert_eq!(cached, Some(gpui::SharedString::from("π")));
     }
 
     #[test]
@@ -7921,6 +7885,8 @@ mod tests {
             resolve(controls + 40.0),
             layout(false, false, false, false, false)
         );
+        // The name no longer fits here, and the Split controls stay.
+        assert!(resolve(controls + 10.0).show_splits);
         assert!(!resolve(controls - 1.0).show_splits);
     }
 
@@ -8464,58 +8430,6 @@ mod tests {
         assert!(resolve(without_repository, 0.0).show_host);
     }
 
-    /// A narrow Pane Caption without status retains Split controls above their width threshold.
-    #[test]
-    fn narrow_caption_without_status_should_keep_split_controls_above_the_control_threshold() {
-        let metrics = CaptionMetrics {
-            name: px(40.0),
-            ..CaptionMetrics::default()
-        };
-        let controls = PANE_CAPTION_LEFT_PADDING
-            + PANE_CAPTION_RIGHT_PADDING
-            + PANE_STATUS_WIDTH
-            + PANE_CONTROL_LEADING_GAP
-            + controls_width(2, false, PANE_CONTROL_SIZE, 1.0);
-        let resolve = |width: f32| {
-            CaptionLayout::from_metrics(
-                false,
-                px(width),
-                1.0,
-                metrics,
-                1.0,
-                13.0,
-                PANE_CONTROL_SIZE,
-            )
-        };
-
-        let narrow = resolve(controls + 10.0);
-        assert!(narrow.show_splits);
-    }
-
-    #[gpui::test]
-    fn a_split_after_layout_should_skip_a_pane_closed_before_the_layout(cx: &mut TestAppContext) {
-        let (view, cx) = core_tab_view(Vec::new(), cx);
-        cx.update(|window, cx| {
-            view.update(cx, |view, cx| {
-                view.split_focused(SplitAxis::Horizontal, window, cx);
-            });
-        });
-        cx.run_until_parked();
-
-        cx.update(|window, cx| {
-            view.update(cx, |view, cx| {
-                view.split_focused_after_layout(SplitAxis::Vertical, cx);
-                view.close_pane_authorized(PaneId::new(2), window, cx);
-            });
-        });
-        cx.run_until_parked();
-
-        assert_eq!(
-            view.read_with(cx, |view, _| view.layout_signature()),
-            "pane:1"
-        );
-    }
-
     #[gpui::test]
     fn native_service_return_is_rejected_after_pane_changes_away_and_back(cx: &mut TestAppContext) {
         let records = TestTerminalSessionRecords::default();
@@ -9020,16 +8934,6 @@ mod tests {
         }
 
         assert_eq!(records.pointer_count(), 0);
-    }
-
-    #[test]
-    fn split_ratio_should_follow_horizontal_requested_offset() {
-        let split_bounds = bounds(point(px(10.0), px(20.0)), size(px(406.0), px(200.0)));
-
-        assert_eq!(
-            split_ratio_for_offset(SplitAxis::Horizontal, split_bounds, 100.0, 6.0),
-            Some(0.25)
-        );
     }
 
     #[test]
