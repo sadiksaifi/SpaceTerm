@@ -509,15 +509,15 @@ fn pending_text(pending: &PendingStatus, finish: &str, machine: &str) -> String 
 /// `machine` until they update.
 pub(crate) fn stranded(devices: &[DeviceRef], machine: &str) -> String {
     match devices {
-        [] => format!(
-            "Devices with an older SpaceTerm can\u{2019}t connect to {machine} until they update."
-        ),
+        [] => {
+            format!("Devices with an older SpaceTerm can't connect to {machine} until they update.")
+        }
         [device] => format!(
-            "SpaceTerm on {} can\u{2019}t connect to {machine} until it updates.",
+            "SpaceTerm on {} can't connect to {machine} until it updates.",
             device.name
         ),
         devices => format!(
-            "SpaceTerm on {} can\u{2019}t connect to {machine} until they update.",
+            "SpaceTerm on {} can't connect to {machine} until they update.",
             devices
                 .iter()
                 .map(|device| device.name.as_str())
@@ -570,13 +570,13 @@ fn failure_text(failure: &UpdateFailureStatus) -> String {
             format!("{version} did not verify. Nothing changed")
         }
         (UpdateFailureStage::Start, UpdateFailureReason::NotReady) => format!(
-            "{version} didn\u{2019}t start, so SpaceTerm Core went back to the version it ran before"
+            "{version} didn't start, so SpaceTerm Core went back to the version it ran before"
         ),
         (UpdateFailureStage::Start, UpdateFailureReason::PortInUse) => format!(
-            "{version} couldn\u{2019}t listen on the Network Access port because another program holds it, so SpaceTerm Core returned to the version it ran before. It tries {version} again at the next restart"
+            "{version} couldn't listen on the Network Access port because another program holds it, so SpaceTerm Core returned to the version it ran before. It tries {version} again at the next restart"
         ),
         (UpdateFailureStage::Start, UpdateFailureReason::DiskFull) => format!(
-            "{version} couldn\u{2019}t start because the disk is full, so SpaceTerm Core returned to the version it ran before. It tries {version} again at the next restart"
+            "{version} couldn't start because the disk is full, so SpaceTerm Core returned to the version it ran before. It tries {version} again at the next restart"
         ),
         (UpdateFailureStage::Start, _) => format!(
             "a reboot, logout or crash interrupted the restart into {version}. It tries {version} again at the next restart"

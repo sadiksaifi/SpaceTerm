@@ -478,18 +478,18 @@ pub(crate) fn update_failure_text(
     };
     match details.reason {
         Some(UpdateFailureReason::NotReady) => format!(
-            "SpaceTerm Core {version} didn\u{2019}t start, so {runs}. It skips {version} until a newer version appears.\n"
+            "SpaceTerm Core {version} didn't start, so {runs}. It skips {version} until a newer version appears.\n"
         ),
         Some(UpdateFailureReason::PortInUse) => format!(
-            "SpaceTerm Core {version} couldn\u{2019}t listen on the Network Access port because another program holds it, so {runs}. {version} stays downloaded. Free the port, then try again with: {restart}\n"
+            "SpaceTerm Core {version} couldn't listen on the Network Access port because another program holds it, so {runs}. {version} stays downloaded. Free the port, then try again with: {restart}\n"
         ),
         Some(UpdateFailureReason::DiskFull) => format!(
-            "SpaceTerm Core {version} couldn\u{2019}t start because the disk is full, so {runs}. {version} stays downloaded. Free some space, then try again with: {restart}\n"
+            "SpaceTerm Core {version} couldn't start because the disk is full, so {runs}. {version} stays downloaded. Free some space, then try again with: {restart}\n"
         ),
         Some(UpdateFailureReason::Interrupted) => format!(
             "A reboot, logout or crash interrupted the restart into SpaceTerm Core {version}, so {runs}. {version} stays downloaded. Try again with: {restart}\n"
         ),
-        _ => format!("SpaceTerm Core {version} didn\u{2019}t start, so {runs}.\n"),
+        _ => format!("SpaceTerm Core {version} didn't start, so {runs}.\n"),
     }
 }
 

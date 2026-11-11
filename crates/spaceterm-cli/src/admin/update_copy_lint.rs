@@ -36,7 +36,7 @@ fn compile() -> Vec<(Regex, &'static str)> {
         // The `--machine` flag of a copied command line is not prose.
         (r"(^|[^-])\bmachine\b", LOWERCASE_MACHINE),
         (r"\bin Progress\b", IN_PROGRESS),
-        (r"'", APOSTROPHE),
+        (r"[\u{2018}\u{2019}]", APOSTROPHE),
         (r"\u{2014}", EM_DASH),
     ]
     .into_iter()
@@ -54,7 +54,7 @@ const UPDATE_RESTART: &str = "the Core's step is a restart";
 const ZERO: &str = "no consequence carries a zero count";
 const LOWERCASE_MACHINE: &str = "Machine is a proper term";
 const IN_PROGRESS: &str = "statuses use sentence case";
-const APOSTROPHE: &str = "the CLI writes the typographic apostrophe";
+const APOSTROPHE: &str = "update text uses straight apostrophes";
 const EM_DASH: &str = "no em dash";
 const BARE_CORE: &str = "\"Core\" alone names nothing";
 
@@ -351,13 +351,15 @@ fn each_rule_refuses_an_example_that_breaks_only_it() {
             LOWERCASE_MACHINE,
         ),
         ("1 in Progress", IN_PROGRESS),
-        ("SpaceTerm Core couldn't start.", APOSTROPHE),
+        ("SpaceTerm Core couldn\u{2019}t start.", APOSTROPHE),
+        ("SpaceTerm Core couldn\u{2018}t start.", APOSTROPHE),
         ("SpaceTerm Core restarts \u{2014} soon.", EM_DASH),
         ("Core 0.11.4 is downloaded.", BARE_CORE),
     ] {
         assert_eq!(violations(text), [why], "{text:?}");
     }
     for allowed in [
+        "SpaceTerm Core couldn't start.",
         "Restart Core\u{2026}",
         "Restarting Core\u{2026}",
         "SpaceTerm Core 0.11.4 is downloaded on This Mac.",

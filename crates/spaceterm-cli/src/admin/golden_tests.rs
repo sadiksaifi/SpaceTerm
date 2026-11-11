@@ -148,7 +148,7 @@ fn status_reports_service_network_devices_and_held_outcomes() {
         text.contains(
             "Downloaded: 0.8.0 at 2026-11-03T09:12:00Z. An update has waited 3 days on \
              penguin. Restarting into SpaceTerm Core 0.8.0 ends 2 Terminal Sessions. Restart \
-             with: spaceterm --machine penguin restart\n  SpaceTerm on old-mini can\u{2019}t \
+             with: spaceterm --machine penguin restart\n  SpaceTerm on old-mini can't \
              connect to penguin until it updates.\n"
         ),
         "{text}"
@@ -159,7 +159,7 @@ fn status_reports_service_network_devices_and_held_outcomes() {
              In progress: downloading 0.8.1, 25% received\n\
              Skipped: 0.7.5 failed to start, so SpaceTerm Core refuses it until a newer version \
              appears.\n\
-             Last update failure: 2026-11-02T08:00:00Z, 0.7.5 didn\u{2019}t start, so \
+             Last update failure: 2026-11-02T08:00:00Z, 0.7.5 didn't start, so \
              SpaceTerm Core went back to the version it ran before.\n"
         ),
         "{text}"
@@ -240,13 +240,13 @@ fn status_names_every_update_operation_and_failure() {
         ),
         (
             FailureKind::Start(StartFailure::PortInUse),
-            "0.8.0 couldn\u{2019}t listen on the Network Access port because another program \
+            "0.8.0 couldn't listen on the Network Access port because another program \
              holds it, so SpaceTerm Core returned to the version it ran before. It tries 0.8.0 \
              again at the next restart.",
         ),
         (
             FailureKind::Start(StartFailure::DiskFull),
-            "0.8.0 couldn\u{2019}t start because the disk is full, so SpaceTerm Core returned to \
+            "0.8.0 couldn't start because the disk is full, so SpaceTerm Core returned to \
              the version it ran before. It tries 0.8.0 again at the next restart.",
         ),
         (
@@ -484,7 +484,7 @@ fn a_breaking_restart_preview_names_its_versions_and_stranded_devices_and_warns(
         lifecycle::summary(lifecycle::Kind::Restart, "penguin", &previewed),
         "Restart SpaceTerm Core on penguin?\nSpaceTerm Core restarts from 0.7.0 to 0.8.0. This \
          ends 1 Terminal Session. Workspaces, Tabs and Panes stay. SpaceTerm on old-mini \
-         can\u{2019}t connect to penguin until it updates.\n"
+         can't connect to penguin until it updates.\n"
     );
     let envelope = lifecycle::preview_envelope(
         "restart",
@@ -598,7 +598,7 @@ fn a_failed_update_names_why_and_the_version_that_runs() {
     };
     assert_eq!(
         lifecycle::update_failure_text("penguin", details, RESTART),
-        "SpaceTerm Core 0.8.0 didn\u{2019}t start, so SpaceTerm Core on penguin runs 0.7.0 \
+        "SpaceTerm Core 0.8.0 didn't start, so SpaceTerm Core on penguin runs 0.7.0 \
          again. It skips 0.8.0 until a newer version appears.\n"
     );
     let settled = lifecycle::settle(
@@ -629,7 +629,7 @@ fn a_failed_update_names_why_and_the_version_that_runs() {
     assert_eq!(details.reason, None);
     assert_eq!(
         lifecycle::update_failure_text("penguin", details, RESTART),
-        "SpaceTerm Core 0.8.0 didn\u{2019}t start, so SpaceTerm Core on penguin runs 0.7.0 \
+        "SpaceTerm Core 0.8.0 didn't start, so SpaceTerm Core on penguin runs 0.7.0 \
          again.\n"
     );
     // Without facts after the restart, the text names neither.
@@ -639,19 +639,19 @@ fn a_failed_update_names_why_and_the_version_that_runs() {
     };
     assert_eq!(
         lifecycle::update_failure_text("penguin", details, RESTART),
-        "SpaceTerm Core 0.8.0 didn\u{2019}t start, so SpaceTerm Core on penguin returned to the version \
+        "SpaceTerm Core 0.8.0 didn't start, so SpaceTerm Core on penguin returned to the version \
          it ran before.\n"
     );
     for (kind, text) in [
         (
             StartFailure::PortInUse,
-            "SpaceTerm Core 0.8.0 couldn\u{2019}t listen on the Network Access port because \
+            "SpaceTerm Core 0.8.0 couldn't listen on the Network Access port because \
              another program holds it, so SpaceTerm Core on penguin runs 0.7.0 again. 0.8.0 stays \
              downloaded. Free the port, then try again with: spaceterm --machine penguin restart\n",
         ),
         (
             StartFailure::DiskFull,
-            "SpaceTerm Core 0.8.0 couldn\u{2019}t start because the disk is full, so SpaceTerm \
+            "SpaceTerm Core 0.8.0 couldn't start because the disk is full, so SpaceTerm \
              Core on penguin runs 0.7.0 again. 0.8.0 stays downloaded. Free some space, then try \
              again with: spaceterm --machine penguin restart\n",
         ),
