@@ -149,6 +149,12 @@ pub enum LaneRequest {
         boot: String,
         revision: u64,
     },
+    /// Service 1.3, account-local only. The helper requests the final automatic Stop grant.
+    GrantStop {
+        operation: String,
+        boot: String,
+        candidate: String,
+    },
 }
 
 impl LaneReply {
@@ -199,6 +205,7 @@ impl LaneRequest {
             Self::DetailedFacts {} | Self::WaitDetailedFacts { .. } => {
                 crate::update::facts::MINOR_DETAILED_FACTS
             }
+            Self::GrantStop { .. } => crate::idle_restart::MINOR,
             _ => 0,
         };
         crate::protocol::version::ProtocolVersion { major: 1, minor }
@@ -281,6 +288,7 @@ pub enum LaneReply {
     BelowFloor {
         floor: crate::update::ordering::Floor,
     },
+    StopGranted {},
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -378,6 +386,31 @@ pub trait LaneHost: Send + Sync {
     /// Session is refused with `ServiceBusy`.
     fn fence(&self, admit: &mut dyn FnMut(&[Id]) -> Result<(), CoreError>)
     -> Result<(), CoreError>;
+    fn fence_automatic(
+        &self,
+        idle: bool,
+        _operation: OperationId,
+        _candidate: [u8; 32],
+        _boot: Id,
+        admit: &mut dyn FnMut(&[Id]) -> Result<(), CoreError>,
+    ) -> Result<(), CoreError> {
+        if idle {
+            return Err(CoreError::Changed);
+        }
+        self.fence(admit)
+    }
+    fn grant_stop(
+        &self,
+        _operation: OperationId,
+        _candidate: [u8; 32],
+        _boot: Id,
+        _check: &mut dyn FnMut(bool) -> Result<(), CoreError>,
+    ) -> Result<(), CoreError> {
+        Err(CoreError::Changed)
+    }
+    fn idle_granted(&self) -> bool {
+        false
+    }
     /// How many live Terminal Sessions have work going on (ADR 0065). A host that cannot tell
     /// counts every one.
     fn working(&self) -> u32 {
@@ -680,6 +713,32 @@ impl LaneCore {
             LaneRequest::Preview {
                 action: LaneAction::Network { access },
             } => self.preview_network(access, actor, caller),
+            LaneRequest::GrantStop {
+                operation,
+                boot,
+                candidate,
+            } => {
+                if actor.pairing.is_some() {
+                    return (
+                        LaneReply::Error {
+                            code: LOCAL_ONLY.to_owned(),
+                        },
+                        None,
+                    );
+                }
+                (|| {
+                    let id = OperationId::parse(&operation).ok_or(CoreError::Changed)?;
+                    let candidate = digest_bytes(&candidate)?;
+                    if boot != hex(&self.boot) {
+                        return Err(CoreError::Changed);
+                    }
+                    self.host
+                        .grant_stop(id, candidate, self.boot, &mut |idle| {
+                            self.updates()?.permits_automatic_stop(candidate, idle)
+                        })?;
+                    Ok(LaneReply::StopGranted {})
+                })()
+            }
             LaneRequest::Status => self
                 .admin()
                 .status(Some((self.host.as_ref(), self.facts().ok())))
@@ -1255,6 +1314,23 @@ impl LaneCore {
         if !self.settled().unwrap_or(false) {
             return false;
         }
+        if self.host.idle_granted() {
+            // An authorized Admitted journal may still dispatch Stop during recovery. The
+            // input barrier remains until that journal settles, even if its ledger settled.
+            match self.service.activation_status() {
+                Ok(Some(status))
+                    if matches!(
+                        status.phase,
+                        super::activation::ActivationPhase::Activating
+                            | super::activation::ActivationPhase::Uncertain
+                    ) =>
+                {
+                    return false;
+                }
+                Err(_) => return false,
+                _ => {}
+            }
+        }
         self.host.release_fence();
         self.watching.store(false, Ordering::SeqCst);
         if let Ok(updates) = self.updates() {
@@ -1620,17 +1696,31 @@ impl runtime::updates::Restarter for LaneCore {
             let _executing = self.executing.lock().unwrap_or_else(|e| e.into_inner());
             let mut open = false;
             let mut admitted = None;
-            let fenced = self.host.fence(&mut |sessions| {
+            let mut admit = |sessions: &[Id]| {
                 if fence == Fence::NoSessions && !sessions.is_empty() {
                     open = true;
                     return Err(CoreError::Changed);
                 }
                 admitted = Some(self.ledger()?.admit(record.clone())?);
                 Ok(())
-            });
+            };
+            let fenced = match fence {
+                Fence::Any => self.host.fence(&mut admit),
+                Fence::NoSessions if candidate.is_none() => self.host.fence(&mut admit),
+                Fence::NoSessions | Fence::NothingRunning => self.host.fence_automatic(
+                    fence == Fence::NothingRunning,
+                    id,
+                    candidate.ok_or(RestartRefusal::NothingPending)?,
+                    self.boot,
+                    &mut admit,
+                ),
+            };
             match fenced {
                 Ok(()) => admitted,
                 Err(_) if open => return Err(RestartRefusal::SessionsOpen),
+                Err(CoreError::Changed) if fence != Fence::Any => {
+                    return Err(RestartRefusal::SessionsOpen);
+                }
                 Err(CoreError::ServiceBusy) => return Err(RestartRefusal::Busy),
                 Err(error) => return Err(RestartRefusal::Core(error)),
             }

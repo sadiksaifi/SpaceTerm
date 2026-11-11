@@ -378,6 +378,16 @@ impl Service {
 
     /// Admit this approval once, then resolve only its durably retained original operation.
     pub fn activate(&self, approval: ActivationApproval) -> Result<ActivationStatus, CoreError> {
+        self.activate_after_grant(approval, || Ok(()))
+    }
+
+    /// The grant precedes the first durable authorization to Stop. Recovery can therefore
+    /// trust an Admitted journal without a new retained field or an unrepeatable callback.
+    pub(crate) fn activate_after_grant(
+        &self,
+        approval: ActivationApproval,
+        grant: impl FnOnce() -> Result<(), CoreError>,
+    ) -> Result<ActivationStatus, CoreError> {
         self.same_service(&approval.service)?;
         let (data, _) = self.read()?.ok_or(CoreError::NotInstalled)?;
         let _operation = data.lock("service.lock", false)?;
@@ -397,6 +407,7 @@ impl Service {
             self.verify_choice(&approval.previous)?;
             self.verify_choice(&approval.candidate)?;
             runtime::verify(&approval.candidate.directory, &self.identity)?;
+            grant()?;
             state.activation = Some(Operation {
                 schema: 1,
                 id: crate::protocol::random()?,

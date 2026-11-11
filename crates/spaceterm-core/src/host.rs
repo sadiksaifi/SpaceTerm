@@ -286,7 +286,21 @@ impl Environment {
 
 /// The host's own rules around the application's service: a Shutdown first retains Stop intent,
 /// and a completed one stops the host.
+#[derive(Default)]
+struct IdleHost {
+    connections: std::collections::BTreeMap<[u8; 32], Outbox>,
+    lease: Option<IdleOperation>,
+}
+struct IdleOperation {
+    id: crate::service::operations::OperationId,
+    candidate: [u8; 32],
+    boot: [u8; 32],
+    idle: bool,
+    sessions: Vec<[u8; 32]>,
+    lease: crate::idle_restart::Lease,
+}
 struct HostService {
+    idle: Arc<Mutex<IdleHost>>,
     inner: Box<dyn PaneService>,
     paths: Paths,
     stop: Arc<Stop>,
@@ -303,6 +317,11 @@ impl PaneService for HostService {
         self.inner.restore(store)
     }
     fn admitted(&mut self, peer: &Peer, name: ClientName, outbox: Outbox) {
+        self.idle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .connections
+            .insert(peer.connection, outbox.clone());
         self.inner.admitted(peer, name, outbox)
     }
     fn revoked(&mut self, client: [u8; 32]) {
@@ -320,7 +339,21 @@ impl PaneService for HostService {
     fn working(&self) -> u32 {
         self.inner.working()
     }
+    fn idle_sessions(&self) -> Option<Vec<Arc<dyn crate::idle_restart::Session>>> {
+        self.inner.idle_sessions()
+    }
+
     fn request(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch {
+        if self
+            .idle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .lease
+            .as_ref()
+            .is_some_and(|operation| operation.lease.granted())
+        {
+            return Dispatch::reply(Err(Refusal::ServiceBusy));
+        }
         // The fence and its check share this service's lock, so no Session starts between an
         // admitted operation's observation and its outcome.
         if let Operation::Sessions { fence } = operation {
@@ -350,6 +383,30 @@ impl PaneService for HostService {
         dispatch
     }
     fn input(&mut self, peer: &Peer, input: Input) {
+        let idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());
+        if idle
+            .lease
+            .as_ref()
+            .is_some_and(|operation| operation.lease.granted())
+        {
+            if let Some(outbox) = idle.connections.get(&peer.connection) {
+                let event = if outbox.work().minor >= crate::idle_restart::MINOR {
+                    crate::protocol::PaneEvent::InputRestarting {
+                        channel: input.channel,
+                        serial: input.serial,
+                    }
+                } else {
+                    crate::protocol::PaneEvent::Input {
+                        serial: input.serial,
+                        outcome: crate::protocol::InputOutcome::Discarded(Refusal::ServiceBusy),
+                    }
+                };
+                let _ = outbox.pane(input.channel, event);
+            }
+            return;
+        }
+        drop(idle);
+        let _receipt = self.inner.received_input(peer, &input);
         self.inner.input(peer, input)
     }
     fn view(&mut self, peer: &Peer, view: View) {
@@ -377,6 +434,12 @@ impl PaneService for HostService {
         self.inner.tick(now)
     }
     fn disconnected(&mut self, peer: &Peer) {
+        self.idle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .connections
+            .remove(&peer.connection);
+
         if self.uninstalling == Some(peer.connection) {
             self.uninstalling = None;
         }
@@ -436,6 +499,8 @@ impl DirectManagement for HostDirect {
 /// The lane's view of this host: its Terminal Sessions, its membership fence and its paired
 /// devices.
 struct HostLane {
+    idle: Arc<Mutex<IdleHost>>,
+    requested: Arc<AtomicBool>,
     panes: SharedPaneService,
     counters: Arc<crate::diagnostics::TerminalCounters>,
     fence: Arc<AtomicBool>,
@@ -467,14 +532,121 @@ impl crate::service::lane::LaneHost for HostLane {
         self.fence.store(true, Ordering::Release);
         Ok(())
     }
-    fn working(&self) -> u32 {
-        self.panes
+    fn fence_automatic(
+        &self,
+        idle_restart: bool,
+        id: crate::service::operations::OperationId,
+        candidate: [u8; 32],
+        boot: [u8; 32],
+        admit: &mut dyn FnMut(&[[u8; 32]]) -> Result<(), CoreError>,
+    ) -> Result<(), CoreError> {
+        let panes = self.panes.lock().unwrap_or_else(|e| e.into_inner());
+        let mut idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());
+        if self.requested.load(Ordering::Acquire) || idle.lease.is_some() {
+            return Err(CoreError::Changed);
+        }
+        let sessions = panes.sessions();
+        let observations = if idle_restart {
+            // Older clients cannot retain a typed restarting refusal. Their live connection
+            // withholds idle admission; the zero-session rule still applies.
+            if idle
+                .connections
+                .values()
+                .any(|outbox| outbox.work().minor < crate::idle_restart::MINOR)
+            {
+                return Err(CoreError::Changed);
+            }
+            panes.idle_sessions().ok_or(CoreError::Changed)?
+        } else {
+            if !sessions.is_empty() {
+                return Err(CoreError::Changed);
+            }
+            Vec::new()
+        };
+        if observations.len() != sessions.len() {
+            return Err(CoreError::Changed);
+        }
+        let lease = crate::idle_restart::Lease::scan(
+            &observations,
+            Instant::now(),
+            crate::service::updates::IDLE_PERIOD,
+        )
+        .ok_or(CoreError::Changed)?;
+        admit(&sessions)?;
+        idle.lease = Some(IdleOperation {
+            id,
+            candidate,
+            boot,
+            idle: idle_restart,
+            sessions,
+            lease,
+        });
+        self.fence.store(true, Ordering::Release);
+        Ok(())
+    }
+    fn grant_stop(
+        &self,
+        id: crate::service::operations::OperationId,
+        candidate: [u8; 32],
+        boot: [u8; 32],
+        check: &mut dyn FnMut(bool) -> Result<(), CoreError>,
+    ) -> Result<(), CoreError> {
+        let panes = self.panes.lock().unwrap_or_else(|e| e.into_inner());
+        let idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());
+        let operation = idle.lease.as_ref().ok_or(CoreError::Changed)?;
+        let mut sessions = panes.sessions();
+        sessions.sort_unstable();
+        let mut expected = operation.sessions.clone();
+        expected.sort_unstable();
+        if operation.id != id
+            || operation.boot != boot
+            || operation.candidate != candidate
+            || sessions != expected
+            || self.requested.load(Ordering::Acquire)
+            || (operation.idle
+                && idle
+                    .connections
+                    .values()
+                    .any(|outbox| outbox.work().minor < crate::idle_restart::MINOR))
+        {
+            return Err(CoreError::Changed);
+        }
+        check(operation.idle)?;
+        operation.lease.grant().map_err(|_| CoreError::Changed)
+    }
+    fn idle_granted(&self) -> bool {
+        self.idle
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .working()
+            .lease
+            .as_ref()
+            .is_some_and(|operation| operation.lease.granted())
+    }
+    fn working(&self) -> u32 {
+        let panes = self.panes.lock().unwrap_or_else(|e| e.into_inner());
+        if self
+            .idle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .connections
+            .values()
+            .any(|outbox| outbox.work().minor < crate::idle_restart::MINOR)
+        {
+            return u32::try_from(panes.sessions().len()).unwrap_or(u32::MAX);
+        }
+        panes.working()
     }
     fn release_fence(&self) {
         let _panes = self.panes.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(operation) = self
+            .idle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .lease
+            .take()
+        {
+            operation.lease.release();
+        }
         self.fence.store(false, Ordering::Release);
     }
     fn stopping(&self) -> bool {
@@ -639,7 +811,9 @@ fn serve_runtime_ready(
     let versions = protocol::CoreVersions::current(version);
     let fence = Arc::new(AtomicBool::new(false));
     let requested = Arc::new(AtomicBool::new(false));
+    let idle = Arc::new(Mutex::new(IdleHost::default()));
     let mut panes: Box<dyn PaneService> = Box::new(HostService {
+        idle: Arc::clone(&idle),
         inner,
         paths: paths.clone(),
         stop: Arc::clone(&stop),
@@ -704,6 +878,8 @@ fn serve_runtime_ready(
     // The lane settles what an earlier run left in the service-operation ledger before any
     // connection is accepted. A server without service state answers no lane.
     let host_lane = Arc::new(HostLane {
+        idle,
+        requested: Arc::clone(&requested),
         panes: Arc::clone(&panes),
         counters,
         fence,
@@ -780,19 +956,21 @@ fn serve_runtime_ready(
                     .stranded(major)
             })
         });
+        let observed_updates = updates.clone();
         let _ = updates.run(restarter, stranded, move || {
             let host = host.upgrade()?;
             (!host.stop.stopping()).then(|| {
                 let sessions = crate::service::lane::LaneHost::sessions(&*host).len();
                 let sessions = u32::try_from(sessions).unwrap_or(u32::MAX);
-                // This release restarts no Core while a Terminal Session is live (ADR 0065), so
-                // nothing reads which sessions have work going on. Every live session counts as
-                // working, as for a host that cannot tell, and the count changes only with
-                // `sessions`.
+                let working = if observed_updates.probes_work() {
+                    crate::service::lane::LaneHost::working(&*host)
+                } else {
+                    sessions
+                };
                 crate::service::updates::Activity {
                     sessions,
                     requested: requested.swap(false, Ordering::AcqRel),
-                    working: sessions,
+                    working,
                 }
             })
         });
@@ -1248,6 +1426,7 @@ pub(crate) fn serve_admitted(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .admitted(&peer, name, outbox.clone());
+
     let connection = AdmittedConnection::new(
         peer,
         outbox,
@@ -1899,6 +2078,7 @@ mod tests {
             }
         }
         let mut host = HostService {
+            idle: Arc::default(),
             fence: Arc::default(),
             uninstalling: None,
             requested: Arc::default(),
@@ -1973,6 +2153,7 @@ mod tests {
         ));
         let restored = Arc::new(AtomicBool::new(false));
         let mut host: Box<dyn PaneService> = Box::new(HostService {
+            idle: Arc::default(),
             fence: Arc::default(),
             uninstalling: None,
             requested: Arc::default(),
@@ -3122,5 +3303,187 @@ mod startup_tests {
             fs::symlink_metadata(fixture.paths.socket()).unwrap().ino(),
             replacement
         );
+    }
+}
+
+#[cfg(test)]
+mod idle_restart_tests {
+    use super::*;
+    use crate::connection::service::PaneService;
+    use crate::idle_restart::{Activity, Session};
+    use crate::service::lane::LaneHost;
+    use crate::service::operations::OperationId;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
+    struct Shell(Activity);
+    impl Session for Shell {
+        fn activity(&self) -> Activity {
+            self.0.clone()
+        }
+        fn working(&self, _: Instant) -> bool {
+            false
+        }
+    }
+    struct Panes {
+        activity: Activity,
+        delivered: Arc<AtomicUsize>,
+    }
+    impl PaneService for Panes {
+        fn admitted(&mut self, _: &Peer, _: ClientName, _: Outbox) {}
+        fn request(&mut self, _: &Peer, _: RequestId, _: Operation) -> Dispatch {
+            Dispatch::reply(Ok(crate::protocol::ReplyBody::Done))
+        }
+        fn input(&mut self, _: &Peer, _: Input) {
+            self.delivered.fetch_add(1, Ordering::SeqCst);
+        }
+        fn received_input(&mut self, _: &Peer, _: &Input) -> Option<crate::idle_restart::Receipt> {
+            self.activity.input(Instant::now()).ok()
+        }
+        fn view(&mut self, _: &Peer, _: View) {}
+        fn effect_done(&mut self, _: &Peer, _: EffectDone) {}
+        fn acknowledge(&mut self, _: &Peer, _: u64) {}
+        fn disconnected(&mut self, _: &Peer) {}
+        fn shutdown(&mut self) -> Result<(), CoreError> {
+            Ok(())
+        }
+        fn sessions(&self) -> Vec<[u8; 32]> {
+            vec![[4; 32]]
+        }
+        fn idle_sessions(&self) -> Option<Vec<Arc<dyn Session>>> {
+            Some(vec![Arc::new(Shell(self.activity.clone()))])
+        }
+    }
+    struct World {
+        lane: HostLane,
+        peer: Peer,
+        outbox: Outbox,
+        delivered: Arc<AtomicUsize>,
+    }
+    impl World {
+        fn new(minor: u16) -> Self {
+            let idle = Arc::new(Mutex::new(IdleHost::default()));
+            let fence = Arc::new(AtomicBool::new(false));
+            let requested = Arc::new(AtomicBool::new(false));
+            let stop = Arc::new(Stop {
+                stopping: AtomicBool::new(false),
+                wake: Arc::new(|| {}),
+            });
+            let delivered = Arc::new(AtomicUsize::new(0));
+            let activity = Activity::new(Instant::now() - Duration::from_secs(7200));
+            let mut host = HostService {
+                inner: Box::new(Panes {
+                    activity,
+                    delivered: delivered.clone(),
+                }),
+                paths: Paths {
+                    identity: "spaceterm-development".into(),
+                    data: "/nonexistent/d".into(),
+                    runtime: "/nonexistent/r".into(),
+                },
+                stop: stop.clone(),
+                fence: fence.clone(),
+                idle: idle.clone(),
+                requested: requested.clone(),
+                uninstalling: None,
+            };
+            let peer = Peer {
+                client: [1; 32],
+                connection: [2; 32],
+                pairing: None,
+            };
+            let outbox = Outbox::new(
+                Arc::new(|| {}),
+                crate::protocol::version::ProtocolVersion { major: 1, minor },
+            );
+            host.admitted(&peer, "fixture".into(), outbox.clone());
+            let panes = Arc::new(Mutex::new(Box::new(host) as Box<dyn PaneService>));
+            Self {
+                lane: HostLane {
+                    idle,
+                    requested,
+                    panes,
+                    counters: Arc::default(),
+                    fence,
+                    direct: None,
+                    stop,
+                },
+                peer,
+                outbox,
+                delivered,
+            }
+        }
+        fn lease(&self) -> Result<(), CoreError> {
+            self.lane.fence_automatic(
+                true,
+                OperationId([3; 16]),
+                [5; 32],
+                [6; 32],
+                &mut |_| Ok(()),
+            )
+        }
+        fn grant(&self, candidate: [u8; 32], boot: [u8; 32]) -> Result<(), CoreError> {
+            self.lane
+                .grant_stop(OperationId([3; 16]), candidate, boot, &mut |_| Ok(()))
+        }
+        fn input(&self) {
+            self.lane.panes.lock().unwrap().input(
+                &self.peer,
+                Input {
+                    channel: crate::protocol::Channel(1),
+                    serial: 1,
+                    generation: 1,
+                    events: vec![crate::protocol::InputEvent::Key(crate::pane::Key {
+                        physical: 0,
+                        action: 0,
+                        logical: "x".into(),
+                        text: Some("unsent".into()),
+                        unshifted: None,
+                        modifiers: 0,
+                        consumed: 0,
+                        option_as_alt: false,
+                    })],
+                },
+            );
+        }
+    }
+    #[test]
+    fn input_after_the_lease_is_delivered_and_refuses_the_final_grant() {
+        let world = World::new(crate::idle_restart::MINOR);
+        world.lease().unwrap();
+        world.input();
+        assert_eq!(world.delivered.load(Ordering::SeqCst), 1);
+        assert_eq!(world.grant([5; 32], [6; 32]), Err(CoreError::Changed));
+        assert!(!world.lane.idle_granted());
+    }
+    #[test]
+    fn input_after_the_grant_gets_a_typed_restarting_refusal_and_no_delivery() {
+        let world = World::new(crate::idle_restart::MINOR);
+        world.lease().unwrap();
+        world.grant([5; 32], [6; 32]).unwrap();
+        world.input();
+        assert_eq!(world.delivered.load(Ordering::SeqCst), 0);
+        let (frame, _) = world.outbox.next_frame().expect("typed refusal");
+        let mut decoder = crate::protocol::frame::Assembler::default();
+        let message = decoder
+            .core(crate::protocol::RawFrame::parse(&frame).unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            message,
+            crate::protocol::CoreMessage::Pane(crate::protocol::PaneMessage {
+                event: crate::protocol::PaneEvent::InputRestarting { serial: 1, .. },
+                ..
+            })
+        ));
+    }
+    #[test]
+    fn an_idle_stop_is_bound_to_the_candidate_boot_and_supported_input_peer() {
+        let legacy = World::new(crate::idle_restart::MINOR - 1);
+        assert_eq!(legacy.lease(), Err(CoreError::Changed));
+        let world = World::new(crate::idle_restart::MINOR);
+        world.lease().unwrap();
+        assert_eq!(world.grant([7; 32], [6; 32]), Err(CoreError::Changed));
+        assert_eq!(world.grant([5; 32], [7; 32]), Err(CoreError::Changed));
+        world.grant([5; 32], [6; 32]).unwrap();
     }
 }

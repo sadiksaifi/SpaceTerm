@@ -2321,11 +2321,31 @@ mod flow {
     }
 
     #[test]
+    fn a_service_1_2_peer_cannot_request_the_final_stop_grant() {
+        with_lane(|lane| {
+            assert_eq!(
+                served(
+                    &lane,
+                    crate::protocol::version::ProtocolVersion { major: 1, minor: 2 },
+                    vec![LaneRequest::GrantStop {
+                        operation: OperationId::random().unwrap().to_string(),
+                        boot: hex(&lane.lane.boot),
+                        candidate: hex(&[7; 32]),
+                    }],
+                ),
+                vec![LaneReply::Error {
+                    code: "unsupported".into()
+                }]
+            );
+        });
+    }
+
+    #[test]
     fn a_service_1_2_peer_reads_the_detailed_update_facts_as_one_snapshot() {
         with_lane(|lane| {
             let replies = served(
                 &lane,
-                crate::protocol::version::SERVICE,
+                crate::protocol::version::ProtocolVersion { major: 1, minor: 2 },
                 vec![
                     LaneRequest::Facts {},
                     LaneRequest::DetailedFacts {},

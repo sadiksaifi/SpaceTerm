@@ -202,6 +202,9 @@ impl Lease {
             .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| Restarting)?;
         for state in &mut guards {
+            // Grant consumes the revocable lease and leaves the input barrier until Stop
+            // completes, or its owner proves that the helper can no longer Stop.
+            state.lease = Weak::new();
             state.granted = true;
         }
         Ok(())

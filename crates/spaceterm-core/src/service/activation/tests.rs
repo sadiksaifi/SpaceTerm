@@ -1775,3 +1775,33 @@ pub(crate) fn quiet(updates: &runtime::updates::Updates) {
     updates.observe(idle, now);
     updates.observe(idle, now + runtime::updates::SILENT_GRACE);
 }
+
+#[test]
+fn a_helper_refused_its_idle_stop_grant_creates_no_recoverable_stop() {
+    with_service(|service, previous, candidate, supervisor| {
+        set_running(&service, &supervisor);
+        let record = crate::service::operations::Record {
+            id: crate::service::operations::OperationId([1; 16]),
+            actor: crate::service::operations::Actor::CORE,
+            core: service.passive_machine_id().unwrap().unwrap(),
+            boot: [2; 32],
+            action: crate::service::operations::Action::Update,
+            observation_digest: [0; 32],
+            candidate: Some([3; 32]),
+            state: crate::service::operations::State::Running,
+            updated_at: 0,
+            orphaned: false,
+        };
+        let result =
+            crate::service::helper::activate_pending(&service, &candidate, &record, |_| {
+                Err(CoreError::Changed)
+            });
+        assert_eq!(result, Err(CoreError::Changed));
+        assert_eq!(supervisor.stops.load(Ordering::SeqCst), 0);
+        assert_eq!(*supervisor.approved.lock().unwrap(), previous.directory);
+        let data = Directory::open(&service.paths.data, false).unwrap();
+        assert!(Service::state(&data).unwrap().unwrap().activation.is_none());
+        assert_eq!(service.recover_activation().unwrap(), None);
+        assert_eq!(supervisor.stops.load(Ordering::SeqCst), 0);
+    });
+}

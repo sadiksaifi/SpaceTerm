@@ -31,9 +31,9 @@ const WATCH_INTERVAL: Duration = Duration::from_secs(1);
 pub const SILENT_GRACE: Duration = Duration::from_secs(10);
 /// The idle period of ADR 0065: one hour. A Terminal Session has no work going on only after
 /// this long with no input and no output. The detailed facts count Terminal Sessions by it.
-/// This Core never restarts by itself while a Terminal Session is live: the idle restart of
-/// ADR 0065 waits until its admission can fence Terminal Session input and output.
+/// Admission requires the receipt-generation lease and final Stop grant of ADR 0065.
 pub const IDLE_PERIOD: Duration = Duration::from_secs(3_600);
+pub const IDLE_RESTART_AFTER: u64 = 2 * 86_400;
 /// Free space an install needs beyond its archive, for the unpacked files.
 const INSTALL_MARGIN: u64 = 64 * 1024 * 1024;
 
@@ -89,9 +89,8 @@ pub enum Restart {
     /// Without a Pending Version the server restarts into the running version.
     Asked,
     /// The Core decided on its own. It goes ahead only into a Pending Version that is not
-    /// breaking, and only at zero Terminal Sessions, at most once per Pending Version and boot.
-    /// The engine asks for it once [`SILENT_GRACE`] passed with no session and no session
-    /// request.
+    /// breaking, at most once per Pending Version and boot. It requires zero sessions for
+    /// [`SILENT_GRACE`], or from Ask every session with no work for [`IDLE_PERIOD`].
     Silent,
 }
 
@@ -143,6 +142,8 @@ pub(crate) enum Fence {
     Any,
     /// No Terminal Session is live.
     NoSessions,
+    /// Every live session has no work, confirmed by a revocable receipt-generation lease.
+    NothingRunning,
 }
 
 /// Launches the helper of an admitted restart.
@@ -460,6 +461,8 @@ struct Live {
     sessions: u32,
     /// Live Terminal Sessions with work going on, at most `sessions`.
     working: u32,
+    requested_at: Option<Instant>,
+    nothing_running: bool,
     /// Why the restart that `operation` names began.
     cause: Option<RestartCause>,
     /// The engine's own continuation, `working` and `cause` as the detailed facts of the current
@@ -511,6 +514,7 @@ fn finishes(
     protocols: &Protocols,
     boot: Option<&str>,
     sessions: u32,
+    now: u64,
 ) -> Option<Continuation> {
     let pending = record.pending.as_ref()?;
     if breaking(protocols, &pending.protocols) {
@@ -528,25 +532,31 @@ fn finishes(
     }
     Some(if sessions == 0 {
         Continuation::Soon
+    } else if now.saturating_sub(pending.installed_at) >= IDLE_RESTART_AFTER {
+        Continuation::WhenNothingRuns
     } else {
         Continuation::WhenSessionsEnd
     })
 }
 
 /// Whether the engine's silent restart goes ahead now, and why: the silent-restart admission.
-/// It never admits a restart while a Terminal Session is live.
+/// `nothing_running` says that every live Terminal Session had no work going on and no session
+/// request arrived for [`IDLE_PERIOD`].
 fn silent_admission(
     record: &Record,
     protocols: &Protocols,
     boot: &str,
     sessions: u32,
+    now: u64,
+    nothing_running: bool,
 ) -> Result<RestartCause, RestartRefusal> {
-    match finishes(record, protocols, Some(boot), sessions) {
+    match finishes(record, protocols, Some(boot), sessions, now) {
         None | Some(Continuation::StartFailed | Continuation::Unknown) => {
             Err(RestartRefusal::NothingPending)
         }
         Some(Continuation::NeedsConfirmation) => Err(RestartRefusal::Breaking),
         Some(Continuation::Soon) => Ok(RestartCause::NoSessions),
+        Some(Continuation::WhenNothingRuns) if nothing_running => Ok(RestartCause::NothingRunning),
         Some(Continuation::WhenSessionsEnd | Continuation::WhenNothingRuns) => {
             Err(RestartRefusal::SessionsOpen)
         }
@@ -605,6 +615,8 @@ impl Updates {
                 record,
                 sessions: 0,
                 working: 0,
+                requested_at: None,
+                nothing_running: false,
                 cause: None,
                 detail: Detail::default(),
                 operation: None,
@@ -748,6 +760,31 @@ impl Updates {
         self.shared.lock().record.stepping_stone.as_ref() == Some(&self.shared.running)
     }
 
+    pub(crate) fn permits_automatic_stop(
+        &self,
+        candidate: [u8; 32],
+        idle: bool,
+    ) -> Result<(), CoreError> {
+        let live = self.shared.lock();
+        let record = load(&self.shared.data)?;
+        let pending = record.pending.as_ref().ok_or(CoreError::Changed)?;
+        if digest_bytes(&pending.digest)? != candidate
+            || breaking(&self.shared.protocols, &pending.protocols)
+            || (idle && now().saturating_sub(pending.installed_at) < IDLE_RESTART_AFTER)
+            || !matches!(live.operation, Some(Operation::Restarting { .. }))
+        {
+            return Err(CoreError::Changed);
+        }
+        Ok(())
+    }
+    pub(crate) fn probes_work(&self) -> bool {
+        let live = self.shared.lock();
+        live.record.pending.as_ref().is_some_and(|pending| {
+            !breaking(&self.shared.protocols, &pending.protocols)
+                && now().saturating_sub(pending.installed_at) >= IDLE_RESTART_AFTER
+        }) && !live.busy()
+    }
+
     /// Begin a restart. A restart into a Pending Version goes through a helper from the running
     /// runtime with a readiness deadline; a failed start restores the retained-state snapshot,
     /// returns to this version and skips the Pending Version unless the failure is transient.
@@ -755,6 +792,13 @@ impl Updates {
     /// # Errors
     /// Returns a [`RestartRefusal`] when the restart did not begin.
     pub fn restart(&self, request: Restart) -> Result<Restarting, RestartRefusal> {
+        self.restart_at(request, Instant::now())
+    }
+    fn restart_at(
+        &self,
+        request: Restart,
+        monotonic: Instant,
+    ) -> Result<Restarting, RestartRefusal> {
         let restarter = self
             .shared
             .restarter
@@ -781,12 +825,15 @@ impl Updates {
                     &self.shared.protocols,
                     &attempt.boot,
                     live.sessions,
+                    now(),
+                    live.nothing_running,
                 )?;
-                fence = Fence::NoSessions;
-                if live
-                    .silent_after
-                    .is_some_and(|after| Instant::now() < after)
-                {
+                fence = if cause == RestartCause::NothingRunning {
+                    Fence::NothingRunning
+                } else {
+                    Fence::NoSessions
+                };
+                if live.silent_after.is_some_and(|after| monotonic < after) {
                     return Err(RestartRefusal::NothingPending);
                 }
                 // Recorded before admission, so a start that fails returns to a runtime that
@@ -899,6 +946,11 @@ impl Updates {
         ) {
             return;
         }
+        let retry = if live.cause == Some(RestartCause::NothingRunning) {
+            IDLE_PERIOD
+        } else {
+            SILENT_RETRY
+        };
         live.operation = None;
         live.cause = None;
         if live.record.silent.is_some()
@@ -908,7 +960,7 @@ impl Updates {
             })
         {
             live.record = record;
-            live.silent_after = Some(Instant::now() + SILENT_RETRY);
+            live.silent_after = Some(Instant::now() + retry);
         }
         drop(live);
         self.refresh();
@@ -933,19 +985,37 @@ impl Updates {
 
     /// The server reported `activity` at `now`. Once it had no live Terminal Session and no
     /// session request for [`SILENT_GRACE`], a waiting Pending Version that is not breaking
-    /// restarts silently.
+    /// restarts silently. From Ask, an hour with no work in every live session also admits a lease.
     pub(crate) fn observe(&self, activity: Activity, now: Instant) {
         let due = {
             let mut live = self.shared.lock();
             live.sessions = activity.sessions;
             live.working = activity.working.min(activity.sessions);
+            if activity.requested {
+                live.requested_at = Some(now);
+            }
             if activity.sessions > 0 {
                 live.quiet_since = None;
             } else if activity.requested || live.quiet_since.is_none() {
                 live.quiet_since = Some(now);
             }
-            live.quiet_since
-                .is_some_and(|since| now.saturating_duration_since(since) >= SILENT_GRACE)
+            live.nothing_running = live.sessions > 0
+                && live.working == 0
+                && live
+                    .requested_at
+                    .is_none_or(|at| now.saturating_duration_since(at) >= IDLE_PERIOD);
+            let quiet = live
+                .quiet_since
+                .is_some_and(|since| now.saturating_duration_since(since) >= SILENT_GRACE);
+            let idle = live.nothing_running
+                && finishes(
+                    &live.record,
+                    &self.shared.protocols,
+                    self.shared.boot.as_deref(),
+                    live.sessions,
+                    self::now(),
+                ) == Some(Continuation::WhenNothingRuns);
+            quiet || idle
         };
         self.refresh();
         // The activation that started this server has settled once its lock is free.
@@ -957,7 +1027,7 @@ impl Updates {
             self.retire_step();
         }
         if due {
-            let _ = self.restart(Restart::Silent);
+            let _ = self.restart_at(Restart::Silent, now);
         }
     }
 
@@ -1271,6 +1341,7 @@ impl Shared {
                 &self.protocols,
                 self.boot.as_deref(),
                 live.sessions,
+                now(),
             ),
             working: live.working.min(live.sessions),
             restart: live.cause.filter(|_| restarting),

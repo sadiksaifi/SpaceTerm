@@ -17,8 +17,7 @@ pub enum Continuation {
     WhenSessionsEnd,
     /// SpaceTerm Core restarts into it by itself once no Terminal Session is live, or once no
     /// live Terminal Session has had work going on for the idle period. Only the detailed
-    /// update facts can report it, and no Core reports it yet: the idle restart of ADR 0065
-    /// waits until its admission can fence Terminal Session input and output.
+    /// update facts can report it. Admission uses the revocable lease and final Stop grant of ADR 0065.
     WhenNothingRuns,
     /// A work or service major changes: it restarts only when a person confirms it.
     NeedsConfirmation,
