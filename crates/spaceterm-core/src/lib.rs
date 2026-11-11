@@ -23,6 +23,8 @@ pub mod permissions;
 pub mod protocol;
 pub mod provisioning;
 pub mod repository;
+#[cfg(feature = "client")]
+mod retry;
 pub mod service;
 #[cfg(feature = "client")]
 mod startup;

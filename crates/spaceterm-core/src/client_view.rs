@@ -595,12 +595,42 @@ pub struct ClientViewStore {
 
 #[cfg(feature = "client")]
 impl ClientViewStore {
+    pub(crate) fn open_cancellable(
+        directory: crate::storage::Directory,
+        core: Id,
+        client: Id,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<Self>, CoreError> {
+        let mut retry = crate::retry::Backoff::new(crate::retry::WaitingFor::ClientViewLock);
+        let lock = loop {
+            if cancelled() {
+                return Ok(None);
+            }
+            if let Some(lock) = directory.try_lock("view.lock")? {
+                break lock;
+            }
+            if !retry.pause(cancelled) {
+                return Ok(None);
+            }
+        };
+        Self::read_locked(directory, lock, core, client).map(Some)
+    }
+
     pub(crate) fn open(
         directory: crate::storage::Directory,
         core: Id,
         client: Id,
     ) -> Result<Self, CoreError> {
         let lock = directory.lock("view.lock", true)?;
+        Self::read_locked(directory, lock, core, client)
+    }
+
+    fn read_locked(
+        directory: crate::storage::Directory,
+        lock: crate::storage::Lock,
+        core: Id,
+        client: Id,
+    ) -> Result<Self, CoreError> {
         let record = directory
             .read_json::<Record>("view.json")?
             .unwrap_or(Record {
@@ -711,6 +741,121 @@ impl ClientViewStore {
             return Err(error);
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "client"))]
+mod opening_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+    use std::time::Duration;
+
+    fn root() -> std::path::PathBuf {
+        std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "st-view-open-{:x}",
+            u64::from_be_bytes(crate::protocol::random().unwrap()[..8].try_into().unwrap())
+        ))
+    }
+
+    #[test]
+    fn a_contended_view_open_waits_then_reads_the_saved_arrangement_without_writing_it() {
+        let root = root();
+        let directory = || crate::storage::Directory::open(&root, true).unwrap();
+        let mut held = ClientViewStore::open(directory(), [3; 32], [4; 32]).unwrap();
+        let saved = ClientView {
+            workspaces: vec![WorkspaceView {
+                workspace: [7; 32],
+                tabs: vec![],
+            }],
+        };
+        held.save(saved.clone()).unwrap();
+        let bytes = std::fs::read(root.join("view.json")).unwrap();
+        let next = directory();
+        let (answer, result) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            answer
+                .send(ClientViewStore::open_cancellable(
+                    next,
+                    [3; 32],
+                    [4; 32],
+                    &|| false,
+                ))
+                .unwrap();
+        });
+        assert!(
+            matches!(
+                result.recv_timeout(Duration::from_millis(100)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ),
+            "lock contention must not become an unreadable-view error"
+        );
+        drop(held);
+        let reopened = result
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(reopened.view(), &saved);
+        assert_eq!(std::fs::read(root.join("view.json")).unwrap(), bytes);
+        drop(reopened);
+        worker.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cancelling_a_contended_view_open_leaves_no_reader_or_writer_behind() {
+        let root = root();
+        let directory = || crate::storage::Directory::open(&root, true).unwrap();
+        let held = directory().lock("view.lock", true).unwrap();
+        let next = directory();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel = Arc::clone(&cancelled);
+        let (answer, result) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            answer
+                .send(ClientViewStore::open_cancellable(
+                    next,
+                    [3; 32],
+                    [4; 32],
+                    &|| cancel.load(Ordering::Acquire),
+                ))
+                .unwrap();
+        });
+        assert!(matches!(
+            result.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        cancelled.store(true, Ordering::Release);
+        assert!(
+            result
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
+        worker.join().unwrap();
+        assert!(!root.join("view.json").exists());
+        drop(held);
+        assert!(directory().try_lock("view.lock").unwrap().is_some());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unreadable_view_data_fails_without_retry_or_replacement() {
+        let root = root();
+        let directory = crate::storage::Directory::open(&root, true).unwrap();
+        directory
+            .write_json(c"view.json", &"not a saved view")
+            .unwrap();
+        let bytes = std::fs::read(root.join("view.json")).unwrap();
+        let result = ClientViewStore::open_cancellable(directory, [3; 32], [4; 32], &|| false);
+        assert!(matches!(result, Err(CoreError::UnsafeStorage)));
+        assert_eq!(std::fs::read(root.join("view.json")).unwrap(), bytes);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 

@@ -440,6 +440,19 @@ impl MachineConnection {
             self.client_id()?,
         )
     }
+    /// Opens the saved arrangement, waiting only for its lock. Cancellation leaves no writer.
+    /// Unreadable data and unavailable storage fail without retry or replacement.
+    pub fn client_view_store_cancellable(
+        &self,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<crate::client_view::ClientViewStore>, CoreError> {
+        crate::client_view::ClientViewStore::open_cancellable(
+            self.client_directory()?,
+            self.machine_id()?,
+            self.client_id()?,
+            cancelled,
+        )
+    }
     /// Opens this desktop's continuous Workspace order without requiring a running server.
     /// Call on the account-local handle; remote routes do not own desktop-wide state.
     pub fn workspace_order_store(
