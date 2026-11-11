@@ -735,6 +735,9 @@ impl PaneLink {
                                 .unwrap_or_else(|e| e.into_inner())
                                 .extend(events);
                         }
+                        if received.dropped.len() == MAX_DROPPED {
+                            received.dropped.pop_front();
+                        }
                         received.dropped.push_back(serial);
                         if received.awaited.contains(&serial) {
                             received.settled.insert(
