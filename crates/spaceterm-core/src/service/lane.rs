@@ -1317,7 +1317,10 @@ impl LaneCore {
         if self.host.idle_granted() {
             // An authorized Admitted journal may still dispatch Stop during recovery. The
             // input barrier remains until that journal settles, even if its ledger settled.
-            match self.service.activation_status() {
+            match self
+                .service
+                .activation_status_with(super::Contention::Refuse)
+            {
                 Ok(Some(status))
                     if matches!(
                         status.phase,

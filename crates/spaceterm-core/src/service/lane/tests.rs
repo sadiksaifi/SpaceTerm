@@ -43,6 +43,7 @@ impl Supervisor for Running {
 struct Host {
     sessions: Mutex<Vec<Id>>,
     fenced: AtomicBool,
+    idle_granted: AtomicBool,
     stopping: AtomicBool,
     /// Runs once inside the next fence release, before the fence clears.
     releasing: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -62,6 +63,9 @@ impl LaneHost for Host {
             let _ = fencing.send(());
         }
         Ok(())
+    }
+    fn idle_granted(&self) -> bool {
+        self.idle_granted.load(Ordering::SeqCst)
     }
     fn release_fence(&self) {
         let releasing = self.releasing.lock().unwrap().take();
@@ -2696,5 +2700,23 @@ fn a_restart_whose_helper_fails_before_stopping_the_server_ends_and_may_try_agai
             serde_json::Value::Null,
             "the next attempt may run"
         );
+    });
+}
+
+#[test]
+fn a_granted_input_barrier_does_not_wait_for_the_helpers_service_lock() {
+    with_lane(|lane| {
+        lane.host.idle_granted.store(true, Ordering::SeqCst);
+        lane.host.fenced.store(true, Ordering::SeqCst);
+        let data = Directory::open(&lane.lane.service.paths.data, false).unwrap();
+        let held = data.lock("service.lock", false).unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let watching = Arc::clone(&lane.lane);
+        let watcher = std::thread::spawn(move || sent.send(watching.release_if_settled()).unwrap());
+        let while_held = received.recv_timeout(Duration::from_secs(2));
+        drop(held);
+        watcher.join().unwrap();
+        assert_eq!(while_held.ok(), Some(false));
+        assert!(lane.host.fenced.load(Ordering::SeqCst));
     });
 }

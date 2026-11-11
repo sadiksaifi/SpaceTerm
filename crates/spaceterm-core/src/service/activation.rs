@@ -432,10 +432,18 @@ impl Service {
 
     /// Observe the original operation without dispatching or granting any authority.
     pub fn activation_status(&self) -> Result<Option<ActivationStatus>, CoreError> {
+        self.activation_status_with(super::Contention::Wait)
+    }
+
+    /// Observes activation with the caller's service-lock contention policy.
+    pub(crate) fn activation_status_with(
+        &self,
+        contention: super::Contention,
+    ) -> Result<Option<ActivationStatus>, CoreError> {
         let Some((data, _)) = self.read()? else {
             return Ok(None);
         };
-        let _operation = data.lock("service.lock", false)?;
+        let _operation = contention.operation_lock(&data)?;
         self.activation_status_locked(&data)
     }
 
