@@ -25,7 +25,7 @@ pub const REQUEST_LIMIT: Duration = Duration::from_secs(30);
 /// How long the server may take to fetch, verify and install a release from its feed, or to
 /// verify and install the last chunk of a push.
 pub const STAGE_LIMIT: Duration = Duration::from_secs(30 * 60);
-/// How long a Stop or an Uninstall is followed: until the server closes the lane.
+/// How long a Stop or an Uninstall is followed: until SpaceTerm Core closes the lane.
 pub const STOP_WAIT: Duration = Duration::from_secs(90);
 /// How long any other action is followed: until it settles, or until a server that replaces
 /// itself, as Restart and Update do, returns.

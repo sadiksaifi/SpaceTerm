@@ -15149,7 +15149,7 @@ fn open_remote_directory_should_browse_the_chosen_machine(cx: &mut TestAppContex
     assert_eq!(
         spaceterm_ui::a11y_testing::A11yTree::read(cx).node("penguin:")["aria"]["role"],
         "Label",
-        "the search line names the server the picker browses"
+        "the search line names the Machine the picker browses"
     );
     assert_eq!(harness.local.submitted(), Vec::new());
 }
