@@ -733,37 +733,42 @@ fn machine_stage(
         MachineLink::Unreported => return (MachineStage::CantCheck, None),
         MachineLink::Incompatible(Incompatible::ListenerTooOld) | MachineLink::Connected => {}
     }
-    let push_failed = || {
-        update.failed_push.as_ref().map(|failed| {
-            let cause = match failed.failure {
-                ActionFailure::NeedsFloor(floor) => {
-                    return MachineStage::NeedsFloor {
-                        version: failed.version.clone(),
-                        floor,
-                        failed: true,
-                    };
-                }
-                ActionFailure::DiskFull => DownloadCause::DiskFull,
-                ActionFailure::Unreachable | ActionFailure::Unavailable(_) => {
-                    DownloadCause::Unreachable
-                }
-                ActionFailure::Busy => DownloadCause::Busy,
-                ActionFailure::RelaunchRequired => DownloadCause::RelaunchRequired,
-                _ => DownloadCause::Failed,
-            };
-            MachineStage::DownloadFailed {
-                version: failed.version.clone(),
-                cause,
-                retries: false,
-                id: PUSH_FAILURE,
-            }
-        })
-    };
     let detailed = update.detailed.as_ref();
-    let Some(facts) = detailed
+    let known = detailed
         .map(|detailed| &detailed.facts)
-        .or(update.facts.as_ref())
-    else {
+        .or(update.facts.as_ref());
+    // Newer facts settle a failed push before the store next carries it.
+    let push_failed = || {
+        update
+            .failed_push
+            .as_ref()
+            .filter(|failed| !known.is_some_and(|facts| failed.settled_by(facts)))
+            .map(|failed| {
+                let cause = match failed.failure {
+                    ActionFailure::NeedsFloor(floor) => {
+                        return MachineStage::NeedsFloor {
+                            version: failed.version.clone(),
+                            floor,
+                            failed: true,
+                        };
+                    }
+                    ActionFailure::DiskFull => DownloadCause::DiskFull,
+                    ActionFailure::Unreachable | ActionFailure::Unavailable(_) => {
+                        DownloadCause::Unreachable
+                    }
+                    ActionFailure::Busy => DownloadCause::Busy,
+                    ActionFailure::RelaunchRequired => DownloadCause::RelaunchRequired,
+                    _ => DownloadCause::Failed,
+                };
+                MachineStage::DownloadFailed {
+                    version: failed.version.clone(),
+                    cause,
+                    retries: false,
+                    id: PUSH_FAILURE,
+                }
+            })
+    };
+    let Some(facts) = known else {
         if let Some(failed) = push_failed() {
             return (failed, blocked);
         }

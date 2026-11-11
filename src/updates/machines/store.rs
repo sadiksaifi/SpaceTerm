@@ -839,11 +839,16 @@ impl MachineUpdates {
     }
 }
 
-/// The failed push `previous` recorded, while `next` still offers its version.
+/// The failed push `previous` recorded, while `next` still offers its version and its facts do
+/// not settle it.
 fn carried_failure(previous: &MachineUpdate, next: &MachineUpdate) -> Option<FailedPush> {
     previous.failed_push.clone().filter(|failed| {
-        next.push.as_ref() == Some(&failed.version)
-            || next.bundled.as_ref().map(|bundled| &bundled.version) == Some(&failed.version)
+        (next.push.as_ref() == Some(&failed.version)
+            || next.bundled.as_ref().map(|bundled| &bundled.version) == Some(&failed.version))
+            && !next
+                .facts
+                .as_ref()
+                .is_some_and(|facts| failed.settled_by(facts))
     })
 }
 

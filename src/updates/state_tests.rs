@@ -1322,6 +1322,55 @@ fn a_failed_stepping_stone_fetch_shows_once_and_keeps_the_download(cx: &mut gpui
     );
 }
 
+/// A failed Stepping Stone fetch lasts only until newer facts settle it: once the Core has the
+/// Stepping Stone downloaded, its row offers the restart and no failure shows; once it runs the
+/// Stepping Stone, the floor is behind it.
+#[gpui::test]
+fn a_stepping_stone_the_core_has_settles_its_failed_fetch(cx: &mut gpui::TestAppContext) {
+    let (adapter, store) = installed_store(cx);
+    adapter.emit(MachineUpdatesEvent::Machines(vec![below_the_floor()]));
+    cx.run_until_parked();
+    store.update(cx, |store, cx| {
+        store.perform(PENGUIN, MachineAction::Install, Surface::Window, cx)
+    });
+    adapter.emit(MachineUpdatesEvent::Finished {
+        machine: PENGUIN,
+        action: MachineAction::Install,
+        outcome: Err(ActionFailure::NeedsFloor(Floor::parse("0.12.0").unwrap())),
+    });
+    cx.run_until_parked();
+    assert_eq!(step_now(cx), Some(Step::Failed(Target::Machine(PENGUIN))));
+
+    // The Core's own check fetched it. The floor still applies to the running version.
+    let mut fetched = below_the_floor();
+    fetched.facts.as_mut().unwrap().pending = Some(pending("0.12.0", false, NOW));
+    adapter.emit(MachineUpdatesEvent::Changed(Box::new(fetched.clone())));
+    cx.run_until_parked();
+    assert_eq!(step_now(cx), None, "no failure shows");
+    let state = UpdateState::UpToDate;
+    let (view, _) = store_view(cx, &app(&state));
+    assert!(matches!(
+        &view.machine(PENGUIN).unwrap().stage,
+        MachineStage::Downloaded { version: v, .. } if *v == version("0.12.0")
+    ));
+    let row = view.machine_row(PENGUIN).unwrap();
+    assert_eq!(row.action.unwrap().label.as_ref(), "Restart Core\u{2026}");
+
+    // It restarted into the Stepping Stone, and the embedded build is offered.
+    let mut restarted = below_the_floor();
+    restarted.facts.as_mut().unwrap().running = version("0.12.0");
+    restarted.bundled = Some(Bundled {
+        version: version("0.14.0"),
+        floor: None,
+    });
+    restarted.push = Some(version("0.14.0"));
+    adapter.emit(MachineUpdatesEvent::Changed(Box::new(restarted)));
+    cx.run_until_parked();
+    let (view, _) = store_view(cx, &app(&state));
+    assert_eq!(view.step, None);
+    assert_eq!(view.machine(PENGUIN).unwrap().stage, MachineStage::Running);
+}
+
 /// A Core that reports it restarts after an hour with nothing running keeps that explanation
 /// and adds how long the update waited from Ask.
 #[test]
