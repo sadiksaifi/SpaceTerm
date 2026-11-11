@@ -1,6 +1,6 @@
 # Present updates as one split pill and one ladder
 
-SpaceTerm never ends a Terminal Session that has work going on in order to update, and an update gets harder to ignore the longer it waits. One Update Ladder covers SpaceTerm and every SpaceTerm Core: Offer from the download, Ask after two days, Insist after seven. The title bar holds one split pill or nothing. Its main area shows the Update Step, and its chevron always opens the same list of SpaceTerm and every Machine. From the Ask stage an update also applies itself when no work is going on: SpaceTerm relaunches after an hour without use, and SpaceTerm Core restarts once no Terminal Session has had work for an hour. A breaking SpaceTerm Core update always asks.
+SpaceTerm never ends a Terminal Session that has work going on in order to update, and an update gets harder to ignore the longer it waits. One Update Ladder covers SpaceTerm and every SpaceTerm Core: Offer from the download, Ask after two days, Insist after seven. The title bar holds one split pill or nothing. Its main area shows the Update Step, and its chevron always opens the same list of SpaceTerm and every Machine. From the Ask stage SpaceTerm on macOS relaunches into its update after an hour without use. SpaceTerm Core is to restart once no Terminal Session has had work for an hour, but this release does not enable that restart: SpaceTerm Core still restarts by itself only when no Terminal Session is live. A breaking SpaceTerm Core update always asks.
 
 [ADR 0040](0040-install-core-versions-from-the-feed-a-push-or-a-local-archive.md) owns how a Pending Version arrives, and [ADR 0034](0034-confirm-server-update-restarts-and-explain-incompatibility.md) owns the restart into it. This record owns how every update is presented, when each presentation escalates, and when an update applies itself without a click.
 
@@ -60,7 +60,7 @@ A newer version can therefore appear with a step only on a Machine that has alre
 | Stage | From | Title bar | Emphasis | Update Reminders | Cancel in the Restart Core confirmation | Applies by itself |
 |---|---|---|---|---|---|---|
 | Offer | The download | SpaceTerm's relaunch or download; Restart Core only for a breaking or blocking SpaceTerm Core update. A SpaceTerm Core update that applies itself shows only in the list. | Accent | None | Closes the alert; the step stays | SpaceTerm Core with no Terminal Session at all, under ADR 0034 |
-| Ask | 2 days | Every waiting update, including a SpaceTerm Core update that applies itself | Accent | One a day | Hides that Machine's step on this desktop for 24 hours | Also when no work is going on for an hour: SpaceTerm relaunches and SpaceTerm Core restarts. Never a breaking SpaceTerm Core update |
+| Ask | 2 days | Every waiting update, including a SpaceTerm Core update that applies itself | Accent | One a day | Hides that Machine's step on this desktop for 24 hours | Also when no work is going on for an hour: SpaceTerm on macOS relaunches. SpaceTerm Core restarts the same way once its idle restart is enabled. Never a breaking SpaceTerm Core update |
 | Insist | 7 days | The same steps | Warning; the menu bar extra's icon shows a dot | One every 4 hours | Closes the alert; the step stays | As in Ask |
 
 Each stage adds presence, emphasis or cadence, never words: a step's label is the same text at every stage. The last stage is Insist. No stage ends a Terminal Session that has work going on, and no stage holds a launch.
@@ -100,18 +100,27 @@ A Terminal Session has no work going on when all four conditions hold:
 
 Attached clients are not a condition: a window showing a quiet prompt is not work, and the input clock covers typing. A Terminal Session whose foreground, processes or markers SpaceTerm Core cannot read counts as work, so a platform without reliable detection keeps the rule of ADR 0034 alone.
 
-SpaceTerm Core restarts into a Pending Version by itself under this rule only when all of these hold:
+SpaceTerm Core is to restart into a Pending Version by itself under this rule only when all of these hold:
 
 - The update has reached the Ask stage.
 - The Pending Version is not breaking.
 - Every live Terminal Session on the Machine has had no work going on for the idle period at the same time.
 - The engine has not tried this version silently in this boot. A start that fails does not loop.
 
-[The update engine](../../crates/spaceterm-core/src/service/runtime/updates.rs) checks the rule again under the membership fence of ADR 0034. A Machine with no Terminal Session keeps the 10-second rule of ADR 0034 from the download.
+[The update engine](../../crates/spaceterm-core/src/service/runtime/updates.rs) is to check the rule again under the membership fence of ADR 0034. A Machine with no Terminal Session keeps the 10-second rule of ADR 0034 from the download.
+
+### What this release does
+
+This release does not enable the idle restart of SpaceTerm Core. SpaceTerm Core restarts by itself only when no Terminal Session is live, under ADR 0034. Its detailed update facts report that its Pending Version finishes once no Terminal Session is live, never that it finishes once nothing runs, and no Pane names an idle restart as a cause. The rule above stays the rule SpaceTerm Core follows once it is enabled.
+
+The idle restart is enabled only with an idle admission that meets both conditions:
+
+- **It refuses on any activity change across one scan.** Each Terminal Session carries an activity generation, stamped when input is sent to it and when its output is read, not when its worker processes them. The admission reads every live Terminal Session in one scan under the Pane lock, with fresh foreground and process reads, and refuses when any generation changed during that scan.
+- **It blocks input from crossing the restart commitment.** From the membership fence until the server stops, SpaceTerm Core accepts no input to a Terminal Session, so nothing typed after the scan reaches a shell that the restart ends.
 
 An idle restart ends the shell process with its environment, unsaved history, screen and Scrollback. Workspaces, Tabs, Panes and layouts stay, and the new shell starts in the Pane's last confirmed directory under [ADR 0044](0044-restore-panes-in-their-last-confirmed-directory.md) when the person starts it under [ADR 0043](0043-start-restored-shells-on-first-use.md). The Pane names the idle restart as the cause.
 
-SpaceTerm itself has no work going on when it has had no keyboard or pointer input for the idle period, no alert, sheet or menu is open, and Settings are saved. Its relaunch from the Ask stage follows ADR 0049 and ends no Terminal Session.
+SpaceTerm itself has no work going on when it has had no keyboard or pointer input for the idle period, no alert, sheet or menu is open, and Settings are saved. Its relaunch from the Ask stage follows ADR 0049 and ends no Terminal Session. SpaceTerm relaunches by itself only on macOS, where it observes every keyboard, input-method and pointer event before a window handles it. SpaceTerm on Linux never relaunches by itself, because it cannot observe all input there, and neither does SpaceTerm on any other platform without such an observer. Its Update Reminders and Ask step still apply.
 
 ## How a Pending Version finishes
 
@@ -124,7 +133,7 @@ SpaceTerm itself has no work going on when it has had no keyboard or pointer inp
 5. No live Terminal Session: it restarts within the grace period of ADR 0034.
 6. Otherwise it restarts once no Terminal Session is live.
 
-The derivation never promises the idle restart, because the update facts cannot show it. A SpaceTerm Core that has the idle rule reports how its Pending Version finishes in the detailed update facts at work and service minor 2 of ADR 0035, and that report takes precedence over the derivation. The engine computes it from its private attempt, retry and idle state. Any later change to when SpaceTerm Core restarts by itself that the update facts cannot show must be reported the same way, and its conformance test must show that the engine's silent admission agrees with the report.
+The derivation never promises the idle restart, because the update facts cannot show it. SpaceTerm Core at work and service minor 2 of ADR 0035 reports how its Pending Version finishes in the detailed update facts, and that report takes precedence over the derivation. The engine computes it from its private attempt and retry state, and from its idle state once the idle restart is enabled. Until then it never reports a restart once nothing runs. Any later change to when SpaceTerm Core restarts by itself that the update facts cannot show must be reported the same way, and its conformance test must show that the engine's silent admission agrees with the report.
 
 ## Who shows what
 
@@ -134,7 +143,7 @@ The derivation never promises the idle restart, because the update facts cannot 
 - **Settings > Machines card.** Its primary button is the row's action. The same-version restart appears in the card's more menu only while no Pending Version waits, because a restart moves into a waiting Pending Version under ADR 0034.
 - **Menu bar extra and Linux status item.** SpaceTerm's step, then a SpaceTerm Core section with one entry per Machine whose submenu starts with the row's action. From Insist the icon shows a dot. Where a flat menu cannot show the Machine as a heading, the action names SpaceTerm Core and the Machine.
 - **Sidebar.** No update text, progress or action.
-- **Pane.** During an announced restart, until the 180-second restart deadline, the Pane keeps its frozen screen with input disabled and shows no notice under [ADR 0045](0045-freeze-terminal-screens-while-reconnecting.md). When SpaceTerm Core returns, a Pane whose Terminal Session ended says so and names one cause: a restart the person approved, an idle restart, a same-version restart, or a start that failed. A Pane that had no Terminal Session keeps ADR 0043's first-use behavior.
+- **Pane.** During an announced restart, until the 180-second restart deadline, the Pane keeps its frozen screen with input disabled and shows no notice under [ADR 0045](0045-freeze-terminal-screens-while-reconnecting.md). When SpaceTerm Core returns, a Pane whose Terminal Session ended says so and names one cause: a restart the person approved, an idle restart once it is enabled, a same-version restart, or a start that failed. A Pane that had no Terminal Session keeps ADR 0043's first-use behavior.
 - **Update Reminders.** The ladder's cadence above.
 - **CLI.** Command names and JSON output stay as [ADR 0055](0055-define-the-cli-output-contract-and-scope-model.md) defines them. Its notice calls the same derivation and reads the same ladder.
 - **Blocked Workspace surface.** The launch screen for the local Machine and the Pane failure notice for a paired Machine explain a protocol mismatch and offer the same step as the pill.
@@ -166,7 +175,7 @@ The owner tried each option in an interactive mock and decided:
 4. The action that updates every Machine at once and the list of recent updates are removed. A confirmation covers one Machine.
 5. The SpaceTerm Core action is Restart Core on every surface.
 6. The update philosophy, in the owner's words: "I wanted to have forced updates, but that doesn't mean that will kill their work. It means it will keep annoying the user. Gradually, the more they ignore the updates, the more annoying we become for them, so that eventually they do update. We never kill their session or something automatically unless it's idle. We don't want someone's work to be lost, but we also don't want someone to keep using the old or stale software. … This applies to everything: client, server, core." Rules 2 and 3, the ladder and the idle relaunch and restart carry it out.
-7. Idle, in the owner's words: "Idle means there's no work going on." The four conditions of No Work Going On carry it out, with anything unreadable counting as work.
+7. Idle, in the owner's words: "Idle means there's no work going on." The four conditions of No Work Going On carry it out, with anything unreadable counting as work. SpaceTerm follows it on macOS in this release; SpaceTerm Core follows it once the conditions in What this release does hold.
 
 ## Retired
 
@@ -179,7 +188,7 @@ This record replaces these earlier decisions by name:
 - The desktop stages of one and two days, which become Offer, Ask and Insist.
 - The reminder rule that only a breaking SpaceTerm Core update notifies.
 - CONTEXT.md's Overdue Update, which the Update Ladder replaces.
-- The rule that an overdue or downloaded SpaceTerm update never installs by itself while SpaceTerm runs, for the idle case only.
+- The rule that an overdue or downloaded SpaceTerm update never installs by itself while SpaceTerm runs, for the idle case on macOS only.
 
 ## Rejected
 
