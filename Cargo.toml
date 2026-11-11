@@ -104,8 +104,8 @@ anyhow = "1.0.100"
 async-channel = "2.5.0"
 futures-lite = { version = "=2.6.1", optional = true }
 getrandom = "=0.4.3"
-gpui = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-10-28", optional = true }
-gpui_platform = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-10-28", features = ["font-kit"], optional = true }
+gpui = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-11-11", optional = true }
+gpui_platform = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-11-11", features = ["font-kit"], optional = true }
 image = { version = "=0.25.10", default-features = false, optional = true }
 libghostty-vt = { path = "third_party/libghostty-vt", default-features = false, features = ["kitty-graphics", "png"] }
 libc = "=0.2.189"
@@ -145,7 +145,7 @@ notify = { version = "=8.2.0", default-features = false }
 fontconfig_sys = { package = "yeslogic-fontconfig-sys", version = "=6.0.1", optional = true }
 zbus = { version = "=5.19.0", features = ["blocking-api"], optional = true }
 roxmltree = { version = "=0.21.1", optional = true }
-gpui_platform = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-10-28", features = ["wayland", "x11"], optional = true }
+gpui_platform = { git = "https://github.com/sadiksaifi/zed", tag = "spaceterm-2026-11-11", features = ["wayland", "x11"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = { version = "=0.10.1", optional = true }
@@ -160,13 +160,13 @@ raw-window-handle = { version = "=0.6.2", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies.gpui_macos]
 git = "https://github.com/sadiksaifi/zed"
-tag = "spaceterm-2026-10-28"
+tag = "spaceterm-2026-11-11"
 features = ["font-kit"]
 optional = true
 
 [target.'cfg(target_os = "linux")'.dependencies.gpui_wgpu]
 git = "https://github.com/sadiksaifi/zed"
-tag = "spaceterm-2026-10-28"
+tag = "spaceterm-2026-11-11"
 optional = true
 
 # Keep local feature-matrix builds compact. SpaceTerm retains line tables for its
