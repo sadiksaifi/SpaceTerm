@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from spaceterm_tasks import TaskError
@@ -9,6 +10,7 @@ from spaceterm_tasks.compatibility import (
     PROTOCOLS,
     candidate_tag,
     expected,
+    exercise,
     plan,
     restart_into,
     verdict,
@@ -237,3 +239,54 @@ class CompatibilityPlanTests(unittest.TestCase):
             with self.subTest(planning=planning, planned=planned, pairs=pairs):
                 with self.assertRaises(TaskError):
                     verdict(planning, planned, pairs)
+
+
+class PaneCompatibilityTests(unittest.TestCase):
+    def test_a_compatible_pair_must_finish_a_command_and_read_its_output(self):
+        calls = []
+
+        def cli(client, arguments, environment):
+            calls.append(arguments)
+            if arguments[:2] == ["pane", "run"]:
+                return {
+                    "data": {
+                        "run": {"state": "finished", "exit_status": 0},
+                        "output": {"rows": [{"text": "spaceterm-compatibility-output"}]},
+                    }
+                }
+            return {"data": {}}
+
+        with (
+            patch("spaceterm_tasks.compatibility._outcome", return_value="ok"),
+            patch("spaceterm_tasks.compatibility._envelope", side_effect=cli),
+        ):
+            exercise("client", {}, {"list": "ok", "status": "ok"})
+        self.assertEqual(
+            [call[:2] for call in calls],
+            [["workspace", "create"], ["pane", "run"], ["pane", "read"]],
+        )
+
+    def test_a_pair_fails_if_the_run_receipt_is_unreadable_or_output_is_lost(self):
+        for reply in [
+            {"run": {"state": "unconfirmed", "exit_status": None}},
+            {"run": {"state": "finished", "exit_status": 0}, "output": {"rows": []}},
+        ]:
+
+            def cli(client, arguments, environment):
+                return {"data": reply if arguments[:2] == ["pane", "run"] else {}}
+
+            with (
+                self.subTest(reply=reply),
+                patch("spaceterm_tasks.compatibility._outcome", return_value="ok"),
+                patch("spaceterm_tasks.compatibility._envelope", side_effect=cli),
+                self.assertRaises(TaskError),
+            ):
+                exercise("client", {}, {"list": "ok", "status": "ok"})
+
+    def test_an_incompatible_work_peer_is_not_sent_pane_commands(self):
+        with (
+            patch("spaceterm_tasks.compatibility._outcome", side_effect=["cli_too_old", "ok"]),
+            patch("spaceterm_tasks.compatibility._envelope") as envelope,
+        ):
+            exercise("client", {}, {"list": "cli_too_old", "status": "ok"})
+        envelope.assert_not_called()

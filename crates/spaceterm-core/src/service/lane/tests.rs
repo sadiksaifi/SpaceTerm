@@ -1,6 +1,7 @@
 use super::*;
 use crate::service::runtime::test_support::{COMMIT, VERSION, target, with_artifact};
 use crate::service::{ServiceStartup, Supervisor};
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::AtomicUsize;
 
@@ -44,6 +45,7 @@ struct Host {
     sessions: Mutex<Vec<Id>>,
     fenced: AtomicBool,
     idle_granted: AtomicBool,
+    grant_target: Mutex<Option<(OperationId, Id, Id)>>,
     stopping: AtomicBool,
     /// Runs once inside the next fence release, before the fence clears.
     releasing: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -62,6 +64,20 @@ impl LaneHost for Host {
         if let Some(fencing) = self.fencing.lock().unwrap().as_ref() {
             let _ = fencing.send(());
         }
+        Ok(())
+    }
+    fn grant_stop(
+        &self,
+        id: OperationId,
+        candidate: Id,
+        boot: Id,
+        check: &mut dyn FnMut(bool) -> Result<(), CoreError>,
+    ) -> Result<(), CoreError> {
+        if *self.grant_target.lock().unwrap() != Some((id, candidate, boot)) {
+            return Err(CoreError::Changed);
+        }
+        check(false)?;
+        self.idle_granted.store(true, Ordering::SeqCst);
         Ok(())
     }
     fn idle_granted(&self) -> bool {
@@ -2718,5 +2734,109 @@ fn a_granted_input_barrier_does_not_wait_for_the_helpers_service_lock() {
         watcher.join().unwrap();
         assert_eq!(while_held.ok(), Some(false));
         assert!(lane.host.fenced.load(Ordering::SeqCst));
+    });
+}
+
+#[test]
+fn a_service_1_3_helper_and_handler_complete_the_encoded_stop_grant() {
+    with_lane(|lane| {
+        let candidate = digest_bytes(&install_pending(&lane, "1.0.0")).unwrap();
+        lane.lane
+            .updates()
+            .unwrap()
+            .confirm(
+                runtime::updates::Confirmed::Restart {
+                    candidate: Some(candidate),
+                },
+                || Ok(()),
+            )
+            .unwrap();
+        let record = Record {
+            id: OperationId([17; 16]),
+            actor: Actor::CORE,
+            core: lane.lane.core,
+            boot: lane.lane.boot,
+            action: Action::Update,
+            observation_digest: [0; 32],
+            candidate: Some(candidate),
+            state: State::Running,
+            updated_at: 0,
+            orphaned: false,
+        };
+        *lane.host.grant_target.lock().unwrap() = Some((record.id, candidate, record.boot));
+        let (mut helper, mut core) = UnixStream::pair().unwrap();
+        let identity = lane.service.identity.clone();
+        let caller = std::thread::spawn(move || {
+            super::super::helper::grant_stop_over(&mut helper, &identity, &record)
+        });
+        let mut versions = crate::protocol::CoreVersions::for_tests();
+        versions.service = crate::protocol::version::ProtocolVersion { major: 1, minor: 3 };
+        let admitted = crate::protocol::admit_core(
+            &mut core,
+            &lane.lane.core,
+            &lane.service.identity,
+            &versions,
+        )
+        .unwrap();
+        let crate::protocol::Admission::Service(admitted) = admitted else {
+            panic!("not service");
+        };
+        assert_eq!(
+            admitted.selected,
+            crate::protocol::version::ProtocolVersion { major: 1, minor: 3 }
+        );
+        lane.lane
+            .serve(&mut core, admitted, None, &|| Ok(()))
+            .unwrap();
+        assert_eq!(caller.join().unwrap(), Ok(()));
+        assert!(lane.host.idle_granted.load(Ordering::SeqCst));
+    });
+}
+
+#[test]
+fn a_service_1_2_helper_sends_no_stop_grant_request_bytes() {
+    with_lane(|lane| {
+        let record = Record {
+            id: OperationId([17; 16]),
+            actor: Actor::CORE,
+            core: lane.lane.core,
+            boot: lane.lane.boot,
+            action: Action::Update,
+            observation_digest: [0; 32],
+            candidate: Some([5; 32]),
+            state: State::Running,
+            updated_at: 0,
+            orphaned: false,
+        };
+        let (mut helper, mut core) = UnixStream::pair().unwrap();
+        let identity = lane.service.identity.clone();
+        let caller = std::thread::spawn(move || {
+            super::super::helper::grant_stop_over(&mut helper, &identity, &record)
+        });
+        let mut versions = crate::protocol::CoreVersions::for_tests();
+        versions.service = crate::protocol::version::ProtocolVersion { major: 1, minor: 2 };
+        let admitted = crate::protocol::admit_core(
+            &mut core,
+            &lane.lane.core,
+            &lane.service.identity,
+            &versions,
+        )
+        .unwrap();
+        assert!(matches!(admitted, crate::protocol::Admission::Service(_)));
+        let request = core
+            .receive(MAX_FRAME, Instant::now() + Duration::from_secs(3))
+            .ok();
+        if request.is_some() {
+            core.send(
+                br#"{"reply":"stop_granted"}"#,
+                Instant::now() + Duration::from_secs(3),
+            )
+            .unwrap();
+        }
+        assert_eq!(caller.join().unwrap(), Err(CoreError::Unsupported));
+        assert!(
+            request.is_none(),
+            "an older service received grant request bytes"
+        );
     });
 }

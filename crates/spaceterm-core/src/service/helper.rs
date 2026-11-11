@@ -156,14 +156,22 @@ pub(super) fn activate_pending(
 
 /// A failed or uncertain grant never creates an activation journal and never dispatches Stop.
 fn grant_stop(identity: &str, record: &Record) -> Result<(), CoreError> {
-    use super::lane::{LaneReply, LaneRequest};
-    use crate::protocol::Preamble;
     let paths = crate::host::Paths::for_identity(identity)?;
     let mut stream = crate::host::connect(&paths)?;
+    grant_stop_over(&mut stream, identity, record)
+}
+
+/// The connected account-local transport, including version negotiation and the exact grant reply.
+pub(super) fn grant_stop_over(
+    stream: &mut dyn crate::protocol::Preamble,
+    identity: &str,
+    record: &Record,
+) -> Result<(), CoreError> {
+    use super::lane::{LaneReply, LaneRequest};
     let client = crate::protocol::random()?;
     let name = "SpaceTerm Core".into();
     let negotiated = crate::protocol::admit_service_lane(
-        &mut stream,
+        stream,
         crate::protocol::Caller {
             client: &client,
             name: &name,
