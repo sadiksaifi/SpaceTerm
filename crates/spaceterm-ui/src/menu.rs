@@ -1440,6 +1440,13 @@ impl<A: Clone + 'static> ComboButton<A> {
         self
     }
 
+    /// Widens the menu past its size's width so every row shows its label, detail and shortcut
+    /// in full. The window still bounds the menu. See [`Menu::fit_rows`].
+    pub fn fit_menu_rows(mut self) -> Self {
+        self.menu.fit_rows = true;
+        self
+    }
+
     /// Marks the menu segment with noninteractive content at the disclosure's trailing top
     /// corner, rendered with the segment's icon color, for a menu that holds more to act on.
     pub fn menu_indicator(mut self, build: impl FnOnce(Rgba) -> AnyElement + 'static) -> Self {

@@ -313,6 +313,9 @@ fn pill(
         )
         .menu_label("Updates")
         .menu_size(MenuSize::Wide)
+        // A row's detail carries the decision: how many Terminal Sessions a restart waits on and
+        // which action the row takes. The list grows to show it whole.
+        .fit_menu_rows()
         .placement(placement())
         .debug_selector("update-pill")
         .on_menu_lifecycle(lifecycle(control))

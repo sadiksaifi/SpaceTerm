@@ -340,31 +340,87 @@ fn the_chevron_opens_spaceterm_then_every_machine_then_update_settings(
     assert!(machines.performed().is_empty());
 }
 
-/// At the default window a long status truncates before the Machine's name, and assistive
-/// technology reads the status, the action and the heading.
+/// At the default 900 x 580 window every row shows its name and its whole detail: the status
+/// with its Terminal Session count, then the action. The list stays inside the window, and
+/// assistive technology reads the detail and the heading.
 #[gpui::test]
-fn a_long_status_keeps_the_row_name_whole_and_readable(cx: &mut gpui::TestAppContext) {
-    const NAME: &str = "This Mac";
-    const DETAIL: &str =
-        "Restarts into 0.11.4 when 2 Terminal Sessions end \u{b7} Restart Core\u{2026}";
+fn every_row_shows_its_whole_detail_at_the_default_window(cx: &mut gpui::TestAppContext) {
+    const SESSIONS: &str = "Restarts into 0.11.4 when 3 Terminal Sessions end";
+    const ROWS: [(&str, &str, &str, &str); 4] = [
+        (
+            "update-row-app-label",
+            "update-row-app-detail",
+            "SpaceTerm",
+            "0.11.4 downloaded \u{b7} Relaunch to Update",
+        ),
+        (
+            "update-row-0-label",
+            "update-row-0-detail",
+            "This Mac",
+            "Restarts into 0.11.4 when 3 Terminal Sessions end \u{b7} Restart Core\u{2026}",
+        ),
+        (
+            "update-row-1-label",
+            "update-row-1-detail",
+            "penguin",
+            "Restarts into 0.11.4 in a moment",
+        ),
+        (
+            "update-row-2-label",
+            "update-row-2-detail",
+            "build-box",
+            "Restarts into 0.11.4 when 4 Terminal Sessions end \u{b7} Restart Core\u{2026}",
+        ),
+    ];
     let _ = services(cx);
-    let script = Script::new(recording());
+    let script = Script::new(Shown {
+        pill: Some(pill(
+            "Relaunch to Update",
+            Glyph::Restart,
+            Emphasis::Accent,
+            Command::Desktop(DesktopAction::Update),
+        )),
+        app: row(
+            "SpaceTerm",
+            "0.11.4 downloaded",
+            Some((
+                "Relaunch to Update",
+                Command::Desktop(DesktopAction::Update),
+            )),
+        ),
+        machines: vec![
+            (
+                THIS_MAC,
+                row(
+                    "This Mac",
+                    SESSIONS,
+                    Some(("Restart Core\u{2026}", restart_core(THIS_MAC))),
+                ),
+            ),
+            (
+                PENGUIN,
+                row("penguin", "Restarts into 0.11.4 in a moment", None),
+            ),
+            (
+                BUILD_BOX,
+                row(
+                    "build-box",
+                    "Restarts into 0.11.4 when 4 Terminal Sessions end",
+                    Some(("Restart Core\u{2026}", restart_core(BUILD_BOX))),
+                ),
+            ),
+        ],
+    });
     let (_, visual) = hosted(&script, cx);
     visual.simulate_resize(gpui::size(gpui::px(900.0), gpui::px(580.0)));
     visual.run_until_parked();
     click("update-pill-menu", visual);
-    let label = visual
-        .debug_bounds("update-row-0-label")
-        .expect("the name renders");
-    let detail = visual
-        .debug_bounds("update-row-0-detail")
-        .expect("the detail renders");
-    let [name_width, detail_width] = visual.update(|window, _| {
-        let font = spaceterm_ui::ControlTypography::default().regular().clone();
-        [NAME, DETAIL].map(|text| {
+    let width = |text: &str, visual: &mut gpui::VisualTestContext| {
+        visual.update(|window, _| {
+            let font = spaceterm_ui::ControlTypography::default().regular().clone();
             let run = gpui::TextRun {
                 len: text.len(),
-                font: font.clone(),
+                font,
                 color: window.text_style().color,
                 background_color: None,
                 underline: None,
@@ -372,22 +428,35 @@ fn a_long_status_keeps_the_row_name_whole_and_readable(cx: &mut gpui::TestAppCon
             };
             window
                 .text_system()
-                .shape_line(text.into(), gpui::px(12.0), &[run], None)
+                .shape_line(text.to_owned().into(), gpui::px(12.0), &[run], None)
                 .width
         })
-    });
-    assert!(
-        detail.size.width < detail_width,
-        "the status is long enough to truncate: {:?} >= {detail_width:?}",
-        detail.size.width
-    );
-    assert!(
-        label.size.width >= name_width,
-        "the name shows in full: {:?} < {name_width:?}",
-        label.size.width
-    );
+    };
     let tree = A11yTree::read(visual);
-    tree.node(DETAIL);
+    for (label, shown, name, detail) in ROWS {
+        let bounds = |selector: &'static str, visual: &mut gpui::VisualTestContext| {
+            visual
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} renders"))
+        };
+        let (label, shown) = (bounds(label, visual), bounds(shown, visual));
+        let (name_width, detail_width) = (width(name, visual), width(detail, visual));
+        assert!(
+            label.size.width >= name_width,
+            "{name}: the name shows in full: {:?} < {name_width:?}",
+            label.size.width
+        );
+        assert!(
+            shown.size.width >= detail_width,
+            "{name}: the detail shows in full: {:?} < {detail_width:?}",
+            shown.size.width
+        );
+        assert!(
+            label.left() >= gpui::px(0.0) && shown.right() <= gpui::px(900.0),
+            "{name}: the row stays inside the window"
+        );
+        tree.node(detail);
+    }
     tree.node("SpaceTerm Core");
 }
 
