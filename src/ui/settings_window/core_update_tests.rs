@@ -285,6 +285,29 @@ fn a_settings_restart_that_fails_after_it_ran_opens_no_alert(cx: &mut TestAppCon
     );
 }
 
+/// D3f from the Machine card: OK dismisses the title bar's failure step on this desktop, and
+/// the row keeps the failure (design 4.6).
+#[gpui::test]
+fn ok_on_how_to_update_in_settings_dismisses_the_step(cx: &mut TestAppContext) {
+    let (_, adapter, cx) = open(cx, None);
+    let mut stone = machine(None, 3);
+    stone.facts.as_mut().unwrap().check = UpdateCheck::Failing {
+        since: crate::updates::now(),
+        last_success: None,
+        reason: spaceterm_core::update::facts::CheckFailure::SteppingStoneSkipped,
+    };
+    adapter.emit(MachineUpdatesEvent::Changed(Box::new(stone)));
+    cx.run_until_parked();
+    assert!(cx.update(|_, cx| crate::updates::state::current(cx).step).is_some());
+    click(UPDATE_SELECTOR, cx);
+    answer("settings-update-explanation-ok", cx);
+    assert_eq!(
+        cx.update(|_, cx| crate::updates::state::current(cx).step),
+        None
+    );
+    A11yTree::read(cx).text("1.4.0 \u{b7} Can't update by itself");
+}
+
 /// I7 for the Machine card: its subtitle is the row's version and status, and its one button is
 /// the row's action, which asks this Machine's Core for the restart it names.
 #[gpui::test]

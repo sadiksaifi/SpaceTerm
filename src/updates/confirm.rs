@@ -40,6 +40,27 @@ impl Explanation {
             dismiss: None,
         }
     }
+
+    /// The label of the button that runs `then`, or None for an alert with only OK.
+    pub(crate) fn follow_up(&self) -> Option<SharedString> {
+        let then = self.then.as_deref()?;
+        Some(self.proceed.clone().unwrap_or_else(|| {
+            match then {
+                Command::Machine(_, MachineAction::CheckAgain) => dialogs::CHECK_AGAIN,
+                _ => dialogs::TRY_AGAIN,
+            }
+            .into()
+        }))
+    }
+
+    /// The command an answer runs, the same on every surface: `then` on its follow-up button,
+    /// and `dismiss` on Cancel, on closing the alert, or on OK.
+    pub(crate) fn answer(self, proceeded: bool) -> Option<Command> {
+        match (proceeded, self.then) {
+            (true, Some(then)) => Some(*then),
+            _ => self.dismiss.map(|dismiss| *dismiss),
+        }
+    }
 }
 
 /// What a confirmation described for each Machine it affects whose facts are known: the sessions

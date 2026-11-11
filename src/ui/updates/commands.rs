@@ -14,7 +14,6 @@ use spaceterm_ui::{
 
 use super::{UpdateControl, front_workspace_window, service, whats_new};
 use crate::updates::confirm::{Confirmation, Explanation};
-use crate::updates::copy::dialogs;
 use crate::updates::machines::store::{self, MachineUpdates, MachineUpdatesNotice, Surface};
 use crate::updates::machines::{ActionFailure, MachineAction, MachineId};
 use crate::updates::state::{self, Command, DesktopAction, Target};
@@ -179,25 +178,13 @@ fn request(
     store::request(actions, always, Surface::Window, ask, cx);
 }
 
-/// The label of the button that runs a failure's follow-up command, when the explanation names
-/// none.
-fn follow_up_label(explanation: &Explanation, then: &Command) -> SharedString {
-    explanation.proceed.clone().unwrap_or_else(|| {
-        match then {
-            Command::Machine(_, MachineAction::CheckAgain) => dialogs::CHECK_AGAIN,
-            _ => dialogs::TRY_AGAIN,
-        }
-        .into()
-    })
-}
-
 /// D3 to D8: a failure's alert, with its follow-up and Cancel, or OK alone.
 pub(super) fn explanation_alert(explanation: &Explanation) -> Alert<Answer> {
-    let actions = match &explanation.then {
-        Some(then) => vec![
+    let actions = match explanation.follow_up() {
+        Some(label) => vec![
             button(
                 Answer::Proceed,
-                follow_up_label(explanation, then),
+                label,
                 ModalActionRole::Affirmative,
                 "update-explain-proceed",
             )
@@ -234,17 +221,13 @@ pub(super) fn explanation_alert(explanation: &Explanation) -> Alert<Answer> {
 /// The follow-up runs on its button. OK and Cancel dismiss the failure's title-bar step.
 fn explain(explanation: Explanation, presenter: Presenter, cx: &mut App) {
     let alert = explanation_alert(&explanation);
-    let Explanation { then, dismiss, .. } = explanation;
     let next = presenter.clone();
     present_in(
         presenter,
         alert,
-        move |answer, cx| match (answer, then) {
-            (Answer::Proceed, Some(then)) => perform(*then, next, cx),
-            _ => {
-                if let Some(dismiss) = dismiss {
-                    perform(*dismiss, next, cx);
-                }
+        move |answer, cx| {
+            if let Some(command) = explanation.answer(answer == Answer::Proceed) {
+                perform(command, next, cx);
             }
         },
         cx,

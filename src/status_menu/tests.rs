@@ -901,3 +901,27 @@ fn a_restart_that_fails_after_it_ran_opens_no_alert(cx: &mut TestAppContext) {
         "only the confirmation opened"
     );
 }
+
+/// D3f from the menu bar extra: OK dismisses the title bar's failure step on this desktop, and
+/// the row keeps the failure (design 4.6).
+#[gpui::test]
+fn ok_on_how_to_update_dismisses_the_step_and_keeps_the_row(cx: &mut TestAppContext) {
+    let mut stone = machine(PENGUIN, "penguin", 1);
+    stone.facts.as_mut().unwrap().check = UpdateCheck::Failing {
+        since: crate::updates::now(),
+        last_success: None,
+        reason: spaceterm_core::update::facts::CheckFailure::SteppingStoneSkipped,
+    };
+    let fixture = start(vec![stone], cx);
+    assert!(cx.update(|cx| state::current(cx).step).is_some());
+    let how = row_action(&fixture.host.menu(), PENGUIN);
+    fixture.host.answers.borrow_mut().push(false);
+    cx.update(|cx| fixture.menu.perform(how, None, cx));
+    cx.run_until_parked();
+    assert_eq!(fixture.host.alerts.borrow().len(), 1, "D3f opened");
+    assert_eq!(cx.update(|cx| state::current(cx).step), None);
+    assert!(
+        row(&fixture.host.menu(), PENGUIN).status.as_deref() == Some("Can't update by itself"),
+        "the row keeps the failure"
+    );
+}

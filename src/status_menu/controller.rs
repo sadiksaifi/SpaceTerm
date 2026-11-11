@@ -283,16 +283,15 @@ impl StatusMenu {
                 let alert = Alert {
                     title: explanation.title.to_string(),
                     message: explanation.message.to_string(),
-                    confirm: None,
+                    confirm: explanation.follow_up().map(|label| label.to_string()),
                 };
                 let messages = self.messages.clone();
-                let then = explanation.then;
                 self.host.alert(
                     alert,
                     activation,
-                    Box::new(move |_| {
-                        if let Some(then) = then {
-                            let _ = messages.send_blocking(Message::Answered(*then));
+                    Box::new(move |proceeded| {
+                        if let Some(command) = explanation.answer(proceeded) {
+                            let _ = messages.send_blocking(Message::Answered(command));
                         }
                     }),
                     cx,

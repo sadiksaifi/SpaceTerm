@@ -388,31 +388,50 @@ fn present_explanation(
         return;
     };
     let handle = window;
+    // A follow-up offers its button and Cancel; an alert without one offers only OK.
+    let actions = match explanation.follow_up() {
+        Some(label) => vec![
+            ModalAction::new(
+                true,
+                label,
+                ModalActionRole::Affirmative,
+                "settings-update-explanation-proceed",
+            )
+            .with_emphasis(ModalActionEmphasis::Prominent),
+            ModalAction::new(
+                false,
+                "Cancel",
+                ModalActionRole::Cancel,
+                "settings-update-explanation-cancel",
+            ),
+        ],
+        None => vec![ModalAction::new(
+            true,
+            "OK",
+            ModalActionRole::Affirmative,
+            "settings-update-explanation-ok",
+        )],
+    };
     let _ = window.update(cx, |_, window, cx| {
         presenter.update(cx, |_, cx| {
             let _ = Alert::new(
                 ModalId::new("settings-update-explanation"),
                 explanation.title.clone(),
-                explanation.title,
-                explanation.message,
-                vec![ModalAction::new(
-                    true,
-                    "OK",
-                    ModalActionRole::Affirmative,
-                    "settings-update-explanation-ok",
-                )],
+                explanation.title.clone(),
+                explanation.message.clone(),
+                actions,
             )
             .present(window, cx, move |outcome, cx| {
-                if matches!(
+                let proceeded = matches!(
                     outcome,
                     AlertOutcome::Activated {
                         action_id: true,
                         ..
                     }
-                ) && let Some(then) = explanation.then
-                {
+                );
+                if let Some(command) = explanation.answer(proceeded) {
                     let _ = owner.update(cx, |settings, cx| {
-                        settings.perform_update_command(*then, handle, cx)
+                        settings.perform_update_command(command, handle, cx)
                     });
                 }
             });
