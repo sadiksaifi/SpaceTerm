@@ -793,7 +793,7 @@ fn alert_open(cx: &mut gpui::VisualTestContext) -> bool {
     cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx))
 }
 
-/// The restart's preview succeeds and it runs; the Core then reports it unreachable. Nothing
+/// The restart's preview succeeds and it runs; the Core then reports that it failed. Nothing
 /// interrupts: the outcome shows as the title bar's step. A refusal at the preview, while the
 /// person waits, opens D5 at once.
 #[gpui::test]
@@ -813,7 +813,7 @@ fn a_restart_that_ran_opens_no_alert_and_a_refused_preview_does(cx: &mut gpui::T
     machines.emit(MachineUpdatesEvent::Finished {
         machine: PENGUIN,
         action: MachineAction::Restart,
-        outcome: Err(ActionFailure::Unreachable),
+        outcome: Err(ActionFailure::Failed),
     });
     visual.run_until_parked();
     assert!(
