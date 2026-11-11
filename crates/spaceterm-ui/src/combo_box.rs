@@ -3206,12 +3206,28 @@ fn render_choices_note(
         )
 }
 
+/// The row a popup shows in place of its options. Its text is one live status under one identity,
+/// so assistive technology announces it, and announces the empty text that follows the busy one.
 fn status_row(
     text: SharedString,
     selector: &'static str,
     theme: ComboBoxTheme,
 ) -> impl IntoElement {
+    let message = text.clone();
     div()
+        .id("combo-box-status")
+        .role(accesskit::Role::Group)
+        .a11y_synthetic_children(move |builder| {
+            let mut status = accesskit::Node::new(accesskit::Role::Status);
+            // Native adapters announce either name changes or live-region values.
+            status.set_label(message.as_ref());
+            status.set_value(message.as_ref());
+            status.set_live(accesskit::Live::Polite);
+            if let Some(bounds) = builder.parent_node().bounds() {
+                status.set_bounds(bounds);
+            }
+            builder.push_child(builder.synthetic_node_id("status"), status);
+        })
         .debug_selector(move || selector.to_owned())
         .h(theme.metrics.row_height)
         .px(theme.metrics.horizontal_padding)
@@ -3951,27 +3967,44 @@ pub(crate) mod tests {
         use crate::a11y_testing::A11yTree;
 
         struct StatusCopyRoot {
-            handle: ComboBoxHandle<u8>,
             copy: ComboBoxCopy,
+            busy: bool,
         }
 
         impl gpui::Render for StatusCopyRoot {
             fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
                 div().size_full().child(
-                    ComboBox::new("status-copy-combo", "Workspace", None, "Choose", Vec::new())
-                        .handle(self.handle.clone())
-                        .copy(self.copy.clone())
-                        .debug_selector("status-copy-trigger")
-                        .on_accept(|_, _, _| {}),
+                    ComboBox::<u8>::new(
+                        "status-copy-combo",
+                        "Workspace",
+                        None,
+                        "Choose",
+                        Vec::new(),
+                    )
+                    .copy(self.copy.clone())
+                    .busy(self.busy)
+                    .debug_selector("status-copy-trigger")
+                    .on_accept(|_, _, _| {}),
                 )
             }
         }
 
         crate::combo_box_tests::install_themes(cx);
         let (root, cx) = cx.add_window_view(|_, _| StatusCopyRoot {
-            handle: ComboBoxHandle::default(),
             copy: ComboBoxCopy::default(),
+            busy: false,
         });
+        // The one status the popup publishes, as assistive technology names and reads it.
+        let status = |cx: &mut gpui::VisualTestContext| {
+            let tree = A11yTree::read(cx);
+            let [status] = tree.with_role("Status")[..] else {
+                panic!("the popup should publish exactly one status");
+            };
+            (
+                status["aria"]["label"].clone(),
+                status["aria"]["value"].clone(),
+            )
+        };
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         let trigger = cx
@@ -3980,6 +4013,7 @@ pub(crate) mod tests {
         cx.simulate_click(trigger.center(), gpui::Modifiers::none());
         cx.run_until_parked();
         assert!(cx.debug_bounds("combo-box-empty").is_some());
+        assert_eq!(status(cx), ("No options.".into(), "No options.".into()));
         assert_eq!(
             A11yTree::read(cx).node("Filter options")["aria"]["placeholder"],
             "Search"
@@ -3998,18 +4032,19 @@ pub(crate) mod tests {
             tree.node("Filter workspaces")["aria"]["placeholder"],
             "Find a workspace"
         );
-        // The status row publishes no accessible text, so its copy is read from the popup's state.
-        let handle = root.read_with(cx, |root, _| root.handle.clone());
-        let state = handle
-            .state
-            .borrow()
-            .as_ref()
-            .and_then(WeakEntity::upgrade)
-            .expect("the mounted control should retain its state");
-        let copy = state.read_with(cx, |state, _| state.copy.clone());
-        assert_eq!(copy.busy_status, "Refreshing");
-        assert_eq!(copy.empty_status, "Nothing available");
         assert!(cx.debug_bounds("combo-box-empty").is_some());
+        assert_eq!(
+            status(cx),
+            ("Nothing available".into(), "Nothing available".into())
+        );
+
+        root.update(cx, |root, cx| {
+            root.busy = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("combo-box-loading").is_some());
+        assert_eq!(status(cx), ("Refreshing".into(), "Refreshing".into()));
         assert!(cx.update(|window, cx| crate::window_combo_box_is_open(window, cx)));
     }
 }
