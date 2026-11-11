@@ -10,7 +10,6 @@ use spaceterm_core::service::ServiceStatus;
 
 use super::model::{Command, Menu};
 use crate::updates::UpdateService;
-use crate::updates::copy::dialogs;
 use crate::updates::machines::store::{self, MachineUpdates, MachineUpdatesNotice, Surface};
 use crate::updates::machines::{ActionFailure, MachineAction, MachineId, MachineUpdate};
 use crate::updates::state::{self, DesktopAction};
@@ -196,10 +195,8 @@ impl StatusMenu {
             // where the person turns it on. Nothing starts by itself: once the item is on, the
             // menu still offers Start, and the person chooses it.
             Err(ActionFailure::LoginItemOff) => self.host.open_login_items(),
-            Err(failure) => {
-                if let Some((title, message)) =
-                    dialogs::action_failure(&notice.name, &notice.action, failure)
-                {
+            Err(_) => {
+                if let Some((title, message)) = notice.unasked_alert() {
                     let alert = Alert {
                         title: title.to_string(),
                         message: message.to_string(),

@@ -264,6 +264,27 @@ fn a_failed_settings_preview_explains_the_failure(cx: &mut TestAppContext) {
     assert!(adapter.executed().is_empty());
 }
 
+/// An approved restart whose lane drops while its result is followed reports through the title
+/// bar's step, not through an alert the person did not ask for (design 4.6).
+#[gpui::test]
+fn a_settings_restart_that_fails_after_it_ran_opens_no_alert(cx: &mut TestAppContext) {
+    let (_, adapter, cx) = open(cx, Some("1.6.0"));
+    click(UPDATE_SELECTOR, cx);
+    answer(UPDATE_CONFIRM_SELECTOR, cx);
+    assert_eq!(adapter.executed().len(), 1);
+    adapter.emit(MachineUpdatesEvent::Finished {
+        machine: MACHINE,
+        action: MachineAction::Restart,
+        outcome: Err(crate::updates::machines::ActionFailure::Unreachable),
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("modal-action-settings-update-explanation-ok")
+            .is_none(),
+        "no alert opens unasked"
+    );
+}
+
 /// I7 for the Machine card: its subtitle is the row's version and status, and its one button is
 /// the row's action, which asks this Machine's Core for the restart it names.
 #[gpui::test]

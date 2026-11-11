@@ -875,3 +875,29 @@ fn choosing_a_rows_action_asks_that_machines_core(cx: &mut TestAppContext) {
     );
     assert!(fixture.machines.executed().is_empty(), "it asks first");
 }
+
+/// An approved restart whose lane drops while its result is followed reports through the title
+/// bar's step, not through an alert the person did not ask for (design 4.6).
+#[gpui::test]
+fn a_restart_that_fails_after_it_ran_opens_no_alert(cx: &mut TestAppContext) {
+    let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 2))], cx);
+    let restart = row_action(&fixture.host.menu(), PENGUIN);
+    fixture.host.answers.borrow_mut().push(true);
+    cx.update(|cx| fixture.menu.perform(restart, None, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        fixture.machines.executed_actions(),
+        [(PENGUIN, MachineAction::Restart)]
+    );
+    fixture.machines.emit(MachineUpdatesEvent::Finished {
+        machine: PENGUIN,
+        action: MachineAction::Restart,
+        outcome: Err(ActionFailure::Unreachable),
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        fixture.host.alerts.borrow().len(),
+        1,
+        "only the confirmation opened"
+    );
+}

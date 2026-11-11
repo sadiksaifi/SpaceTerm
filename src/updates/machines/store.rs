@@ -88,6 +88,24 @@ pub(crate) struct MachineUpdatesNotice {
     pub(crate) refused_at_preview: bool,
 }
 
+impl MachineUpdatesNotice {
+    /// The alert this outcome opens without a click on it, as a title and a message: D5 for an
+    /// action the Core refused at its preview, and a failed Start or Stop, which no update step
+    /// reports. A later outcome of an update action shows once in the title bar instead (design
+    /// 4.6). `Changed` and `LoginItemOff` have no alert.
+    pub(crate) fn unasked_alert(&self) -> Option<(SharedString, SharedString)> {
+        let Err(failure) = self.outcome else {
+            return None;
+        };
+        let waiting = self.refused_at_preview
+            || matches!(self.action, MachineAction::Start | MachineAction::Stop);
+        if !waiting {
+            return None;
+        }
+        crate::updates::copy::dialogs::action_failure(&self.name, &self.action, failure)
+    }
+}
+
 /// What a Restart or Stop needs next, from the Cores' own previews.
 enum Prepared {
     /// Nothing asks: execute these previews.

@@ -15,7 +15,6 @@ use crate::local_startup::CandidateError;
 use crate::machine_connection::CoreError;
 use crate::machine_connection::service::activation::{ActivationStatus, is_released_downgrade};
 use crate::machine_connection::service::{RetainedInstallation, Service, ServiceStatus};
-use crate::updates::copy::dialogs;
 use crate::updates::machines::store::{self, MachineUpdates, Surface};
 use crate::updates::machines::{ActionFailure, MachineAction, MachineId, MachineUpdate};
 use crate::updates::state::{self, Command, Confirmation, Explanation, RowView};
@@ -366,9 +365,7 @@ impl SettingsWindow {
                 );
             } else if failure == ActionFailure::LoginItemOff {
                 crate::local_startup::open_login_items();
-            } else if let Some((title, message)) =
-                dialogs::action_failure(&notice.name, &notice.action, failure)
-            {
+            } else if let Some((title, message)) = notice.unasked_alert() {
                 settings.perform_update_command(
                     Command::Explain(Explanation::ok(title, message)),
                     window,
