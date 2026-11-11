@@ -120,6 +120,9 @@ pub(crate) struct AppRow {
     pub(crate) notes: bool,
     /// A Machine's SpaceTerm Core is too new for this SpaceTerm: a hard stop.
     pub(crate) too_old_for: Option<SharedString>,
+    /// The downloaded release a scheduled check replaces. While that check runs, downloads by
+    /// itself or retries by itself, the main area keeps its Relaunch; the row tells the work.
+    pub(crate) replacing: Option<SharedString>,
 }
 
 /// SpaceTerm's update, as the person sees it.
@@ -357,6 +360,8 @@ pub(crate) struct AppFacts<'a> {
     pub(crate) download_asked: bool,
     /// SpaceTerm tries the failed automatic download again by itself.
     pub(crate) retrying: bool,
+    /// The downloaded release a scheduled check replaces, while it does.
+    pub(crate) replacing: Option<&'a str>,
 }
 
 /// What only this desktop knows about the Machines, from the shared store.
@@ -571,6 +576,17 @@ impl AppRow {
                 whats_new: facts.whats_new && facts.notes,
             },
         };
+        let replacing = facts
+            .replacing
+            .filter(|_| {
+                matches!(
+                    stage,
+                    AppStage::Available { .. }
+                        | AppStage::Downloading { here: false, .. }
+                        | AppStage::DownloadFailed { retries: true, .. }
+                )
+            })
+            .map(|version| version.to_owned().into());
         Self {
             running: facts.running.to_owned().into(),
             stage,
@@ -578,6 +594,7 @@ impl AppRow {
             waited: facts.waited,
             notes: facts.notes,
             too_old_for,
+            replacing,
         }
     }
 
@@ -589,6 +606,9 @@ impl AppRow {
             stage: (!hard_stop).then_some(self.ladder),
             hard_stop,
         };
+        if self.replacing.is_some() {
+            return Some(act(ActKind::Relaunch));
+        }
         match &self.stage {
             AppStage::Current { whats_new: true } => Some(Step::WhatsNew),
             AppStage::Current { whats_new: false } | AppStage::NeedsNewerSystem { .. } => None,
@@ -606,6 +626,9 @@ impl AppRow {
 
     /// The version that waits, when one does.
     pub(crate) fn waiting(&self) -> Option<&SharedString> {
+        if let Some(version) = &self.replacing {
+            return Some(version);
+        }
         match &self.stage {
             AppStage::Available { version } | AppStage::Downloaded { version } => Some(version),
             _ => None,
@@ -951,6 +974,7 @@ pub(crate) fn current(cx: &App) -> UpdateView {
                 relaunch_held: updates.holds_failed_relaunch(),
                 download_asked: updates.download_asked(),
                 retrying: updates.retries_download(),
+                replacing: updates.replaces_download(),
             }
         }
         None => AppFacts {
@@ -964,6 +988,7 @@ pub(crate) fn current(cx: &App) -> UpdateView {
             relaunch_held: false,
             download_asked: false,
             retrying: false,
+            replacing: None,
         },
     };
     let none = HashMap::new();

@@ -96,6 +96,7 @@ pub(crate) fn app(state: &UpdateState) -> AppFacts<'_> {
         relaunch_held: false,
         download_asked: false,
         retrying: false,
+        replacing: None,
     }
 }
 
