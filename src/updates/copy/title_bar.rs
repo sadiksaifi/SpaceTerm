@@ -3,13 +3,15 @@
 use gpui::SharedString;
 
 use super::{days, dialogs, sessions, this_ends};
+use crate::updates::UpdateError;
 use crate::updates::ladder::Stage;
 use crate::updates::machines::MachineAction;
 use crate::updates::state::{
-    ActKind, AppStage, Blocked, Command, DesktopAction, Glyph, MachineRow, MachineStage, PillView,
-    Step, Target, UpdateView,
+    ActKind, AppRow, AppStage, Blocked, Command, DesktopAction, DownloadCause, Glyph, MachineRow,
+    MachineStage, PillView, Step, Target, UpdateView,
 };
 use spaceterm_core::update::continuation::Continuation;
+use spaceterm_core::update::facts::StartFailure;
 
 pub(crate) const UPDATE_FAILED: &str = "Update Failed";
 pub(crate) const RESTART_NOT_CONFIRMED: &str = "Restart Not Confirmed";
@@ -42,14 +44,17 @@ pub(crate) fn pill(view: &UpdateView) -> Option<PillView> {
     let (label, glyph, tooltip, main, progress): (&str, Glyph, String, Command, Option<f32>) =
         match step {
             Step::Failed(target) => {
-                let alert = match target {
-                    Target::App => dialogs::app_failure(&view.app)?,
-                    Target::Machine(id) => dialogs::machine_failure(machine(id)?)?,
+                let (alert, tooltip) = match target {
+                    Target::App => (dialogs::app_failure(&view.app)?, app_failed(&view.app)),
+                    Target::Machine(id) => {
+                        let row = machine(id)?;
+                        (dialogs::machine_failure(row)?, machine_failed(row))
+                    }
                 };
                 (
                     UPDATE_FAILED,
                     Glyph::UpdateFailed,
-                    first_sentence(&alert.message),
+                    tooltip,
                     Command::Explain(alert),
                     None,
                 )
@@ -223,10 +228,130 @@ fn restart_tooltip(row: &MachineRow, asking: bool) -> String {
     text
 }
 
-/// The first sentence of an alert's body, for the tooltip of `Update Failed`.
-fn first_sentence(text: &SharedString) -> String {
-    match text.find(". ") {
-        Some(end) => text[..=end].to_owned(),
-        None => text.to_string(),
+/// The tooltip of `Update Failed` for SpaceTerm's own failure: what failed, then why, in at
+/// most two short sentences.
+fn app_failed(app: &AppRow) -> String {
+    let release = |version: &Option<SharedString>| {
+        version
+            .as_ref()
+            .map_or_else(|| "SpaceTerm".to_owned(), |v| format!("SpaceTerm {v}"))
+    };
+    match &app.stage {
+        AppStage::DownloadFailed { version, error, .. } => {
+            let why = match error {
+                UpdateError::DiskFull => "Free some disk space, then try again.",
+                UpdateError::Verification => "The download didn't pass verification.",
+                _ => "Check your network, then try again.",
+            };
+            format!("Couldn't download {}. {why}", release(version))
+        }
+        AppStage::RelaunchFailed {
+            error: UpdateError::SettingsUnsaved,
+            ..
+        } => "Couldn't relaunch SpaceTerm because it couldn't save Settings.".to_owned(),
+        AppStage::RelaunchFailed {
+            version: Some(version),
+            ..
+        } => format!("Couldn't relaunch into SpaceTerm {version}."),
+        AppStage::RelaunchFailed { version: None, .. } => "Couldn't relaunch SpaceTerm.".to_owned(),
+        _ => "SpaceTerm can't update itself where it is.".to_owned(),
+    }
+}
+
+/// The tooltip of `Update Failed` for a Machine's failure: what failed, then why, in at most two
+/// short sentences.
+fn machine_failed(row: &MachineRow) -> String {
+    let name = &row.name;
+    match &row.stage {
+        MachineStage::StartFailed { version, cause, .. } => {
+            let why = match cause {
+                StartFailure::NotReady => format!("SpaceTerm Core {version} didn't start."),
+                StartFailure::PortInUse => {
+                    format!("Another app is using {name}'s Network Access port.")
+                }
+                StartFailure::DiskFull => format!("{name} is out of disk space."),
+                StartFailure::Interrupted => "The restart was interrupted.".to_owned(),
+            };
+            format!("Couldn't restart SpaceTerm Core on {name}. {why}")
+        }
+        MachineStage::DownloadFailed { version, cause, .. } => {
+            let failed = format!("Couldn't download SpaceTerm Core {version} to {name}.");
+            let why = match cause {
+                DownloadCause::DiskFull => format!("{name} is out of disk space."),
+                DownloadCause::Unreachable => format!("{name} stopped answering."),
+                DownloadCause::Busy => {
+                    format!("SpaceTerm Core on {name} is busy with another update.")
+                }
+                DownloadCause::RelaunchRequired => {
+                    "SpaceTerm was replaced on disk while it was running.".to_owned()
+                }
+                DownloadCause::Failed => return failed,
+            };
+            format!("{failed} {why}")
+        }
+        MachineStage::NeedsFloor { version, floor, .. } => format!(
+            "Couldn't download SpaceTerm Core {version} to {name}. {name} needs SpaceTerm Core \
+             {floor} first."
+        ),
+        _ => format!("SpaceTerm Core on {name} can't update by itself."),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::updates::state::tests::{NOW, app};
+    use crate::updates::state::{AppFacts, Dismissed, Marks, UpdateView};
+    use crate::updates::{UpdateError, UpdateState};
+
+    fn tooltip(facts: AppFacts<'_>) -> String {
+        let marks = Marks {
+            dismissed: &Dismissed::new(),
+            deferred: &HashMap::new(),
+            pushes_held: false,
+        };
+        let pill = UpdateView::new(facts, &[], marks, NOW)
+            .pill()
+            .expect("a step");
+        pill.tooltip.to_string()
+    }
+
+    /// Hovering `Update Failed` tells what failed before the alert opens: SpaceTerm and the
+    /// release, then why.
+    #[test]
+    fn the_update_failed_tooltip_names_what_failed() {
+        let cases = [
+            (
+                UpdateError::Download,
+                "Couldn't download SpaceTerm 0.11.5. Check your network, then try again.",
+            ),
+            (
+                UpdateError::DiskFull,
+                "Couldn't download SpaceTerm 0.11.5. Free some disk space, then try again.",
+            ),
+            (
+                UpdateError::Verification,
+                "Couldn't download SpaceTerm 0.11.5. The download didn't pass verification.",
+            ),
+            (
+                UpdateError::Relaunch,
+                "Couldn't relaunch into SpaceTerm 0.11.5.",
+            ),
+            (
+                UpdateError::SettingsUnsaved,
+                "Couldn't relaunch SpaceTerm because it couldn't save Settings.",
+            ),
+            (
+                UpdateError::ReadOnly,
+                "SpaceTerm can't update itself where it is.",
+            ),
+        ];
+        for (error, expected) in cases {
+            let state = UpdateState::Failed { error };
+            let mut facts = app(&state);
+            facts.pending = Some("0.11.5");
+            assert_eq!(tooltip(facts), expected, "{error:?}");
+        }
     }
 }

@@ -731,7 +731,10 @@ fn the_step_follows_the_priority_table() {
     assert_eq!(view.step, Some(Step::Failed(Target::Machine(PENGUIN))));
     let pill = view.pill().unwrap();
     assert_eq!(pill.label.as_ref(), "Update Failed");
-    assert_eq!(pill.tooltip.as_ref(), "penguin is out of disk space.");
+    assert_eq!(
+        pill.tooltip.as_ref(),
+        "Couldn't download SpaceTerm Core 0.11.5 to penguin. penguin is out of disk space."
+    );
     let mut whats_new = app(&UpdateState::UpToDate);
     whats_new.whats_new = true;
     assert_eq!(desk.view(whats_new, &[], NOW).step, Some(Step::WhatsNew));

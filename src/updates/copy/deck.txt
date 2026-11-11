@@ -68,34 +68,42 @@ Restarting Core… | Plain | Restarting SpaceTerm Core on This Mac.
 Restarting Core… | Plain | Restarting SpaceTerm Core on penguin into 0.11.4.
 Restarting Core… | Plain | Restarting SpaceTerm Core on penguin into 0.11.5.
 Restarting Core… | Plain | Restarting SpaceTerm Core on penguin.
-Update Failed | Warning | Check your network, then try again.
-Update Failed | Warning | Its Terminal Sessions keep running.
-Update Failed | Warning | On This Computer, install a newer compatible SpaceTerm Core archive with spaceterm update --archive, or wait for a newer release.
-Update Failed | Warning | On This Mac, install a newer compatible SpaceTerm Core archive with spaceterm update --archive, or wait for a newer release.
-Update Failed | Warning | On penguin, install a newer compatible SpaceTerm Core archive with spaceterm update --archive, or wait for a newer release.
-Update Failed | Warning | SpaceTerm 0.11.5 is downloaded.
-Update Failed | Warning | SpaceTerm Core 0.11.4 couldn't start because This Computer is out of disk space, so it went back to 0.11.3.
-Update Failed | Warning | SpaceTerm Core 0.11.4 couldn't start because This Mac is out of disk space, so it went back to 0.11.3.
-Update Failed | Warning | SpaceTerm Core 0.11.4 couldn't start because another app is using This Computer's Network Access port, so it went back to 0.11.3.
-Update Failed | Warning | SpaceTerm Core 0.11.4 couldn't start because another app is using This Mac's Network Access port, so it went back to 0.11.3.
-Update Failed | Warning | SpaceTerm Core 0.11.4 couldn't start because another app is using penguin's Network Access port, so it went back to 0.11.3.
-Update Failed | Warning | SpaceTerm Core 0.11.4 couldn't start because penguin is out of disk space, so it went back to 0.11.3.
-Update Failed | Warning | SpaceTerm Core 0.11.4 didn't start, so it went back to 0.11.3.
-Update Failed | Warning | SpaceTerm Core on This Computer is busy with another update.
-Update Failed | Warning | SpaceTerm Core on This Mac is busy with another update.
-Update Failed | Warning | SpaceTerm Core on penguin is busy with another update.
-Update Failed | Warning | SpaceTerm was replaced on disk while it was running.
-Update Failed | Warning | The restart into SpaceTerm Core 0.11.4 was interrupted, so it went back to 0.11.3.
-Update Failed | Warning | This Computer is out of disk space.
-Update Failed | Warning | This Computer needs SpaceTerm Core 0.12.0 first and couldn't get it.
-Update Failed | Warning | This Computer stopped answering.
-Update Failed | Warning | This Mac is out of disk space.
-Update Failed | Warning | This Mac needs SpaceTerm Core 0.12.0 first and couldn't get it.
-Update Failed | Warning | This Mac stopped answering.
-Update Failed | Warning | penguin is out of disk space.
-Update Failed | Warning | penguin needs SpaceTerm Core 0.12.0 first and couldn't get it.
-Update Failed | Warning | penguin stopped answering.
-Update Failed | Warning | {cant-replace-message}
+Update Failed | Warning | Couldn't download SpaceTerm 0.11.5. Check your network, then try again.
+Update Failed | Warning | Couldn't download SpaceTerm Core 0.11.5 to This Computer.
+Update Failed | Warning | Couldn't download SpaceTerm Core 0.11.5 to This Computer. SpaceTerm Core on This Computer is busy with another update.
+Update Failed | Warning | Couldn't download SpaceTerm Core 0.11.5 to This Computer. SpaceTerm was replaced on disk while it was running.
+Update Failed | Warning | Couldn't download SpaceTerm Core 0.11.5 to This Computer. This Computer is out of disk space.
+Update Failed | Warning | Couldn't download SpaceTerm Core 0.11.5 to This Computer. This Computer stopped answering.
+Update Failed | Warning | Couldn't download SpaceTerm Core 0.11.5 to This Mac.
+Update Failed | Warning | Couldn't download SpaceTerm Core 0.11.5 to This Mac. SpaceTerm Core on This Mac is busy with another update.
+Update Failed | Warning | Couldn't download SpaceTerm Core 0.11.5 to This Mac. SpaceTerm was replaced on disk while it was running.
+Update Failed | Warning | Couldn't download SpaceTerm Core 0.11.5 to This Mac. This Mac is out of disk space.
+Update Failed | Warning | Couldn't download SpaceTerm Core 0.11.5 to This Mac. This Mac stopped answering.
+Update Failed | Warning | Couldn't download SpaceTerm Core 0.11.5 to penguin.
+Update Failed | Warning | Couldn't download SpaceTerm Core 0.11.5 to penguin. SpaceTerm Core on penguin is busy with another update.
+Update Failed | Warning | Couldn't download SpaceTerm Core 0.11.5 to penguin. SpaceTerm was replaced on disk while it was running.
+Update Failed | Warning | Couldn't download SpaceTerm Core 0.11.5 to penguin. penguin is out of disk space.
+Update Failed | Warning | Couldn't download SpaceTerm Core 0.11.5 to penguin. penguin stopped answering.
+Update Failed | Warning | Couldn't download SpaceTerm Core 0.12.1 to This Computer. This Computer needs SpaceTerm Core 0.12.0 first.
+Update Failed | Warning | Couldn't download SpaceTerm Core 0.12.1 to This Mac. This Mac needs SpaceTerm Core 0.12.0 first.
+Update Failed | Warning | Couldn't download SpaceTerm Core 0.12.1 to penguin. penguin needs SpaceTerm Core 0.12.0 first.
+Update Failed | Warning | Couldn't relaunch into SpaceTerm 0.11.5.
+Update Failed | Warning | Couldn't restart SpaceTerm Core on This Computer. Another app is using This Computer's Network Access port.
+Update Failed | Warning | Couldn't restart SpaceTerm Core on This Computer. SpaceTerm Core 0.11.4 didn't start.
+Update Failed | Warning | Couldn't restart SpaceTerm Core on This Computer. The restart was interrupted.
+Update Failed | Warning | Couldn't restart SpaceTerm Core on This Computer. This Computer is out of disk space.
+Update Failed | Warning | Couldn't restart SpaceTerm Core on This Mac. Another app is using This Mac's Network Access port.
+Update Failed | Warning | Couldn't restart SpaceTerm Core on This Mac. SpaceTerm Core 0.11.4 didn't start.
+Update Failed | Warning | Couldn't restart SpaceTerm Core on This Mac. The restart was interrupted.
+Update Failed | Warning | Couldn't restart SpaceTerm Core on This Mac. This Mac is out of disk space.
+Update Failed | Warning | Couldn't restart SpaceTerm Core on penguin. Another app is using penguin's Network Access port.
+Update Failed | Warning | Couldn't restart SpaceTerm Core on penguin. SpaceTerm Core 0.11.4 didn't start.
+Update Failed | Warning | Couldn't restart SpaceTerm Core on penguin. The restart was interrupted.
+Update Failed | Warning | Couldn't restart SpaceTerm Core on penguin. penguin is out of disk space.
+Update Failed | Warning | SpaceTerm Core on This Computer can't update by itself.
+Update Failed | Warning | SpaceTerm Core on This Mac can't update by itself.
+Update Failed | Warning | SpaceTerm Core on penguin can't update by itself.
+Update Failed | Warning | SpaceTerm can't update itself where it is.
 What's New | Plain | See what's new in SpaceTerm 0.11.4.
 
 ## Rows: name | status · action (subtitle) | description | accessibility
