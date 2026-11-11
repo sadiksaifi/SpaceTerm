@@ -68,6 +68,10 @@ enum Admission {
 }
 pub(crate) struct CorePaneState {
     status: Mutex<CorePaneStatus>,
+    /// Input explicitly refused at an idle restart's Stop grant. Never replayed to a new shell.
+    unsent_input: Arc<Mutex<Vec<spaceterm_core::protocol::InputEvent>>>,
+    unconfirmed_input: Arc<Mutex<Vec<spaceterm_core::protocol::InputEvent>>>,
+    retaining_input: Arc<AtomicBool>,
     /// Admission settles before a hidden Pane receives its input-enabling screen.
     admission: Mutex<Admission>,
     /// Who controlled the Pane when the server last offered Take Over.
@@ -107,6 +111,9 @@ impl CorePaneState {
     fn new() -> Self {
         Self {
             status: Mutex::new(CorePaneStatus::Connecting),
+            unsent_input: Arc::default(),
+            unconfirmed_input: Arc::default(),
+            retaining_input: Arc::default(),
             admission: Mutex::new(Admission::Pending),
             controller: Mutex::default(),
             session_end: Mutex::default(),
@@ -418,6 +425,7 @@ impl CorePaneState {
             .restart_expired(std::time::Instant::now())
     }
     fn connection_failed(&self, error: CoreError, has_takeover: bool) -> bool {
+        self.retaining_input.store(true, Ordering::Release);
         // An admitted server update refuses connections only until it resolves, so the Pane
         // keeps reconnecting on its backoff in every client, whoever started the update.
         let mut retryable = matches!(

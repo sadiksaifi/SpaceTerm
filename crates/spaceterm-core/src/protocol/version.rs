@@ -16,16 +16,16 @@ pub struct ProtocolVersion {
 /// [`super::inventory_1_0::MINOR_GIT_DIRECTORY_INVENTORY`], and the Worktree error of
 /// [`crate::worktree::MINOR_CHANGED_AFTER_CLOSING`]. Work 1.2 adds the
 /// [`super::Kind::DetailedUpdateFacts`] message of
-/// [`crate::update::facts::MINOR_DETAILED_FACTS`].
-pub const WORK: ProtocolVersion = ProtocolVersion { major: 1, minor: 2 };
+/// [`crate::update::facts::MINOR_DETAILED_FACTS`]. Work 1.3 adds the restarting input refusal.
+pub const WORK: ProtocolVersion = ProtocolVersion { major: 1, minor: 3 };
 // The build document's major is the work major.
 const _: () = assert!(super::MAJOR == WORK.major);
 
 /// This build's service lane version. Service 1.1 adds the update fact values of
 /// [`crate::update::facts::MINOR_RESTART_FACTS`] and the `clock_behind` code. Service 1.2 adds
 /// the `DetailedFacts` and `WaitDetailedFacts` requests of
-/// [`crate::update::facts::MINOR_DETAILED_FACTS`].
-pub const SERVICE: ProtocolVersion = ProtocolVersion { major: 1, minor: 2 };
+/// [`crate::update::facts::MINOR_DETAILED_FACTS`]. Service 1.3 adds the final Stop grant.
+pub const SERVICE: ProtocolVersion = ProtocolVersion { major: 1, minor: 3 };
 /// This build's Desktop Channel version.
 pub const DESKTOP_CHANNEL: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };
 

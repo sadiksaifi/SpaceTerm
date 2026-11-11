@@ -177,7 +177,10 @@ impl ActiveInput {
                 keys.push(submitted);
                 continue;
             }
-            self.send_keys(state, std::mem::take(&mut keys), exchange)?;
+            if let Err(error) = self.send_keys(state, std::mem::take(&mut keys), exchange) {
+                retain_local_input(state, &submitted.command);
+                return Err(error);
+            }
             self.process(state, submitted, exchange, paste_unconfirmed)?;
         }
         self.send_keys(state, keys, exchange)?;
@@ -197,6 +200,10 @@ impl ActiveInput {
             return Ok(());
         }
         if let Err(error) = self.sync_focus(state, exchange) {
+            state.retaining_input.store(true, Ordering::Release);
+            for submitted in &submitted {
+                retain_local_input(state, &submitted.command);
+            }
             state.invalidate();
             return Err(error);
         }
@@ -280,6 +287,17 @@ impl ActiveInput {
                 other => {
                     // A lost acknowledgement may follow a successful write. Neither that
                     // chunk nor the unsent suffix can be replayed on this or a new connection.
+                    state.retaining_input.store(true, Ordering::Release);
+                    if !remaining[end..].is_empty() {
+                        state
+                            .unsent_input
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(InputEvent::Paste {
+                                text: remaining[end..].to_owned(),
+                                last: true,
+                            });
+                    }
                     state.invalidate();
                     return Err(match other {
                         Err(error) => error,
@@ -303,6 +321,8 @@ impl ActiveInput {
             return Ok(());
         }
         if let Err(error) = self.sync_focus(state, exchange) {
+            state.retaining_input.store(true, Ordering::Release);
+            retain_local_input(state, &submitted.command);
             state.invalidate();
             discard_input(state, submitted.epoch, submitted.command);
             return Err(error);
@@ -624,6 +644,10 @@ pub(super) struct PaneLink {
     notify: Arc<dyn Fn() + Send + Sync>,
     /// The highest Input serial sent on the bound channel.
     last_input: std::cell::Cell<u32>,
+    unsent_input: Arc<Mutex<Vec<InputEvent>>>,
+    unconfirmed_input: Arc<Mutex<Vec<InputEvent>>>,
+    bound_channel: Arc<std::sync::atomic::AtomicU32>,
+    retaining_input: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -661,6 +685,10 @@ impl PaneLink {
             pushed: None,
             notify,
             last_input: std::cell::Cell::new(0),
+            unsent_input: Arc::default(),
+            unconfirmed_input: Arc::default(),
+            bound_channel: Arc::default(),
+            retaining_input: Arc::default(),
         }
     }
 
@@ -689,11 +717,33 @@ impl PaneLink {
     /// `pushed` for the worker's loop.
     fn sink(&self, pushed: Arc<super::inbox::Inbox>) -> Arc<dyn ChannelSink> {
         let inbox = Arc::clone(&self.inbox);
+        let returned = self.link.clone();
+        let unsent = Arc::clone(&self.unsent_input);
+        let unconfirmed = Arc::clone(&self.unconfirmed_input);
+        let bound_channel = Arc::clone(&self.bound_channel);
+        let retaining_input = Arc::clone(&self.retaining_input);
         let notify = Arc::clone(&self.notify);
         Arc::new(move |event: ChannelEvent| {
             {
                 let mut received = inbox.state.lock().unwrap_or_else(|e| e.into_inner());
                 match event {
+                    ChannelEvent::Pane(PaneEvent::InputRestarting { channel, serial }) => {
+                        retaining_input.store(true, Ordering::Release);
+                        if let Some(events) = returned.take_unaccepted_input(channel, serial) {
+                            unsent
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .extend(events);
+                        }
+                        received.dropped.push_back(serial);
+                        if received.awaited.contains(&serial) {
+                            received.settled.insert(
+                                serial,
+                                InputOutcome::Discarded(pane::Refusal::ServiceBusy),
+                            );
+                        }
+                        received.discarded.get_or_insert(pane::Refusal::ServiceBusy);
+                    }
                     ChannelEvent::Pane(PaneEvent::Input { serial, outcome }) => {
                         if matches!(outcome, InputOutcome::Discarded(_)) {
                             if received.dropped.len() == MAX_DROPPED {
@@ -713,6 +763,16 @@ impl PaneLink {
                         }
                     }
                     ChannelEvent::Closed(error) => {
+                        retaining_input.store(true, Ordering::Release);
+                        let channel = Channel(bound_channel.load(Ordering::Acquire));
+                        unconfirmed
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .extend(returned.take_unconfirmed_input(channel));
+                        unsent
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .extend(returned.take_unsent_input(channel));
                         received.closed.get_or_insert(error.into());
                     }
                     event @ (ChannelEvent::Frame(_)
@@ -838,13 +898,16 @@ impl PaneLink {
             .clear();
         let pushed = super::inbox::Inbox::new(Arc::clone(&self.notify));
         let channel = self.link.open_channel(self.sink(Arc::clone(&pushed)))?;
-        let reply = Self::wait(channel.claim(
+        let claim = channel.claim(
             claim.attachment,
             claim.pane,
             claim.claim,
             claim.size,
             claim.style,
-        )?);
+        )?;
+        self.bound_channel
+            .store(channel.channel()?.0, Ordering::Release);
+        let reply = Self::wait(claim);
         if let Ok(ReplyBody::Claim(ClaimReply::Attached { lease })) = reply {
             self.channel = Some((channel, lease));
             self.pushed = Some(pushed);
@@ -886,7 +949,27 @@ impl PaneLink {
 
     /// Runs one worker command.
     pub(super) fn exchange(&mut self, request: &Request) -> Result<Reply, CoreError> {
+        if let Err(error) = self.reported() {
+            self.retaining_input.store(true, Ordering::Release);
+            self.unsent_input
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(request_input(request));
+            return Err(error);
+        }
+        let before = self.last_input();
         let result = self.command(request);
+        if result.is_err() {
+            self.retaining_input.store(true, Ordering::Release);
+            let channel = Channel(self.bound_channel.load(Ordering::Acquire));
+            let local = self.link.take_unsent_input(channel);
+            let captured = !local.is_empty();
+            let mut unsent = self.unsent_input.lock().unwrap_or_else(|e| e.into_inner());
+            unsent.extend(local);
+            if !captured && self.last_input() == before {
+                unsent.extend(request_input(request));
+            }
+        }
         // The Terminal Session is gone, so the channel is released and the server frees its slot.
         if matches!(result, Err(CoreError::SessionUnavailable)) {
             self.release();
@@ -963,7 +1046,6 @@ impl PaneLink {
     }
 
     fn command(&mut self, request: &Request) -> Result<Reply, CoreError> {
-        self.reported()?;
         if let Some(permit) = &self.attachment
             && let Some(claim) = permit.claim(&self.link, request)?
         {
@@ -993,8 +1075,15 @@ impl PaneLink {
                 generation,
                 keys,
             } => {
-                for batch in key_batches(keys) {
-                    self.input(lease, generation, batch)?;
+                let mut batches = key_batches(keys).into_iter();
+                while let Some(batch) = batches.next() {
+                    if let Err(error) = self.input(lease, generation, batch) {
+                        self.unsent_input
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .extend(batches.flatten());
+                        return Err(error);
+                    }
                 }
                 Ok(Reply::Unchanged)
             }
@@ -1255,13 +1344,24 @@ fn send(
     connection: &mut PaneLink,
     request: &Request,
 ) -> Result<Reply, CoreError> {
-    presenter.send(request, |request| {
+    let mut entered = false;
+    let result = presenter.send(request, |request| {
         if alive.load(Ordering::Acquire) {
+            entered = true;
             connection.exchange(request)
         } else {
             Err(CoreError::NotRunning)
         }
-    })
+    });
+    if result.is_err() && !entered {
+        connection.retaining_input.store(true, Ordering::Release);
+        connection
+            .unsent_input
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(request_input(request));
+    }
+    result
 }
 
 pub(super) fn expect_unchanged(reply: Reply) -> Result<(), CoreError> {
@@ -1348,6 +1448,9 @@ pub(super) fn present(
                 let state = Arc::clone(&state);
                 Arc::new(move || state.wake.notify())
             });
+            connection.unsent_input = Arc::clone(&state.unsent_input);
+            connection.unconfirmed_input = Arc::clone(&state.unconfirmed_input);
+            connection.retaining_input = Arc::clone(&state.retaining_input);
             let Some(claim::Granted {
                 lease,
                 size: grant_size,
@@ -1398,6 +1501,7 @@ pub(super) fn present(
                 .unwrap_or_else(|e| e.into_inner())
                 .connected(std::time::Instant::now());
             drain_input(&state, &input);
+            state.retaining_input.store(false, Ordering::Release);
             let mut active_input = ActiveInput {
                 epoch,
                 lease,
@@ -1524,7 +1628,8 @@ pub(super) fn present(
                                 PaneEvent::Failed => return Err(CoreError::StartupFailed),
                                 // The link settles input outcomes before they reach the inbox.
                                 // Progress and run receipts are for CLI channels only.
-                                PaneEvent::Input { .. }
+                                PaneEvent::InputRestarting { .. }
+                                | PaneEvent::Input { .. }
                                 | PaneEvent::Progress { .. }
                                 | PaneEvent::RunFinished(_) => {}
                             }
@@ -1843,8 +1948,53 @@ pub(super) fn show(
     Ok(mapping)
 }
 
+fn retain_local_input(state: &CorePaneState, input: &Input) {
+    let event = match input {
+        Input::Key(key) => InputEvent::Key(encode_key(key.clone())),
+        Input::Commit(text, _) | Input::Paste(text, _) => InputEvent::Paste {
+            text: text.clone(),
+            last: true,
+        },
+        Input::Pointer(_, pointer) => InputEvent::Pointer(*pointer),
+        Input::Wheel(_, wheel) => InputEvent::Wheel(*wheel),
+        Input::CopyOrForward(modifiers) => InputEvent::CopyOrForward {
+            modifiers: encode_modifiers(*modifiers),
+        },
+        _ => return,
+    };
+    state
+        .unsent_input
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(event);
+}
+fn request_input(request: &Request) -> Vec<InputEvent> {
+    match request {
+        Request::Keys { keys, .. } => keys.iter().cloned().map(InputEvent::Key).collect(),
+        Request::Input { input, .. } => match input {
+            pane::InteractiveInput::Key(key) => vec![InputEvent::Key(key.clone())],
+            pane::InteractiveInput::Paste { text } => vec![InputEvent::Paste {
+                text: text.clone(),
+                last: true,
+            }],
+            pane::InteractiveInput::Pointer(pointer) => vec![InputEvent::Pointer(*pointer)],
+            pane::InteractiveInput::Wheel(wheel) => vec![InputEvent::Wheel(*wheel)],
+            pane::InteractiveInput::CopyOrForward { modifiers } => {
+                vec![InputEvent::CopyOrForward {
+                    modifiers: *modifiers,
+                }]
+            }
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
 fn drain_input(state: &CorePaneState, input: &mpsc::Receiver<SubmittedInput>) {
     while let Ok(submitted) = input.try_recv() {
+        if state.retaining_input.load(Ordering::Acquire) {
+            retain_local_input(state, &submitted.command);
+        }
         discard_input(state, submitted.epoch, submitted.command);
     }
 }
@@ -1927,6 +2077,43 @@ mod tests {
             _ => {}
         }
         Ok(Reply::Unchanged)
+    }
+
+    #[test]
+    fn a_restarting_refusal_keeps_keys_and_the_remaining_queue_unsent() {
+        let Adapter {
+            handle,
+            input,
+            mut active,
+            ..
+        } = Adapter::new();
+        active.focus_sent = None;
+        for key in typed("kept") {
+            handle.key(key);
+        }
+        let mut unconfirmed = false;
+        let result = active.drain(
+            &handle.state,
+            &input,
+            &mut |_| Err(CoreError::ServiceBusy),
+            &mut unconfirmed,
+        );
+        assert_eq!(result, Err(CoreError::ServiceBusy));
+        drain_input(&handle.state, &input);
+        let retained = handle.state.unsent_input.lock().unwrap();
+        assert!(retained.iter().any(
+            |event| matches!(event, InputEvent::Key(key) if key.text.as_deref() == Some("kept"))
+        ));
+        drop(retained);
+        assert!(
+            handle
+                .state
+                .connection_failed(CoreError::ServiceBusy, false)
+        );
+        assert_eq!(
+            *handle.state.status.lock().unwrap(),
+            CorePaneStatus::Reconnecting
+        );
     }
 
     /// Input queued while the worker was blocked can exceed one turn's bound. Each drain that

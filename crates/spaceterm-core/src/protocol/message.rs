@@ -224,6 +224,8 @@ pub enum PaneEvent {
     /// The channel's run settled. Boxed to keep events small; postcard encodes it as the bare
     /// receipt.
     RunFinished(Box<super::operation::RunReceipt>),
+    /// Work 1.3 only: no event of this Input was admitted. The sender retains it unsent.
+    InputRestarting { channel: Channel, serial: u32 },
 }
 
 impl PaneEvent {

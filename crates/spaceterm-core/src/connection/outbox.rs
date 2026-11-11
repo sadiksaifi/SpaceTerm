@@ -183,6 +183,10 @@ impl Outbox {
         }
     }
 
+    pub fn work(&self) -> ProtocolVersion {
+        self.shared.work
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.shared.state.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -266,6 +270,12 @@ impl Outbox {
     /// Queues a Pane event that leaves the channel open. Use [`Outbox::end`] for `Ended`,
     /// `SessionEnded`, `Failed`, `DirectoryUnavailable` and `Takeover`.
     pub fn pane(&self, channel: Channel, event: PaneEvent) -> Result<(), OutboxError> {
+        if matches!(event, PaneEvent::InputRestarting { .. })
+            && self.shared.work.minor < crate::idle_restart::MINOR
+        {
+            return Err(OutboxError::Misuse);
+        }
+
         let frames = encode(&CoreMessage::Pane(PaneMessage { channel, event }))?;
         self.with(|state| state.push_l1(Entry::Message(frames, None)))
     }
