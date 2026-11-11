@@ -943,4 +943,4 @@ fn app_ladder(stage: UpdateStage) -> (Stage, u64) {
 
 #[cfg(test)]
 #[path = "state_tests.rs"]
-mod tests;
+pub(crate) mod tests;

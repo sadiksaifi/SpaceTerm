@@ -13,9 +13,9 @@ use crate::updates::machines::store::Surface;
 use crate::updates::machines::testing::ScriptedMachines;
 use crate::updates::machines::{FailedPush, MachinePreview, MachineUpdatesEvent};
 
-const NOW: u64 = 100 * DAY;
-const LOCAL: MachineId = [1; 32];
-const PENGUIN: MachineId = [2; 32];
+pub(crate) const NOW: u64 = 100 * DAY;
+pub(crate) const LOCAL: MachineId = [1; 32];
+pub(crate) const PENGUIN: MachineId = [2; 32];
 const BUILD_BOX: MachineId = [3; 32];
 const NAMES: [&str; 3] = ["This Mac", "penguin", "build-box"];
 
@@ -48,7 +48,7 @@ fn pending(to: &str, breaking: bool, installed_at: u64) -> PendingVersion {
     }
 }
 
-fn machine(id: MachineId, name: &str, local: bool, facts: Option<UpdateFacts>) -> MachineUpdate {
+pub(crate) fn machine(id: MachineId, name: &str, local: bool, facts: Option<UpdateFacts>) -> MachineUpdate {
     MachineUpdate {
         machine: id,
         name: name.to_owned().into(),
@@ -65,13 +65,13 @@ fn machine(id: MachineId, name: &str, local: bool, facts: Option<UpdateFacts>) -
 }
 
 /// A Machine waiting with `to` downloaded since `installed_at`.
-fn waiting(id: MachineId, name: &str, sessions: u32, breaking: bool, installed_at: u64) -> MachineUpdate {
+pub(crate) fn waiting(id: MachineId, name: &str, sessions: u32, breaking: bool, installed_at: u64) -> MachineUpdate {
     let mut facts = facts("0.11.3", sessions);
     facts.pending = Some(pending("0.11.4", breaking, installed_at));
     machine(id, name, id == LOCAL, Some(facts))
 }
 
-fn app(state: &UpdateState) -> AppFacts<'_> {
+pub(crate) fn app(state: &UpdateState) -> AppFacts<'_> {
     AppFacts {
         state,
         pending: None,
@@ -113,7 +113,7 @@ impl Desk {
 }
 
 /// Every app state the generator covers, with the flags that change its row.
-fn app_states() -> Vec<(UpdateState, Option<&'static str>, bool, bool, bool)> {
+pub(crate) fn app_states() -> Vec<(UpdateState, Option<&'static str>, bool, bool, bool)> {
     let v = || "0.11.5".to_owned();
     let mut states = Vec::new();
     for asked in [false, true] {
@@ -164,7 +164,7 @@ fn app_states() -> Vec<(UpdateState, Option<&'static str>, bool, bool, bool)> {
 
 /// Every Machine variant the generator covers: link states, update stages, 0, 1 or 3 sessions,
 /// every ladder age, started here or elsewhere.
-fn machine_variants(id: MachineId, name: &str) -> Vec<MachineUpdate> {
+pub(crate) fn machine_variants(id: MachineId, name: &str) -> Vec<MachineUpdate> {
     let local = id == LOCAL;
     let mut all = Vec::new();
     let ages = [NOW, NOW - 3 * DAY, NOW - 8 * DAY];
