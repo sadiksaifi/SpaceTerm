@@ -492,6 +492,35 @@ fn a_stopped_local_core_reads_stopped_and_starts_through_the_service_manager() {
     assert_eq!(running.facts.unwrap().sessions, 0);
 }
 
+/// A service 1.2 Core that is then deliberately stopped reads as stopped in every copy of its
+/// facts: the update view counts no sessions and nothing running from its last detailed answer.
+#[test]
+fn a_stopped_service_1_2_core_keeps_no_sessions_from_its_detailed_facts() {
+    let mut answered = facts(1, 2, Some("0.9.0"));
+    answered.detailed = Some(spaceterm_core::update::DetailedUpdateFacts {
+        facts: answered.facts.clone(),
+        continuation: None,
+        working: 2,
+        restart: None,
+    });
+    let lane = ScriptedLane::new([Ok(answered)]);
+    let machine = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
+    let sources = ScriptedSources::with(vec![known(LOCAL, "This Mac", true, &machine)]);
+    let (_adapter, events) = started(&sources, RESTART_LIMIT);
+    let running = changed(&events, "the running Core", |update| {
+        update.link == MachineLink::Connected && update.facts.is_some()
+    });
+    assert_eq!(row(&running, 1).sessions, 2);
+
+    machine.set(Script::Stopped);
+    sources.change();
+    let stopped = changed(&events, "the stopped Core", |update| {
+        update.link == MachineLink::Stopped
+    });
+    assert_eq!(stopped.facts.as_ref().map(|facts| facts.sessions), Some(0));
+    assert_eq!(row(&stopped, 1).sessions, 0);
+}
+
 /// Install and Check Again become their lane requests. A Restart performed without a preview
 /// executes only the Core's preview of the sessions the person saw. Stop is refused on a paired
 /// Machine without dialing it.

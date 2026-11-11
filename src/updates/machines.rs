@@ -33,7 +33,8 @@ pub(crate) struct MachineUpdate {
     pub(crate) facts: Option<UpdateFacts>,
     /// The latest detailed update facts, from a Core whose service lane offers them. They hold
     /// the same facts as `facts` and the engine's own continuation, which takes precedence over
-    /// [`spaceterm_core::update::continuation`]. None from an older Core.
+    /// [`spaceterm_core::update::continuation`]. None from an older Core. Every writer that
+    /// changes `facts` without a new detailed answer clears them, so the two copies never differ.
     pub(crate) detailed: Option<spaceterm_core::update::DetailedUpdateFacts>,
     pub(crate) capabilities: Capabilities,
     /// This desktop's embedded Core version for the Machine's platform, when it is newer than

@@ -805,6 +805,7 @@ impl Shared {
             entry.update.link = MachineLink::Unreported;
             entry.update.capabilities = reached(work);
             entry.update.facts = None;
+            entry.update.detailed = None;
             entry.update.push = None;
             entry.update.bundled = None;
             entry.restart = None;
@@ -817,6 +818,8 @@ impl Shared {
             entry.update.link = MachineLink::Stopped;
             entry.update.capabilities = unconnected();
             entry.restart = None;
+            // A stopped Core runs no engine, so nothing of its last detailed answer still holds.
+            entry.update.detailed = None;
             if let Some(facts) = &mut entry.update.facts {
                 facts.sessions = 0;
                 facts.operation = None;
