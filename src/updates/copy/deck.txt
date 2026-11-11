@@ -84,7 +84,6 @@ Update Failed | Warning | SpaceTerm Core 0.11.4 didn't start, so it went back to
 Update Failed | Warning | SpaceTerm Core on This Computer is busy with another update.
 Update Failed | Warning | SpaceTerm Core on This Mac is busy with another update.
 Update Failed | Warning | SpaceTerm Core on penguin is busy with another update.
-Update Failed | Warning | SpaceTerm can't replace itself where it is.
 Update Failed | Warning | SpaceTerm was replaced on disk while it was running.
 Update Failed | Warning | The restart into SpaceTerm Core 0.11.4 was interrupted, so it went back to 0.11.3.
 Update Failed | Warning | This Computer is out of disk space.
@@ -96,6 +95,7 @@ Update Failed | Warning | This Mac stopped answering.
 Update Failed | Warning | penguin is out of disk space.
 Update Failed | Warning | penguin needs SpaceTerm Core 0.11.5 first and couldn't get it.
 Update Failed | Warning | penguin stopped answering.
+Update Failed | Warning | {cant-replace-message}
 What's New | Plain | See what's new in SpaceTerm 0.11.4.
 
 ## Rows: name | status · action (subtitle) | description | accessibility
@@ -107,13 +107,13 @@ SpaceTerm | 0.11.5 available · Download (Terminal Sessions keep running) | a11y
 SpaceTerm | 0.11.5 downloaded · Relaunch to Update (Terminal Sessions keep running) | An update has waited 2 days. | a11y: SpaceTerm 0.11.5 is downloaded. Relaunching keeps Terminal Sessions running.
 SpaceTerm | 0.11.5 downloaded · Relaunch to Update (Terminal Sessions keep running) | An update has waited 7 days. | a11y: SpaceTerm 0.11.5 is downloaded. Relaunching keeps Terminal Sessions running.
 SpaceTerm | 0.11.5 downloaded · Relaunch to Update (Terminal Sessions keep running) | a11y: SpaceTerm 0.11.5 is downloaded. Relaunching keeps Terminal Sessions running.
-SpaceTerm | 0.11.5 needs a newer macOS | a11y: SpaceTerm 0.11.5 needs a newer macOS.
+SpaceTerm | 0.11.5 needs a {newer-system} | a11y: SpaceTerm 0.11.5 needs a {newer-system}.
 SpaceTerm | Couldn't download 0.11.5 | SpaceTerm tries again later. | a11y: SpaceTerm couldn't download 0.11.5.
 SpaceTerm | Couldn't download 0.11.5 · Try Again | a11y: SpaceTerm couldn't download 0.11.5.
 SpaceTerm | Couldn't relaunch · Try Again | a11y: SpaceTerm couldn't relaunch. Terminal Sessions keep running.
 SpaceTerm | Downloading 0.11.5… | a11y: Downloading SpaceTerm 0.11.5.
-SpaceTerm | Move SpaceTerm to Applications to update | a11y: Move SpaceTerm to Applications to update.
 SpaceTerm | Relaunching… | a11y: Relaunching SpaceTerm. Terminal Sessions keep running.
+SpaceTerm | {cant-replace-status} | a11y: {cant-replace-status}.
 This Computer | 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | An update has waited 3 days. | a11y: SpaceTerm Core on This Computer has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.
 This Computer | 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | An update has waited 8 days. | a11y: SpaceTerm Core on This Computer has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.
 This Computer | 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | a11y: SpaceTerm Core on This Computer has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.
@@ -396,7 +396,6 @@ Couldn't Stop SpaceTerm Core on penguin | This SpaceTerm is too old for SpaceTer
 Couldn't Stop SpaceTerm Core on penguin | penguin is out of disk space. Free some space, then try again. | OK
 Couldn't Stop SpaceTerm Core on penguin | penguin needs SpaceTerm Core 0.12.0 first and couldn't get it. | OK
 Couldn't Stop SpaceTerm Core on penguin | penguin's clock is more than five minutes behind. Set the correct date and time on penguin, then try again. | OK
-Move SpaceTerm to Applications to Update | SpaceTerm can't replace itself where it is. | OK (dismisses the step)
 Restart SpaceTerm Core on This Mac? | SpaceTerm Core 0.11.3 restarts without updating. No Terminal Session is open. Workspaces, Tabs and Panes stay. | Restart Core, Cancel
 Restart SpaceTerm Core on This Mac? | SpaceTerm Core 0.11.3 restarts without updating. This ends 1 Terminal Session. Workspaces, Tabs and Panes stay. | Restart Core, Cancel
 Restart SpaceTerm Core on This Mac? | SpaceTerm Core 0.11.3 restarts without updating. This ends 3 Terminal Sessions. Workspaces, Tabs and Panes stay. | Restart Core, Cancel
@@ -427,3 +426,11 @@ Stop SpaceTerm Core on This Mac? | This ends 3 Terminal Sessions. SpaceTerm Core
 Stop SpaceTerm Core on penguin? | No Terminal Session is open. SpaceTerm Core stays stopped until you start it again. | Stop, Cancel
 Stop SpaceTerm Core on penguin? | This ends 1 Terminal Session. SpaceTerm Core stays stopped until you start it again. | Stop, Cancel
 Stop SpaceTerm Core on penguin? | This ends 3 Terminal Sessions. SpaceTerm Core stays stopped until you start it again. | Stop, Cancel
+{cant-replace-title} | {cant-replace-message} | OK (dismisses the step)
+
+## Platform strings: token | macOS | Linux
+
+{cant-replace-message} | SpaceTerm can't replace itself where it is. | Run the SpaceTerm install script to update.
+{cant-replace-title} | Move SpaceTerm to Applications to Update | Reinstall SpaceTerm to Update
+{cant-replace-status} | Move SpaceTerm to Applications to update | Run the SpaceTerm install script to update
+{newer-system} | newer macOS | newer system

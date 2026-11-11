@@ -16,6 +16,22 @@ pub(crate) mod title_bar;
 #[cfg(test)]
 mod deck;
 
+/// The desktop platform whose install remedy and system name the copy states. Only
+/// [`Platform::HOST`] renders; the copy deck shows both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Platform {
+    Mac,
+    Linux,
+}
+
+impl Platform {
+    pub(crate) const HOST: Self = if cfg!(target_os = "macos") {
+        Self::Mac
+    } else {
+        Self::Linux
+    };
+}
+
 /// "1 Terminal Session", "3 Terminal Sessions".
 pub(crate) fn sessions(n: u32) -> String {
     match n {

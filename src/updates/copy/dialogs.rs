@@ -3,7 +3,7 @@ use gpui::SharedString;
 use spaceterm_core::protocol::capability::Unavailable;
 use spaceterm_core::update::facts::StartFailure;
 
-use super::{list_and, this_ends};
+use super::{Platform, list_and, this_ends};
 use crate::updates::UpdateError;
 use crate::updates::confirm::{Explanation, Previewed};
 use crate::updates::machines::{ActionFailure, MachineAction};
@@ -110,8 +110,8 @@ pub(crate) fn app_failure(app: &AppRow) -> Option<Explanation> {
             relaunch_failure(version.as_deref(), *error == UpdateError::SettingsUnsaved)
         }
         AppStage::CantReplace => Explanation {
-            title: cant_replace_title().into(),
-            message: cant_replace_message().into(),
+            title: cant_replace_title(Platform::HOST).into(),
+            message: cant_replace_message(Platform::HOST).into(),
             then: None,
             proceed: None,
             dismiss,
@@ -138,21 +138,20 @@ pub(crate) fn relaunch_failure(version: Option<&str>, unsaved: bool) -> Explanat
     }
 }
 
-#[cfg(target_os = "macos")]
-fn cant_replace_title() -> &'static str {
-    "Move SpaceTerm to Applications to Update"
+/// D8's title.
+pub(crate) fn cant_replace_title(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Mac => "Move SpaceTerm to Applications to Update",
+        Platform::Linux => "Reinstall SpaceTerm to Update",
+    }
 }
-#[cfg(not(target_os = "macos"))]
-fn cant_replace_title() -> &'static str {
-    "Reinstall SpaceTerm to Update"
-}
-#[cfg(target_os = "macos")]
-fn cant_replace_message() -> &'static str {
-    "SpaceTerm can't replace itself where it is."
-}
-#[cfg(not(target_os = "macos"))]
-fn cant_replace_message() -> &'static str {
-    "Run the SpaceTerm install script to update."
+
+/// D8's body.
+pub(crate) fn cant_replace_message(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Mac => "SpaceTerm can't replace itself where it is.",
+        Platform::Linux => "Run the SpaceTerm install script to update.",
+    }
 }
 
 /// The alert `Update Failed` opens for a Machine's failure: D3a to D3f.

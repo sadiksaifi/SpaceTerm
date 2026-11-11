@@ -3,7 +3,7 @@
 use gpui::SharedString;
 use spaceterm_core::update::continuation::Continuation;
 
-use super::{dialogs, sessions, waited};
+use super::{Platform, dialogs, sessions, waited};
 use crate::updates::ladder::Stage;
 use crate::updates::machines::MachineAction;
 use crate::updates::state::{
@@ -111,14 +111,14 @@ pub(crate) fn app_row(app: &AppRow) -> RowView {
             "SpaceTerm couldn't relaunch. Terminal Sessions keep running.".to_owned(),
         ),
         AppStage::CantReplace => {
-            let status = cant_replace().to_owned();
+            let status = cant_replace(Platform::HOST).to_owned();
             let sentence = format!("{status}.");
             (status, None, None, sentence)
         }
         AppStage::NeedsNewerSystem { version } => {
             let status = match version {
-                Some(v) => format!("{v} {}", newer_system()),
-                None => format!("Needs a newer {}", system()),
+                Some(v) => format!("{v} needs a newer {}", system(Platform::HOST)),
+                None => format!("Needs a newer {}", system(Platform::HOST)),
             };
             let sentence = format!("SpaceTerm {status}.");
             (status, None, None, sentence)
@@ -139,24 +139,20 @@ pub(crate) fn app_row(app: &AppRow) -> RowView {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn cant_replace() -> &'static str {
-    "Move SpaceTerm to Applications to update"
+/// The SpaceTerm row's status when the installation can't be replaced.
+pub(crate) fn cant_replace(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Mac => "Move SpaceTerm to Applications to update",
+        Platform::Linux => "Run the SpaceTerm install script to update",
+    }
 }
-#[cfg(not(target_os = "macos"))]
-fn cant_replace() -> &'static str {
-    "Run the SpaceTerm install script to update"
-}
-#[cfg(target_os = "macos")]
-fn system() -> &'static str {
-    "macOS"
-}
-#[cfg(not(target_os = "macos"))]
-fn system() -> &'static str {
-    "system"
-}
-fn newer_system() -> String {
-    format!("needs a newer {}", system())
+
+/// The system a release can need a newer version of.
+pub(crate) fn system(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Mac => "macOS",
+        Platform::Linux => "system",
+    }
 }
 
 /// "Restarts into 0.11.4 when 2 Terminal Sessions end", "… when 1 Terminal Session ends".
