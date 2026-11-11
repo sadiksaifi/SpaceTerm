@@ -3717,7 +3717,13 @@ fn render_panel(
                         .text_size(style.metrics.section_font_size)
                         .line_height(style.metrics.section_line_height)
                         .font(typography.section_font().clone())
-                        .child(label),
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("menu-heading-{index}")))
+                                .role(accesskit::Role::Heading)
+                                .aria_label(label.clone())
+                                .child(label),
+                        ),
                 );
             }
             InternalEntryKind::Item {
@@ -3946,6 +3952,9 @@ fn render_row(
     let leading = columns
         .render(style.metrics.leading_column_metrics(), mark, icon)
         .map(|columns| columns.relative().top(icon_offset));
+    // A row with a detail keeps its label whole and truncates the detail, because the label
+    // names what the row acts on.
+    let has_detail = extra.detail.is_some();
     row = row
         .children(leading)
         .child(
@@ -3953,6 +3962,7 @@ fn render_row(
                 .debug_selector(move || label_selector)
                 .min_w_0()
                 .flex_grow(1.0)
+                .when(has_detail, |label| label.flex_shrink_0())
                 .truncate()
                 .when(informational, |label| {
                     label.text_color(secondary_foreground)
@@ -3962,8 +3972,12 @@ fn render_row(
         .when_some(extra.detail, |row, detail| {
             row.child(
                 div()
+                    .id(SharedString::from(detail_selector.clone()))
+                    .role(accesskit::Role::Label)
+                    .aria_label(detail.clone())
                     .debug_selector(move || detail_selector)
-                    .flex_none()
+                    .min_w_0()
+                    .truncate()
                     .text_color(secondary_foreground)
                     .child(detail),
             )
@@ -5754,10 +5768,13 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    fn an_unfitted_panel_truncates_a_row_wider_than_its_size(cx: &mut TestAppContext) {
-        let [(label, label_text), _] = row_widths(false, cx);
+    fn an_unfitted_panel_truncates_the_detail_of_a_row_wider_than_its_size(
+        cx: &mut TestAppContext,
+    ) {
+        let [(label, label_text), (detail, detail_text)] = row_widths(false, cx);
+        assert!(label >= label_text, "label {label:?} < {label_text:?}");
         assert!(
-            label < label_text,
+            detail < detail_text,
             "the fixture must overflow the regular width"
         );
     }

@@ -340,6 +340,57 @@ fn the_chevron_opens_spaceterm_then_every_machine_then_update_settings(
     assert!(machines.performed().is_empty());
 }
 
+/// At the default window a long status truncates before the Machine's name, and assistive
+/// technology reads the status, the action and the heading.
+#[gpui::test]
+fn a_long_status_keeps_the_row_name_whole_and_readable(cx: &mut gpui::TestAppContext) {
+    const NAME: &str = "This Mac";
+    const DETAIL: &str =
+        "Restarts into 0.11.4 when 2 Terminal Sessions end \u{b7} Restart Core\u{2026}";
+    let _ = services(cx);
+    let script = Script::new(recording());
+    let (_, visual) = hosted(&script, cx);
+    visual.simulate_resize(gpui::size(gpui::px(900.0), gpui::px(580.0)));
+    visual.run_until_parked();
+    click("update-pill-menu", visual);
+    let label = visual
+        .debug_bounds("update-row-0-label")
+        .expect("the name renders");
+    let detail = visual
+        .debug_bounds("update-row-0-detail")
+        .expect("the detail renders");
+    let [name_width, detail_width] = visual.update(|window, _| {
+        let font = spaceterm_ui::ControlTypography::default().regular().clone();
+        [NAME, DETAIL].map(|text| {
+            let run = gpui::TextRun {
+                len: text.len(),
+                font: font.clone(),
+                color: window.text_style().color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            window
+                .text_system()
+                .shape_line(text.into(), gpui::px(12.0), &[run], None)
+                .width
+        })
+    });
+    assert!(
+        detail.size.width < detail_width,
+        "the status is long enough to truncate: {:?} >= {detail_width:?}",
+        detail.size.width
+    );
+    assert!(
+        label.size.width >= name_width,
+        "the name shows in full: {:?} < {name_width:?}",
+        label.size.width
+    );
+    let tree = A11yTree::read(visual);
+    tree.node(DETAIL);
+    tree.node("SpaceTerm Core");
+}
+
 /// The owner's complaint: penguin's restart ended while the menu was open, and the menu turned
 /// into a button. Now the list keeps its rows and the pill keeps its shape until the list closes.
 #[gpui::test]
