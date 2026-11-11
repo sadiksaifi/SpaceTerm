@@ -48,7 +48,12 @@ fn pending(to: &str, breaking: bool, installed_at: u64) -> PendingVersion {
     }
 }
 
-pub(crate) fn machine(id: MachineId, name: &str, local: bool, facts: Option<UpdateFacts>) -> MachineUpdate {
+pub(crate) fn machine(
+    id: MachineId,
+    name: &str,
+    local: bool,
+    facts: Option<UpdateFacts>,
+) -> MachineUpdate {
     MachineUpdate {
         machine: id,
         name: name.to_owned().into(),
@@ -65,7 +70,13 @@ pub(crate) fn machine(id: MachineId, name: &str, local: bool, facts: Option<Upda
 }
 
 /// A Machine waiting with `to` downloaded since `installed_at`.
-pub(crate) fn waiting(id: MachineId, name: &str, sessions: u32, breaking: bool, installed_at: u64) -> MachineUpdate {
+pub(crate) fn waiting(
+    id: MachineId,
+    name: &str,
+    sessions: u32,
+    breaking: bool,
+    installed_at: u64,
+) -> MachineUpdate {
     let mut facts = facts("0.11.3", sessions);
     facts.pending = Some(pending("0.11.4", breaking, installed_at));
     machine(id, name, id == LOCAL, Some(facts))
@@ -183,11 +194,17 @@ pub(crate) fn machine_variants(id: MachineId, name: &str) -> Vec<MachineUpdate> 
             }
         }
         let base = machine(id, name, local, Some(facts("0.11.4", sessions)));
-        for asked in [None, Some(Asked::Restart), Some(Asked::Install), Some(Asked::Check)] {
+        for asked in [
+            None,
+            Some(Asked::Restart),
+            Some(Asked::Install),
+            Some(Asked::Check),
+        ] {
             let mut restarting = base.clone();
             restarting.asked = asked;
-            restarting.facts.as_mut().unwrap().operation =
-                Some(Operation::Restarting { to: version("0.11.5") });
+            restarting.facts.as_mut().unwrap().operation = Some(Operation::Restarting {
+                to: version("0.11.5"),
+            });
             all.push(restarting.clone());
             restarting.facts.as_mut().unwrap().operation = Some(Operation::RestartingSameVersion);
             all.push(restarting.clone());
@@ -235,7 +252,8 @@ pub(crate) fn machine_variants(id: MachineId, name: &str) -> Vec<MachineUpdate> 
         });
         all.push(feed.clone());
         let mut beside = waiting(id, name, sessions, false, NOW - 3 * DAY);
-        beside.facts.as_mut().unwrap().last_failure = feed.facts.as_ref().unwrap().last_failure.clone();
+        beside.facts.as_mut().unwrap().last_failure =
+            feed.facts.as_ref().unwrap().last_failure.clone();
         all.push(beside);
         let mut pushed = base.clone();
         pushed.push = Some(version("0.11.5"));
@@ -408,7 +426,10 @@ fn i4_the_list_keeps_its_rows_while_facts_change() {
     let desk = Desk::new();
     let state = UpdateState::UpToDate;
     let order = |view: &UpdateView| -> Vec<SharedString> {
-        view.machine_rows().into_iter().map(|row| row.name).collect()
+        view.machine_rows()
+            .into_iter()
+            .map(|row| row.name)
+            .collect()
     };
     let variants = machine_variants(LOCAL, "This Mac");
     let expected: Vec<SharedString> = vec!["This Mac".into(), "penguin".into(), "build-box".into()];
@@ -434,7 +455,11 @@ fn i4_the_list_keeps_its_rows_while_facts_change() {
 #[test]
 fn i5_each_action_has_one_command_and_download_never_relaunches() {
     scenes(|view, _| {
-        let mut actions: Vec<RowAction> = view.machine_rows().into_iter().filter_map(|row| row.action).collect();
+        let mut actions: Vec<RowAction> = view
+            .machine_rows()
+            .into_iter()
+            .filter_map(|row| row.action)
+            .collect();
         actions.extend(view.app_row().action);
         for action in actions {
             let label = action.label.as_ref();
@@ -442,28 +467,46 @@ fn i5_each_action_has_one_command_and_download_never_relaunches() {
                 action.command,
                 Command::Machine(_, MachineAction::Restart) | Command::Explain(_)
             );
-            assert_eq!(label.ends_with('\u{2026}'), asks, "{label}: {:?}", action.command);
+            assert_eq!(
+                label.ends_with('\u{2026}'),
+                asks,
+                "{label}: {:?}",
+                action.command
+            );
             match label {
                 "Download" => assert!(matches!(
                     action.command,
-                    Command::Desktop(DesktopAction::Download) | Command::Machine(_, MachineAction::Install)
+                    Command::Desktop(DesktopAction::Download)
+                        | Command::Machine(_, MachineAction::Install)
                 )),
                 "Relaunch to Update" => {
                     assert_eq!(action.command, Command::Desktop(DesktopAction::Update))
                 }
                 "Restart Core\u{2026}" | "Try Again\u{2026}" => {
-                    assert!(matches!(action.command, Command::Machine(_, MachineAction::Restart)))
+                    assert!(matches!(
+                        action.command,
+                        Command::Machine(_, MachineAction::Restart)
+                    ))
                 }
-                "What's New" => assert_eq!(action.command, Command::Desktop(DesktopAction::WhatsNew)),
+                "What's New" => {
+                    assert_eq!(action.command, Command::Desktop(DesktopAction::WhatsNew))
+                }
                 _ => {}
             }
         }
         if let Some(pill) = view.pill() {
             match pill.label.as_ref() {
-                "Download Update" => assert_eq!(pill.main, Command::Desktop(DesktopAction::Download)),
-                "Relaunch to Update" => assert_eq!(pill.main, Command::Desktop(DesktopAction::Update)),
+                "Download Update" => {
+                    assert_eq!(pill.main, Command::Desktop(DesktopAction::Download))
+                }
+                "Relaunch to Update" => {
+                    assert_eq!(pill.main, Command::Desktop(DesktopAction::Update))
+                }
                 "Restart Core\u{2026}" => {
-                    assert!(matches!(pill.main, Command::Machine(_, MachineAction::Restart)))
+                    assert!(matches!(
+                        pill.main,
+                        Command::Machine(_, MachineAction::Restart)
+                    ))
                 }
                 _ => {}
             }
@@ -478,7 +521,14 @@ fn i6_no_text_counts_zero_or_uses_a_banned_word() {
     scenes(|view, _| {
         for text in texts(view) {
             assert!(!text.contains("0 Terminal Session"), "{text}");
-            for banned in ["installed", "ready", "idle", "Update This", "Update penguin", "\u{2019}"] {
+            for banned in [
+                "installed",
+                "ready",
+                "idle",
+                "Update This",
+                "Update penguin",
+                "\u{2019}",
+            ] {
                 assert!(!text.contains(banned), "{banned}: {text}");
             }
         }
@@ -512,17 +562,33 @@ fn l1_a_stage_changes_emphasis_never_words() {
     let state = UpdateState::UpToDate;
     for sessions in [1, 2] {
         let at = |days: u64| {
-            desk.view(app(&state), &[waiting(LOCAL, "This Mac", sessions, false, NOW - days * DAY)], NOW)
+            desk.view(
+                app(&state),
+                &[waiting(
+                    LOCAL,
+                    "This Mac",
+                    sessions,
+                    false,
+                    NOW - days * DAY,
+                )],
+                NOW,
+            )
         };
         let offer = at(1);
-        assert_eq!(offer.step, None, "a Core that applies itself is list only at Offer");
+        assert_eq!(
+            offer.step, None,
+            "a Core that applies itself is list only at Offer"
+        );
         let (ask, insist) = (at(3), at(8));
         let (ask_pill, insist_pill) = (ask.pill().unwrap(), insist.pill().unwrap());
         assert_eq!(ask_pill.label, insist_pill.label);
         assert_eq!(ask_pill.emphasis, Emphasis::Accent);
         assert_eq!(insist_pill.emphasis, Emphasis::Warning);
         assert_eq!(offer.machine_rows()[0].status, ask.machine_rows()[0].status);
-        assert_eq!(ask.machine_rows()[0].status, insist.machine_rows()[0].status);
+        assert_eq!(
+            ask.machine_rows()[0].status,
+            insist.machine_rows()[0].status
+        );
         assert!(!ask.insists() && insist.insists());
     }
 }
@@ -535,10 +601,25 @@ fn l2_the_clock_inherits_across_a_replacement_and_resets_after_a_restart() {
     let state = UpdateState::UpToDate;
     let old = waiting(LOCAL, "This Mac", 2, false, NOW - 3 * DAY);
     let mut replaced = old.clone();
-    replaced.facts.as_mut().unwrap().pending.as_mut().unwrap().version = version("0.11.5");
-    let stage = |update: &MachineUpdate| desk.view(app(&state), std::slice::from_ref(update), NOW).machines[0].ladder;
+    replaced
+        .facts
+        .as_mut()
+        .unwrap()
+        .pending
+        .as_mut()
+        .unwrap()
+        .version = version("0.11.5");
+    let stage = |update: &MachineUpdate| {
+        desk.view(app(&state), std::slice::from_ref(update), NOW)
+            .machines[0]
+            .ladder
+    };
     assert_eq!(stage(&old), Some(Stage::Ask));
-    assert_eq!(stage(&replaced), Some(Stage::Ask), "the newer version inherits the clock");
+    assert_eq!(
+        stage(&replaced),
+        Some(Stage::Ask),
+        "the newer version inherits the clock"
+    );
     let mut restarted = waiting(LOCAL, "This Mac", 2, false, NOW);
     restarted.facts.as_mut().unwrap().running = version("0.11.4");
     assert_eq!(stage(&restarted), Some(Stage::Offer));
@@ -551,17 +632,25 @@ fn l3_cancel_defers_an_ask_step_for_a_day_only() {
     let mut desk = Desk::new();
     let cancelled = NOW - ladder::ASK_DEFERRAL + 1;
     desk.deferred.insert(LOCAL, cancelled);
-    let view = |update: MachineUpdate, desk: &Desk, now| desk.view(app(&state), &[update], now).step;
+    let view =
+        |update: MachineUpdate, desk: &Desk, now| desk.view(app(&state), &[update], now).step;
     let ask = waiting(LOCAL, "This Mac", 2, false, NOW - 3 * DAY);
     assert_eq!(view(ask.clone(), &desk, NOW), None);
-    assert!(view(ask, &desk, NOW + 1).is_some(), "24 hours after Cancel it asks again");
+    assert!(
+        view(ask, &desk, NOW + 1).is_some(),
+        "24 hours after Cancel it asks again"
+    );
     let insist = waiting(LOCAL, "This Mac", 2, false, NOW - 8 * DAY);
     assert!(view(insist, &desk, NOW).is_some());
     let mut blocked = waiting(LOCAL, "This Mac", 2, false, NOW - 3 * DAY);
     blocked.link = MachineLink::Incompatible(Incompatible::ListenerTooOld);
     assert!(matches!(
         view(blocked, &desk, NOW),
-        Some(Step::Act { hard_stop: true, stage: None, .. })
+        Some(Step::Act {
+            hard_stop: true,
+            stage: None,
+            ..
+        })
     ));
     desk.deferred.clear();
 }
@@ -578,7 +667,7 @@ fn the_step_follows_the_priority_table() {
     let mut facts = app(&ready);
     facts.ladder = Stage::Ask;
     assert_eq!(
-        desk.view(facts, &[insisting.clone()], NOW).step,
+        desk.view(facts, std::slice::from_ref(&insisting), NOW).step,
         Some(Step::Act {
             kind: ActKind::RestartCore(PENGUIN),
             stage: Some(Stage::Insist),
@@ -588,7 +677,7 @@ fn the_step_follows_the_priority_table() {
     );
     facts.ladder = Stage::Insist;
     assert_eq!(
-        desk.view(facts, &[insisting.clone()], NOW).step,
+        desk.view(facts, std::slice::from_ref(&insisting), NOW).step,
         Some(Step::Act {
             kind: ActKind::Relaunch,
             stage: Some(Stage::Insist),
@@ -620,7 +709,10 @@ fn the_rows_and_the_confirmation_name_the_software_and_the_consequence() {
     let mut this_mac = waiting(LOCAL, "This Mac", 2, false, NOW);
     let view = desk.view(app(&state), &[this_mac.clone()], NOW);
     let row = &view.machine_rows()[0];
-    assert_eq!(row.status.as_deref(), Some("Restarts into 0.11.4 when 2 Terminal Sessions end"));
+    assert_eq!(
+        row.status.as_deref(),
+        Some("Restarts into 0.11.4 when 2 Terminal Sessions end")
+    );
     let action = row.action.clone().unwrap();
     assert_eq!(action.label.as_ref(), "Restart Core\u{2026}");
     assert_eq!(action.subtitle.as_deref(), Some("Ends 2 Terminal Sessions"));
@@ -629,7 +721,14 @@ fn the_rows_and_the_confirmation_name_the_software_and_the_consequence() {
         "SpaceTerm Core on This Mac restarts into 0.11.4 when its 2 Terminal Sessions end. Restart Core ends 2 Terminal Sessions now."
     );
 
-    this_mac.facts.as_mut().unwrap().pending.as_mut().unwrap().installed_at = NOW - 2 * DAY;
+    this_mac
+        .facts
+        .as_mut()
+        .unwrap()
+        .pending
+        .as_mut()
+        .unwrap()
+        .installed_at = NOW - 2 * DAY;
     let view = desk.view(app(&state), &[this_mac.clone()], NOW);
     let pill = view.pill().unwrap();
     assert_eq!(pill.label.as_ref(), "Restart Core\u{2026}");
@@ -638,7 +737,10 @@ fn the_rows_and_the_confirmation_name_the_software_and_the_consequence() {
         pill.tooltip.as_ref(),
         "An update has waited 2 days on This Mac. Restarting into 0.11.4 ends 2 Terminal Sessions."
     );
-    assert_eq!(view.machine_rows()[0].description.as_deref(), Some("An update has waited 2 days."));
+    assert_eq!(
+        view.machine_rows()[0].description.as_deref(),
+        Some("An update has waited 2 days.")
+    );
 
     let preview = MachinePreview {
         machine: LOCAL,
@@ -648,8 +750,16 @@ fn the_rows_and_the_confirmation_name_the_software_and_the_consequence() {
         target: Some(version("0.11.4")),
         id: 1,
     };
-    let confirmation = super::super::confirm::previewed(&[this_mac.clone()], &[preview.clone()], false).unwrap();
-    assert_eq!(confirmation.title.as_ref(), "Restart SpaceTerm Core on This Mac?");
+    let confirmation = super::super::confirm::previewed(
+        std::slice::from_ref(&this_mac),
+        std::slice::from_ref(&preview),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        confirmation.title.as_ref(),
+        "Restart SpaceTerm Core on This Mac?"
+    );
     assert_eq!(
         confirmation.message.as_ref(),
         "SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 2 Terminal Sessions. Workspaces, Tabs and Panes stay."
@@ -664,7 +774,10 @@ fn the_rows_and_the_confirmation_name_the_software_and_the_consequence() {
         pairing: Default::default(),
         name: "iPad".into(),
     }];
-    let none = MachinePreview { sessions: 0, ..preview };
+    let none = MachinePreview {
+        sessions: 0,
+        ..preview
+    };
     let confirmation = super::super::confirm::previewed(&[breaking], &[none], false).unwrap();
     assert_eq!(
         confirmation.message.as_ref(),
@@ -700,7 +813,9 @@ fn r1_the_recorded_journey_shows_whats_new_for_every_frame(cx: &mut gpui::TestAp
     let this_mac = waiting(LOCAL, "This Mac", 2, false, NOW);
     let penguin = waiting(PENGUIN, "penguin", 0, false, NOW);
     let mut restarting = penguin.clone();
-    restarting.facts.as_mut().unwrap().operation = Some(Operation::Restarting { to: version("0.11.4") });
+    restarting.facts.as_mut().unwrap().operation = Some(Operation::Restarting {
+        to: version("0.11.4"),
+    });
     let mut away = restarting.clone();
     away.link = MachineLink::Offline { since: NOW };
     let mut back = machine(PENGUIN, "penguin", false, Some(facts_running("0.11.4")));
@@ -754,14 +869,20 @@ fn r5_only_a_restart_approved_here_shows_restart_progress(cx: &mut gpui::TestApp
     let facts = app(&state);
     let this_mac = waiting(LOCAL, "This Mac", 2, false, NOW);
     let mut restarting = this_mac.clone();
-    restarting.facts.as_mut().unwrap().operation = Some(Operation::Restarting { to: version("0.11.4") });
+    restarting.facts.as_mut().unwrap().operation = Some(Operation::Restarting {
+        to: version("0.11.4"),
+    });
     let mut back = machine(LOCAL, "This Mac", true, Some(facts_running("0.11.4")));
     back.facts.as_mut().unwrap().revision = 2;
 
     adapter.emit(MachineUpdatesEvent::Machines(vec![this_mac.clone()]));
     adapter.emit(MachineUpdatesEvent::Changed(Box::new(restarting.clone())));
     cx.run_until_parked();
-    assert_eq!(store_view(cx, &facts).0.step, None, "another device's restart");
+    assert_eq!(
+        store_view(cx, &facts).0.step,
+        None,
+        "another device's restart"
+    );
 
     adapter.emit(MachineUpdatesEvent::Changed(Box::new(this_mac)));
     cx.run_until_parked();
@@ -780,7 +901,10 @@ fn r5_only_a_restart_approved_here_shows_restart_progress(cx: &mut gpui::TestApp
     };
     assert_eq!(
         shown(cx),
-        (Some(Step::Restarting(LOCAL)), Some("Restarting Core\u{2026}".into())),
+        (
+            Some(Step::Restarting(LOCAL)),
+            Some("Restarting Core\u{2026}".into())
+        ),
         "from the approval"
     );
     adapter.emit(MachineUpdatesEvent::Finished {
@@ -792,13 +916,23 @@ fn r5_only_a_restart_approved_here_shows_restart_progress(cx: &mut gpui::TestApp
     cx.run_until_parked();
     assert_eq!(
         shown(cx),
-        (Some(Step::Restarting(LOCAL)), Some("Restarting Core\u{2026}".into()))
+        (
+            Some(Step::Restarting(LOCAL)),
+            Some("Restarting Core\u{2026}".into())
+        )
     );
     let pill = store_view(cx, &facts).0.pill().unwrap();
-    assert_eq!(pill.tooltip.as_ref(), "Restarting SpaceTerm Core on This Mac into 0.11.4.");
+    assert_eq!(
+        pill.tooltip.as_ref(),
+        "Restarting SpaceTerm Core on This Mac into 0.11.4."
+    );
     assert_eq!(pill.main, Command::ShowList);
 
     adapter.emit(MachineUpdatesEvent::Changed(Box::new(back)));
     cx.run_until_parked();
-    assert_eq!(shown(cx), (None, None), "the pill hides once the Core is back");
+    assert_eq!(
+        shown(cx),
+        (None, None),
+        "the pill hides once the Core is back"
+    );
 }
