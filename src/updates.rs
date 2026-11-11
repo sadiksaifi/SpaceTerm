@@ -578,8 +578,9 @@ pub(crate) struct ApplicationUpdates {
     download_requested: bool,
     /// The person chose Relaunch before the release was ready, so it relaunches once it is.
     relaunch_requested: bool,
-    /// The downloaded release a scheduled check replaces, until that check ends ready, current
-    /// or with another release. The main area keeps its Relaunch meanwhile (design 4.5).
+    /// The downloaded release a scheduled check replaces with the same or a newer one, until a
+    /// release is ready again, SpaceTerm is current or the person checks. The main area keeps
+    /// its Relaunch meanwhile (design 4.5).
     replacing: Option<String>,
     /// A due check ended a cycle that only waited for the person, so a check follows once the
     /// updater finishes it.
@@ -1217,18 +1218,17 @@ impl ApplicationUpdates {
             self.own_download_failed = false;
             self.replacing = None;
         }
-        if let UpdateEvent::Available(version) = &event
-            && self.replacing.as_ref() != Some(version)
-        {
-            self.replacing = None;
-        }
         let finished = matches!(event, UpdateEvent::Finished);
         let notice = self.model.receive(event);
         if found && matches!(self.model.state, UpdateState::Available { .. }) {
+            // A scheduled check that replaced a downloaded release downloads what it found, so
+            // the Relaunch the main area kept stays true.
+            let automatic = self.preferences().automatic_downloads;
             if !self.prepared
                 && (self.download_requested
                     || self.relaunch_requested
-                    || self.preferences().automatic_downloads)
+                    || self.replacing.is_some()
+                    || automatic)
             {
                 self.automatic_download = !self.model.manual_check
                     && !self.download_requested
@@ -1690,12 +1690,40 @@ mod tests {
     }
 
     /// Design 4.5: a scheduled check of a downloaded release ends its cycle and downloads it
-    /// again by itself. The main area keeps `Relaunch to Update` through the whole check.
+    /// again. The main area keeps `Relaunch to Update` through the whole check, and the row
+    /// agrees once the release is downloaded again.
     #[gpui::test]
     fn a_scheduled_check_keeps_relaunch_to_update_in_the_main_area(cx: &mut gpui::TestAppContext) {
+        scheduled_check_keeps_relaunch("0.1.1", true, cx);
+    }
+
+    /// The same when the scheduled check finds a newer release and downloads that one by itself.
+    #[gpui::test]
+    fn a_scheduled_check_that_finds_a_newer_release_keeps_relaunch_to_update(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        scheduled_check_keeps_relaunch("0.1.2", true, cx);
+    }
+
+    /// With automatic downloads off, the check downloads the release the person downloaded again,
+    /// so `Relaunch to Update` stays true.
+    #[gpui::test]
+    fn a_scheduled_check_downloads_again_a_release_the_person_downloaded(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        scheduled_check_keeps_relaunch("0.1.1", false, cx);
+    }
+
+    fn scheduled_check_keeps_relaunch(found: &str, automatic: bool, cx: &mut gpui::TestAppContext) {
         let adapter = Rc::new(RecordingAdapter::available());
         cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
         let service = cx.update(|cx| cx.global::<UpdateService>().0.clone());
+        let mut document = crate::settings::SettingsDocument::default();
+        document.updates.automatic_downloads = automatic;
+        let settings = crate::settings::Settings::load(
+            crate::settings::storage::testing::MemoryStorage::with_document(&document),
+        );
+        service.update(cx, |updates, _| updates.attach_settings(settings));
         service.update(cx, |updates, cx| updates.check(false, cx));
         adapter.emit(UpdateEvent::Available("0.1.1".into()));
         cx.run_until_parked();
@@ -1715,9 +1743,10 @@ mod tests {
         adapter.emit(UpdateEvent::Finished);
         cx.run_until_parked();
         assert_eq!(main(cx), relaunch, "while it checks");
-        adapter.emit(UpdateEvent::Available("0.1.1".into()));
+        adapter.emit(UpdateEvent::Available(found.into()));
         cx.run_until_parked();
-        assert_eq!(main(cx), relaunch, "after it finds the same release");
+        assert_eq!(main(cx), relaunch, "after it finds {found}");
+        assert_eq!(adapter.downloads.get(), 2, "it downloads {found} again");
         adapter.emit(UpdateEvent::Downloading {
             received: 1,
             total: 2,
@@ -1727,6 +1756,12 @@ mod tests {
         adapter.emit(UpdateEvent::Ready);
         cx.run_until_parked();
         assert_eq!(main(cx), relaunch);
+        let row = cx.update(|cx| state::current(cx).app_row());
+        assert_eq!(
+            row.status.as_deref(),
+            Some(format!("{found} downloaded").as_str()),
+            "the row agrees"
+        );
     }
 
     /// The scheduler sleeps from one due check or reminder to the next. Every step lands exactly
