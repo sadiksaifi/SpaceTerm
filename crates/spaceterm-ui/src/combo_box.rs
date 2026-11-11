@@ -1921,15 +1921,20 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBoxState<I, C> {
         self.recompute_matches(true);
         self.repair_provisional();
         if self.open {
-            self.status_rest = Some(cx.spawn(async move |state, cx| {
-                cx.background_executor().timer(STATUS_REST).await;
-                let _ = state.update(cx, |state, cx| {
-                    state.status_rest = None;
-                    cx.notify();
-                });
-            }));
+            self.rest_status(cx);
         }
         cx.notify();
+    }
+
+    /// Restarts the wait before a line that names the query is announced.
+    fn rest_status(&mut self, cx: &mut gpui::Context<Self>) {
+        self.status_rest = Some(cx.spawn(async move |state, cx| {
+            cx.background_executor().timer(STATUS_REST).await;
+            let _ = state.update(cx, |state, cx| {
+                state.status_rest = None;
+                cx.notify();
+            });
+        }));
     }
 
     fn recompute_matches(&mut self, reset_command_selection: bool) -> bool {
@@ -2051,6 +2056,10 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBoxState<I, C> {
             self.input.update(cx, |input, cx| input.set_value("", cx));
         }
         self.query = self.input.read(cx).value().to_owned();
+        // A character typed on the trigger opens the popup as its query, and more may follow.
+        if !self.query.is_empty() {
+            self.rest_status(cx);
+        }
         self.recompute_matches(false);
         self.provisional = if from_end {
             self.last_enabled_match().map(|item| item.id.clone())
@@ -4089,7 +4098,6 @@ pub(crate) mod tests {
                         "Choose",
                         vec![ComboBoxItem::new(1u8, "Local")],
                     )
-                    .debug_selector("resting-status-trigger")
                     .on_accept(|_, _, _| {}),
                 )
             }
@@ -4108,17 +4116,14 @@ pub(crate) mod tests {
         let almost = rest - std::time::Duration::from_millis(1);
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
-        let trigger = cx
-            .debug_bounds("resting-status-trigger")
-            .expect("the trigger should render");
-        cx.simulate_click(trigger.center(), gpui::Modifiers::none());
+        // The first character opens the popup from its trigger and is its query.
+        cx.update(|window, cx| window.focus_next(cx));
         cx.run_until_parked();
-
-        cx.simulate_input("z");
+        cx.simulate_keystrokes("z");
         cx.run_until_parked();
         assert!(
             cx.debug_bounds("combo-box-empty").is_some(),
-            "the row shows the line at once"
+            "the row is shown at once"
         );
         assert_eq!(announced(cx), "");
         cx.executor().advance_clock(almost);
