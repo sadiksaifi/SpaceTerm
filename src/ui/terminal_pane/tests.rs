@@ -2394,7 +2394,9 @@ fn core_pane_refused_input_offers_its_text_to_copy_without_sending_it(cx: &mut T
 
 /// After a lost connection the same Terminal Session runs on. What the Core never confirmed
 /// may not have been sent, so the status never claims it wasn't, and Copy Typed Text puts it on
-/// the clipboard without sending it. Text typed at a hidden prompt offers nothing to copy.
+/// the clipboard without sending it. The kept text stays offered until it is copied or its
+/// Session ends. Hidden-prompt text never reaches the Pane:
+/// `password_text_is_never_offered_after_a_lost_connection` covers it through the worker.
 #[gpui::test]
 fn core_pane_unconfirmed_input_after_a_lost_connection_may_not_have_been_sent(
     cx: &mut TestAppContext,
@@ -2430,13 +2432,50 @@ fn core_pane_unconfirmed_input_after_a_lost_connection_may_not_have_been_sent(
     );
     assert_eq!(records.commands().len(), sent, "nothing is sent again");
 
-    records.keep_unsent_input(1, lost(""));
-    pane.update(cx, |_, cx| cx.notify());
-    cx.run_until_parked();
     assert!(
         cx.debug_bounds("copy-typed-text").is_none(),
-        "hidden-prompt text is never offered"
+        "copying dismisses the kept text"
     );
+
+    // Two losses before the person copies run on as one text, and another status hides the
+    // kept text only while it shows.
+    let show = |cx: &mut VisualTestContext| {
+        pane.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+    };
+    records.keep_unsent_input(1, lost("ls "));
+    show(cx);
+    records.keep_unsent_input(1, lost("-la"));
+    show(cx);
+    pane.update(cx, |pane, cx| {
+        pane.status = Some("Diagnostics exported".to_owned());
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("copy-typed-text").is_none());
+    pane.update(cx, |pane, cx| {
+        pane.status = None;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let bounds = cx
+        .debug_bounds("copy-typed-text")
+        .expect("the kept text is offered again");
+    cx.simulate_click(bounds.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()),
+        Some("ls -la".to_owned())
+    );
+
+    // A Terminal Session that ends takes what the Pane kept for it.
+    records.keep_unsent_input(1, lost("rm -r build"));
+    show(cx);
+    assert!(cx.debug_bounds("copy-typed-text").is_some());
+    records.leave_unsent_session(1);
+    show(cx);
+    assert!(cx.debug_bounds("copy-typed-text").is_none());
+    assert_eq!(records.commands().len(), sent, "nothing is sent again");
 }
 
 fn current_native_service_origin(

@@ -572,7 +572,7 @@ mod tests {
         assert!(run_claim(&state, |_| Ok(attached())).unwrap().is_some());
         state.attached_session();
         assert_eq!(
-            state.take_unsent_notice(),
+            state.take_unsent_notice().notice,
             Some(super::super::unsent::UnsentNotice {
                 interruption: super::super::unsent::Interruption::Restart,
                 input: super::super::unsent::UnsentInput {
@@ -581,7 +581,11 @@ mod tests {
                 },
             })
         );
-        assert_eq!(state.take_unsent_notice(), None, "it says so once");
+        assert_eq!(
+            state.take_unsent_notice(),
+            Default::default(),
+            "it says so once"
+        );
 
         let state = CorePaneState::new();
         state
@@ -611,8 +615,11 @@ mod tests {
         state.attached_session();
         assert_eq!(
             state.take_unsent_notice(),
-            None,
-            "the new Session says nothing"
+            super::super::unsent::UnsentChange {
+                session_left: true,
+                notice: None,
+            },
+            "the new Session says nothing, and the Pane drops what it held"
         );
         assert_eq!(state.unsent_input(), None);
     }

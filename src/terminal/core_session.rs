@@ -74,7 +74,7 @@ pub(crate) struct CorePaneState {
     unsent: Arc<Mutex<unsent::Unsent>>,
     /// A Terminal Session that survived the idle restart grant that refused its input, until
     /// the Pane's status says so.
-    unsent_notice: Mutex<Option<unsent::UnsentNotice>>,
+    unsent_notice: Mutex<unsent::UnsentChange>,
     retaining_input: Arc<AtomicBool>,
     /// Admission settles before a hidden Pane receives its input-enabling screen.
     admission: Mutex<Admission>,
@@ -100,8 +100,10 @@ pub(crate) struct CorePaneState {
     paste_unconfirmed: AtomicBool,
     interaction: Mutex<Interaction>,
     effect_authority: Arc<ClipboardAuthority>,
-    /// Shared with the link, which keeps no text typed at a hidden prompt.
-    hidden_input: Arc<AtomicBool>,
+    hidden_input: AtomicBool,
+    /// Whether the input the worker sends now was typed at a hidden prompt. Shared with the
+    /// link, which records it per Input serial.
+    sending_hidden: Arc<AtomicBool>,
     reading: Mutex<reading::Reading>,
     accessibility: Mutex<accessibility::RetainedSemantics>,
     accessibility_demand: AtomicBool,
@@ -138,7 +140,8 @@ impl CorePaneState {
             connected_epoch: AtomicU64::new(0),
             paste_unconfirmed: AtomicBool::new(false),
             interaction: Mutex::new(Interaction::default()),
-            hidden_input: Arc::default(),
+            hidden_input: AtomicBool::new(false),
+            sending_hidden: Arc::default(),
             reading: Mutex::default(),
             accessibility: Mutex::default(),
             accessibility_demand: AtomicBool::new(false),
@@ -273,42 +276,53 @@ impl CorePaneState {
             .unwrap_or_else(|e| e.into_inner())
             .input()
     }
-    /// Keeps the text of `events`, which the Core refused or never confirmed.
+    /// Keeps the text of `events`, which the Core refused or never confirmed. `hidden` says
+    /// they were typed at a hidden prompt, so only the loss is kept.
     fn keep_input<'a>(
         &self,
         delivery: unsent::Delivery,
         events: impl IntoIterator<Item = &'a spaceterm_core::protocol::InputEvent>,
+        hidden: bool,
     ) {
-        let hidden = self.hidden_input.load(Ordering::Acquire);
         self.unsent
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .keep(delivery, events, hidden);
     }
-    /// The Pane attached to a Terminal Session. One that survived the idle restart grant that
-    /// refused input says so once in the Pane's status.
+    /// The Pane attached to a Terminal Session. One that survived what interrupted it says
+    /// once in the Pane's status what it kept. A notice the Pane has not shown yet is merged
+    /// with the new one, never replaced.
     fn attached_session(&self) {
-        let notice = self
+        let Some(notice) = self
             .unsent
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .attached();
-        *self.unsent_notice.lock().unwrap_or_else(|e| e.into_inner()) = notice;
+            .attached()
+        else {
+            return;
+        };
+        let mut pending = self.unsent_notice.lock().unwrap_or_else(|e| e.into_inner());
+        pending.notice = Some(match pending.notice.take() {
+            Some(earlier) => earlier.then(notice),
+            None => notice,
+        });
     }
     /// What the Pane's status says once about a Terminal Session that survived the idle restart
     /// grant that refused its input.
-    fn take_unsent_notice(&self) -> Option<unsent::UnsentNotice> {
-        self.unsent_notice
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
+    fn take_unsent_notice(&self) -> unsent::UnsentChange {
+        std::mem::take(&mut *self.unsent_notice.lock().unwrap_or_else(|e| e.into_inner()))
     }
     /// The Terminal Session the kept input was for ended or belongs to another client.
     fn left_session(&self) {
+        let unshown = {
+            let mut pending = self.unsent_notice.lock().unwrap_or_else(|e| e.into_inner());
+            pending.session_left = true;
+            pending.notice.take()
+        };
         self.unsent
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .left_session();
+            .left_session(unshown);
     }
     pub(crate) fn start_restored(&self) {
         let status = self.status.lock().unwrap_or_else(|e| e.into_inner());
@@ -784,6 +798,8 @@ struct SubmittedInput {
     epoch: u64,
     focus_generation: u64,
     command: Input,
+    /// The program was reading hidden input, such as a password, when the person typed this.
+    hidden: bool,
 }
 #[derive(Clone, Copy)]
 struct PendingPaste {
@@ -1135,7 +1151,7 @@ impl TerminalSessionHandle for PresentationHandle {
     fn take_paste_unconfirmed(&self) -> bool {
         self.state.paste_unconfirmed.swap(false, Ordering::AcqRel)
     }
-    fn take_unsent_input(&self) -> Option<unsent::UnsentNotice> {
+    fn take_unsent_input(&self) -> unsent::UnsentChange {
         self.state.take_unsent_notice()
     }
     fn focus_paste_confirmation(&self, id: super::paste::PasteConfirmationId) {

@@ -150,7 +150,7 @@ pub(crate) struct TestTerminalSessionRecords {
     input_generations: Rc<RefCell<BTreeMap<usize, u64>>>,
     unconfirmed_pastes: Rc<RefCell<BTreeMap<usize, bool>>>,
     unsent_inputs:
-        Rc<RefCell<BTreeMap<usize, crate::terminal::core_session::unsent::UnsentNotice>>>,
+        Rc<RefCell<BTreeMap<usize, crate::terminal::core_session::unsent::UnsentChange>>>,
     dropped_session_ids: Rc<RefCell<Vec<usize>>>,
     commands: Rc<RefCell<Vec<RecordedCall>>>,
 }
@@ -162,7 +162,20 @@ impl TestTerminalSessionRecords {
         session_id: usize,
         input: crate::terminal::core_session::unsent::UnsentNotice,
     ) {
-        self.unsent_inputs.borrow_mut().insert(session_id, input);
+        self.unsent_inputs
+            .borrow_mut()
+            .entry(session_id)
+            .or_default()
+            .notice = Some(input);
+    }
+
+    /// The Terminal Session `session_id` shows ended or went to another client.
+    pub(crate) fn leave_unsent_session(&self, session_id: usize) {
+        self.unsent_inputs
+            .borrow_mut()
+            .entry(session_id)
+            .or_default()
+            .session_left = true;
     }
 
     pub(crate) fn retain_unconfirmed_paste(&self, session_id: usize) {
@@ -486,11 +499,12 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
     fn reading_available(&self) -> bool {
         self.reading_available
     }
-    fn take_unsent_input(&self) -> Option<crate::terminal::core_session::unsent::UnsentNotice> {
+    fn take_unsent_input(&self) -> crate::terminal::core_session::unsent::UnsentChange {
         self.records
             .unsent_inputs
             .borrow_mut()
             .remove(&self.session_id)
+            .unwrap_or_default()
     }
     fn take_paste_unconfirmed(&self) -> bool {
         self.records

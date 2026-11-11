@@ -10,6 +10,44 @@ use crate::terminal::PhysicalKey;
 /// The most text kept. Typing during a restart is short; a large paste keeps its start.
 const MAX_TEXT_BYTES: usize = 64 * 1024;
 
+/// Which Input serials on the bound channel carried input typed at a hidden prompt, until the
+/// Core confirms them. A kept serial is checked against this record, never against the Pane's
+/// current prompt, which a failure resets before the input is kept.
+#[derive(Debug, Default)]
+pub(crate) struct HiddenSerials {
+    serials: std::collections::BTreeSet<u32>,
+}
+
+impl HiddenSerials {
+    /// The worker sent `serial`, typed at a hidden prompt when `hidden`.
+    pub(super) fn sent(&mut self, serial: u32, hidden: bool) {
+        if hidden {
+            self.serials.insert(serial);
+        }
+    }
+
+    /// The Core applied every Input through `serial`.
+    pub(super) fn confirmed(&mut self, serial: u32) {
+        self.serials.retain(|sent| *sent > serial);
+    }
+
+    /// Whether `serial` was typed at a hidden prompt.
+    pub(super) fn hidden(&self, serial: u32) -> bool {
+        self.serials.contains(&serial)
+    }
+
+    /// Whether any input the Core has not confirmed was typed at a hidden prompt. Unconfirmed
+    /// input comes back as one list, so one hidden serial hides all of it.
+    pub(super) fn any(&self) -> bool {
+        !self.serials.is_empty()
+    }
+
+    /// A new channel numbers its Input from 1.
+    pub(super) fn clear(&mut self) {
+        self.serials.clear();
+    }
+}
+
 /// Whether the Core received what the person typed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Delivery {
@@ -43,6 +81,44 @@ pub(crate) enum Interruption {
 pub(crate) struct UnsentNotice {
     pub(crate) interruption: Interruption,
     pub(crate) input: UnsentInput,
+}
+
+/// What changed about kept input since the Pane last asked.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct UnsentChange {
+    /// The Terminal Session the Pane showed kept input for ended or went to another client, so
+    /// the Pane drops what it holds. The ended Pane offers what was kept since.
+    pub(crate) session_left: bool,
+    /// What to say after that, for the Terminal Session the Pane is attached to now.
+    pub(crate) notice: Option<UnsentNotice>,
+}
+
+impl UnsentNotice {
+    /// `self` followed by `later`, which a later attachment kept before the person saw `self`.
+    /// The text runs on in order. Any unknown part makes all of it unknown, and any lost
+    /// connection makes the cause a lost connection.
+    pub(crate) fn then(self, later: Self) -> Self {
+        let mut text = self.input.text;
+        text.push_str(&later.input.text);
+        let delivery = if self.input.delivery == Delivery::Unknown
+            || later.input.delivery == Delivery::Unknown
+        {
+            Delivery::Unknown
+        } else {
+            Delivery::NotSent
+        };
+        let interruption = if self.interruption == Interruption::Restart
+            && later.interruption == Interruption::Restart
+        {
+            Interruption::Restart
+        } else {
+            Interruption::Connection
+        };
+        Self {
+            interruption,
+            input: UnsentInput { delivery, text },
+        }
+    }
 }
 
 /// Input kept since the Pane last attached to a Terminal Session.
@@ -97,8 +173,17 @@ impl Unsent {
     }
 
     /// The Terminal Session the input was for ended or belongs to another client. The ended
-    /// Pane says what was kept; a later attachment does not.
-    pub(super) fn left_session(&mut self) {
+    /// Pane says what was kept, including `unshown`, a notice the Pane never showed; a later
+    /// attachment says nothing.
+    pub(super) fn left_session(&mut self, unshown: Option<UnsentNotice>) {
+        if let Some(earlier) = unshown {
+            let input = earlier.input;
+            self.text = input.text + &self.text;
+            match input.delivery {
+                Delivery::NotSent => self.not_sent = true,
+                Delivery::Unknown => self.unknown = true,
+            }
+        }
         self.left = true;
     }
 
@@ -268,6 +353,43 @@ mod tests {
         assert_eq!(unsent.attached(), None, "it says so once");
     }
 
+    /// A notice the Pane has not shown yet runs on with the next one, and one never shown before
+    /// the Session ended goes to the ended Pane.
+    #[test]
+    fn kept_input_is_merged_and_never_overwritten() {
+        let notice = |interruption, delivery, text: &str| UnsentNotice {
+            interruption,
+            input: UnsentInput {
+                delivery,
+                text: text.into(),
+            },
+        };
+        let restart = notice(Interruption::Restart, Delivery::NotSent, "ls ");
+        assert_eq!(
+            restart
+                .clone()
+                .then(notice(Interruption::Restart, Delivery::NotSent, "-la")),
+            notice(Interruption::Restart, Delivery::NotSent, "ls -la")
+        );
+        assert_eq!(
+            restart
+                .clone()
+                .then(notice(Interruption::Connection, Delivery::Unknown, "-la")),
+            notice(Interruption::Connection, Delivery::Unknown, "ls -la")
+        );
+
+        let mut unsent = Unsent::default();
+        unsent.keep(Delivery::NotSent, &typed("-la"), false);
+        unsent.left_session(Some(restart));
+        assert_eq!(
+            unsent.input(),
+            Some(UnsentInput {
+                delivery: Delivery::NotSent,
+                text: "ls -la".into()
+            })
+        );
+    }
+
     /// A Terminal Session that survived the refusing grant hears about it on attachment; one that
     /// ended does not. Every attachment starts a new record.
     #[test]
@@ -287,7 +409,7 @@ mod tests {
         assert_eq!(unsent.input(), None);
 
         unsent.refused_by_restart(&typed("ls"), false);
-        unsent.left_session();
+        unsent.left_session(None);
         assert_eq!(unsent.input().map(|input| input.text), Some("ls".into()));
         assert_eq!(unsent.attached(), None, "a new Session says nothing");
         assert_eq!(unsent.input(), None);

@@ -65,6 +65,7 @@ pub(super) fn submit_input(
         epoch,
         focus_generation,
         command: input,
+        hidden: state.hidden_input.load(Ordering::Acquire),
     };
     let sent = sender.try_send(submitted);
     drop(interaction);
@@ -178,7 +179,7 @@ impl ActiveInput {
                 continue;
             }
             if let Err(error) = self.send_keys(state, std::mem::take(&mut keys), exchange) {
-                retain_local_input(state, &submitted.command);
+                retain_local_input(state, &submitted);
                 return Err(error);
             }
             self.process(state, submitted, exchange, paste_unconfirmed)?;
@@ -202,17 +203,18 @@ impl ActiveInput {
         if let Err(error) = self.sync_focus(state, exchange) {
             state.retaining_input.store(true, Ordering::Release);
             for submitted in &submitted {
-                retain_local_input(state, &submitted.command);
+                retain_local_input(state, submitted);
             }
             state.invalidate();
             return Err(error);
         }
-        let (generation, keys) = {
+        let (generation, keys, hidden) = {
             let interaction = state.interaction.lock().unwrap_or_else(|e| e.into_inner());
             if state.epoch.load(Ordering::Acquire) != self.epoch || !interaction.interactive {
                 return Ok(());
             }
             let generation = interaction.focus_generation;
+            let mut hidden = false;
             let keys: Vec<_> = submitted
                 .into_iter()
                 .filter(|submitted| {
@@ -221,15 +223,20 @@ impl ActiveInput {
                         && submitted.command.eligible(interaction.target)
                 })
                 .filter_map(|submitted| match submitted.command {
-                    Input::Key(key) => Some(encode_key(key)),
+                    Input::Key(key) => {
+                        hidden |= submitted.hidden;
+                        Some(encode_key(key))
+                    }
                     _ => None,
                 })
                 .collect();
-            (generation, keys)
+            (generation, keys, hidden)
         };
         if keys.is_empty() {
             return Ok(());
         }
+        // The link records each Input serial this sends with the prompt it was typed at.
+        state.sending_hidden.store(hidden, Ordering::Release);
         match exchange(&Request::Keys {
             lease: self.lease,
             generation,
@@ -253,6 +260,7 @@ impl ActiveInput {
         generation: u64,
         text: &str,
         exchange: &mut impl FnMut(&Request) -> Result<Reply, CoreError>,
+        hidden: bool,
     ) -> Result<InputMethodOutcome, CoreError> {
         let mut remaining = text;
         while !remaining.is_empty() {
@@ -295,6 +303,7 @@ impl ActiveInput {
                             text: remaining[..end].to_owned(),
                             last: true,
                         }],
+                        hidden,
                     );
                     if !remaining[end..].is_empty() {
                         state.keep_input(
@@ -303,6 +312,7 @@ impl ActiveInput {
                                 text: remaining[end..].to_owned(),
                                 last: true,
                             }],
+                            hidden,
                         );
                     }
                     state.invalidate();
@@ -329,11 +339,15 @@ impl ActiveInput {
         }
         if let Err(error) = self.sync_focus(state, exchange) {
             state.retaining_input.store(true, Ordering::Release);
-            retain_local_input(state, &submitted.command);
+            retain_local_input(state, &submitted);
             state.invalidate();
             discard_input(state, submitted.epoch, submitted.command);
             return Err(error);
         }
+        // The link records each Input serial this sends with the prompt it was typed at.
+        state
+            .sending_hidden
+            .store(submitted.hidden, Ordering::Release);
         let valid = {
             let interaction = state.interaction.lock().unwrap_or_else(|e| e.into_inner());
             state.epoch.load(Ordering::Acquire) == self.epoch
@@ -357,7 +371,8 @@ impl ActiveInput {
         };
         let (request, paste_reply) = match submitted.command {
             Input::Commit(text, reply) => {
-                let result = self.write_input_method(state, generation, &text, exchange);
+                let result =
+                    self.write_input_method(state, generation, &text, exchange, submitted.hidden);
                 let _ = reply.try_send(match &result {
                     Ok(outcome) => *outcome,
                     Err(_) => InputMethodOutcome::Interrupted,
@@ -653,8 +668,13 @@ pub(super) struct PaneLink {
     last_input: std::cell::Cell<u32>,
     /// Shared with [`CorePaneState::unsent`].
     unsent: Arc<Mutex<unsent::Unsent>>,
-    /// Shared with [`CorePaneState::hidden_input`].
-    hidden_input: Arc<AtomicBool>,
+    /// Shared with [`CorePaneState::sending_hidden`].
+    sending_hidden: Arc<AtomicBool>,
+    /// The bound channel's Input serials typed at a hidden prompt, until the Core confirms them.
+    hidden_serials: Arc<Mutex<unsent::HiddenSerials>>,
+    /// An error or refusal ended the bound channel, so what the link still holds of its input
+    /// is kept for the person. A dismissed presentation keeps nothing.
+    failed: std::cell::Cell<bool>,
     bound_channel: Arc<std::sync::atomic::AtomicU32>,
     retaining_input: Arc<AtomicBool>,
 }
@@ -695,19 +715,30 @@ impl PaneLink {
             notify,
             last_input: std::cell::Cell::new(0),
             unsent: Arc::default(),
-            hidden_input: Arc::default(),
+            sending_hidden: Arc::default(),
+            hidden_serials: Arc::default(),
+            failed: std::cell::Cell::new(false),
             bound_channel: Arc::default(),
             retaining_input: Arc::default(),
         }
     }
 
-    /// Keeps the text of `events`, which the Core refused or never confirmed.
-    fn keep(&self, delivery: unsent::Delivery, events: &[InputEvent]) {
-        self.unsent.lock().unwrap_or_else(|e| e.into_inner()).keep(
-            delivery,
-            events,
-            self.hidden_input.load(Ordering::Acquire),
-        );
+    /// Keeps the text of `events`, which the Core refused or never confirmed. `hidden` says
+    /// they were typed at a hidden prompt, so only the loss is kept.
+    fn keep(&self, delivery: unsent::Delivery, events: &[InputEvent], hidden: bool) {
+        self.unsent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keep(delivery, events, hidden);
+    }
+
+    /// Whether any input the link still holds for the bound channel was typed at a hidden
+    /// prompt.
+    fn holds_hidden(&self) -> bool {
+        self.hidden_serials
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .any()
     }
 
     /// The highest Input serial sent on the bound channel, or 0 before any.
@@ -728,6 +759,10 @@ impl PaneLink {
 
     fn sent(&self, serial: u32) -> u32 {
         self.last_input.set(self.last_input.get().max(serial));
+        self.hidden_serials
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .sent(serial, self.sending_hidden.load(Ordering::Acquire));
         serial
     }
 
@@ -737,7 +772,7 @@ impl PaneLink {
         let inbox = Arc::clone(&self.inbox);
         let returned = self.link.clone();
         let unsent = Arc::clone(&self.unsent);
-        let hidden_input = Arc::clone(&self.hidden_input);
+        let hidden_serials = Arc::clone(&self.hidden_serials);
         let bound_channel = Arc::clone(&self.bound_channel);
         let retaining_input = Arc::clone(&self.retaining_input);
         let notify = Arc::clone(&self.notify);
@@ -750,10 +785,14 @@ impl PaneLink {
                         let events = returned
                             .take_unaccepted_input(channel, serial)
                             .unwrap_or_default();
+                        let hidden = hidden_serials
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .hidden(serial);
                         unsent
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
-                            .refused_by_restart(&events, hidden_input.load(Ordering::Acquire));
+                            .refused_by_restart(&events, hidden);
                         if received.dropped.len() == MAX_DROPPED {
                             received.dropped.pop_front();
                         }
@@ -787,7 +826,10 @@ impl PaneLink {
                     ChannelEvent::Closed(error) => {
                         retaining_input.store(true, Ordering::Release);
                         let channel = Channel(bound_channel.load(Ordering::Acquire));
-                        let hidden = hidden_input.load(Ordering::Acquire);
+                        let hidden = hidden_serials
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .any();
                         let mut kept = unsent.lock().unwrap_or_else(|e| e.into_inner());
                         kept.keep(
                             unsent::Delivery::Unknown,
@@ -805,13 +847,29 @@ impl PaneLink {
                     event @ (ChannelEvent::Frame(_)
                     | ChannelEvent::Pane(_)
                     | ChannelEvent::Accessibility(_)) => {
+                        // A frame or progress names the last Input the Core applied.
+                        let applied = match &event {
+                            ChannelEvent::Frame(frame) => Some(frame.input),
+                            ChannelEvent::Pane(PaneEvent::Progress { input, .. }) => Some(*input),
+                            _ => None,
+                        };
+                        if let Some(applied) = applied {
+                            hidden_serials
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .confirmed(applied);
+                        }
                         if matches!(&event, ChannelEvent::Pane(event) if event.last()) {
                             retaining_input.store(true, Ordering::Release);
                             let channel = Channel(bound_channel.load(Ordering::Acquire));
+                            let hidden = hidden_serials
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .any();
                             unsent.lock().unwrap_or_else(|e| e.into_inner()).keep(
                                 unsent::Delivery::Unknown,
                                 &returned.take_unconfirmed_input(channel),
-                                hidden_input.load(Ordering::Acquire),
+                                hidden,
                             );
                         }
                         drop(received);
@@ -983,21 +1041,36 @@ impl PaneLink {
 
     /// Runs one worker command.
     pub(super) fn exchange(&mut self, request: &Request) -> Result<Reply, CoreError> {
+        let sending_hidden = self.sending_hidden.load(Ordering::Acquire);
         if let Err(error) = self.reported() {
+            self.failed.set(true);
             self.retaining_input.store(true, Ordering::Release);
-            self.keep(unsent::Delivery::NotSent, &request_input(request));
+            self.keep(
+                unsent::Delivery::NotSent,
+                &request_input(request),
+                sending_hidden,
+            );
             return Err(error);
         }
         let before = self.last_input();
         let result = self.command(request);
         if result.is_err() {
+            self.failed.set(true);
             self.retaining_input.store(true, Ordering::Release);
             let channel = Channel(self.bound_channel.load(Ordering::Acquire));
             let local = self.link.take_unsent_input(channel);
             let captured = !local.is_empty();
-            self.keep(unsent::Delivery::NotSent, &local);
+            self.keep(
+                unsent::Delivery::NotSent,
+                &local,
+                sending_hidden || self.holds_hidden(),
+            );
             if !captured && self.last_input() == before {
-                self.keep(unsent::Delivery::NotSent, &request_input(request));
+                self.keep(
+                    unsent::Delivery::NotSent,
+                    &request_input(request),
+                    sending_hidden,
+                );
             }
         }
         // The Terminal Session is gone, so the channel is released and the server frees its slot.
@@ -1044,8 +1117,10 @@ impl PaneLink {
         self.pushed = None;
     }
 
-    /// Drops or detaches the bound channel, then keeps the text of input the link still held
-    /// for it: refused input as not sent, the rest as delivery unknown. Nothing sends it again.
+    /// Drops or detaches the bound channel. When an error or refusal ended it, keeps the text
+    /// of input the link still held for it: refused input as not sent, the rest as delivery
+    /// unknown. A presentation the person dismissed keeps nothing: the link already carries its
+    /// input ahead of the detach, so the Core applies it. Nothing is ever sent again.
     fn retire_channel(&mut self, detach: bool) {
         let Some((handle, _)) = self.channel.take() else {
             return;
@@ -1056,16 +1131,23 @@ impl PaneLink {
         } else {
             drop(handle);
         }
+        let ended = self.failed.replace(false) || {
+            let received = self.inbox.state.lock().unwrap_or_else(|e| e.into_inner());
+            received.closed.is_some() || received.discarded.is_some()
+        };
         if let Some(channel) = channel {
-            self.keep(
-                unsent::Delivery::Unknown,
-                &self.link.take_unconfirmed_input(channel),
-            );
-            self.keep(
-                unsent::Delivery::NotSent,
-                &self.link.take_unsent_input(channel),
-            );
+            let unconfirmed = self.link.take_unconfirmed_input(channel);
+            let unsent = self.link.take_unsent_input(channel);
+            if ended {
+                let hidden = self.holds_hidden();
+                self.keep(unsent::Delivery::Unknown, &unconfirmed, hidden);
+                self.keep(unsent::Delivery::NotSent, &unsent, hidden);
+            }
         }
+        self.hidden_serials
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 
     /// Applies every pushed event in order: each frame is applied, then acknowledged, each
@@ -1133,7 +1215,8 @@ impl PaneLink {
                 while let Some(batch) = batches.next() {
                     if let Err(error) = self.input(lease, generation, batch) {
                         let rest: Vec<InputEvent> = batches.flatten().collect();
-                        self.keep(unsent::Delivery::NotSent, &rest);
+                        let hidden = self.sending_hidden.load(Ordering::Acquire);
+                        self.keep(unsent::Delivery::NotSent, &rest, hidden);
                         return Err(error);
                     }
                 }
@@ -1405,7 +1488,8 @@ fn send(
     });
     if result.is_err() && !entered {
         connection.retaining_input.store(true, Ordering::Release);
-        connection.keep(unsent::Delivery::NotSent, &request_input(request));
+        let hidden = connection.sending_hidden.load(Ordering::Acquire);
+        connection.keep(unsent::Delivery::NotSent, &request_input(request), hidden);
     }
     result
 }
@@ -1495,7 +1579,7 @@ pub(super) fn present(
                 Arc::new(move || state.wake.notify())
             });
             connection.unsent = Arc::clone(&state.unsent);
-            connection.hidden_input = Arc::clone(&state.hidden_input);
+            connection.sending_hidden = Arc::clone(&state.sending_hidden);
             connection.retaining_input = Arc::clone(&state.retaining_input);
             let Some(claim::Granted {
                 lease,
@@ -1995,8 +2079,9 @@ pub(super) fn show(
     Ok(mapping)
 }
 
-fn retain_local_input(state: &CorePaneState, input: &Input) {
-    let event = match input {
+/// Keeps `submitted`, which never left this client, with the prompt it was typed at.
+fn retain_local_input(state: &CorePaneState, submitted: &SubmittedInput) {
+    let event = match &submitted.command {
         Input::Key(key) => InputEvent::Key(encode_key(key.clone())),
         Input::Commit(text, _) | Input::Paste(text, _) => InputEvent::Paste {
             text: text.clone(),
@@ -2009,7 +2094,7 @@ fn retain_local_input(state: &CorePaneState, input: &Input) {
         },
         _ => return,
     };
-    state.keep_input(unsent::Delivery::NotSent, &[event]);
+    state.keep_input(unsent::Delivery::NotSent, &[event], submitted.hidden);
 }
 fn request_input(request: &Request) -> Vec<InputEvent> {
     match request {
@@ -2036,7 +2121,7 @@ fn request_input(request: &Request) -> Vec<InputEvent> {
 fn drain_input(state: &CorePaneState, input: &mpsc::Receiver<SubmittedInput>) {
     while let Ok(submitted) = input.try_recv() {
         if state.retaining_input.load(Ordering::Acquire) {
-            retain_local_input(state, &submitted.command);
+            retain_local_input(state, &submitted);
         }
         discard_input(state, submitted.epoch, submitted.command);
     }
