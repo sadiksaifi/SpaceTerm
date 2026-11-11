@@ -307,7 +307,6 @@ impl StatusMenu {
     }
 }
 
-/// Performs `action` through the shared Machine updates, which report back to this menu.
 /// A failure's alert: its follow-up, such as Try Again, is an ordinary action beside Cancel,
 /// since it ends nothing. An alert without one offers OK.
 pub(super) fn explanation_alert(explanation: &Explanation) -> Alert {
@@ -320,6 +319,7 @@ pub(super) fn explanation_alert(explanation: &Explanation) -> Alert {
     }
 }
 
+/// Performs `action` through the shared Machine updates, which report back to this menu.
 fn act(machine: MachineId, action: MachineAction, cx: &mut App) {
     if let Some(store) = MachineUpdates::global(cx) {
         store.update(cx, |store, cx| {
