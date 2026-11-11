@@ -25,7 +25,7 @@ pub const REQUEST_LIMIT: Duration = Duration::from_secs(30);
 /// How long the server may take to fetch, verify and install a release from its feed, or to
 /// verify and install the last chunk of a push.
 pub const STAGE_LIMIT: Duration = Duration::from_secs(30 * 60);
-/// How long a Stop is followed: until the server closes the lane.
+/// How long a Stop or an Uninstall is followed: until SpaceTerm Core closes the lane.
 pub const STOP_WAIT: Duration = Duration::from_secs(90);
 /// How long any other action is followed: until it settles, or until a server that replaces
 /// itself, as Restart and Update do, returns.
@@ -36,11 +36,12 @@ pub const RETURN_WAIT: Duration = Duration::from_secs(180);
 /// itself only delays an unconfirmed outcome.
 pub const NETWORK_WAIT: Duration = Duration::from_secs(30);
 
-/// How long an action is followed after its `Execute`. Only Stop ends the lane it is followed
-/// over, so every other action, including one added later, is followed until it settles.
+/// How long an action is followed after its `Execute`. Only Stop and Uninstall end the lane they
+/// are followed over, so every other action, including one added later, is followed until it
+/// settles.
 pub fn wait(action: &LaneAction) -> Duration {
     match action {
-        LaneAction::Stop => STOP_WAIT,
+        LaneAction::Stop | LaneAction::Uninstall => STOP_WAIT,
         LaneAction::Network { .. } => NETWORK_WAIT,
         _ => RETURN_WAIT,
     }
@@ -463,11 +464,12 @@ mod tests {
         );
     }
 
-    /// A new action needs no change here: only Stop and Network Access changes are followed
-    /// for a shorter wait.
+    /// A new action needs no change here: only the actions that end the lane and Network Access
+    /// changes are followed for a shorter wait.
     #[test]
-    fn only_stop_and_network_access_are_followed_for_a_shorter_wait() {
+    fn only_stop_uninstall_and_network_access_are_followed_for_a_shorter_wait() {
         assert_eq!(wait(&LaneAction::Stop), STOP_WAIT);
+        assert_eq!(wait(&LaneAction::Uninstall), STOP_WAIT);
         assert_eq!(
             wait(&LaneAction::Network {
                 access: NetworkAccess::All

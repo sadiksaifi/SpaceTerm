@@ -26,6 +26,9 @@ use crate::{
 };
 
 const KEY_CONTEXT: &str = "SpaceTermComboBox";
+/// How long the query rests before the line for a query that matches nothing is announced, so
+/// typing announces one line.
+const STATUS_REST: std::time::Duration = std::time::Duration::from_millis(750);
 /// The open popup is an anchored popup, like the menus it sits beside.
 const COMBO_BOX_ROLE: FloatingRole = FloatingRole::Popover;
 const MENU_MINIMUM_WIDTH: f32 = 240.0;
@@ -1649,6 +1652,8 @@ struct ComboBoxState<I: Clone + Eq + 'static, C: Clone + Eq + 'static> {
     selection_reveal_pending: bool,
     input_context_menu_open: bool,
     input_context_menu_claimed: bool,
+    /// Runs while the query changed less than [`STATUS_REST`] ago.
+    status_rest: Option<gpui::Task<()>>,
     registration: Option<ComboBoxRegistration>,
     window_id: WindowId,
     restore_focus: Option<WeakFocusHandle>,
@@ -1780,6 +1785,7 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBoxState<I, C> {
             selection_reveal_pending: false,
             input_context_menu_open: false,
             input_context_menu_claimed: false,
+            status_rest: None,
             registration: None,
             window_id,
             restore_focus: None,
@@ -1914,7 +1920,21 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBoxState<I, C> {
         self.pointer_press = None;
         self.recompute_matches(true);
         self.repair_provisional();
+        if self.open {
+            self.rest_status(cx);
+        }
         cx.notify();
+    }
+
+    /// Restarts the wait before a line that names the query is announced.
+    fn rest_status(&mut self, cx: &mut gpui::Context<Self>) {
+        self.status_rest = Some(cx.spawn(async move |state, cx| {
+            cx.background_executor().timer(STATUS_REST).await;
+            let _ = state.update(cx, |state, cx| {
+                state.status_rest = None;
+                cx.notify();
+            });
+        }));
     }
 
     fn recompute_matches(&mut self, reset_command_selection: bool) -> bool {
@@ -2036,6 +2056,10 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBoxState<I, C> {
             self.input.update(cx, |input, cx| input.set_value("", cx));
         }
         self.query = self.input.read(cx).value().to_owned();
+        // A character typed on the trigger opens the popup as its query, and more may follow.
+        if !self.query.is_empty() {
+            self.rest_status(cx);
+        }
         self.recompute_matches(false);
         self.provisional = if from_end {
             self.last_enabled_match().map(|item| item.id.clone())
@@ -2086,6 +2110,7 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBoxState<I, C> {
         self.hovered_row = None;
         self.pointer_press = None;
         self.provisional = None;
+        self.status_rest = None;
         if let Some(registration) = self.registration.take() {
             unregister_combo_box(self.window_id, registration, cx);
         }
@@ -2112,6 +2137,7 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBoxState<I, C> {
         self.hovered_row = None;
         self.pointer_press = None;
         self.provisional = None;
+        self.status_rest = None;
         self.input_context_menu_open = false;
         self.input_context_menu_claimed = false;
         if let Some(registration) = self.registration.take() {
@@ -2968,12 +2994,14 @@ fn render_overlay<I: Clone + Eq + 'static, C: Clone + Eq + 'static>(
     .absolute()
     .inset_0();
     let content = if busy {
-        status_row(copy.busy_status, "combo-box-loading", theme).into_any_element()
+        status_row(copy.busy_status, true, "combo-box-loading", theme).into_any_element()
     } else if matches.is_empty() {
         let line = copy
             .no_results(&query, Some(&copy.empty_status))
             .unwrap_or_else(|| copy.empty_status.clone());
-        status_row(line, "combo-box-empty", theme).into_any_element()
+        // The line names the query, so it is announced once the query rests.
+        let rested = query.trim().is_empty() || state.read(cx).status_rest.is_none();
+        status_row(line, rested, "combo-box-empty", theme).into_any_element()
     } else {
         let note_heading_font = typography.section_font().clone();
         let options = list(list_state, move |position, _, _| {
@@ -3206,12 +3234,34 @@ fn render_choices_note(
         )
 }
 
+/// The row a popup shows in place of its options. Its text is one live status under one identity,
+/// so assistive technology announces it, and announces the empty text that follows the busy one.
+/// While `announced` is false the status is empty, which announces nothing.
 fn status_row(
     text: SharedString,
+    announced: bool,
     selector: &'static str,
     theme: ComboBoxTheme,
 ) -> impl IntoElement {
+    let message = if announced {
+        text.clone()
+    } else {
+        SharedString::default()
+    };
     div()
+        .id("combo-box-status")
+        .role(accesskit::Role::Group)
+        .a11y_synthetic_children(move |builder| {
+            let mut status = accesskit::Node::new(accesskit::Role::Status);
+            // Native adapters announce either name changes or live-region values.
+            status.set_label(message.as_ref());
+            status.set_value(message.as_ref());
+            status.set_live(accesskit::Live::Polite);
+            if let Some(bounds) = builder.parent_node().bounds() {
+                status.set_bounds(bounds);
+            }
+            builder.push_child(builder.synthetic_node_id("status"), status);
+        })
         .debug_selector(move || selector.to_owned())
         .h(theme.metrics.row_height)
         .px(theme.metrics.horizontal_padding)
@@ -3951,27 +4001,44 @@ pub(crate) mod tests {
         use crate::a11y_testing::A11yTree;
 
         struct StatusCopyRoot {
-            handle: ComboBoxHandle<u8>,
             copy: ComboBoxCopy,
+            busy: bool,
         }
 
         impl gpui::Render for StatusCopyRoot {
             fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
                 div().size_full().child(
-                    ComboBox::new("status-copy-combo", "Workspace", None, "Choose", Vec::new())
-                        .handle(self.handle.clone())
-                        .copy(self.copy.clone())
-                        .debug_selector("status-copy-trigger")
-                        .on_accept(|_, _, _| {}),
+                    ComboBox::<u8>::new(
+                        "status-copy-combo",
+                        "Workspace",
+                        None,
+                        "Choose",
+                        Vec::new(),
+                    )
+                    .copy(self.copy.clone())
+                    .busy(self.busy)
+                    .debug_selector("status-copy-trigger")
+                    .on_accept(|_, _, _| {}),
                 )
             }
         }
 
         crate::combo_box_tests::install_themes(cx);
         let (root, cx) = cx.add_window_view(|_, _| StatusCopyRoot {
-            handle: ComboBoxHandle::default(),
             copy: ComboBoxCopy::default(),
+            busy: false,
         });
+        // The one status the popup publishes, as assistive technology names and reads it.
+        let status = |cx: &mut gpui::VisualTestContext| {
+            let tree = A11yTree::read(cx);
+            let [status] = tree.with_role("Status")[..] else {
+                panic!("the popup should publish exactly one status");
+            };
+            (
+                status["aria"]["label"].clone(),
+                status["aria"]["value"].clone(),
+            )
+        };
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         let trigger = cx
@@ -3980,6 +4047,7 @@ pub(crate) mod tests {
         cx.simulate_click(trigger.center(), gpui::Modifiers::none());
         cx.run_until_parked();
         assert!(cx.debug_bounds("combo-box-empty").is_some());
+        assert_eq!(status(cx), ("No options.".into(), "No options.".into()));
         assert_eq!(
             A11yTree::read(cx).node("Filter options")["aria"]["placeholder"],
             "Search"
@@ -3998,18 +4066,72 @@ pub(crate) mod tests {
             tree.node("Filter workspaces")["aria"]["placeholder"],
             "Find a workspace"
         );
-        // The status row publishes no accessible text, so its copy is read from the popup's state.
-        let handle = root.read_with(cx, |root, _| root.handle.clone());
-        let state = handle
-            .state
-            .borrow()
-            .as_ref()
-            .and_then(WeakEntity::upgrade)
-            .expect("the mounted control should retain its state");
-        let copy = state.read_with(cx, |state, _| state.copy.clone());
-        assert_eq!(copy.busy_status, "Refreshing");
-        assert_eq!(copy.empty_status, "Nothing available");
         assert!(cx.debug_bounds("combo-box-empty").is_some());
+        assert_eq!(
+            status(cx),
+            ("Nothing available".into(), "Nothing available".into())
+        );
+
+        root.update(cx, |root, cx| {
+            root.busy = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("combo-box-loading").is_some());
+        assert_eq!(status(cx), ("Refreshing".into(), "Refreshing".into()));
         assert!(cx.update(|window, cx| crate::window_combo_box_is_open(window, cx)));
+    }
+
+    #[gpui::test]
+    fn a_no_match_status_should_be_announced_once_the_query_rests(cx: &mut gpui::TestAppContext) {
+        use crate::a11y_testing::A11yTree;
+
+        struct RestingStatusRoot;
+
+        impl gpui::Render for RestingStatusRoot {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                div().size_full().child(
+                    ComboBox::new(
+                        "resting-status-combo",
+                        "Workspace",
+                        None,
+                        "Choose",
+                        vec![ComboBoxItem::new(1u8, "Local")],
+                    )
+                    .on_accept(|_, _, _| {}),
+                )
+            }
+        }
+
+        crate::combo_box_tests::install_themes(cx);
+        let (_, cx) = cx.add_window_view(|_, _| RestingStatusRoot);
+        let announced = |cx: &mut gpui::VisualTestContext| {
+            let tree = A11yTree::read(cx);
+            let [status] = tree.with_role("Status")[..] else {
+                panic!("the popup should publish exactly one status");
+            };
+            status["aria"]["value"].clone()
+        };
+        let rest = std::time::Duration::from_millis(750);
+        let almost = rest - std::time::Duration::from_millis(1);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        // The first character opens the popup from its trigger and is its query.
+        cx.update(|window, cx| window.focus_next(cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("z");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("combo-box-empty").is_some(),
+            "the row is shown at once"
+        );
+        assert_eq!(announced(cx), "");
+        cx.executor().advance_clock(almost);
+        cx.simulate_input("y");
+        cx.executor().advance_clock(almost);
+        assert_eq!(announced(cx), "", "each edit restarts the wait");
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(1));
+        assert_eq!(announced(cx), "No options match \u{201C}zy\u{201D}.");
     }
 }

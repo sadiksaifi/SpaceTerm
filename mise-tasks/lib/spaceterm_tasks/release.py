@@ -384,9 +384,14 @@ def appcast(tag):
 def verified_core(entry, target, version, floor, directory, *, execute=True):
     """Authenticate one Core build of `version` with Update Floor `floor` and return its archive
     and signature."""
-    from spaceterm_tasks.core_package import document, host_target, verified_copy
+    from spaceterm_tasks.core_package import access_failure, document, host_target, verified_copy
 
-    if (entry / "artifact.sha256").read_text() != sha256(entry / "artifact.tar.gz") + "\n":
+    try:
+        recorded = (entry / "artifact.sha256").read_bytes()
+        digest = sha256(entry / "artifact.tar.gz")
+    except OSError as error:
+        raise access_failure(error) from None
+    if recorded != f"{digest}\n".encode():
         raise TaskError(f"the {target} Core build differs from its digest")
     tree, archive, signature = verified_copy(
         entry / "artifact.tar.gz",

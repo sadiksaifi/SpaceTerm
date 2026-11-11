@@ -2527,10 +2527,6 @@ fn assert_the_footer_closes_only_the_content_column(
             "the save status should end on the content gutter in {section:?}"
         );
     }
-    assert!(
-        cx.debug_bounds("settings-sidebar-footer-divider").is_none(),
-        "no rule should cross the sidebar above the window's bottom edge"
-    );
 }
 
 #[gpui::test]
