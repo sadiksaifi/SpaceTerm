@@ -88,9 +88,11 @@ _Avoid_: shim, alias, CLI install
 
 **End All Sessions**: The action that ends every live Terminal Session on one Machine while SpaceTerm Core keeps running and retains its Workspace organization.
 
-**Pending Version**: A verified SpaceTerm Core version for one application identity and computer, installed beside the running version and waiting for a restart to run it.
+**Pending Version**: A SpaceTerm Core version for one application identity and computer, downloaded and verified beside the running version and waiting for a restart to run it.
+_Avoid_ in the interface: installed, ready
 
-**Update Core**: The action that installs a Pending Version and, after confirmation, restarts SpaceTerm Core into it, ending that Machine's Terminal Sessions.
+**Update Core**: The action that restarts SpaceTerm Core into its Pending Version after confirmation, ending that Machine's Terminal Sessions. The interface calls it Restart Core. Installing the Pending Version is automatic under ADR 0040.
+_Avoid_: Update {Machine}
 
 **Original Operation**: An explicit operation a SpaceTerm Client submitted to SpaceTerm Core, bound to its admitted connection, application, Machine, client and operation identities until its outcome is validated and acknowledged.
 
@@ -189,9 +191,16 @@ _Avoid_: Hotkey, key equivalent
 
 ## Updates
 
-**Overdue Update**: An available update whose release is at least two days old. A desktop update's Update Reminders repeat daily until it is installed. A SpaceTerm Core update's Update Reminders repeat daily only while its Pending Version changes a protocol major, because SpaceTerm Core restarts into any other Pending Version by itself once no Terminal Session is open. An Overdue Update never holds a launch. Desktop updates require the person to relaunch SpaceTerm; nonbreaking Core updates restart silently after the grace period in ADR 0034.
+**Update Ladder**: The stages an update climbs by how long it has waited: Offer from the download, Ask after two days, Insist after seven. Each stage adds presence, emphasis or reminder cadence. No stage ends a Terminal Session that has work going on. ADR 0065 owns it.
 
-**Update Reminder**: A deferrable notice about an outstanding update.
+**Update Reminder**: A notification about an update that has reached the Ask stage, repeated by its stage's cadence.
+
+**Update Step**: The one thing the split pill's main area shows: the next update action the person can take, or progress on one they took on this desktop.
+
+**Relaunch**: Quitting and reopening SpaceTerm to install a downloaded SpaceTerm update. It keeps every Terminal Session running.
+
+**No Work Going On**: A Terminal Session whose shell owns the foreground at an empty prompt, with no other process in its terminal session and no input or output for the idle period.
+_Avoid_ in the interface: idle
 
 **Update Floor**: The oldest release version allowed to update directly to a release. Every release publishes one for SpaceTerm Core and one for the desktops.
 
