@@ -7205,30 +7205,50 @@ pub(crate) mod tests {
         }
     }
 
-    // GPUI's test platform exposes no resolved cursor. This covers the builder flag only, not the
-    // cursor the trigger requests.
-    #[test]
-    fn context_menu_builder_records_cursor_preservation_only_when_requested() {
-        let default_menu = ContextMenu::new(
-            "default-context-cursor",
-            "Default context cursor",
-            div(),
-            vec![MenuEntry::action("Inspect", ())],
-        );
-        let preserving_menu = ContextMenu::new(
-            "preserving-context-cursor",
-            "Preserving context cursor",
-            div(),
-            vec![MenuEntry::action("Inspect", ())],
-        )
-        .preserve_trigger_cursor();
+    struct ContextCursorRoot;
+
+    impl Render for ContextCursorRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let menu = |id: &'static str| {
+                ContextMenu::new(
+                    id,
+                    "Context actions",
+                    div().w(px(80.0)).h(px(40.0)),
+                    vec![MenuEntry::action("Inspect", ())],
+                )
+                .debug_selector(id)
+                .on_activate(|_, _, _| {})
+            };
+            // The surrounding element requests the text cursor, as a terminal does around its
+            // context menu.
+            div()
+                .flex()
+                .cursor(gpui::CursorStyle::IBeam)
+                .child(menu("default-context-cursor"))
+                .child(menu("preserving-context-cursor").preserve_trigger_cursor())
+        }
+    }
+
+    #[gpui::test]
+    fn context_trigger_should_request_the_default_cursor_unless_it_preserves_the_surrounding_one(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        let (_, cx) = cx.add_window_view(|_, _| ContextCursorRoot);
+        let mut cursor_over = |selector: &'static str| {
+            let trigger = cx.debug_bounds(selector).expect("context menu trigger");
+            cx.simulate_mouse_move(trigger.center(), None, Modifiers::none());
+            cx.update(|window, _| window.requested_cursor_style())
+        };
 
         assert_eq!(
-            (
-                default_menu.core.preserve_trigger_cursor,
-                preserving_menu.core.preserve_trigger_cursor,
-            ),
-            (false, true)
+            cursor_over("default-context-cursor"),
+            Some(gpui::CursorStyle::Arrow)
+        );
+        assert_eq!(
+            cursor_over("preserving-context-cursor"),
+            Some(gpui::CursorStyle::IBeam)
         );
     }
 
