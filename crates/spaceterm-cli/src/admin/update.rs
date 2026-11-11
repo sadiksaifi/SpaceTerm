@@ -1,4 +1,4 @@
-//! `update`: install a SpaceTerm Core update beside the running version. Installing ends
+//! `update`: download a SpaceTerm Core update beside the running version. Downloading ends
 //! nothing, so it asks nothing; `restart` moves SpaceTerm Core to the new version.
 //!
 //! Without files, SpaceTerm Core installs the release its own signed feed names. Preflight and
@@ -11,6 +11,7 @@ use spaceterm_core::service::Service;
 use spaceterm_core::service::lane::Offline;
 use spaceterm_core::service::lane::admin::{self, PushArchive};
 use spaceterm_core::service::updates::InstallError;
+use spaceterm_core::update::continuation::Continuation;
 use spaceterm_core::update::facts::UpdateFacts;
 use spaceterm_core::update::sources::SourceError;
 use std::io::Read;
@@ -56,7 +57,19 @@ fn running(
     };
     match installed {
         Ok((installed, facts)) => {
-            finish(context, routed.machine, installed, &facts, opened.recovered)
+            // A Core of service 1.2 says how the version it holds finishes.
+            let detailed = super::UpdateLane::detailed_facts(&mut opened.session)
+                .ok()
+                .flatten();
+            let continuation = crate::notice::reported_for(detailed.as_ref(), &facts);
+            finish(
+                context,
+                routed.machine,
+                installed,
+                &facts,
+                continuation,
+                opened.recovered,
+            )
         }
         Err(failure) => Reply::new(
             &super::with_recovered(
@@ -92,7 +105,9 @@ fn stopped(context: &Context<'_>, routed: Routed, files: Option<(&Path, &Path)>)
             .map_err(|error| source_failure(&error)),
     };
     match installed {
-        Ok((installed, facts)) => finish(context, routed.machine, installed, &facts, Vec::new()),
+        Ok((installed, facts)) => {
+            finish(context, routed.machine, installed, &facts, None, Vec::new())
+        }
         Err(failure) => Reply::failure(COMMAND, Some(routed.machine), failure),
     }
 }
@@ -177,14 +192,20 @@ fn finish(
     machine: MachineRef,
     installed: bool,
     facts: &UpdateFacts,
+    continuation: Option<Continuation>,
     recovered: Vec<contract::RecoveredOperation>,
 ) -> Reply {
     let restart = context.command_line(&machine, &["restart"]);
-    let text = text(installed, facts, super::display_name(&machine), &restart);
-    Reply::new(
-        &envelope(machine, installed, facts, recovered, crate::notice::now()),
-        text,
-    )
+    let now = crate::notice::now();
+    let text = text(
+        installed,
+        facts,
+        continuation,
+        super::display_name(&machine),
+        &restart,
+        now,
+    );
+    Reply::new(&envelope(machine, installed, facts, recovered, now), text)
 }
 
 /// The `update` envelope.
@@ -204,34 +225,147 @@ pub(crate) fn envelope(
     super::with_recovered(Envelope::ok(COMMAND, Some(machine), data), recovered)
 }
 
-/// What installing found, and how SpaceTerm Core on `machine` updates to the Pending Version.
-/// `restart` is the command line that updates it.
-pub(crate) fn text(installed: bool, facts: &UpdateFacts, machine: &str, restart: &str) -> String {
+/// What downloading found, and how SpaceTerm Core on `machine` finishes moving to the Pending
+/// Version at `now`, Unix seconds, in the sentences of the notice. `installed` says whether
+/// this command downloaded it. `continuation` is the one a Core of service 1.2 reported for
+/// that version. `restart` is the command line that restarts SpaceTerm Core.
+pub(crate) fn text(
+    installed: bool,
+    facts: &UpdateFacts,
+    continuation: Option<Continuation>,
+    machine: &str,
+    restart: &str,
+    now: u64,
+) -> String {
     let running = &facts.running;
     let Some(pending) = &facts.pending else {
         return format!("SpaceTerm Core {running} is up to date.\n");
     };
     let what = if installed {
-        format!(
-            "Installed SpaceTerm Core {} beside {running}.",
-            pending.version
-        )
+        format!("Downloaded SpaceTerm Core {}.", pending.version)
     } else {
-        format!(
-            "SpaceTerm Core {} is already installed beside {running}.",
-            pending.version
-        )
+        format!("SpaceTerm Core {} is already downloaded.", pending.version)
     };
-    let how = match facts.sessions {
-        // The Core restarts into a compatible version by itself while no Session is open.
-        0 if !pending.breaking => {
-            "SpaceTerm Core updates to it by itself once no Terminal Session is open.".to_owned()
+    let how = crate::notice::finish(facts, continuation, machine, restart, now)
+        .map(crate::notice::Finish::sentences)
+        .unwrap_or_default();
+    format!("{what} SpaceTerm Core {running} keeps running. {how}\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::notice::{ASK_AFTER, INSIST_AFTER};
+    use spaceterm_core::update::facts::{
+        PendingVersion, Platform, Protocols, UpdateCheck, Version,
+    };
+
+    const INSTALLED: u64 = 1_793_697_120;
+    const RESTART: &str = "spaceterm --machine penguin restart";
+
+    fn facts(sessions: u32, breaking: bool) -> UpdateFacts {
+        UpdateFacts {
+            revision: 4,
+            platform: Platform::LinuxX86_64,
+            running: Version::parse("0.7.0").unwrap(),
+            pending: Some(PendingVersion {
+                version: Version::parse("0.8.0").unwrap(),
+                protocols: Protocols::CURRENT,
+                breaking,
+                installed_at: INSTALLED,
+                overdue_since: None,
+                stranded: Vec::new(),
+            }),
+            sessions,
+            operation: None,
+            check: UpdateCheck::Never,
+            skipped: None,
+            last_failure: None,
         }
-        0 => format!("Update with: {restart}"),
-        sessions => format!(
-            "Updating to it ends {} on {machine}. Update with: {restart}",
-            super::lifecycle::terminal_sessions(sessions)
-        ),
-    };
-    format!("{what} {how}\n")
+    }
+
+    #[test]
+    fn update_names_the_downloaded_version_and_how_it_finishes() {
+        let at = INSTALLED + 60;
+        assert_eq!(
+            text(true, &facts(2, false), None, "penguin", RESTART, at),
+            "Downloaded SpaceTerm Core 0.8.0. SpaceTerm Core 0.7.0 keeps running. SpaceTerm Core \
+             restarts into it when no Terminal Session is open. Restart now with: spaceterm \
+             --machine penguin restart\n"
+        );
+        assert_eq!(
+            text(false, &facts(0, false), None, "penguin", RESTART, at),
+            "SpaceTerm Core 0.8.0 is already downloaded. SpaceTerm Core 0.7.0 keeps running. \
+             SpaceTerm Core restarts into it in a moment. Restart now with: spaceterm --machine \
+             penguin restart\n"
+        );
+        assert_eq!(
+            text(true, &facts(2, true), None, "penguin", RESTART, at),
+            "Downloaded SpaceTerm Core 0.8.0. SpaceTerm Core 0.7.0 keeps running. Restarting \
+             ends 2 Terminal Sessions. Restart with: spaceterm --machine penguin restart\n",
+            "a breaking version never restarts by itself"
+        );
+        assert_eq!(
+            text(true, &facts(0, true), None, "penguin", RESTART, at),
+            "Downloaded SpaceTerm Core 0.8.0. SpaceTerm Core 0.7.0 keeps running. No Terminal \
+             Session is open. Restart with: spaceterm --machine penguin restart\n"
+        );
+    }
+
+    #[test]
+    fn update_names_how_long_an_update_has_waited_from_the_ask_stage() {
+        assert_eq!(
+            text(
+                false,
+                &facts(1, false),
+                None,
+                "penguin",
+                RESTART,
+                INSTALLED + ASK_AFTER
+            ),
+            "SpaceTerm Core 0.8.0 is already downloaded. SpaceTerm Core 0.7.0 keeps running. An \
+             update has waited 2 days on penguin. Restarting into SpaceTerm Core 0.8.0 ends 1 \
+             Terminal Session. Restart with: spaceterm --machine penguin restart\n"
+        );
+        assert_eq!(
+            text(
+                false,
+                &facts(3, true),
+                None,
+                "penguin",
+                RESTART,
+                INSTALLED + INSIST_AFTER
+            ),
+            "SpaceTerm Core 0.8.0 is already downloaded. SpaceTerm Core 0.7.0 keeps running. An \
+             update has waited 7 days on penguin. Restarting into SpaceTerm Core 0.8.0 ends 3 \
+             Terminal Sessions. Restart with: spaceterm --machine penguin restart\n"
+        );
+    }
+
+    #[test]
+    fn update_says_what_a_1_2_core_reports_for_the_version_it_holds() {
+        assert_eq!(
+            text(
+                false,
+                &facts(2, false),
+                Some(Continuation::WhenNothingRuns),
+                "penguin",
+                RESTART,
+                INSTALLED + ASK_AFTER
+            ),
+            "SpaceTerm Core 0.8.0 is already downloaded. SpaceTerm Core 0.7.0 keeps running. \
+             SpaceTerm Core restarts into it after an hour with nothing running. Restart now \
+             with: spaceterm --machine penguin restart\n"
+        );
+    }
+
+    #[test]
+    fn update_with_no_newer_version_names_the_running_one() {
+        let mut current = facts(2, false);
+        current.pending = None;
+        assert_eq!(
+            text(false, &current, None, "penguin", RESTART, INSTALLED),
+            "SpaceTerm Core 0.7.0 is up to date.\n"
+        );
+    }
 }

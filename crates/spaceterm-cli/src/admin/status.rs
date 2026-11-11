@@ -14,6 +14,7 @@ use crate::state::{CliState, RouteKey};
 use spaceterm_core::service::lane::{
     LaneActivation, LaneReply, LaneRequest, LaneStatus, LaneVersion, Offline,
 };
+use spaceterm_core::update::continuation::Continuation;
 use spaceterm_core::update::facts::{
     CheckFailure, FailureKind, InstallFailure, OVERDUE_AFTER, Operation, StartFailure, UpdateCheck,
     UpdateFacts,
@@ -48,7 +49,7 @@ pub fn run(context: &Context<'_>) -> Reply {
         .and_then(|offline| offline.admin().status(None))
         .map_err(contract::from_core_error);
     match status {
-        Ok(status) => report(context, core, &status, &RouteKey::Local, Vec::new()),
+        Ok(status) => report(context, core, &status, None, &RouteKey::Local, Vec::new()),
         Err(failure) => Reply::failure(COMMAND, Some(core), failure),
     }
 }
@@ -78,7 +79,17 @@ fn over_lane(
         Instant::now() + context.timeout(LIMIT),
     );
     match reply {
-        Ok(LaneReply::Status(status)) => report(context, core, &status, &route, recovered),
+        Ok(LaneReply::Status(status)) => {
+            // A Core of service 1.2 says how the version it holds finishes.
+            let detailed = super::UpdateLane::detailed_facts(&mut session)
+                .ok()
+                .flatten();
+            let continuation = status
+                .update
+                .as_deref()
+                .and_then(|facts| crate::notice::reported_for(detailed.as_ref(), facts));
+            report(context, core, &status, continuation, &route, recovered)
+        }
         Ok(LaneReply::Error { code }) => {
             Reply::failure(COMMAND, Some(core), contract::from_lane_code(&code))
         }
@@ -139,6 +150,7 @@ fn report(
     context: &Context<'_>,
     core: MachineRef,
     status: &LaneStatus,
+    continuation: Option<Continuation>,
     route: &RouteKey,
     recovered: Vec<crate::contract::RecoveredOperation>,
 ) -> Reply {
@@ -153,6 +165,7 @@ fn report(
         held(context, route),
         recovered,
         &commands,
+        continuation,
         crate::notice::now(),
     );
     Reply::new(&envelope, text)
@@ -308,12 +321,15 @@ pub(crate) struct Commands<'a> {
 }
 
 /// The `status` envelope and its text, from the lane's status and this CLI's held outcomes.
+/// `continuation` is the one a Core of service 1.2 reported for its Pending Version; only the
+/// text uses it.
 pub(crate) fn envelope(
     core: MachineRef,
     status: &LaneStatus,
     held_outcomes: Vec<HeldOutcomes>,
     recovered: Vec<crate::contract::RecoveredOperation>,
     commands: &Commands<'_>,
+    continuation: Option<Continuation>,
     now: u64,
 ) -> (Envelope<CoreStatus>, String) {
     let facts = status.update.as_deref();
@@ -354,14 +370,31 @@ pub(crate) fn envelope(
         lane_major: status.lane_major,
         terminal_counters: status.terminal_counters,
     };
-    let text = text(&core, &data, commands);
+    // How the Pending Version finishes, in the notice's sentences.
+    let finish = facts
+        .and_then(|facts| {
+            crate::notice::finish(
+                facts,
+                continuation,
+                super::display_name(&core),
+                commands.restart,
+                now,
+            )
+        })
+        .map(crate::notice::Finish::sentences);
+    let text = text(&core, &data, commands, finish.as_deref());
     (
         super::with_recovered(Envelope::ok(COMMAND, Some(core), data), recovered),
         text,
     )
 }
 
-fn text(core: &MachineRef, data: &CoreStatus, commands: &Commands<'_>) -> String {
+fn text(
+    core: &MachineRef,
+    data: &CoreStatus,
+    commands: &Commands<'_>,
+    finish: Option<&str>,
+) -> String {
     let state = if !data.installed {
         "not installed"
     } else if data.running {
@@ -392,7 +425,11 @@ fn text(core: &MachineRef, data: &CoreStatus, commands: &Commands<'_>) -> String
         ));
     }
     if let Some(pending) = &data.pending {
-        out.push_str(&pending_text(pending, commands.restart));
+        out.push_str(&pending_text(
+            pending,
+            finish.unwrap_or_default(),
+            super::display_name(core),
+        ));
     }
     out.push_str(&check_text(&data.update_check));
     let restarting = data.operation.as_ref().is_some_and(|operation| {
@@ -406,12 +443,15 @@ fn text(core: &MachineRef, data: &CoreStatus, commands: &Commands<'_>) -> String
     }
     if data.activation == Activation::Unresolved && !restarting {
         let finish = if commands.local {
-            "finish it with: spaceterm start"
+            "finish it with: spaceterm start".to_owned()
         } else {
-            "finish it on that machine with: spaceterm start"
+            format!(
+                "finish it on {} with: spaceterm start",
+                super::display_name(core)
+            )
         };
         out.push_str(&format!(
-            "Update: the update to the Pending Version has not finished. Check again in a minute. If it still has not finished, {finish}\n"
+            "Update: the restart into the downloaded version has not finished. Check again in a minute. If it still has not finished, {finish}\n"
         ));
     }
     if let Some(skipped) = &data.skipped {
@@ -452,30 +492,39 @@ fn text(core: &MachineRef, data: &CoreStatus, commands: &Commands<'_>) -> String
     out
 }
 
-fn pending_text(pending: &PendingStatus, restart: &str) -> String {
-    let overdue = if pending.overdue_since.is_some() {
-        ", update overdue"
-    } else {
-        ""
-    };
+/// The Pending Version line, with `finish`, the sentences that say how it finishes, and the
+/// devices a breaking version strands, as a restart confirmation names them.
+fn pending_text(pending: &PendingStatus, finish: &str, machine: &str) -> String {
     let mut out = format!(
-        "Pending: {}, installed {}{overdue}. Update with: {restart}\n",
+        "Downloaded: {} at {}. {finish}\n",
         pending.version, pending.installed_at
     );
     if pending.breaking {
-        if pending.stranded.is_empty() {
-            out.push_str(
-                "  It changes the protocol. Older clients stop working until they update.\n",
-            );
-        } else {
-            let names: Vec<&str> = pending.stranded.iter().map(|v| v.name.as_str()).collect();
-            out.push_str(&format!(
-                "  It changes the protocol. These devices stop working until they update: {}\n",
-                names.join(", ")
-            ));
-        }
+        out.push_str(&format!("  {}\n", stranded(&pending.stranded, machine)));
     }
     out
+}
+
+/// The sentence of a restart into a breaking version about the devices that can't connect to
+/// `machine` until they update.
+pub(crate) fn stranded(devices: &[DeviceRef], machine: &str) -> String {
+    match devices {
+        [] => format!(
+            "Devices with an older SpaceTerm can\u{2019}t connect to {machine} until they update."
+        ),
+        [device] => format!(
+            "SpaceTerm on {} can\u{2019}t connect to {machine} until it updates.",
+            device.name
+        ),
+        devices => format!(
+            "SpaceTerm on {} can\u{2019}t connect to {machine} until they update.",
+            devices
+                .iter()
+                .map(|device| device.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 /// The line of an update operation other than a feed check, which the update check line names.
@@ -490,11 +539,11 @@ fn operation_text(operation: &UpdateOperation, running: &str) -> String {
             );
             if total > 0 && received < total {
                 format!(
-                    "In progress: installing {version}, {}% received\n",
+                    "In progress: downloading {version}, {}% received\n",
                     received.saturating_mul(100) / total
                 )
             } else {
-                format!("In progress: installing {version}, verifying and unpacking\n")
+                format!("In progress: downloading {version}, verifying and unpacking\n")
             }
         }
         UpdateOperationKind::Restarting => {
@@ -512,7 +561,7 @@ fn failure_text(failure: &UpdateFailureStatus) -> String {
     let version = &failure.version;
     let what = match (failure.stage, failure.reason) {
         (UpdateFailureStage::Install, UpdateFailureReason::DiskFull) => {
-            format!("installing {version} failed because the disk is full. Nothing changed")
+            format!("downloading {version} failed because the disk is full. Nothing changed")
         }
         (UpdateFailureStage::Install, UpdateFailureReason::Download) => {
             format!("downloading {version} failed. Nothing changed")
@@ -521,7 +570,7 @@ fn failure_text(failure: &UpdateFailureStatus) -> String {
             format!("{version} did not verify. Nothing changed")
         }
         (UpdateFailureStage::Start, UpdateFailureReason::NotReady) => format!(
-            "{version} did not become ready, so SpaceTerm Core returned to the version it ran before"
+            "{version} didn\u{2019}t start, so SpaceTerm Core went back to the version it ran before"
         ),
         (UpdateFailureStage::Start, UpdateFailureReason::PortInUse) => format!(
             "{version} couldn\u{2019}t listen on the Network Access port because another program holds it, so SpaceTerm Core returned to the version it ran before. It tries {version} again at the next restart"
@@ -542,7 +591,7 @@ fn check_text(check: &UpdateCheckStatus) -> String {
         Some(UpdateCheckReason::Proxy) => "the proxy is unreachable",
         Some(UpdateCheckReason::Verification) => "the update feed did not verify",
         Some(UpdateCheckReason::SystemTooOld) => "the newest version needs a newer system",
-        Some(UpdateCheckReason::ClockBehind) => "the machine's clock is behind",
+        Some(UpdateCheckReason::ClockBehind) => "the clock is behind",
         Some(UpdateCheckReason::SteppingStoneSkipped) => {
             "the version the newest one needs first failed to start"
         }
