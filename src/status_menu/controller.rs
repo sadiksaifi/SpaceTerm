@@ -282,6 +282,8 @@ impl StatusMenu {
             presentation::Command::Confirm(confirmation) => {
                 self.request(confirmation.actions, false, activation, cx);
             }
+            // Only the title bar opens its list.
+            presentation::Command::ShowList => {}
             presentation::Command::Explain(explanation) => {
                 let alert = Alert {
                     title: explanation.title.to_string(),

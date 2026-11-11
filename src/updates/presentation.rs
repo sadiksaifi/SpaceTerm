@@ -9,8 +9,6 @@
     reason = "the title-bar control and the menu bar extra each read part of this model"
 )]
 
-use std::collections::BTreeSet;
-
 use gpui::{App, SharedString};
 use spaceterm_core::protocol::capability::Unavailable;
 use spaceterm_core::protocol::version::Incompatible;
@@ -21,7 +19,7 @@ use spaceterm_core::update::facts::{
 
 use super::machines::store::MachineUpdates;
 use super::machines::{
-    ActionFailure, Asked, MachineAction, MachineId, MachineLink, MachinePreview, MachineUpdate,
+    ActionFailure, Asked, MachineAction, MachineId, MachineLink, MachineUpdate,
 };
 use super::policy::{DAY, UpdateStage};
 use super::{UpdateError, UpdateService, UpdateState};
@@ -39,128 +37,8 @@ pub(crate) enum Tone {
     Problem,
 }
 
-pub(crate) use super::state::{Command, Glyph};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DesktopAction {
-    /// Relaunches into a ready release without asking, or downloads it first.
-    Update,
-    /// Downloads the pending release. Relaunching stays a separate choice.
-    Download,
-    WhatsNew,
-    /// Clears a failed desktop install; the desktop tries again later.
-    DismissFailure,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Confirmation {
-    pub(crate) title: SharedString,
-    pub(crate) message: SharedString,
-    /// The destructive button: "Update Core", "Restart Core" or "Stop".
-    pub(crate) button: SharedString,
-    pub(crate) actions: Vec<(MachineId, MachineAction)>,
-    /// The work the alert described. Approving it authorizes exactly that work.
-    pub(crate) approval: Approval,
-}
-
-/// What a confirmation described for each Machine it affects whose facts are known: the sessions
-/// it closes, the Core that runs and the Pending Version it restarts into. A surface checks
-/// [`Approval::holds`] against the current facts before it executes the approved previews, and
-/// previews again when it does not hold. The Core refuses its own preview's token once the
-/// sessions or the Pending Version changed, which also covers a Machine without facts.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Approval {
-    machines: Vec<Described>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Described {
-    machine: MachineId,
-    sessions: u32,
-    running: Option<Version>,
-    target: Option<Version>,
-    /// None while the target is unobserved, so no facts match it.
-    breaking: Option<bool>,
-}
-
-impl Described {
-    fn of(update: &MachineUpdate) -> Self {
-        let facts = update.facts.as_ref();
-        let pending = facts.and_then(|facts| facts.pending.as_ref());
-        Self {
-            machine: update.machine,
-            sessions: facts.map_or(0, |facts| facts.sessions),
-            running: facts.map(|facts| facts.running.clone()),
-            target: pending.map(|pending| pending.version.clone()),
-            breaking: Some(pending.is_some_and(|pending| pending.breaking)),
-        }
-    }
-}
-
-impl Approval {
-    fn of(views: &[MachineView]) -> Self {
-        Self {
-            machines: views
-                .iter()
-                // Without facts there is nothing to compare; the Core's token guards alone.
-                .filter(|view| view.running.is_some())
-                .map(|view| Described {
-                    machine: view.machine,
-                    sessions: view.sessions,
-                    running: view.running.clone(),
-                    target: view.pending.as_ref().map(|pending| pending.version.clone()),
-                    breaking: view.breaking(),
-                })
-                .collect(),
-        }
-    }
-
-    /// Whether the person's approval still covers a new `preview` of its work. A restart the
-    /// alert described into a Pending Version is not covered once the Core previews none: that
-    /// update already ran or went away.
-    pub(crate) fn still_approves(&self, preview: &MachinePreview) -> bool {
-        !(preview.action == MachineAction::Restart
-            && preview.target.is_none()
-            && self
-                .target(preview.machine)
-                .is_some_and(|target| target.is_some()))
-    }
-
-    /// Whether a new `preview` restarts into another Pending Version than the alert described.
-    pub(crate) fn retargets(&self, preview: &MachinePreview) -> bool {
-        preview.action == MachineAction::Restart
-            && preview.target.is_some()
-            && self
-                .target(preview.machine)
-                .is_some_and(|target| target != preview.target.as_ref())
-    }
-
-    /// The Pending Version described for `machine`, when the alert described it.
-    fn target(&self, machine: MachineId) -> Option<Option<&Version>> {
-        self.machines
-            .iter()
-            .find(|described| described.machine == machine)
-            .map(|described| described.target.as_ref())
-    }
-
-    /// Whether `machines` still show the work the alert described: the same sessions, running
-    /// Core and Pending Version on every affected Machine. Other changes keep the approval.
-    pub(crate) fn holds(&self, machines: &[MachineUpdate]) -> bool {
-        self.machines.iter().all(|described| {
-            machines
-                .iter()
-                .find(|update| update.machine == described.machine)
-                .is_some_and(|update| Described::of(update) == *described)
-        })
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Explanation {
-    pub(crate) title: SharedString,
-    pub(crate) message: SharedString,
-    pub(crate) then: Option<Box<Command>>,
-}
+pub(crate) use super::confirm::{Approval, Confirmation, Explanation};
+pub(crate) use super::state::{Command, DesktopAction, Dismissed, Glyph};
 
 /// The desktop's own update, as the person sees it.
 #[derive(Clone, Debug, PartialEq)]
@@ -433,9 +311,6 @@ pub(crate) struct MachineView {
     pub(crate) state: MachineState,
 }
 
-/// Failure notices the person dismissed on this desktop, by Machine and failure ID.
-pub(crate) type Dismissed = BTreeSet<(MachineId, u64)>;
-
 impl MachineView {
     pub(crate) fn new(update: &MachineUpdate, dismissed: &Dismissed, now: u64) -> Self {
         let facts = update.facts.as_ref();
@@ -451,10 +326,7 @@ impl MachineView {
             skipped: facts.and_then(|facts| facts.skipped.clone()),
             asked: update.asked,
             // This desktop's failed push is tried again by nobody, so it is never quiet.
-            retrying: update.failed_push.is_none()
-                && update
-                    .retrying_since
-                    .is_some_and(|since| now.saturating_sub(since) < RETRY_QUIETLY_FOR),
+            retrying: false,
             state: machine_state(update, dismissed, now),
         }
     }
@@ -555,7 +427,7 @@ impl MachineView {
             message: message.into(),
             button: "Stop".into(),
             actions: vec![(self.machine, MachineAction::Stop)],
-            approval: Approval::of(std::slice::from_ref(self)),
+            approval: Approval::default(),
         }
     }
 
@@ -793,6 +665,8 @@ impl MachineView {
                 Command::Machine(machine, MachineAction::CheckAgain)
             }
             MachineState::UpdateFailed { id, version, .. } => Command::Explain(Explanation {
+                proceed: None,
+                dismiss: None,
                 title: format!(
                     "Couldn't Start SpaceTerm Core {version} on {}",
                     self.place()
@@ -805,6 +679,8 @@ impl MachineView {
                 ))),
             }),
             MachineState::InstallFailed { id, version, .. } => Command::Explain(Explanation {
+                proceed: None,
+                dismiss: None,
                 title: format!(
                     "Couldn't Install SpaceTerm Core {version} on {}",
                     self.place()
@@ -824,6 +700,8 @@ impl MachineView {
                 failure: ActionFailure::RelaunchRequired,
                 ..
             } => Command::Explain(Explanation {
+                proceed: None,
+                dismiss: None,
                 title: "Relaunch SpaceTerm to Update Machines".into(),
                 message: self.sentence(),
                 then: None,
@@ -832,6 +710,8 @@ impl MachineView {
                 reason: CheckProblem::Failing(CheckFailure::SteppingStoneSkipped),
                 ..
             } => Command::Explain(Explanation {
+                proceed: None,
+                dismiss: None,
                 title: format!("Couldn't Update {}", self.name).into(),
                 message: self.sentence(),
                 then: None,
@@ -1122,6 +1002,8 @@ impl MachineView {
                     title: "Relaunch Required".into(),
                     subtitle: None,
                     command: Command::Explain(Explanation {
+                proceed: None,
+                dismiss: None,
                         title: "Relaunch SpaceTerm to Update Machines".into(),
                         message: self.sentence(),
                         then: None,
@@ -1675,6 +1557,8 @@ impl DesktopState {
             | Self::RelaunchHeld { .. } => Command::Desktop(DesktopAction::Update),
             Self::WhatsNew { .. } => Command::Desktop(DesktopAction::WhatsNew),
             Self::InstallFailed { version, .. } => Command::Explain(Explanation {
+                proceed: None,
+                dismiss: None,
                 title: match version {
                     _ if matches!(
                         self,
@@ -1876,21 +1760,6 @@ pub(crate) struct RowButton {
     pub(crate) command: Command,
 }
 
-/// "Update All…": every Machine whose Pending Version waits.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RestartAll {
-    pub(crate) machines: usize,
-    pub(crate) sessions: u32,
-    /// "Update All…".
-    pub(crate) label: SharedString,
-    /// The in-window menu's trailing text: "7 sessions".
-    pub(crate) trailing: SharedString,
-    /// The menu bar extra's subtitle: "Updates 3 machines, closes 7 sessions".
-    pub(crate) subtitle: SharedString,
-    pub(crate) sentence: SharedString,
-    pub(crate) command: Command,
-}
-
 /// The menu bar extra's tile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ExtraTile {
@@ -2071,104 +1940,6 @@ impl Presentation {
             .collect()
     }
 
-    /// "Update All…", when two or more Pending Versions wait.
-    pub(crate) fn restart_all(&self) -> Option<RestartAll> {
-        let waiting: Vec<MachineView> = self
-            .machines
-            .iter()
-            .filter(|view| view.state.waiting().is_some())
-            .cloned()
-            .collect();
-        if waiting.len() < 2 {
-            return None;
-        }
-        let total: u32 = waiting.iter().map(|view| view.sessions).sum();
-        let confirmation = update_confirmation(&waiting);
-        Some(RestartAll {
-            machines: waiting.len(),
-            sessions: total,
-            label: "Update All…".into(),
-            trailing: sessions(total).into(),
-            subtitle: format!(
-                "Updates {} Machines, ends {}",
-                waiting.len(),
-                sessions(total)
-            )
-            .into(),
-            sentence: format!(
-                "Update SpaceTerm Core on {} Machines. This ends {}.",
-                waiting.len(),
-                running_sessions(total)
-            )
-            .into(),
-            command: Command::Confirm(confirmation),
-        })
-    }
-
-    /// The confirmation for the Restarts or the Stop `previews` describe, with the sessions each
-    /// Core itself will end. None when nothing asks: no session closes and no breaking change
-    /// waits, unless `always`, as after a Core refused a preview the person never saw. A
-    /// Machine no longer listed is left out.
-    pub(crate) fn previewed(
-        &self,
-        previews: &[MachinePreview],
-        always: bool,
-    ) -> Option<Confirmation> {
-        let views: Vec<MachineView> = previews
-            .iter()
-            .filter_map(|preview| {
-                let mut view = self.machine(preview.machine)?.clone();
-                view.sessions = preview.sessions;
-                if let Some(running) = &preview.running {
-                    view.running = Some(running.clone());
-                }
-                if preview.action == MachineAction::Restart {
-                    let observed = view
-                        .pending
-                        .take()
-                        .filter(|pending| Some(&pending.version) == preview.target.as_ref());
-                    // An unobserved target asks until matching facts describe its consequences.
-                    view.unobserved = preview.target.is_some() && observed.is_none();
-                    view.pending = observed.or_else(|| {
-                        preview.target.as_ref().map(|to| PendingVersion {
-                            version: to.clone(),
-                            protocols: spaceterm_core::update::facts::Protocols::CURRENT,
-                            breaking: false,
-                            installed_at: 0,
-                            overdue_since: None,
-                            stranded: Vec::new(),
-                        })
-                    });
-                    view.state = match &view.pending {
-                        Some(pending) => MachineState::Ready {
-                            to: pending.version.clone(),
-                            breaking: view.breaking() != Some(false),
-                            stranded: pending
-                                .stranded
-                                .iter()
-                                .map(|device| device.name.clone())
-                                .collect(),
-                        },
-                        None => MachineState::Current,
-                    };
-                }
-                Some(view)
-            })
-            .collect();
-        match previews.first().map(|preview| &preview.action) {
-            Some(MachineAction::Stop) => {
-                let [view] = views.as_slice() else {
-                    return None;
-                };
-                (always || view.sessions > 0).then(|| view.stop_confirmation())
-            }
-            Some(MachineAction::Restart) if !views.is_empty() => (always
-                || views.iter().any(MachineView::restart_asks))
-            .then(|| update_confirmation(&views)),
-            _ => None,
-        }
-    }
-
     pub(crate) fn extra_header(&self) -> ExtraHeader {
         let running = env!("SPACETERM_VERSION");
         let (version, state): (&str, Option<String>) = match &self.desktop {
@@ -2266,13 +2037,6 @@ impl Presentation {
             | DesktopState::Relaunching { .. }
             | DesktopState::NeedsNewerSystem => {}
         }
-        if let Some(all) = self.restart_all() {
-            actions.push(ExtraItem::Action {
-                title: all.label,
-                subtitle: Some(all.subtitle),
-                command: all.command,
-            });
-        }
         actions
     }
 
@@ -2364,60 +2128,11 @@ pub(crate) fn current(cx: &App) -> Presentation {
 /// `Changed` asks again instead, and `LoginItemOff` opens Login Items, so neither has an alert.
 pub(crate) fn action_failure(
     name: &str,
-    local: bool,
+    _local: bool,
     action: &MachineAction,
     failure: ActionFailure,
 ) -> Option<(SharedString, SharedString)> {
-    let place = if local {
-        LOCAL_PLACE.to_owned()
-    } else {
-        name.to_owned()
-    };
-    let verb = match action {
-        MachineAction::Install => "update",
-        MachineAction::Restart => "restart",
-        MachineAction::CheckAgain => "check",
-        MachineAction::Start => "start",
-        MachineAction::Stop => "stop",
-        MachineAction::DismissFailure(_) => return None,
-    };
-    let message = match failure {
-        ActionFailure::Changed | ActionFailure::LoginItemOff => return None,
-        ActionFailure::Unavailable(Unavailable::CoreTooOld) => format!(
-            "SpaceTerm Core on {place} is too old to {verb} from this SpaceTerm. Update it on {place} first."
-        ),
-        ActionFailure::Unavailable(Unavailable::ClientTooOld) => format!(
-            "This SpaceTerm is too old for SpaceTerm Core on {place}. Update SpaceTerm, then try again."
-        ),
-        ActionFailure::Unavailable(Unavailable::NotConnected) | ActionFailure::Unreachable => {
-            format!("SpaceTerm can't reach {place}. Try again when it is connected.")
-        }
-        ActionFailure::Busy => format!(
-            "SpaceTerm Core on {place} is busy with another update. Try again when it finishes."
-        ),
-        ActionFailure::DiskFull => format!(
-            "SpaceTerm Core on {place} couldn't {verb} because {place} is out of disk space. Free some space, then try again."
-        ),
-        ActionFailure::RelaunchRequired => "SpaceTerm was replaced on disk while it was running. Relaunch SpaceTerm, then update the Machine.".to_owned(),
-        ActionFailure::ClockBehind => format!("{place}'s clock is more than five minutes behind. Set the correct date and time on {place}, then check for updates again."),
-        ActionFailure::SteppingStoneSkipped([major, minor, patch]) => format!("{place} couldn't start SpaceTerm Core {major}.{minor}.{patch}, which it needs before it can install the newest version. Install a newer compatible SpaceTerm Core archive on {place} with spaceterm update --archive, or wait for a newer intermediate release."),
-        ActionFailure::NeedsFloor(floor) => format!("{place} needs SpaceTerm Core {floor} first, but couldn't fetch it from its update feed. Check its network and proxy settings, then try again."),
-        ActionFailure::Failed => format!("SpaceTerm Core on {place} couldn't {verb}."),
-    };
-    Some((
-        format!(
-            "Couldn't {} SpaceTerm Core on {place}",
-            match action {
-                MachineAction::Install => "Update",
-                MachineAction::Restart => "Restart",
-                MachineAction::CheckAgain => "Check",
-                MachineAction::Start => "Start",
-                _ => "Stop",
-            }
-        )
-        .into(),
-        message.into(),
-    ))
+    super::copy::dialogs::action_failure(name, action, failure)
 }
 
 /// The confirmation for restarting one or more Machines into their Pending Versions.
@@ -2469,7 +2184,7 @@ fn update_confirmation(views: &[MachineView]) -> Confirmation {
             .iter()
             .map(|view| (view.machine, MachineAction::Restart))
             .collect(),
-        approval: Approval::of(views),
+        approval: Approval::default(),
     }
 }
 
@@ -2622,6 +2337,3 @@ fn list_and(names: &[String]) -> String {
     }
 }
 
-#[cfg(test)]
-#[path = "presentation_tests.rs"]
-mod tests;

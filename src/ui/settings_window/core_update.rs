@@ -283,6 +283,8 @@ impl SettingsWindow {
                 crate::ui::updates::commands::Presenter::Front,
                 cx,
             ),
+            // Only the title bar opens its list.
+            Command::ShowList => {}
             Command::Explain(explanation) => {
                 // This runs inside an update of Settings, which the alert must update again.
                 let owner = cx.weak_entity();
@@ -369,11 +371,7 @@ impl SettingsWindow {
                 presentation::action_failure(&notice.name, notice.local, &notice.action, failure)
             {
                 settings.perform_update_command(
-                    Command::Explain(presentation::Explanation {
-                        title,
-                        message,
-                        then: None,
-                    }),
+                    Command::Explain(presentation::Explanation::ok(title, message)),
                     window,
                     cx,
                 );

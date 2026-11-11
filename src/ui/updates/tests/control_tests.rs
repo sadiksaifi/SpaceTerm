@@ -47,7 +47,6 @@ fn waiting(machine: MachineId, name: &'static str, sessions: u32) -> MachineUpda
         bundled: None,
         failed_push: None,
         asked: None,
-        retrying_since: None,
     }
 }
 

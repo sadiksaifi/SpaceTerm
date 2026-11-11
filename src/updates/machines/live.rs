@@ -701,7 +701,6 @@ impl Shared {
                         bundled: None,
                         failed_push: None,
                         asked: None,
-                        retrying_since: None,
                     },
                     known: machine.clone(),
                     wake: Arc::clone(&wake),

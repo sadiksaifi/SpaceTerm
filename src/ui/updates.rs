@@ -985,11 +985,10 @@ mod tests {
             commands::confirmation_alert(&confirmation).validate(&policy),
             Ok(())
         );
-        let explanation = crate::updates::presentation::Explanation {
-            title: "Couldn't restart SpaceTerm Core on penguin".into(),
-            message: "SpaceTerm can't reach penguin. Try again when it is connected.".into(),
-            then: None,
-        };
+        let explanation = crate::updates::presentation::Explanation::ok(
+            "Couldn't restart SpaceTerm Core on penguin",
+            "SpaceTerm can't reach penguin. Try again when it is connected.",
+        );
         assert_eq!(
             commands::explanation_alert(&explanation).validate(&policy),
             Ok(())

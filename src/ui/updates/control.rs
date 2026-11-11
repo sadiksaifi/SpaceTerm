@@ -207,21 +207,12 @@ fn menu_entries(presentation: &Presentation, warning: Rgba, cx: &App) -> Vec<Men
                 .collect(),
         ));
     }
-    let restart_all = presentation.restart_all();
     let recent: Vec<MenuEntry<Choice>> = crate::updates::recent_lines(cx)
         .into_iter()
         .map(|line| MenuEntry::action(line, Choice::Status).informational())
         .collect();
-    if restart_all.is_some() || !recent.is_empty() {
+    if !recent.is_empty() {
         entries.push(MenuEntry::separator());
-    }
-    if let Some(all) = restart_all {
-        entries.push(
-            MenuEntry::action(all.label, Choice::Perform(all.command))
-                .detail(all.trailing)
-                .description(all.sentence)
-                .debug_selector("update-restart-all"),
-        );
     }
     if !recent.is_empty() {
         entries.push(MenuEntry::submenu("Recent", recent).debug_selector("update-recent"));

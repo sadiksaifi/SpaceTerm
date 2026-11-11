@@ -1,8 +1,7 @@
 //! Machine updates: what the desktop knows about each Machine's SpaceTerm Core updates, and the
 //! actions it takes on them. The desktop's own update stays on [`super::UpdateAdapter`].
 //!
-//! Restart All is the UI performing [`MachineAction::Restart`] for each waiting Machine.
-//! Confirmation alerts read `facts.sessions` and `pending.breaking` before `perform`.
+//! A restart runs on one Machine at a time, through its Core's own preview.
 #![allow(
     dead_code,
     reason = "#799 composes the adapter and builds the UI that consumes it"
@@ -38,7 +37,7 @@ pub(crate) struct MachineUpdate {
     pub(crate) detailed: Option<spaceterm_core::update::DetailedUpdateFacts>,
     pub(crate) capabilities: Capabilities,
     /// This desktop's embedded Core version for the Machine's platform, when it is newer than
-    /// `facts.running` and not `facts.skipped`. It drives "Update {Machine}".
+    /// `facts.running` and not `facts.skipped`. The shared store pushes it.
     pub(crate) push: Option<Version>,
     /// This desktop's embedded Core version for the Machine's platform, when it is newer than
     /// every version the Core has and not `facts.skipped`, whether or not its Update Floor
@@ -49,15 +48,10 @@ pub(crate) struct MachineUpdate {
     /// breaks off or runs out of disk space records nothing in the Core's facts. Adapters leave
     /// it None.
     pub(crate) failed_push: Option<FailedPush>,
-    /// A check or install a person started on this desktop that the Core has not ended. The
-    /// shared store records it, so the title bar shows that work and keeps quiet about the work
-    /// a Core starts by itself. Adapters leave it None.
+    /// A check, install or restart a person started on this desktop that the Core has not
+    /// ended. The shared store records it, so the title bar shows that work and keeps quiet about
+    /// the work a Core starts by itself. Adapters leave it None.
     pub(crate) asked: Option<Asked>,
-    /// When this desktop first saw the Core's own download of an update fail, while the Core
-    /// tries it again by itself. None when a person's own try from this desktop failed, or when
-    /// the failure began unseen, so no first time is known. The shared store records it.
-    /// Adapters leave it None.
-    pub(crate) retrying_since: Option<u64>,
 }
 
 /// The work on a Machine that a person started on this desktop.
@@ -65,6 +59,9 @@ pub(crate) struct MachineUpdate {
 pub(crate) enum Asked {
     Check,
     Install,
+    /// From the approval until the Core comes back, or while it does not answer past the restart
+    /// deadline.
+    Restart,
 }
 
 /// A push of this desktop's embedded Core build that failed.

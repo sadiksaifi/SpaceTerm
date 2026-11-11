@@ -64,6 +64,8 @@ fn perform_now(command: Command, presenter: Presenter, cx: &mut App) {
         // The confirmation is built again from the Cores' previews before it shows.
         Command::Confirm(confirmation) => request(confirmation.actions, false, presenter, cx),
         Command::Explain(explanation) => explain(explanation, presenter, cx),
+        // The title-bar control opens its own list; elsewhere it does nothing.
+        Command::ShowList => {}
     }
 }
 
@@ -241,11 +243,7 @@ pub(super) fn receive_failure(notice: &MachineUpdatesNotice, cx: &mut App) {
     else {
         return;
     };
-    let explanation = Explanation {
-        title,
-        message,
-        then: None,
-    };
+    let explanation = Explanation::ok(title, message);
     perform(Command::Explain(explanation), Presenter::Front, cx);
 }
 

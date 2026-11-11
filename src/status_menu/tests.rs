@@ -45,7 +45,6 @@ fn machine(id: MachineId, name: &'static str, sessions: u32) -> MachineUpdate {
         bundled: None,
         failed_push: None,
         asked: None,
-        retrying_since: None,
     }
 }
 

@@ -30,7 +30,6 @@ fn machine(pending: Option<&str>, sessions: u32) -> MachineUpdate {
         bundled: None,
         failed_push: None,
         asked: None,
-        retrying_since: None,
         facts: Some(UpdateFacts {
             revision: 1,
             platform: Platform::MacosArm64,

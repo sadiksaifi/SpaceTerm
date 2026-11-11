@@ -571,7 +571,6 @@ pub(in crate::platform) mod tests {
             bundled: None,
             failed_push: None,
             asked: None,
-            retrying_since: None,
         };
         let machines = [machine(1, "This Mac"), machine(2, "penguin")];
         let update = Presentation::new(
