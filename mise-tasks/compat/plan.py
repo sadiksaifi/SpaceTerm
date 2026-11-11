@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# MISE description="Plan the compatibility pairs from the listed releases"
+# MISE description="Plan the compatibility pairs from the published releases"
 """Write the compatibility workflow's pair matrix as GitHub step outputs."""
 
 import argparse

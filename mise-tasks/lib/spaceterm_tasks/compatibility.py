@@ -1,9 +1,9 @@
 """Pair this commit with published SpaceTerm releases across the protocol and the update path.
 
-`.github/compatibility.toml` lists the releases this commit must still talk to. For each one,
-the release workflow runs two pairs on x86_64 Linux: this commit's CLI against that
-release's Core, and that release's CLI against this commit's Core. ADR 0035 owns the rule
-that decides which releases belong in the list.
+The plan pairs this commit with every published release that ADR 0035 says it must still
+talk to, read from GitHub at planning time. For each one, the release workflow runs two pairs
+on x86_64 Linux: this commit's CLI against that release's Core, and that release's CLI
+against this commit's Core.
 
 The release workflow also runs the update-from-floor pair: the Core of the release's Update
 Floor, with Workspace organization and a pairing, updates to the release's own signed Core
@@ -39,9 +39,8 @@ from spaceterm_tasks.core_package import (
 )
 from spaceterm_tasks.packaging import RELEASE_FLOOR, SHELL_INTEGRATION, packaged_environment
 
-RELEASES = ROOT / ".github/compatibility.toml"
 TARGET = TARGETS["linux"]
-# Each side of a pair is this commit or the listed release.
+# Each side of a pair is this commit or the paired release.
 SIDES = ("client", "core")
 STARTUP = 60
 COMMAND = 60
@@ -53,25 +52,18 @@ def _release_pattern():
         return re.compile(tomllib.load(config)["git"]["tag_pattern"])
 
 
-def releases(path=RELEASES):
-    """The listed release tags, oldest first."""
+def _published_tags(published):
+    """The published release tags that cliff.toml's tag_pattern admits, oldest first."""
     pattern = _release_pattern()
-    try:
-        listed = tomllib.loads(Path(path).read_text())["releases"]
-    except (KeyError, tomllib.TOMLDecodeError):
-        raise TaskError("the compatibility list needs one releases array") from None
-    if not isinstance(listed, list) or not all(
-        isinstance(tag, str) and pattern.match(tag) for tag in listed
-    ):
-        raise TaskError("each listed release is a stable release tag")
-    if listed != sorted(set(listed), key=_order):
-        raise TaskError("listed releases are distinct and oldest first")
-    return listed
+    return sorted(
+        (tag for tag in (f"v{release}" for release in published()) if pattern.match(tag)),
+        key=_order,
+    )
 
 
-def matrix(listed):
-    """The workflow's pair jobs: each listed release, once with this commit as each side."""
-    return [{"release": tag, "candidate": side} for tag in listed for side in SIDES]
+def matrix(paired):
+    """The workflow's pair jobs: each paired release, once with this commit as each side."""
+    return [{"release": tag, "candidate": side} for tag in paired for side in SIDES]
 
 
 def published_work_major(tag):
@@ -102,49 +94,38 @@ def published_work_major(tag):
     return document["protocols"]["work"]["major"]
 
 
-def _unlisted(
+def paired(
     version,
-    listed,
     *,
     published=release_floor.published_releases,
     work_major=published_work_major,
     current=PROTOCOLS,
 ):
-    """The published releases older than `version` that ADR 0035 requires in the list but
-    `listed` omits, oldest first: those whose work major is this commit's or the previous one."""
-    pattern = _release_pattern()
+    """The published releases older than `version` that ADR 0035 pairs with it, oldest first:
+    those whose work major is this commit's or the previous one."""
     mine = current["work"]["major"]
-    candidates = sorted(
-        (
-            tag
-            for tag in (f"v{release}" for release in published())
-            if pattern.match(tag) and _order(tag) < _order(f"v{version}") and tag not in listed
-        ),
-        key=_order,
-    )
-    return [tag for tag in candidates if work_major(tag) in (mine, mine - 1)]
+    return [
+        tag
+        for tag in _published_tags(published)
+        if _order(tag) < _order(f"v{version}") and work_major(tag) in (mine, mine - 1)
+    ]
 
 
 def plan(
     output,
     version,
-    path=RELEASES,
     *,
     published=release_floor.published_releases,
     work_major=published_work_major,
 ):
     """Write the matrix and whether it has any job as GitHub step outputs.
 
-    Release `version` publishes only after every pair passes, so the plan refuses a list that
-    omits a published release older than `version` that ADR 0035 requires. A rerun after
-    `version` itself was published plans the same pairs.
+    Release `version` publishes only after every pair passes. A rerun after `version` itself
+    was published plans the same pairs, because only older releases pair with it.
     """
     if not release_feed.VERSION.fullmatch(version):
         raise TaskError("the compatibility plan needs the MAJOR.MINOR.PATCH release version")
-    listed = releases(path)
-    if missing := _unlisted(version, listed, published=published, work_major=work_major):
-        raise TaskError(f"the compatibility list omits published releases {', '.join(missing)}")
-    include = matrix(listed)
+    include = matrix(paired(version, published=published, work_major=work_major))
     with open(output, "a") as outputs:
         outputs.write(f"matrix={json.dumps({'include': include}, separators=(',', ':'))}\n")
         outputs.write(f"any={'true' if include else 'false'}\n")
@@ -162,11 +143,12 @@ def verdict(planning, planned, pairs):
     print("Every planned compatibility pair passed.")
 
 
-def candidate_tag(listed):
-    """A release tag for this commit's build: the next minor after the newest listed release."""
-    if not listed:
-        raise TaskError("a candidate pairs with a listed release")
-    major, minor, _ = _order(listed[-1])
+def candidate_tag(published=release_floor.published_releases):
+    """A release tag for this commit's build: the next minor after the newest published release."""
+    tags = _published_tags(published)
+    if not tags:
+        raise TaskError("a candidate pairs with a published release")
+    major, minor, _ = _order(tags[-1])
     return f"v{major}.{minor + 1}.0"
 
 
@@ -186,21 +168,21 @@ def expected(candidate, release, current=PROTOCOLS):
     for command, lane in LANES.items():
         mine, theirs = current[lane]["major"], release[lane]["major"]
         if theirs not in (mine, mine - 1):
-            raise TaskError(f"a listed release's {lane} major is this commit's or the previous one")
+            raise TaskError(f"a paired release's {lane} major is this commit's or the previous one")
         allowed[command] = "ok" if candidate == "client" or theirs == mine else "cli_too_old"
     return allowed
 
 
-def pair(tag, candidate, path=RELEASES, *, release_tag=None):
-    """Run one pair: `candidate` names the side this commit plays against release `tag`."""
-    listed = releases(path)
-    if tag not in listed or candidate not in SIDES:
-        raise TaskError("a pair names a listed release and a candidate side")
+def pair(tag, candidate, *, release_tag=None):
+    """Run one pair: `candidate` names the side this commit plays against published release
+    `tag`. `expected` refuses a release outside the protocol window of ADR 0035."""
+    if not _release_pattern().match(tag) or candidate not in SIDES:
+        raise TaskError("a pair names a stable release tag and a candidate side")
     with tempfile.TemporaryDirectory(prefix="spaceterm-compatibility-") as temporary:
         directory = Path(temporary)
-        built = build_candidate(release_tag or candidate_tag(listed), directory / "candidate")
         published, protocols = fetch(tag, directory / "release")
         allowed = expected(candidate, protocols)
+        built = build_candidate(release_tag or candidate_tag(), directory / "candidate")
         environment = _environment(directory / "account")
         if candidate == "client":
             install(published, environment, "off")
