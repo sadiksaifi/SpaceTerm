@@ -445,15 +445,32 @@ fn update_ui_modules_hold_no_update_strings() {
         "src/updates/state.rs",
         "src/updates/confirm.rs",
         "src/updates/machines/store.rs",
+        "src/ui/updates.rs",
+        "src/ui/updates/commands.rs",
+        "src/ui/updates/control.rs",
+        "src/ui/updates/whats_new.rs",
+        "src/status_menu/model.rs",
+        "src/status_menu/controller.rs",
+        "src/ui/settings_window/updates.rs",
+        "src/ui/settings_window/machine_card.rs",
+        "src/ui/settings_window/core_update.rs",
     ] {
         let text = std::fs::read_to_string(root.join(file)).unwrap();
-        let text = text.split("#[cfg(test)]").next().unwrap_or_default();
+        // An inline test module ends the production code.
+        let text = text
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap_or_default();
         for (number, line) in text.lines().enumerate() {
             let code = line.trim_start();
             if code.starts_with("//") {
                 continue;
             }
             for literal in code.split('"').skip(1).step_by(2) {
+                // The Core service's own state, not an update's.
+                if literal == "Not installed" {
+                    continue;
+                }
                 if phrases.iter().any(|phrase| literal.contains(phrase)) {
                     found.push(format!("{file}:{}: {literal}", number + 1));
                 }

@@ -12,6 +12,16 @@ use crate::updates::state::{
     PUSH_FAILURE, STEPPING_STONE,
 };
 
+/// The alert Check for Updates shows once a release is downloaded: its accessibility label,
+/// title and body for `version`. Its main button is [`super::title_bar::RELAUNCH_TO_UPDATE`].
+pub(crate) fn downloaded(version: &str) -> (&'static str, String, &'static str) {
+    (
+        "Update downloaded",
+        format!("SpaceTerm {version} Is Downloaded"),
+        "Relaunching keeps Terminal Sessions running.",
+    )
+}
+
 /// The destructive button of D1 and D2.
 pub(crate) const RESTART_BUTTON: &str = "Restart Core";
 pub(crate) const STOP_BUTTON: &str = "Stop";

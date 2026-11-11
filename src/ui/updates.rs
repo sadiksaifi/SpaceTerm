@@ -542,15 +542,16 @@ fn present_relaunch_failure(cx: &mut App) {
 }
 
 fn install_alert(version: &str) -> Alert<PromptAction> {
+    let (label, title, message) = dialogs::downloaded(version);
     Alert::new(
         ModalId::new("update-install"),
-        "Update downloaded",
-        format!("SpaceTerm {version} Is Downloaded"),
-        "Relaunching keeps Terminal Sessions running.",
+        label,
+        title,
+        message,
         vec![
             action(
                 PromptAction::Relaunch,
-                "Relaunch to Update",
+                crate::updates::copy::title_bar::RELAUNCH_TO_UPDATE,
                 ModalActionRole::Affirmative,
                 "update-install-relaunch",
             )
