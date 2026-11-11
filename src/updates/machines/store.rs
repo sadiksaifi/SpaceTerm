@@ -80,6 +80,9 @@ pub(crate) struct MachineUpdatesNotice {
     pub(crate) action: MachineAction,
     pub(crate) surface: Surface,
     pub(crate) outcome: Result<(), ActionFailure>,
+    /// The Core refused the preview itself, while the person waits on the click. Only such a
+    /// refusal opens an alert unasked (D5); a later outcome shows once in the title bar.
+    pub(crate) refused_at_preview: bool,
 }
 
 /// What a Restart or Stop needs next, from the Cores' own previews.
@@ -501,7 +504,7 @@ impl MachineUpdates {
                     Ok(preview) => previews.push((index, preview)),
                     Err(failure) => {
                         let _ = this.update(cx, |this, cx| {
-                            this.notify_outcome(machine, action, surface, Err(failure), cx);
+                            this.notify_outcome(machine, action, surface, Err(failure), true, cx);
                         });
                     }
                 }
@@ -580,6 +583,7 @@ impl MachineUpdates {
         action: MachineAction,
         surface: Surface,
         outcome: Result<(), ActionFailure>,
+        refused_at_preview: bool,
         cx: &mut Context<Self>,
     ) {
         let Some(update) = self.machines.iter().find(|known| known.machine == machine) else {
@@ -592,6 +596,7 @@ impl MachineUpdates {
             action,
             surface,
             outcome,
+            refused_at_preview,
         });
     }
 
@@ -664,7 +669,7 @@ impl MachineUpdates {
         if let MachineAction::DismissFailure(_) = action {
             return;
         }
-        self.notify_outcome(machine, action, surface, outcome, cx);
+        self.notify_outcome(machine, action, surface, outcome, false, cx);
     }
 
     /// Keeps the outcome of an Install that pushed the bundled Core: an automatic one of

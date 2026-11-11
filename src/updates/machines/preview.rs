@@ -59,7 +59,7 @@ pub(crate) enum Scenario {
     InstallFailedVerification,
     UpdateFailed,
     CantConfirm,
-    RestartAllPartial,
+    FailedAndUnconfirmed,
     Stopped,
     Offline,
     CapabilityMissing,
@@ -84,7 +84,7 @@ impl Scenario {
         Self::InstallFailedVerification,
         Self::UpdateFailed,
         Self::CantConfirm,
-        Self::RestartAllPartial,
+        Self::FailedAndUnconfirmed,
         Self::Stopped,
         Self::Offline,
         Self::CapabilityMissing,
@@ -110,7 +110,7 @@ impl Scenario {
             Self::InstallFailedVerification => "install-failed-verification",
             Self::UpdateFailed => "update-failed",
             Self::CantConfirm => "cant-confirm",
-            Self::RestartAllPartial => "restart-all-partial",
+            Self::FailedAndUnconfirmed => "failed-and-unconfirmed",
             Self::Stopped => "stopped",
             Self::Offline => "offline",
             Self::CapabilityMissing => "capability-missing",
@@ -673,7 +673,7 @@ fn machines(scenario: Scenario, now: u64) -> Vec<MachineUpdate> {
             failed(&mut penguin, FailureKind::Start(StartFailure::NotReady));
         }
         Scenario::CantConfirm => unconfirmed(&mut build_box),
-        Scenario::RestartAllPartial => {
+        Scenario::FailedAndUnconfirmed => {
             failed(&mut penguin, FailureKind::Start(StartFailure::NotReady));
             unconfirmed(&mut build_box);
         }
