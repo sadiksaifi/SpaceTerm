@@ -16,7 +16,8 @@ use spaceterm_ui::{
 };
 
 use super::WorkspaceManager;
-use crate::desktop_profile::{DesktopPresentation, DesktopWording};
+use crate::updates::copy::dialogs;
+use crate::updates::state::{self, Command};
 use crate::updates::machines::store::{MachineUpdates, MachineUpdatesNotice};
 use crate::updates::reminders::{ReminderActivated, UpdateReminders};
 use crate::updates::{ApplicationUpdates, UpdateError, UpdateNotice, UpdateService, UpdateState};
@@ -282,9 +283,15 @@ fn present_result(state: UpdateState, cx: &mut App) {
         }
         UpdateState::Ready { .. } => present_in_front_window(cx, present_install),
         UpdateState::Failed { error } if error.relaunch_failed() => present_relaunch_failure(cx),
-        UpdateState::Failed { error } => {
-            present_in_front_window(cx, move |window, cx| present_failure(error, window, cx))
-        }
+        // A failure the person can act on opens the same alert as `Update Failed`.
+        UpdateState::Failed { error } => match dialogs::app_failure(&state::current(cx).app) {
+            Some(explanation) => {
+                commands::perform(Command::Explain(explanation), commands::Presenter::Front, cx)
+            }
+            None => {
+                present_in_front_window(cx, move |window, cx| present_failure(error, window, cx))
+            }
+        },
         _ => {}
     }
 }
@@ -466,49 +473,17 @@ fn put_off(cx: &mut App) {
     }
 }
 
-/// Only the read-only failure names a remedy, which the desktop wording supplies.
-pub(crate) fn failure_message(error: UpdateError, wording: DesktopWording) -> String {
-    match error {
-        UpdateError::ReadOnly => wording.read_only_update.1.to_owned(),
-        error => error.to_string(),
-    }
-}
-
-fn failure_alert(error: UpdateError, wording: DesktopWording) -> Alert<PromptAction> {
+/// The alert for a check that could not run or finish. Every update failure the person can act
+/// on opens its shared alert instead (D6 to D8, from `copy::dialogs`).
+fn failure_alert(error: UpdateError) -> Alert<PromptAction> {
     let (title, retry, intent) = match error {
         UpdateError::Unavailable => ("Updates Unavailable", false, AlertIntent::Informational),
-        UpdateError::Check => ("Couldn’t Check for Updates", true, AlertIntent::Warning),
-        UpdateError::Download => (
-            "Couldn\u{2019}t Download the Update",
-            true,
-            AlertIntent::Warning,
-        ),
-        UpdateError::Verification => (
-            "Couldn\u{2019}t Verify the Update",
-            true,
-            AlertIntent::Warning,
-        ),
-        UpdateError::Installation => (
-            "Couldn\u{2019}t Install the Update",
-            true,
-            AlertIntent::Warning,
-        ),
-        UpdateError::DiskFull => (
-            "Not Enough Disk Space for the Update",
-            true,
-            AlertIntent::Warning,
-        ),
         UpdateError::SystemTooOld => (
             "Update Needs a Newer System",
             false,
             AlertIntent::Informational,
         ),
-        UpdateError::ReadOnly => (wording.read_only_update.0, false, AlertIntent::Warning),
-        UpdateError::Relaunch | UpdateError::SettingsUnsaved => (
-            "Couldn\u{2019}t Relaunch SpaceTerm",
-            true,
-            AlertIntent::Warning,
-        ),
+        _ => ("Couldn't Check for Updates", true, AlertIntent::Warning),
     };
     let mut actions = Vec::with_capacity(2);
     if retry {
@@ -533,63 +508,25 @@ fn failure_alert(error: UpdateError, wording: DesktopWording) -> Alert<PromptAct
         ModalId::new("update-failure"),
         title,
         title,
-        failure_message(error, wording),
+        error.to_string(),
         actions,
     )
     .intent(intent)
 }
 
 fn present_failure<T: 'static>(error: UpdateError, window: &mut Window, cx: &mut Context<T>) {
-    let wording = DesktopPresentation::get(cx).wording();
-    present(failure_alert(error, wording), window, cx, |action, cx| {
+    present(failure_alert(error), window, cx, |action, cx| {
         if action == Some(PromptAction::TryAgain) {
             check_for_updates(cx);
         }
     });
 }
 
-/// D7. `unsaved` names a relaunch that failed because Settings couldn't be saved.
-fn relaunch_failure_alert(version: &str, unsaved: bool) -> Alert<PromptAction> {
-    Alert::new(
-        ModalId::new("update-relaunch-failure"),
-        "Couldn't relaunch SpaceTerm",
-        "Couldn't Relaunch SpaceTerm",
-        if unsaved {
-            "SpaceTerm couldn't save Settings, so it didn't relaunch. Terminal Sessions keep \
-             running."
-                .to_owned()
-        } else {
-            format!("SpaceTerm {version} is downloaded. Terminal Sessions keep running.")
-        },
-        vec![
-            action(
-                PromptAction::TryAgain,
-                "Try Again",
-                ModalActionRole::Affirmative,
-                "update-relaunch-failure-try-again",
-            )
-            .with_emphasis(ModalActionEmphasis::Prominent)
-            .default_action(true),
-            action(
-                PromptAction::Later,
-                "Cancel",
-                ModalActionRole::Cancel,
-                "update-relaunch-failure-cancel",
-            ),
-        ],
-    )
-    .intent(AlertIntent::Warning)
-}
-
 /// The person chose Relaunch and is waiting for SpaceTerm to quit, so the failure appears even
 /// with no Workspace Window open: SpaceTerm opens one to show it, as its relaunch would have.
 fn present_relaunch_failure(cx: &mut App) {
     let Some(updates) = service(cx) else { return };
-    let version = updates
-        .read(cx)
-        .pending_version()
-        .unwrap_or_default()
-        .to_owned();
+    let version = updates.read(cx).pending_version().map(str::to_owned);
     let unsaved = matches!(
         updates.read(cx).state(),
         UpdateState::Failed {
@@ -600,28 +537,8 @@ fn present_relaunch_failure(cx: &mut App) {
         crate::app::activate_default_window(cx, None);
         cx.activate(true);
     }
-    present_in_front_window(cx, move |window, cx| {
-        present(
-            relaunch_failure_alert(&version, unsaved),
-            window,
-            cx,
-            |action, cx| match action {
-                Some(PromptAction::TryAgain) => {
-                    if let Some(updates) = service(cx) {
-                        updates.update(cx, |updates, cx| updates.relaunch(cx));
-                    }
-                }
-                // Cancel and Escape dismiss the failure's title-bar step on this desktop.
-                _ => commands::perform(
-                    crate::updates::state::Command::Desktop(
-                        crate::updates::state::DesktopAction::DismissFailure,
-                    ),
-                    commands::Presenter::Front,
-                    cx,
-                ),
-            },
-        );
-    });
+    let explanation = dialogs::relaunch_failure(version.as_deref(), unsaved);
+    commands::perform(Command::Explain(explanation), commands::Presenter::Front, cx);
 }
 
 fn install_alert(version: &str) -> Alert<PromptAction> {
@@ -693,10 +610,6 @@ mod tests {
     use crate::appearance::{Appearance, builtin_chrome_base};
 
     mod control_tests;
-
-    fn testing_wording() -> DesktopWording {
-        crate::desktop_profile::testing_presentation().wording()
-    }
 
     fn version() -> String {
         "0.4.2".to_owned()
@@ -910,8 +823,6 @@ mod tests {
             available_alert("0.4.2"),
             install_alert("0.4.2"),
             downloading_alert("0.4.2"),
-            relaunch_failure_alert("0.4.2", false),
-            relaunch_failure_alert("0.4.2", true),
         ];
         alerts.extend(
             [
@@ -926,7 +837,7 @@ mod tests {
                 UpdateError::Relaunch,
                 UpdateError::SettingsUnsaved,
             ]
-            .map(|error| failure_alert(error, testing_wording())),
+            .map(failure_alert),
         );
         for alert in alerts {
             assert_eq!(alert.validate(&policy), Ok(()));
@@ -1006,16 +917,5 @@ mod tests {
         let alert = tree.node("Update downloaded");
         assert_eq!(alert["aria"]["role"], "AlertDialog");
         assert_eq!(tree.with_role("Button").len(), 3);
-    }
-
-    #[gpui::test]
-    fn the_relaunch_failure_alert_offers_try_again_and_cancel(cx: &mut gpui::TestAppContext) {
-        let tree = presented(relaunch_failure_alert("0.4.2", false), cx);
-        tree.text("Couldn't Relaunch SpaceTerm");
-        tree.text("SpaceTerm 0.4.2 is downloaded. Terminal Sessions keep running.");
-        for action in ["Try Again", "Cancel"] {
-            tree.node(action);
-        }
-        assert_eq!(tree.with_role("Button").len(), 2);
     }
 }

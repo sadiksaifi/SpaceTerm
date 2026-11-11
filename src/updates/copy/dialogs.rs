@@ -12,13 +12,6 @@ use crate::updates::state::{
     PUSH_FAILURE, STEPPING_STONE,
 };
 
-/// How to update an installation SpaceTerm can't replace, as each platform installs SpaceTerm.
-/// The failure alert's own wording comes from the platform's desktop wording.
-#[cfg(target_os = "macos")]
-pub(crate) const READ_ONLY_REMEDY: &str = "Install SpaceTerm in Applications to update.";
-#[cfg(not(target_os = "macos"))]
-pub(crate) const READ_ONLY_REMEDY: &str = "Run the SpaceTerm install script to install the update.";
-
 /// The destructive button of D1 and D2.
 pub(crate) const RESTART_BUTTON: &str = "Restart Core";
 pub(crate) const STOP_BUTTON: &str = "Stop";
@@ -113,17 +106,9 @@ pub(crate) fn app_failure(app: &AppRow) -> Option<Explanation> {
             proceed: Some(TRY_AGAIN.into()),
             dismiss,
         },
-        AppStage::RelaunchFailed { version, error } => Explanation {
-            title: "Couldn't Relaunch SpaceTerm".into(),
-            message: match error {
-                UpdateError::SettingsUnsaved => "SpaceTerm couldn't save Settings, so it didn't relaunch. Terminal Sessions keep running.".to_owned(),
-                _ => format!("{} is downloaded. Terminal Sessions keep running.", release(version)),
-            }
-            .into(),
-            then: Some(Box::new(Command::Desktop(DesktopAction::Update))),
-            proceed: Some(TRY_AGAIN.into()),
-            dismiss,
-        },
+        AppStage::RelaunchFailed { version, error } => {
+            relaunch_failure(version.as_deref(), *error == UpdateError::SettingsUnsaved)
+        }
         AppStage::CantReplace => Explanation {
             title: cant_replace_title().into(),
             message: cant_replace_message().into(),
@@ -133,6 +118,24 @@ pub(crate) fn app_failure(app: &AppRow) -> Option<Explanation> {
         },
         _ => return None,
     })
+}
+
+/// D7: the relaunch of `version` failed, or failed because Settings couldn't be saved when
+/// `unsaved`. Try Again relaunches, and Cancel dismisses the failure's title-bar step.
+pub(crate) fn relaunch_failure(version: Option<&str>, unsaved: bool) -> Explanation {
+    let release = version.map_or_else(|| "SpaceTerm".to_owned(), |v| format!("SpaceTerm {v}"));
+    Explanation {
+        title: "Couldn't Relaunch SpaceTerm".into(),
+        message: if unsaved {
+            "SpaceTerm couldn't save Settings, so it didn't relaunch. Terminal Sessions keep running.".to_owned()
+        } else {
+            format!("{release} is downloaded. Terminal Sessions keep running.")
+        }
+        .into(),
+        then: Some(Box::new(Command::Desktop(DesktopAction::Update))),
+        proceed: Some(TRY_AGAIN.into()),
+        dismiss: Some(Box::new(Command::Desktop(DesktopAction::DismissFailure))),
+    }
 }
 
 #[cfg(target_os = "macos")]

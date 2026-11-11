@@ -22,8 +22,6 @@ pub(crate) struct DesktopWording {
     pub(crate) system_directory_selection: &'static str,
     /// The command that shows a file selected in the desktop's file manager.
     pub(crate) reveal_file: &'static str,
-    /// The remedy for an installation the updater cannot replace, as an alert title and message.
-    pub(crate) read_only_update: (&'static str, &'static str),
     /// What Settings > Uninstall SpaceTerm removes from this computer, as its row's description.
     pub(crate) uninstall_description: &'static str,
     /// What the person does to remove SpaceTerm after Uninstall removed SpaceTerm Core but not
@@ -432,7 +430,6 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
             this_computer_phrase: "this computer",
             system_directory_selection: "Choose Directory…",
             reveal_file: "Show in Folder",
-            read_only_update: ("Move SpaceTerm", "Move SpaceTerm before updating it."),
             uninstall_description: "Removes SpaceTerm and SpaceTerm Core from this computer.",
             uninstall_app_remedy: "remove SpaceTerm the way you installed it",
         },

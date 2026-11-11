@@ -843,7 +843,7 @@ fn failed_relaunch(
 #[gpui::test]
 fn cancel_on_a_failed_relaunch_dismisses_its_step(cx: &mut gpui::TestAppContext) {
     let (adapter, updates, visual) = failed_relaunch(cx);
-    click("modal-action-update-relaunch-failure-cancel", visual);
+    click("modal-action-update-explain-cancel", visual);
     assert!(
         !relaunch_failed(&updates, visual),
         "the failure no longer holds the title bar"
