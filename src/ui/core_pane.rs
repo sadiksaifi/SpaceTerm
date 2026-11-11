@@ -906,8 +906,13 @@ mod connection {
                 .map(|facts| facts.running.clone())
         }
 
+        /// A Core of work minor 2 or later also says why its restart began.
         fn restart_progress(&self) -> Option<CoreRestart> {
-            CoreRestart::of(self.directory_core()?.update_facts()?.as_ref())
+            let core = self.directory_core()?;
+            if let Some(detailed) = core.detailed_update_facts() {
+                return CoreRestart::of_detailed(&detailed);
+            }
+            CoreRestart::of(core.update_facts()?.as_ref())
         }
 
         /// The version the Core last failed to start into, as its update facts report it.
