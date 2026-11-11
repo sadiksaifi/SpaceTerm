@@ -1,6 +1,7 @@
 """Exercise release notes, dry-run tags, update trust, feeds, the appcast and the asset list."""
 
 import base64
+import hashlib
 import json
 import os
 import plistlib
@@ -14,6 +15,7 @@ from pathlib import Path
 from spaceterm_tasks import (
     ROOT,
     TaskError,
+    core_package,
     release,
     release_feed,
     release_publish,
@@ -556,6 +558,33 @@ class AssetListTests(unittest.TestCase):
     def test_a_partial_release_is_only_for_dry_runs(self):
         with self.assertRaisesRegex(TaskError, "only a dry run"):
             release.assemble("v1.4.0", complete=False, environment={})
+
+    def test_a_core_build_missing_its_archive_digest_or_signature_is_refused_as_missing(self):
+        archive = b"archive"
+        files = {
+            "artifact.tar.gz": archive,
+            "artifact.sha256": (hashlib.sha256(archive).hexdigest() + "\n").encode(),
+            "artifact.sig": bytes(64),
+        }
+        for missing in files:
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as temporary:
+                entry = Path(temporary) / "entry"
+                scratch = Path(temporary) / "scratch"
+                entry.mkdir()
+                scratch.mkdir()
+                for name, contents in files.items():
+                    if name != missing:
+                        (entry / name).write_bytes(contents)
+                with self.assertRaises(core_package.ArtifactVerificationError) as failure:
+                    release.verified_core(
+                        entry,
+                        core_package.TARGETS["linux"],
+                        "1.4.0",
+                        "1.4.0",
+                        scratch,
+                        execute=False,
+                    )
+                self.assertEqual(failure.exception.cause, core_package.ArtifactCause.MISSING)
 
 
 class InstallerTests(unittest.TestCase):
