@@ -83,9 +83,10 @@ pub(crate) struct MachineUpdatesNotice {
     pub(crate) action: MachineAction,
     pub(crate) surface: Surface,
     pub(crate) outcome: Result<(), ActionFailure>,
-    /// The Core refused the preview itself, while the person waits on the click. Only such a
-    /// refusal opens an alert unasked (D5); a later outcome shows once in the title bar.
-    pub(crate) refused_at_preview: bool,
+    /// The Core refused the click's restart at once, while the person waits on it: at its
+    /// preview, or when the approved restart executed. Only such a refusal opens an alert unasked
+    /// (D5); a later outcome shows once in the title bar.
+    pub(crate) refused_at_once: bool,
 }
 
 impl MachineUpdatesNotice {
@@ -97,7 +98,7 @@ impl MachineUpdatesNotice {
         let Err(failure) = self.outcome else {
             return None;
         };
-        let waiting = self.refused_at_preview
+        let waiting = self.refused_at_once
             || matches!(self.action, MachineAction::Start | MachineAction::Stop);
         if !waiting {
             return None;
@@ -654,7 +655,7 @@ impl MachineUpdates {
         action: MachineAction,
         surface: Surface,
         outcome: Result<(), ActionFailure>,
-        refused_at_preview: bool,
+        refused_at_once: bool,
         cx: &mut Context<Self>,
     ) {
         let Some(update) = self.machines.iter().find(|known| known.machine == machine) else {
@@ -667,7 +668,7 @@ impl MachineUpdates {
             action,
             surface,
             outcome,
-            refused_at_preview,
+            refused_at_once,
         });
     }
 
@@ -740,7 +741,14 @@ impl MachineUpdates {
         if let MachineAction::DismissFailure(_) = action {
             return;
         }
-        self.notify_outcome(machine, action, surface, outcome, false, cx);
+        // An approved restart the Core refused without running it leaves no failure in its
+        // facts, so the person waiting on the click hears it at once.
+        let refused = action == MachineAction::Restart
+            && matches!(
+                outcome,
+                Err(ActionFailure::Busy | ActionFailure::Unreachable | ActionFailure::Unavailable(_))
+            );
+        self.notify_outcome(machine, action, surface, outcome, refused, cx);
     }
 
     /// Keeps the outcome of an Install that pushed the bundled Core: an automatic one of

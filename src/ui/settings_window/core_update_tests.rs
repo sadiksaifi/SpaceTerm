@@ -264,10 +264,10 @@ fn a_failed_settings_preview_explains_the_failure(cx: &mut TestAppContext) {
     assert!(adapter.executed().is_empty());
 }
 
-/// An approved restart whose lane drops while its result is followed reports through the title
-/// bar's step, not through an alert the person did not ask for (design 4.6).
+/// An approved restart the Core refuses without running it opens D5 at once, because the
+/// person waits on that click (design 4.6).
 #[gpui::test]
-fn a_settings_restart_that_fails_after_it_ran_opens_no_alert(cx: &mut TestAppContext) {
+fn a_refused_approved_settings_restart_opens_d5(cx: &mut TestAppContext) {
     let (_, adapter, cx) = open(cx, Some("1.6.0"));
     click(UPDATE_SELECTOR, cx);
     answer(UPDATE_CONFIRM_SELECTOR, cx);
@@ -275,14 +275,13 @@ fn a_settings_restart_that_fails_after_it_ran_opens_no_alert(cx: &mut TestAppCon
     adapter.emit(MachineUpdatesEvent::Finished {
         machine: MACHINE,
         action: MachineAction::Restart,
-        outcome: Err(crate::updates::machines::ActionFailure::Unreachable),
+        outcome: Err(crate::updates::machines::ActionFailure::Busy),
     });
     cx.run_until_parked();
-    assert!(
-        cx.debug_bounds("modal-action-settings-update-explanation-ok")
-            .is_none(),
-        "no alert opens unasked"
+    A11yTree::read(cx).text(
+        "SpaceTerm Core on This Mac is busy with another update. Try again when it finishes.",
     );
+    assert_eq!(adapter.executed().len(), 1, "no restart runs again");
 }
 
 /// D3f from the Machine card: OK dismisses the title bar's failure step on this desktop, and

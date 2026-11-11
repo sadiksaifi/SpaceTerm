@@ -876,30 +876,43 @@ fn choosing_a_rows_action_asks_that_machines_core(cx: &mut TestAppContext) {
     assert!(fixture.machines.executed().is_empty(), "it asks first");
 }
 
-/// An approved restart whose lane drops while its result is followed reports through the title
-/// bar's step, not through an alert the person did not ask for (design 4.6).
+/// An approved restart the Core refuses without running it opens D5 once, because the person
+/// waits on that click. An outcome that came later opens no alert (design 4.6).
 #[gpui::test]
-fn a_restart_that_fails_after_it_ran_opens_no_alert(cx: &mut TestAppContext) {
-    let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 2))], cx);
-    let restart = row_action(&fixture.host.menu(), PENGUIN);
-    fixture.host.answers.borrow_mut().push(true);
-    cx.update(|cx| fixture.menu.perform(restart, None, cx));
-    cx.run_until_parked();
-    assert_eq!(
-        fixture.machines.executed_actions(),
-        [(PENGUIN, MachineAction::Restart)]
-    );
-    fixture.machines.emit(MachineUpdatesEvent::Finished {
-        machine: PENGUIN,
-        action: MachineAction::Restart,
-        outcome: Err(ActionFailure::Unreachable),
-    });
-    cx.run_until_parked();
-    assert_eq!(
-        fixture.host.alerts.borrow().len(),
-        1,
-        "only the confirmation opened"
-    );
+fn a_refused_approved_restart_opens_d5_once_and_a_later_failure_none(cx: &mut TestAppContext) {
+    for (failure, alerts) in [(ActionFailure::Busy, 2), (ActionFailure::Failed, 1)] {
+        let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 2))], cx);
+        let restart = row_action(&fixture.host.menu(), PENGUIN);
+        fixture.host.answers.borrow_mut().push(true);
+        cx.update(|cx| fixture.menu.perform(restart, None, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            fixture.machines.executed_actions(),
+            [(PENGUIN, MachineAction::Restart)]
+        );
+        fixture.machines.emit(MachineUpdatesEvent::Finished {
+            machine: PENGUIN,
+            action: MachineAction::Restart,
+            outcome: Err(failure),
+        });
+        cx.run_until_parked();
+        let titles: Vec<String> = fixture
+            .host
+            .alerts
+            .borrow()
+            .iter()
+            .map(|alert| alert.title.clone())
+            .collect();
+        assert_eq!(titles.len(), alerts, "{failure:?}: {titles:?}");
+        if alerts == 2 {
+            assert_eq!(titles[1], "Couldn't Restart SpaceTerm Core on penguin");
+        }
+        assert_eq!(
+            fixture.machines.executed_actions().len(),
+            1,
+            "no restart runs again"
+        );
+    }
 }
 
 /// D3f from the menu bar extra: OK dismisses the title bar's failure step on this desktop, and

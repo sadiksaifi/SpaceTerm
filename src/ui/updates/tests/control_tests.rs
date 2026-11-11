@@ -725,7 +725,7 @@ fn restart_core_asks_and_only_its_destructive_button_restarts(cx: &mut gpui::Tes
     );
 }
 
-fn notice(failure: ActionFailure, refused_at_preview: bool) -> MachineUpdatesNotice {
+fn notice(failure: ActionFailure, refused_at_once: bool) -> MachineUpdatesNotice {
     MachineUpdatesNotice {
         machine: PENGUIN,
         name: "penguin".into(),
@@ -733,7 +733,7 @@ fn notice(failure: ActionFailure, refused_at_preview: bool) -> MachineUpdatesNot
         action: MachineAction::Restart,
         surface: Surface::Window,
         outcome: Err(failure),
-        refused_at_preview,
+        refused_at_once,
     }
 }
 
