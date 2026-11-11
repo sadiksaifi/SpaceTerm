@@ -124,9 +124,6 @@ pub(crate) enum Refused {
         core: CoreVersions,
     },
     Failed(CoreError),
-    /// Account-local admission ended before receiving even one reply byte. This is still a
-    /// protocol failure unless the local host independently proves that its capacity is full.
-    NoReply,
 }
 
 impl From<CoreError> for Refused {
@@ -140,7 +137,6 @@ impl From<Refused> for CoreError {
         match refused {
             Refused::Incompatible { older, .. } => Self::IncompatibleProtocol(older),
             Refused::Failed(error) => error,
-            Refused::NoReply => Self::Protocol,
         }
     }
 }
@@ -243,6 +239,18 @@ pub(crate) fn prefixed(bytes: &[u8]) -> Vec<u8> {
     frame
 }
 
+// A native-local transport refusal, never a Hello or Offer. The impossible frame length
+// keeps released readers' existing Protocol outcome when no admission slot is available.
+const LOCAL_CAPACITY_RECEIPT: &[u8] = b"\xff\xff\xff\xffSpaceTerm local capacity\0";
+
+/// Publishes a rejection on the connection it rejected, so capacity returning or a new Core
+/// taking over the runtime cannot change its classification. Never blocks the accept loop.
+pub(crate) fn reject_local_capacity(mut stream: UnixStream) {
+    if stream.set_nonblocking(true).is_ok() {
+        let _ = stream.write_all(LOCAL_CAPACITY_RECEIPT);
+    }
+}
+
 impl Preamble for UnixStream {
     fn send(&mut self, frame: &[u8], deadline: Instant) -> Result<(), CoreError> {
         self.set_nonblocking(true)
@@ -266,7 +274,7 @@ impl Preamble for UnixStream {
     }
 
     fn receive(&mut self, max: usize, deadline: Instant) -> Result<Vec<u8>, CoreError> {
-        receive_frame(self, max, deadline, &mut 0)
+        receive_frame(self, max, deadline)
     }
 }
 
@@ -274,19 +282,27 @@ fn receive_frame(
     stream: &mut UnixStream,
     max: usize,
     deadline: Instant,
-    received: &mut usize,
 ) -> Result<Vec<u8>, CoreError> {
     stream
         .set_nonblocking(true)
         .map_err(|_| CoreError::Protocol)?;
     let mut size = [0; 4];
-    read_exact(stream, &mut size, deadline, received)?;
+    read_exact(stream, &mut size, deadline)?;
+    if size == [0xff; 4] {
+        let mut receipt = [0; LOCAL_CAPACITY_RECEIPT.len() - 4];
+        read_exact(stream, &mut receipt, deadline)?;
+        return Err(if receipt == LOCAL_CAPACITY_RECEIPT[4..] {
+            CoreError::Capacity
+        } else {
+            CoreError::Protocol
+        });
+    }
     let size = u32::from_be_bytes(size) as usize;
     if size > max {
         return Err(CoreError::Protocol);
     }
     let mut bytes = vec![0; size];
-    read_exact(stream, &mut bytes, deadline, received)?;
+    read_exact(stream, &mut bytes, deadline)?;
     Ok(bytes)
 }
 
@@ -294,13 +310,11 @@ fn read_exact(
     stream: &mut UnixStream,
     mut bytes: &mut [u8],
     deadline: Instant,
-    received: &mut usize,
 ) -> Result<(), CoreError> {
     while !bytes.is_empty() {
         match stream.read(bytes) {
             Ok(0) => return Err(CoreError::Protocol),
             Ok(count) => {
-                *received += count;
                 bytes = &mut bytes[count..];
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -545,29 +559,24 @@ pub(crate) fn admit_client<'a>(
     build: &str,
 ) -> Result<Negotiated, Refused> {
     crate::host::check_peer(stream)?;
-    let mut observed = ObservedReply {
-        stream,
-        received: 0,
-    };
-    let result = admit_transport(&mut observed, caller, core, build);
-    if result == Err(Refused::Failed(CoreError::Protocol)) && observed.received == 0 {
-        Err(Refused::NoReply)
-    } else {
-        result
-    }
+    admit_transport(&mut LocalCaller(stream), caller, core, build)
 }
 
-struct ObservedReply<'a> {
-    stream: &'a mut UnixStream,
-    received: usize,
-}
+struct LocalCaller<'a>(&'a mut UnixStream);
 
-impl Preamble for ObservedReply<'_> {
+impl Preamble for LocalCaller<'_> {
     fn send(&mut self, frame: &[u8], deadline: Instant) -> Result<(), CoreError> {
-        self.stream.send(frame, deadline)
+        self.0.send(frame, deadline).map_err(|error| {
+            // A rejecting Core can close before Hello is written. Its queued receipt still
+            // belongs to this connection; an empty or malformed reply proves nothing.
+            match self.0.receive(MAX_FRAME, deadline) {
+                Err(CoreError::Capacity) => CoreError::Capacity,
+                _ => error,
+            }
+        })
     }
     fn receive(&mut self, max: usize, deadline: Instant) -> Result<Vec<u8>, CoreError> {
-        receive_frame(self.stream, max, deadline, &mut self.received)
+        self.0.receive(max, deadline)
     }
 }
 

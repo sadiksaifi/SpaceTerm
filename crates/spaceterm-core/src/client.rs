@@ -642,9 +642,6 @@ impl MachineConnection {
             &self.identity,
         );
         self.record_work(&admitted);
-        if admitted == Err(protocol::Refused::NoReply) && host::capacity::full(&self.paths)? {
-            return Err(CoreError::Capacity);
-        }
         admitted?;
         let carrier =
             crate::connection::unix::UnixCarrier::new(stream).map_err(|_| CoreError::Protocol)?;

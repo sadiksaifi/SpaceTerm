@@ -1032,8 +1032,12 @@ fn serve_runtime_ready(
                     break;
                 }
             };
-            if connections.len() >= MAX_LOCAL_CONNECTIONS || check_peer(&stream).is_err() {
+            if check_peer(&stream).is_err() {
+                continue;
+            }
+            if connections.len() >= MAX_LOCAL_CONNECTIONS {
                 capacity.update(&connections);
+                protocol::reject_local_capacity(stream);
                 continue;
             }
             if let Ok(running) = spawn_local(stream, core, paths, &environment) {

@@ -66,12 +66,13 @@ fn local_capacity_wait_can_be_cancelled_without_connecting_later() {
 
 #[test]
 fn local_capacity_does_not_turn_other_protocol_failures_into_retries() {
-    for kind in 0..4 {
+    for kind in 0..8 {
         let fixture = Fixture::new();
         let listener = UnixListener::bind(fixture.paths.socket()).unwrap();
         fs::set_permissions(fixture.paths.socket(), fs::Permissions::from_mode(0o600)).unwrap();
         let core = crate::MachineConnection::with_paths(fixture.paths.clone()).unwrap();
         let runtime = Directory::open(&fixture.paths.runtime, false).unwrap();
+        let socket = fixture.paths.socket();
         let (done, finished) = std::sync::mpsc::channel();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -79,11 +80,26 @@ fn local_capacity_does_not_turn_other_protocol_failures_into_retries() {
             let _: serde_json::Value = wire.read().unwrap();
             // Capacity can change after Hello. Partial and malformed replies still fail.
             let marker = (kind != 0).then(|| runtime.lock(capacity::MARKER, false).unwrap());
+            // A replacement Core's signal cannot explain this older socket's empty reply.
+            let _replacement = (kind == 7).then(|| {
+                fs::remove_file(&socket).unwrap();
+                let replacement = UnixListener::bind(&socket).unwrap();
+                fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+                replacement
+            });
             if kind == 1 {
                 wire.write(&serde_json::json!({"invalid": true})).unwrap();
             }
             if kind == 2 {
                 stream.write_all(&[0, 0]).unwrap();
+            }
+            if kind == 5 {
+                let mut malformed = CAPACITY_REJECTION.to_vec();
+                *malformed.last_mut().unwrap() = b'!';
+                stream.write_all(&malformed).unwrap();
+            }
+            if kind == 6 {
+                stream.write_all(&CAPACITY_REJECTION[..8]).unwrap();
             }
             let _held = if kind == 3 {
                 drop(marker);
@@ -94,11 +110,90 @@ fn local_capacity_does_not_turn_other_protocol_failures_into_retries() {
             stream.shutdown(std::net::Shutdown::Write).unwrap();
             finished.recv_timeout(Duration::from_secs(2)).unwrap();
         });
-        assert_eq!(
-            core.refresh_cancellable(&|| false),
-            Err(CoreError::Protocol)
-        );
+        let result = core.refresh();
         done.send(()).unwrap();
         server.join().unwrap();
+        assert_eq!(result, Err(CoreError::Protocol), "case {kind}");
     }
+}
+
+// The native transport receipt is deliberately outside length-prefixed JSON. Normal
+// admission frames, including malformed Offers, never constitute this receipt.
+const CAPACITY_REJECTION: &[u8] = b"\xff\xff\xff\xffSpaceTerm local capacity\0";
+
+fn capacity_rejection_after_hello(release_before_reply: bool) {
+    let fixture = Fixture::new();
+    let listener = UnixListener::bind(fixture.paths.socket()).unwrap();
+    fs::set_permissions(fixture.paths.socket(), fs::Permissions::from_mode(0o600)).unwrap();
+    let core = crate::MachineConnection::with_paths(fixture.paths.clone()).unwrap();
+    let runtime = Directory::open(&fixture.paths.runtime, false).unwrap();
+    let (done, finished) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _: serde_json::Value = protocol::Wire::new(&mut stream).read().unwrap();
+        // Reading Hello proves that the caller passed its first capacity probe.
+        let marker = runtime.lock(capacity::MARKER, false).unwrap();
+        let last = CAPACITY_REJECTION.len() - 1;
+        stream.write_all(&CAPACITY_REJECTION[..last]).unwrap();
+        let held = if release_before_reply {
+            // No complete receipt or EOF exists until after capacity has returned.
+            drop(marker);
+            assert!(!runtime.existing_lock_held(capacity::MARKER).unwrap());
+            None
+        } else {
+            Some(marker)
+        };
+        // The old reader closes as soon as it sees the non-JSON prefix.
+        let _ = stream.write_all(&CAPACITY_REJECTION[last..]);
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+        finished.recv_timeout(Duration::from_secs(2)).unwrap();
+        drop(held);
+    });
+    let result = core.refresh();
+    done.send(()).unwrap();
+    server.join().unwrap();
+    assert_eq!(result, Err(CoreError::Capacity));
+}
+
+#[test]
+fn local_capacity_rejection_survives_capacity_release_before_reply_is_complete() {
+    capacity_rejection_after_hello(true);
+}
+
+#[test]
+fn local_capacity_rejection_after_the_first_probe_is_temporary() {
+    capacity_rejection_after_hello(false);
+}
+
+#[test]
+fn local_capacity_receipt_survives_the_core_closing_before_hello() {
+    let (mut caller, mut server) = UnixStream::pair().unwrap();
+    server.write_all(CAPACITY_REJECTION).unwrap();
+    drop(server);
+    assert_eq!(
+        protocol::admit_client(
+            &mut caller,
+            (&[9; 32], &"Capacity test".into()),
+            &[7; 32],
+            "spaceterm-development",
+        ),
+        Err(protocol::Refused::Failed(CoreError::Capacity))
+    );
+}
+
+#[test]
+fn local_capacity_rejected_socket_reports_its_own_core() {
+    let fixture = Fixture::new();
+    let (_child, _held) = fill_local_admission(&fixture);
+    // Bypass the advisory probe to exercise the actual full host's rejection path.
+    let mut caller = connect_when_ready(&fixture);
+    assert_eq!(
+        protocol::admit_client(
+            &mut caller,
+            (&fixture.device, &"Capacity test".into()),
+            &fixture.pin,
+            "spaceterm-development",
+        ),
+        Err(protocol::Refused::Failed(CoreError::Capacity))
+    );
 }

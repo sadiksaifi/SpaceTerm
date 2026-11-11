@@ -156,7 +156,7 @@ impl Admissions {
         let (outcome, core) = match result {
             Ok(negotiated) => (Ok(negotiated.selected), Some(&negotiated.core)),
             Err(Refused::Incompatible { older, core }) => (Err((*older).into()), Some(core)),
-            Err(Refused::Failed(_) | Refused::NoReply) => (Err(Unavailable::NotConnected), None),
+            Err(Refused::Failed(_)) => (Err(Unavailable::NotConnected), None),
         };
         match lane {
             Lane::Work => self.work = Some(outcome),
