@@ -1307,15 +1307,27 @@ fn a_confirmation_follows_the_fresh_preview_and_its_approval_the_described_work(
     }));
 }
 
-/// Through the store: a restart that ends sessions asks, approving executes exactly the
-/// previewed work, and Cancel records the Ask-stage deferral.
+/// Through the store: a restart that ends sessions asks, and approving executes exactly the
+/// previewed work. Cancel records a deferral only at the Ask stage: Cancel at Offer leaves the
+/// first Ask step to show, and an Insist step never hides (L3).
 #[gpui::test]
-fn a_requested_restart_asks_then_runs_or_defers(cx: &mut gpui::TestAppContext) {
+fn a_requested_restart_asks_then_runs_or_defers_only_at_ask(cx: &mut gpui::TestAppContext) {
     use crate::updates::machines::store::{Ask, request};
-    for approve in [true, false] {
+    let now = crate::updates::now();
+    let cases = [
+        (true, now - 3 * DAY, false),
+        (false, now - ladder::ASK_AFTER + 60, false),
+        (false, now - 3 * DAY, true),
+        (false, now - 8 * DAY, false),
+    ];
+    for (approve, installed_at, defers) in cases {
         let (adapter, store) = installed_store(cx);
         adapter.emit(MachineUpdatesEvent::Machines(vec![waiting(
-            LOCAL, "This Mac", 2, false, NOW,
+            LOCAL,
+            "This Mac",
+            2,
+            false,
+            installed_at,
         )]));
         cx.run_until_parked();
         let asked = Rc::new(std::cell::Cell::new(0));
@@ -1349,7 +1361,9 @@ fn a_requested_restart_asks_then_runs_or_defers(cx: &mut gpui::TestAppContext) {
         );
         assert_eq!(
             store.read_with(cx, |store, _| store.deferred().contains_key(&LOCAL)),
-            !approve
+            defers,
+            "installed {} seconds ago",
+            now - installed_at
         );
     }
 }

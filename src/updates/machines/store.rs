@@ -306,9 +306,23 @@ impl MachineUpdates {
         &self.deferred
     }
 
-    /// Records that the person cancelled `machine`'s restart confirmation at `at`. At the Ask
-    /// stage the update view hides that Machine's step for a day on this desktop.
+    /// Records that the person cancelled `machine`'s restart confirmation at `at`, when its
+    /// Pending Version is at the Ask stage and is no hard stop. The update view then hides that
+    /// Machine's step for a day on this desktop. Cancel at Offer or Insist records nothing, so
+    /// it never hides a later stage's first step.
     pub(crate) fn defer(&mut self, machine: MachineId, at: u64, cx: &mut Context<Self>) {
+        let Some(update) = self.machines.iter().find(|known| known.machine == machine) else {
+            return;
+        };
+        let marks = crate::updates::state::Marks {
+            dismissed: &self.dismissed,
+            deferred: &HashMap::new(),
+            pushes_held: self.holds_pushes(cx),
+        };
+        let row = crate::updates::state::MachineRow::new(update, marks, at);
+        if row.ladder != Some(crate::updates::ladder::Stage::Ask) || row.blocked.is_some() {
+            return;
+        }
         self.deferred.insert(machine, at);
         cx.notify();
     }
