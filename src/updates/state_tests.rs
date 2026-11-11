@@ -1212,11 +1212,8 @@ fn a_core_below_the_update_floor_offers_its_stepping_stone() {
     let view = Desk::new().view(app(&state), std::slice::from_ref(&below), NOW);
     assert_eq!(view.step, None, "nothing failed");
     let row = view.machine_rows().remove(0);
-    assert_eq!(row.status.as_deref(), Some("Needs 0.12.0 first"));
-    assert_eq!(
-        row.description.as_deref(),
-        Some("Then SpaceTerm Core can update to 0.14.0.")
-    );
+    assert_eq!(row.status.as_deref(), Some("Needs 0.12.0 before 0.14.0"));
+    assert_eq!(row.description, None, "the status says it whole");
     let action = row.action.expect("the row offers the Stepping Stone");
     assert_eq!(action.label.as_ref(), "Download");
     assert_eq!(
@@ -1232,7 +1229,7 @@ fn a_core_below_the_update_floor_offers_its_stepping_stone() {
         .remove(0);
     assert_eq!(
         row.status.as_deref(),
-        Some("Too old for this SpaceTerm \u{b7} Needs 0.12.0 first")
+        Some("Too old for this SpaceTerm \u{b7} Needs 0.12.0 before 0.14.0")
     );
     assert_eq!(row.action.unwrap().label.as_ref(), "Download");
 
@@ -1266,7 +1263,7 @@ fn a_failed_stepping_stone_fetch_shows_once_and_keeps_the_download(cx: &mut gpui
     let state = UpdateState::UpToDate;
     let download = |cx: &mut gpui::TestAppContext| {
         let row = store_view(cx, &app(&state)).0.machine_row(PENGUIN).unwrap();
-        assert_eq!(row.status.as_deref(), Some("Needs 0.12.0 first"));
+        assert_eq!(row.status.as_deref(), Some("Needs 0.12.0 before 0.14.0"));
         let Some(RowAction {
             label,
             command: Command::Machine(id, action),

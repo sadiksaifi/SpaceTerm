@@ -379,15 +379,15 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
         ),
         // Download asks the Core to fetch the Stepping Stone at the floor from its own feed.
         MachineStage::NeedsFloor { version, floor, .. } => (
-            blocked(format!("Needs {floor} first")),
+            blocked(format!("Needs {floor} before {version}")),
             action(DOWNLOAD, None, Command::Machine(id, MachineAction::Install)),
-            Some(format!("Then SpaceTerm Core can update to {version}.")),
+            None,
             if too_old {
                 format!(
-                    "{subject} is too old for this SpaceTerm and needs {floor} first. Then it can update to {version}."
+                    "{subject} is too old for this SpaceTerm and needs {floor} before it can update to {version}."
                 )
             } else {
-                format!("{subject} needs {floor} first. Then it can update to {version}.")
+                format!("{subject} needs {floor} before it can update to {version}.")
             },
         ),
         MachineStage::SteppingStoneSkipped => (
