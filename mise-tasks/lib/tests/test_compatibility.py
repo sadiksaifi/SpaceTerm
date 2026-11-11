@@ -176,6 +176,17 @@ class CompatibilityPlanTests(unittest.TestCase):
             '{"release":"v1.10.0","candidate":"core"}]}',
         )
 
+    def test_a_published_release_whose_work_major_cannot_be_read_stops_the_plan(self):
+        # Skipping that release would let the planned release publish without its pairs.
+        def unreadable(tag):
+            raise TaskError(f"the compatibility feed download step failed for {tag}")
+
+        output = self.root / "output"
+        output.write_text("")
+        with self.assertRaisesRegex(TaskError, "feed download"):
+            plan(output, "1.3.0", published=lambda: {"1.2.0"}, work_major=unreadable)
+        self.assertEqual(output.read_text(), "")
+
     def test_a_release_with_no_paired_release_plans_no_pair(self):
         self.assertEqual(self.planned("0.11.0"), {"matrix": '{"include":[]}', "any": "false"})
 

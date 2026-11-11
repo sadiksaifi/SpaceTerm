@@ -180,9 +180,9 @@ def pair(tag, candidate, *, release_tag=None):
         raise TaskError("a pair names a stable release tag and a candidate side")
     with tempfile.TemporaryDirectory(prefix="spaceterm-compatibility-") as temporary:
         directory = Path(temporary)
-        built = build_candidate(release_tag or candidate_tag(), directory / "candidate")
         published, protocols = fetch(tag, directory / "release")
         allowed = expected(candidate, protocols)
+        built = build_candidate(release_tag or candidate_tag(), directory / "candidate")
         environment = _environment(directory / "account")
         if candidate == "client":
             install(published, environment, "off")

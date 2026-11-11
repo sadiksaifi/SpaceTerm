@@ -556,7 +556,7 @@ jobs:
       - desktop-linux
       - verify-desktop-macos
       - verify-desktop-linux
-    # The compatibility pairs alone may be skipped, when the list is empty.
+    # The compatibility pairs alone may be skipped, when the plan has no pair.
     if: >-
       !cancelled() &&
       needs.validate.result == 'success' &&
