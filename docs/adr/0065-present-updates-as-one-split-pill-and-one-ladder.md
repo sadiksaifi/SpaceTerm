@@ -25,7 +25,7 @@ The main area shows the first Update Step in this priority order:
 3. A restart the person approved on this desktop, while it runs.
 4. A download the person started on this desktop, while it runs, determinate when the total is known.
 5. A relaunch the person chose, until SpaceTerm quits.
-6. An action step, ordered first by stage (a hard stop, then Insist, Ask and Offer) and then by kind: SpaceTerm's relaunch into a downloaded update, then Restart Core for a SpaceTerm Core update that is owed, then SpaceTerm's download when automatic downloads are off. A SpaceTerm Core update is owed when it is breaking (from Offer), when it blocks a Machine's Workspaces (at once), or when it would apply itself (from Ask). The step names the first such Machine: the local Machine first, then store order.
+6. An action step, ordered first by stage (a hard stop, then Insist, Ask and Offer) and then by kind: SpaceTerm's relaunch into a downloaded update, then Restart Core for a SpaceTerm Core update that is owed, then SpaceTerm's download when automatic downloads are off or a download failure was dismissed on this desktop. A SpaceTerm Core update is owed when it is breaking (from Offer), when it blocks a Machine's Workspaces (at once), or when it would apply itself (from Ask). The step names the first such Machine: the local Machine first, then store order.
 7. The release notes, on the first run of a newer SpaceTerm, until the notes open from anywhere or SpaceTerm quits. They never return on a later launch.
 
 Progress and the release notes are plain. An action step is accent at Offer and Ask, and warning at Insist and for a hard stop. The relaunch runs at once with no confirmation under [ADR 0049](0049-own-status-controls-in-the-desktop-client.md). Restart Core opens its confirmation. A failure step opens that failure's alert. The main area's label never carries a count or a Machine name.
@@ -40,7 +40,7 @@ The pill keeps its shape:
 - Offline or stale facts never produce a SpaceTerm Core step.
 - Several needs show one at a time in the main area. The list shows all of them.
 
-A confirmation covers one Machine. An alert opens without a click on the pill only when the Machine refuses the click's preview at once, because the person is waiting on that click. Every later outcome appears once, as a failure step, and its alert opens on click. Dismissing a failure's alert removes its step on this desktop; the row keeps the failure until newer facts supersede it. Dismissal never changes whether an update applies itself.
+A confirmation covers one Machine. An alert opens without a click on the pill only when the Machine refuses the click's preview at once, because the person is waiting on that click. Every later outcome appears once, as a failure step, and its alert opens on click. Dismissing a failure's alert dismisses that failure's title-bar presentation on this desktop. The title bar then shows the next update action still needed, including downloading an available release after a failed download. It hides only when no Update Step remains. The row keeps the failure until newer facts supersede it. Dismissal never changes whether an update applies itself.
 
 [state.rs](../../src/updates/state.rs) is the only place that decides the Update Step, and it derives the step and the rows from the same stages.
 
