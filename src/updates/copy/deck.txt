@@ -444,6 +444,7 @@ Stop SpaceTerm Core on penguin? | This ends 3 Terminal Sessions. SpaceTerm Core 
 
 Button | Copy Typed Text | Copies what you typed to the clipboard without sending it.
 Status | What you typed may not have been sent. SpaceTerm Core was about to restart.
+Status | What you typed may not have been sent. The connection to SpaceTerm Core was lost.
 Status | What you typed wasn't sent. SpaceTerm Core was about to restart.
 Terminal Session Ended | SpaceTerm Core couldn't restart into 0.11.4.
 Terminal Session Ended | SpaceTerm Core couldn't restart into 0.11.4. What you typed during the restart may not have been sent.

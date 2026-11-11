@@ -573,9 +573,12 @@ mod tests {
         state.attached_session();
         assert_eq!(
             state.take_unsent_notice(),
-            Some(super::super::unsent::UnsentInput {
-                delivery: super::super::unsent::Delivery::NotSent,
-                text: "make\n".into(),
+            Some(super::super::unsent::UnsentNotice {
+                interruption: super::super::unsent::Interruption::Restart,
+                input: super::super::unsent::UnsentInput {
+                    delivery: super::super::unsent::Delivery::NotSent,
+                    text: "make\n".into(),
+                },
             })
         );
         assert_eq!(state.take_unsent_notice(), None, "it says so once");

@@ -39,13 +39,18 @@ pub(crate) const TYPED_NOT_SENT: &str = "What you typed during the restart wasn'
 pub(crate) const TYPED_UNCONFIRMED: &str =
     "What you typed during the restart may not have been sent.";
 
-/// A Pane's status after the Core refused input for an idle restart that then did not happen,
-/// so the same Terminal Session runs on.
-pub(crate) fn restart_refused_input(not_sent: bool) -> &'static str {
-    if not_sent {
-        "What you typed wasn't sent. SpaceTerm Core was about to restart."
-    } else {
-        "What you typed may not have been sent. SpaceTerm Core was about to restart."
+/// A Pane's status when its Terminal Session runs on after what the person typed was kept:
+/// after an idle restart that refused it and then did not happen, or after a lost connection.
+/// `not_sent` says the Core received none of it, which a lost connection never proves.
+pub(crate) fn reattached_input(after_restart: bool, not_sent: bool) -> &'static str {
+    match (after_restart, not_sent) {
+        (true, true) => "What you typed wasn't sent. SpaceTerm Core was about to restart.",
+        (true, false) => {
+            "What you typed may not have been sent. SpaceTerm Core was about to restart."
+        }
+        (false, _) => {
+            "What you typed may not have been sent. The connection to SpaceTerm Core was lost."
+        }
     }
 }
 

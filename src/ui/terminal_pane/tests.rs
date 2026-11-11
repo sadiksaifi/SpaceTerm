@@ -2356,15 +2356,20 @@ fn core_pane_uncertain_paste_warns_without_sending_a_second_payload(cx: &mut Tes
 /// says so and Copy Typed Text puts the text on the clipboard; nothing is sent again.
 #[gpui::test]
 fn core_pane_refused_input_offers_its_text_to_copy_without_sending_it(cx: &mut TestAppContext) {
-    use crate::terminal::core_session::unsent::{Delivery, UnsentInput};
+    use crate::terminal::core_session::unsent::{
+        Delivery, Interruption, UnsentInput, UnsentNotice,
+    };
     use spaceterm_ui::a11y_testing::A11yTree;
     let (pane, cx, records) = core_terminal_pane(cx, true);
     let sent = records.commands().len();
     records.keep_unsent_input(
         1,
-        UnsentInput {
-            delivery: Delivery::NotSent,
-            text: "git push\n".into(),
+        UnsentNotice {
+            interruption: Interruption::Restart,
+            input: UnsentInput {
+                delivery: Delivery::NotSent,
+                text: "git push\n".into(),
+            },
         },
     );
     pane.update(cx, |_, cx| cx.notify());
@@ -2385,6 +2390,53 @@ fn core_pane_refused_input_offers_its_text_to_copy_without_sending_it(cx: &mut T
         Some("git push\n".to_owned())
     );
     assert_eq!(records.commands().len(), sent, "nothing is sent again");
+}
+
+/// After a lost connection the same Terminal Session runs on. What the Core never confirmed
+/// may not have been sent, so the status never claims it wasn't, and Copy Typed Text puts it on
+/// the clipboard without sending it. Text typed at a hidden prompt offers nothing to copy.
+#[gpui::test]
+fn core_pane_unconfirmed_input_after_a_lost_connection_may_not_have_been_sent(
+    cx: &mut TestAppContext,
+) {
+    use crate::terminal::core_session::unsent::{
+        Delivery, Interruption, UnsentInput, UnsentNotice,
+    };
+    use spaceterm_ui::a11y_testing::A11yTree;
+    let (pane, cx, records) = core_terminal_pane(cx, true);
+    let sent = records.commands().len();
+    let lost = |text: &str| UnsentNotice {
+        interruption: Interruption::Connection,
+        input: UnsentInput {
+            delivery: Delivery::Unknown,
+            text: text.into(),
+        },
+    };
+    records.keep_unsent_input(1, lost("cargo test\n"));
+    pane.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    assert_eq!(
+        A11yTree::read(cx).node("Terminal status")["aria"]["description"],
+        "What you typed may not have been sent. The connection to SpaceTerm Core was lost."
+    );
+    let bounds = cx
+        .debug_bounds("copy-typed-text")
+        .expect("Copy Typed Text renders");
+    cx.simulate_click(bounds.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()),
+        Some("cargo test\n".to_owned())
+    );
+    assert_eq!(records.commands().len(), sent, "nothing is sent again");
+
+    records.keep_unsent_input(1, lost(""));
+    pane.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("copy-typed-text").is_none(),
+        "hidden-prompt text is never offered"
+    );
 }
 
 fn current_native_service_origin(

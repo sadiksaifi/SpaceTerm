@@ -149,17 +149,18 @@ pub(crate) struct TestTerminalSessionRecords {
     interactive_availability: Rc<RefCell<BTreeMap<usize, crate::terminal::InteractiveInput>>>,
     input_generations: Rc<RefCell<BTreeMap<usize, u64>>>,
     unconfirmed_pastes: Rc<RefCell<BTreeMap<usize, bool>>>,
-    unsent_inputs: Rc<RefCell<BTreeMap<usize, crate::terminal::core_session::unsent::UnsentInput>>>,
+    unsent_inputs:
+        Rc<RefCell<BTreeMap<usize, crate::terminal::core_session::unsent::UnsentNotice>>>,
     dropped_session_ids: Rc<RefCell<Vec<usize>>>,
     commands: Rc<RefCell<Vec<RecordedCall>>>,
 }
 
 impl TestTerminalSessionRecords {
-    /// The Core refused `input` for an idle restart that did not happen.
+    /// The Terminal Session reattached after `input` was refused or went unconfirmed.
     pub(crate) fn keep_unsent_input(
         &self,
         session_id: usize,
-        input: crate::terminal::core_session::unsent::UnsentInput,
+        input: crate::terminal::core_session::unsent::UnsentNotice,
     ) {
         self.unsent_inputs.borrow_mut().insert(session_id, input);
     }
@@ -485,7 +486,7 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
     fn reading_available(&self) -> bool {
         self.reading_available
     }
-    fn take_unsent_input(&self) -> Option<crate::terminal::core_session::unsent::UnsentInput> {
+    fn take_unsent_input(&self) -> Option<crate::terminal::core_session::unsent::UnsentNotice> {
         self.records
             .unsent_inputs
             .borrow_mut()

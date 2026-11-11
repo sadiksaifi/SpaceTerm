@@ -74,7 +74,7 @@ pub(crate) struct CorePaneState {
     unsent: Arc<Mutex<unsent::Unsent>>,
     /// A Terminal Session that survived the idle restart grant that refused its input, until
     /// the Pane's status says so.
-    unsent_notice: Mutex<Option<unsent::UnsentInput>>,
+    unsent_notice: Mutex<Option<unsent::UnsentNotice>>,
     retaining_input: Arc<AtomicBool>,
     /// Admission settles before a hidden Pane receives its input-enabling screen.
     admission: Mutex<Admission>,
@@ -297,7 +297,7 @@ impl CorePaneState {
     }
     /// What the Pane's status says once about a Terminal Session that survived the idle restart
     /// grant that refused its input.
-    fn take_unsent_notice(&self) -> Option<unsent::UnsentInput> {
+    fn take_unsent_notice(&self) -> Option<unsent::UnsentNotice> {
         self.unsent_notice
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1135,7 +1135,7 @@ impl TerminalSessionHandle for PresentationHandle {
     fn take_paste_unconfirmed(&self) -> bool {
         self.state.paste_unconfirmed.swap(false, Ordering::AcqRel)
     }
-    fn take_unsent_input(&self) -> Option<unsent::UnsentInput> {
+    fn take_unsent_input(&self) -> Option<unsent::UnsentNotice> {
         self.state.take_unsent_notice()
     }
     fn focus_paste_confirmation(&self, id: super::paste::PasteConfirmationId) {

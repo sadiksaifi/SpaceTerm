@@ -29,6 +29,22 @@ pub(crate) struct UnsentInput {
     pub(crate) text: String,
 }
 
+/// What interrupted a Terminal Session the Pane attached to again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Interruption {
+    /// The Core refused input for an idle restart that then did not happen.
+    Restart,
+    /// The connection to the Core was lost.
+    Connection,
+}
+
+/// What a Pane's status says once when it attaches again to the same Terminal Session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UnsentNotice {
+    pub(crate) interruption: Interruption,
+    pub(crate) input: UnsentInput,
+}
+
 /// Input kept since the Pane last attached to a Terminal Session.
 #[derive(Debug, Default)]
 pub(crate) struct Unsent {
@@ -87,12 +103,25 @@ impl Unsent {
     }
 
     /// The Pane attached to a Terminal Session, which starts a new record. Returns what to tell
-    /// the person when that Session survived the idle restart grant that refused input.
-    pub(super) fn attached(&mut self) -> Option<UnsentInput> {
+    /// the person when that Session survived what interrupted it: an idle restart grant that
+    /// refused input, or a lost connection. After a lost connection the Pane cannot tell what
+    /// reached the Core before it, so all of it may not have been sent.
+    pub(super) fn attached(&mut self) -> Option<UnsentNotice> {
         let kept = std::mem::take(self);
-        (kept.restart_refused && !kept.left)
-            .then(|| kept.input())
-            .flatten()
+        if kept.left {
+            return None;
+        }
+        let mut input = kept.input()?;
+        let interruption = if kept.restart_refused {
+            Interruption::Restart
+        } else {
+            input.delivery = Delivery::Unknown;
+            Interruption::Connection
+        };
+        Some(UnsentNotice {
+            interruption,
+            input,
+        })
     }
 
     /// What was kept, if the person typed anything.
@@ -222,13 +251,39 @@ mod tests {
         assert_eq!(moved.input(), None, "a copy shortcut is not typing");
     }
 
-    /// Only a Terminal Session that survived the refusing grant hears about it on attachment.
-    /// Every attachment starts a new record.
+    /// After an ordinary connection loss the same Terminal Session hears what was kept, only as
+    /// possibly unsent, even for input that never left this client.
+    #[test]
+    fn a_session_reattached_after_a_lost_connection_hears_what_may_not_have_been_sent() {
+        let mut unsent = Unsent::default();
+        unsent.keep(Delivery::NotSent, &typed("cd "), false);
+        unsent.keep(Delivery::Unknown, &typed("src"), false);
+        assert_eq!(
+            unsent.attached().map(|notice| notice.input),
+            Some(UnsentInput {
+                delivery: Delivery::Unknown,
+                text: "cd src".into()
+            })
+        );
+        assert_eq!(unsent.attached(), None, "it says so once");
+    }
+
+    /// A Terminal Session that survived the refusing grant hears about it on attachment; one that
+    /// ended does not. Every attachment starts a new record.
     #[test]
     fn only_a_surviving_session_hears_about_its_refused_input() {
         let mut unsent = Unsent::default();
         unsent.refused_by_restart(&typed("ls"), false);
-        assert_eq!(unsent.attached().map(|input| input.text), Some("ls".into()));
+        assert_eq!(
+            unsent.attached(),
+            Some(UnsentNotice {
+                interruption: Interruption::Restart,
+                input: UnsentInput {
+                    delivery: Delivery::NotSent,
+                    text: "ls".into()
+                }
+            })
+        );
         assert_eq!(unsent.input(), None);
 
         unsent.refused_by_restart(&typed("ls"), false);

@@ -2122,6 +2122,72 @@ mod tests {
         Ok(Reply::Unchanged)
     }
 
+    /// A lost connection keeps only the input the Core never confirmed, as delivery unknown.
+    /// Input it confirmed is never offered again.
+    #[test]
+    fn a_lost_connection_keeps_only_the_input_the_core_never_confirmed() {
+        use protocol::{
+            CoreMessage, PaneMessage,
+            frame::{RawFrame, encode_core},
+        };
+        use spaceterm_core::connection::link::{LinkError, LinkEvent};
+        let now = std::time::Instant::now();
+        let link = CoreLink::new(Arc::new(|_: LinkEvent| {}), Arc::new(|| {}), now);
+        let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+        let client = PaneLink::new(link.clone(), None, Arc::clone(&notify));
+        let channel = link
+            .open_channel(client.sink(super::super::inbox::Inbox::new(notify)))
+            .unwrap();
+        let _claim = channel
+            .claim(
+                spaceterm_core::attachments::Attachment {
+                    workspace: [1; 32],
+                    generation: 1,
+                },
+                [2; 32],
+                pane::AttachmentClaim::Select { explicit: true },
+                pane::PaneSize {
+                    columns: 80,
+                    rows: 24,
+                    cell_width: 8,
+                    cell_height: 16,
+                },
+                None,
+            )
+            .unwrap();
+        let id = channel.channel().unwrap();
+        client.bound_channel.store(id.0, Ordering::Release);
+        let paste = |text: &str| {
+            vec![InputEvent::Paste {
+                text: text.into(),
+                last: true,
+            }]
+        };
+        let confirmed = channel.input(1, paste("ran ")).unwrap();
+        channel.input(1, paste("kept")).unwrap();
+        while link.next_frame().is_some() {}
+        let wire = encode_core(&CoreMessage::Pane(PaneMessage {
+            channel: id,
+            event: PaneEvent::Progress {
+                input: confirmed,
+                output_bytes: 0,
+            },
+        }))
+        .unwrap();
+        for bytes in &wire.frames {
+            link.receive(RawFrame::parse(bytes).unwrap(), now).unwrap();
+        }
+        link.fail(LinkError::Closed);
+        assert_eq!(
+            client.unsent.lock().unwrap().input(),
+            Some(unsent::UnsentInput {
+                delivery: unsent::Delivery::Unknown,
+                text: "kept".into(),
+            })
+        );
+        assert!(link.next_frame().is_none(), "kept input is never replayed");
+    }
+
     /// A refusal keeps the text as not sent; a channel end keeps it as delivery unknown. Neither
     /// sends it again.
     #[test]

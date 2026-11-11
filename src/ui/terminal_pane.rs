@@ -3992,15 +3992,15 @@ impl TerminalPane {
         }
     }
 
-    /// The Core refused what the person typed for an idle restart that did not happen. The
-    /// Pane says so and offers the text to copy; it sends nothing again, because the text can
-    /// hold Return.
+    /// The Terminal Session runs on after an idle restart refused what the person typed, or
+    /// after a lost connection left it unconfirmed. The Pane says so and offers the text to
+    /// copy; it sends nothing again, because the text can hold Return.
     fn sync_unsent_input(&mut self) {
-        use crate::terminal::core_session::unsent::Delivery;
+        use crate::terminal::core_session::unsent::{Delivery, Interruption};
         if !self.interactive_input_available() {
             return;
         }
-        let Some(typed) = self
+        let Some(notice) = self
             .terminal_session
             .session
             .as_ref()
@@ -4008,9 +4008,12 @@ impl TerminalPane {
         else {
             return;
         };
-        let status =
-            crate::updates::copy::pane::restart_refused_input(typed.delivery == Delivery::NotSent)
-                .to_owned();
+        let typed = notice.input;
+        let status = crate::updates::copy::pane::reattached_input(
+            notice.interruption == Interruption::Restart,
+            typed.delivery == Delivery::NotSent,
+        )
+        .to_owned();
         self.unsent_typed = (!typed.text.is_empty()).then(|| (status.clone(), typed.text));
         self.status = Some(status);
         self.status_intent = StatusIntent::Warning;

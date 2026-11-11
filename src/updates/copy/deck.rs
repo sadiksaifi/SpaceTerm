@@ -359,8 +359,8 @@ fn build() -> Deck {
                 .insert(format!("{} | {detail}", pane::SESSION_ENDED));
         }
     }
-    for not_sent in [true, false] {
-        let status = pane::restart_refused_input(not_sent);
+    for (after_restart, not_sent) in [(true, true), (true, false), (false, false)] {
+        let status = pane::reattached_input(after_restart, not_sent);
         deck.field(Role::Text, status);
         deck.pane.insert(format!("Status | {status}"));
     }

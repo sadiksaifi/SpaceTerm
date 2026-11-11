@@ -552,9 +552,10 @@ pub trait TerminalSessionHandle {
         false
     }
 
-    /// Consumes what the person typed that the Core refused for an idle restart that then did
-    /// not happen, once the same Terminal Session is interactive again.
-    fn take_unsent_input(&self) -> Option<crate::terminal::core_session::unsent::UnsentInput> {
+    /// Consumes what the person typed that the Core refused for an idle restart that did not
+    /// happen, or never confirmed before a lost connection, once the same Terminal Session is
+    /// interactive again.
+    fn take_unsent_input(&self) -> Option<crate::terminal::core_session::unsent::UnsentNotice> {
         None
     }
 
