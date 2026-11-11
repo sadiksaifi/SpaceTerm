@@ -90,8 +90,9 @@ pub(crate) trait MachineLane: Send + Sync {
     ) -> Result<Observed, ActionFailure>;
     /// `Check`.
     fn check(&self) -> Result<(), ActionFailure>;
-    /// Pushes `build` when supplied, otherwise fetches from the Core's feed.
-    fn install(&self, build: Option<&EmbeddedCore>) -> Result<(), ActionFailure>;
+    /// Pushes `build` when supplied, otherwise fetches from the Core's feed. Answers whether a
+    /// version was downloaded: a feed that names nothing newer downloads none.
+    fn install(&self, build: Option<&EmbeddedCore>) -> Result<bool, ActionFailure>;
     /// `Preview` of `change`: the Core's token and what it affects.
     fn preview(&self, change: LaneChange) -> Result<admin::Preview, ActionFailure>;
     /// `Execute` of exactly `preview`, followed until it settles.
@@ -430,15 +431,15 @@ fn act(target: &Target, action: &MachineAction) -> Result<(), ActionFailure> {
         };
     };
     match action {
-        MachineAction::Install => {
-            lane.install(target.push.as_deref())
-                .map_err(|failure| match (target.floor, failure) {
-                    (Some(floor), ActionFailure::Failed | ActionFailure::Unreachable) => {
-                        ActionFailure::NeedsFloor(floor)
-                    }
-                    _ => failure,
-                })
-        }
+        // Below the floor, Install asks the Core to fetch the Stepping Stone. A fetch that
+        // downloads nothing couldn't get it.
+        MachineAction::Install => match (lane.install(target.push.as_deref()), target.floor) {
+            (Ok(true), _) | (Ok(false), None) => Ok(()),
+            (Ok(false) | Err(ActionFailure::Failed | ActionFailure::Unreachable), Some(floor)) => {
+                Err(ActionFailure::NeedsFloor(floor))
+            }
+            (Err(failure), _) => Err(failure),
+        },
         _ => lane.check(),
     }
 }

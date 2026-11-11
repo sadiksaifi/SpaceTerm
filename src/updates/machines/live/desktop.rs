@@ -474,12 +474,12 @@ impl MachineLane for CoreLane {
         Ok(())
     }
 
-    fn install(&self, build: Option<&EmbeddedCore>) -> Result<(), ActionFailure> {
+    fn install(&self, build: Option<&EmbeddedCore>) -> Result<bool, ActionFailure> {
         let mut session = self.open()?;
         match build {
-            Some(build) => push::push(&mut session, build, &mut |_, _| {}).map(drop),
+            Some(build) => push::push(&mut session, build, &mut |_, _| {}).map(|_| true),
             None => match admin::install_from_feed(&mut session) {
-                Ok(_) => Ok(()),
+                Ok((installed, _)) => Ok(installed),
                 Err(LaneError::Code(code)) if code == "version_skipped" => Err(self
                     .facts()
                     .ok()
@@ -599,8 +599,8 @@ mod tests {
         fn check(&self) -> Result<(), ActionFailure> {
             Ok(())
         }
-        fn install(&self, _: Option<&EmbeddedCore>) -> Result<(), ActionFailure> {
-            Ok(())
+        fn install(&self, _: Option<&EmbeddedCore>) -> Result<bool, ActionFailure> {
+            Ok(true)
         }
         fn preview(&self, _: LaneChange) -> Result<admin::Preview, ActionFailure> {
             Err(ActionFailure::Unreachable)

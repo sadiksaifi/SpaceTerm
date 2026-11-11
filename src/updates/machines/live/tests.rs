@@ -65,7 +65,7 @@ struct ScriptedLane {
     waits: Mutex<mpsc::Receiver<Result<Observed, ActionFailure>>>,
     answer: Mutex<mpsc::Sender<Result<Observed, ActionFailure>>>,
     previewed: Mutex<u32>,
-    install_result: Mutex<Result<(), ActionFailure>>,
+    install_result: Mutex<Result<bool, ActionFailure>>,
     requests: Mutex<Vec<String>>,
 }
 
@@ -77,7 +77,7 @@ impl ScriptedLane {
             waits: Mutex::new(waits),
             answer: Mutex::new(answer),
             previewed: Mutex::new(0),
-            install_result: Mutex::new(Ok(())),
+            install_result: Mutex::new(Ok(true)),
             requests: Mutex::new(Vec::new()),
         })
     }
@@ -147,7 +147,7 @@ impl MachineLane for ScriptedLane {
         Ok(())
     }
 
-    fn install(&self, build: Option<&EmbeddedCore>) -> Result<(), ActionFailure> {
+    fn install(&self, build: Option<&EmbeddedCore>) -> Result<bool, ActionFailure> {
         self.record(build.map_or_else(
             || "install".into(),
             |build| format!("push {}", build.candidate.version()),
@@ -1034,12 +1034,16 @@ fn a_core_below_the_embedded_floor_gets_no_push_and_installs_from_its_feed() {
         "Install asks the Core to update from its own feed"
     );
 
-    *lane.install_result.lock().unwrap() = Err(ActionFailure::Unreachable);
-    adapter.perform(PENGUIN, MachineAction::Install);
-    assert_eq!(
-        finished(&events, &MachineAction::Install),
-        Err(ActionFailure::NeedsFloor(floor))
-    );
+    // The Core couldn't get the Stepping Stone: its feed failed, or named nothing newer.
+    for result in [Err(ActionFailure::Unreachable), Ok(false)] {
+        *lane.install_result.lock().unwrap() = result;
+        adapter.perform(PENGUIN, MachineAction::Install);
+        assert_eq!(
+            finished(&events, &MachineAction::Install),
+            Err(ActionFailure::NeedsFloor(floor)),
+            "{result:?}"
+        );
+    }
 }
 
 #[test]
