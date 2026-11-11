@@ -1639,6 +1639,203 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "child of queued_slave_descriptor_can_write_after_the_session_is_frozen"]
+    fn queued_slave_descriptor_child() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        let Some(path) = env::var_os("SPACETERM_TEST_RIGHTS_SOCKET") else {
+            return;
+        };
+        let socket = UnixStream::connect(path).unwrap();
+        let mut byte = [1_u8];
+        let mut vector = libc::iovec {
+            iov_base: byte.as_mut_ptr().cast(),
+            iov_len: 1,
+        };
+        // SAFETY: the control storage is aligned and sized for one descriptor; all pointers
+        // remain live until sendmsg completes. Sending duplicates stdout into the socket queue.
+        unsafe {
+            let space = libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as _) as usize;
+            let mut control = vec![0_usize; space.div_ceil(std::mem::size_of::<usize>())];
+            let mut message: libc::msghdr = std::mem::zeroed();
+            message.msg_iov = &mut vector;
+            message.msg_iovlen = 1;
+            message.msg_control = control.as_mut_ptr().cast();
+            message.msg_controllen = space as _;
+            let header = libc::CMSG_FIRSTHDR(&message);
+            (*header).cmsg_level = libc::SOL_SOCKET;
+            (*header).cmsg_type = libc::SCM_RIGHTS;
+            (*header).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as _) as _;
+            libc::CMSG_DATA(header)
+                .cast::<libc::c_int>()
+                .write(libc::STDOUT_FILENO);
+            assert_eq!(libc::sendmsg(socket.as_raw_fd(), &message, 0), 1);
+        }
+        std::io::stdout().write_all(b"QUEUED_READY").unwrap();
+        std::io::stdout().flush().unwrap();
+        loop {
+            // SAFETY: wait for a signal until the owning test terminates this child.
+            unsafe {
+                libc::pause();
+            }
+        }
+    }
+
+    #[test]
+    fn a_quiet_job_can_start_after_the_probe_without_terminal_input_or_output() {
+        const NAME: &str = "platform::unix_pty::tests::a_quiet_job_can_start_after_the_probe_without_terminal_input_or_output";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _isolation = lock_real_pty_test();
+        let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+        let marker = fixture.path().join("trap-ran");
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args([
+            "-c",
+            "trap 'sleep 30 & printf yes > \"$1\"' USR1; printf READY; while :; do read line; done",
+            "quiet-trap",
+        ]);
+        command.arg(&marker);
+        let (mut pty, terminator) =
+            spawn_command_in_pty(test_host(), PtySize::default(), command, Arc::default()).unwrap();
+        let mut reader = pty.take_reader().unwrap();
+        read_output_marker(&mut reader, b"READY");
+        assert!(!pty.probe.others().unwrap());
+        // SAFETY: this is the test's unreaped child. No terminal input or output delivers this signal.
+        assert_eq!(
+            unsafe { libc::kill(pty.probe.session.leader.process, libc::SIGUSR1) },
+            0
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !marker.exists() {
+            assert!(Instant::now() < deadline, "the shell trap did not run");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            pty.probe.others().unwrap(),
+            "a quiet child appeared after the negative probe"
+        );
+        let mut ready = libc::pollfd {
+            fd: pty._foreground.as_ref().unwrap().as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: ready is one live retained master descriptor.
+        assert_eq!(
+            unsafe { libc::poll(&mut ready, 1, 0) },
+            0,
+            "the trap printed nothing"
+        );
+        terminator.terminate().unwrap();
+        drop(reader);
+        drop(pty);
+    }
+
+    #[test]
+    fn queued_slave_descriptor_can_write_after_the_session_is_frozen() {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        use std::os::unix::net::UnixListener;
+        const NAME: &str = "platform::unix_pty::tests::queued_slave_descriptor_can_write_after_the_session_is_frozen";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _isolation = lock_real_pty_test();
+        let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+        let path = fixture.path().join("rights");
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut command = CommandBuilder::new(env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "platform::unix_pty::tests::queued_slave_descriptor_child",
+            "--ignored",
+            "--nocapture",
+        ]);
+        command.env("SPACETERM_TEST_RIGHTS_SOCKET", &path);
+        let (mut pty, terminator) =
+            spawn_command_in_pty(test_host(), PtySize::default(), command, Arc::default()).unwrap();
+        let mut reader = pty.take_reader().unwrap();
+        let (socket, _) = listener.accept().unwrap();
+        read_output_marker(&mut reader, b"QUEUED_READY");
+        let pid = pty.probe.session.leader.process;
+        struct Thaw(i32);
+        impl Drop for Thaw {
+            fn drop(&mut self) {
+                // SAFETY: this is the test's own unreaped child, whose PID cannot be reused.
+                unsafe {
+                    libc::kill(self.0, libc::SIGCONT);
+                }
+            }
+        }
+        // SAFETY: this is the test's own unreaped child. WUNTRACED waits for its stop, not exit.
+        let thaw = unsafe {
+            assert_eq!(libc::kill(pid, libc::SIGSTOP), 0);
+            let thaw = Thaw(pid);
+            let mut status = 0;
+            assert_eq!(libc::waitpid(pid, &mut status, libc::WUNTRACED), pid);
+            assert!(libc::WIFSTOPPED(status));
+            thaw
+        };
+        assert!(
+            !pty.probe.others().unwrap(),
+            "every process in the SID is frozen"
+        );
+        let master = pty._foreground.as_ref().unwrap().as_raw_fd();
+        let pending = || {
+            let mut count: libc::c_int = 0;
+            // SAFETY: master is live and count is a writable ioctl result.
+            assert_eq!(
+                unsafe { libc::ioctl(master, libc::FIONREAD, &mut count) },
+                0
+            );
+            count
+        };
+        assert_eq!(pending(), 0);
+        let mut byte = [0_u8];
+        let mut vector = libc::iovec {
+            iov_base: byte.as_mut_ptr().cast(),
+            iov_len: 1,
+        };
+        // SAFETY: aligned control storage holds one descriptor. recvmsg installs a new owned
+        // descriptor; no process outside the SID held that descriptor before this receive.
+        let descriptor = unsafe {
+            let space = libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as _) as usize;
+            let mut control = vec![0_usize; space.div_ceil(std::mem::size_of::<usize>())];
+            let mut message: libc::msghdr = std::mem::zeroed();
+            message.msg_iov = &mut vector;
+            message.msg_iovlen = 1;
+            message.msg_control = control.as_mut_ptr().cast();
+            message.msg_controllen = space as _;
+            assert_eq!(libc::recvmsg(socket.as_raw_fd(), &mut message, 0), 1);
+            let header = libc::CMSG_FIRSTHDR(&message);
+            assert!(!header.is_null());
+            assert_eq!((*header).cmsg_type, libc::SCM_RIGHTS);
+            OwnedFd::from_raw_fd(libc::CMSG_DATA(header).cast::<libc::c_int>().read())
+        };
+        let mut writer = std::fs::File::from(descriptor);
+        writer.write_all(b"AFTER_FREEZE").unwrap();
+        let mut ready = libc::pollfd {
+            fd: master,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: ready is one live descriptor and remains writable for poll's result.
+        assert_eq!(unsafe { libc::poll(&mut ready, 1, 3000) }, 1);
+        assert_ne!(ready.revents & libc::POLLIN, 0);
+        #[cfg(target_os = "linux")]
+        assert!(
+            pending() > 0,
+            "the kernel holds output after the frozen negative check"
+        );
+        read_output_marker(&mut reader, b"AFTER_FREEZE");
+        drop(writer);
+        drop(thaw);
+        terminator.terminate().unwrap();
+        drop(reader);
+        drop(pty);
+    }
+
+    #[test]
     fn fresh_session_probes_preserve_quiet_programs_and_jobs() {
         const NAME: &str =
             "platform::unix_pty::tests::fresh_session_probes_preserve_quiet_programs_and_jobs";

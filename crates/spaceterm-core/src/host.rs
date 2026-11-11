@@ -615,6 +615,10 @@ impl crate::service::lane::LaneHost for HostLane {
             return Err(CoreError::Changed);
         }
         check(operation.idle)?;
+        if operation.idle && !crate::idle_restart::NATIVE_WRITER_FENCE_AVAILABLE {
+            operation.lease.unreadable();
+            return Err(CoreError::Unsupported);
+        }
         operation.lease.grant().map_err(|_| CoreError::Changed)
     }
     fn idle_granted(&self) -> bool {
@@ -3354,6 +3358,7 @@ mod idle_restart_tests {
     struct Panes {
         activity: Activity,
         delivered: Arc<AtomicUsize>,
+        live: bool,
     }
     impl PaneService for Panes {
         fn admitted(&mut self, _: &Peer, _: ClientName, _: Outbox) {}
@@ -3374,10 +3379,14 @@ mod idle_restart_tests {
             Ok(())
         }
         fn sessions(&self) -> Vec<[u8; 32]> {
-            vec![[4; 32]]
+            if self.live { vec![[4; 32]] } else { Vec::new() }
         }
         fn idle_sessions(&self) -> Option<Vec<Arc<dyn Session>>> {
-            Some(vec![Arc::new(Shell(self.activity.clone()))])
+            Some(if self.live {
+                vec![Arc::new(Shell(self.activity.clone())) as Arc<dyn Session>]
+            } else {
+                Vec::new()
+            })
         }
     }
     struct World {
@@ -3388,6 +3397,9 @@ mod idle_restart_tests {
     }
     impl World {
         fn new(minor: u16) -> Self {
+            Self::with_live_session(minor, true)
+        }
+        fn with_live_session(minor: u16, live: bool) -> Self {
             let idle = Arc::new(Mutex::new(IdleHost::default()));
             let fence = Arc::new(AtomicBool::new(false));
             let requested = Arc::new(AtomicBool::new(false));
@@ -3401,6 +3413,7 @@ mod idle_restart_tests {
                 inner: Box::new(Panes {
                     activity,
                     delivered: delivered.clone(),
+                    live,
                 }),
                 paths: Paths {
                     identity: "spaceterm-development".into(),
@@ -3479,13 +3492,18 @@ mod idle_restart_tests {
         world.lease().unwrap();
         world.input();
         assert_eq!(world.delivered.load(Ordering::SeqCst), 1);
-        assert_eq!(world.grant([5; 32], [6; 32]), Err(CoreError::Changed));
+        assert_eq!(world.grant([5; 32], [6; 32]), Err(CoreError::Unsupported));
         assert!(!world.lane.idle_granted());
     }
     #[test]
     fn input_after_the_grant_gets_a_typed_restarting_refusal_and_no_delivery() {
-        let world = World::new(crate::idle_restart::MINOR);
-        world.lease().unwrap();
+        let world = World::with_live_session(crate::idle_restart::MINOR, false);
+        world
+            .lane
+            .fence_automatic(false, OperationId([3; 16]), [5; 32], [6; 32], &mut |_| {
+                Ok(())
+            })
+            .unwrap();
         world.grant([5; 32], [6; 32]).unwrap();
         world.input();
         assert_eq!(world.delivered.load(Ordering::SeqCst), 0);
@@ -3511,6 +3529,43 @@ mod idle_restart_tests {
         world.lease().unwrap();
         assert_eq!(world.grant([7; 32], [6; 32]), Err(CoreError::Changed));
         assert_eq!(world.grant([5; 32], [7; 32]), Err(CoreError::Changed));
-        world.grant([5; 32], [6; 32]).unwrap();
+        assert_eq!(world.grant([5; 32], [6; 32]), Err(CoreError::Unsupported));
+    }
+    #[test]
+    fn a_work_1_2_peer_joining_after_the_lease_refuses_before_policy_or_stop() {
+        let world = World::new(crate::idle_restart::MINOR);
+        world.lease().unwrap();
+        let mut legacy = world.peer;
+        legacy.connection = [8; 32];
+        world.lane.panes.lock().unwrap().admitted(
+            &legacy,
+            "old peer".into(),
+            Outbox::new(
+                Arc::new(|| {}),
+                crate::protocol::version::ProtocolVersion { major: 1, minor: 2 },
+            ),
+        );
+        let mut checked = 0;
+        let result = world
+            .lane
+            .grant_stop(OperationId([3; 16]), [5; 32], [6; 32], &mut |_| {
+                checked += 1;
+                Ok(())
+            });
+        assert_eq!(result, Err(CoreError::Changed));
+        assert_eq!(
+            checked, 0,
+            "an unsupported peer must be refused before native Stop policy"
+        );
+        assert!(!world.lane.idle_granted());
+    }
+    #[test]
+    fn a_live_session_cannot_grant_stop_without_a_complete_native_writer_fence() {
+        let world = World::new(crate::idle_restart::MINOR);
+        world.lease().unwrap();
+        assert_eq!(world.grant([5; 32], [6; 32]), Err(CoreError::Unsupported));
+        assert!(!world.lane.idle_granted());
+        world.input();
+        assert_eq!(world.delivered.load(Ordering::SeqCst), 1);
     }
 }

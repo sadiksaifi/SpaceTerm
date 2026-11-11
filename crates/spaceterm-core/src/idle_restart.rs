@@ -1,4 +1,4 @@
-//! Receipt-time activity and revocable permission to end idle Terminal Sessions.
+//! Receipt-time activity and the revocable receipt gate for a Core restart.
 use std::collections::BTreeSet;
 use std::io;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -7,6 +7,11 @@ use std::time::{Duration, Instant};
 
 /// Work and service minor that add the Stop grant and the retained-input refusal.
 pub const MINOR: u16 = 3;
+
+/// Neither supported OS exposes a complete, exclusive fence over PTY slave references.
+/// Process FD tables omit references queued in SCM_RIGHTS messages. No live-session Stop
+/// can be admitted until an adapter proves every writer is fenced, including those references.
+pub(crate) const NATIVE_WRITER_FENCE_AVAILABLE: bool = false;
 
 /// Input was not admitted because Stop has been granted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +54,9 @@ impl Activity {
     /// outside its readiness wait. EOF or a read failure makes the observation unreadable.
     pub fn read(&self, read: impl FnOnce() -> io::Result<usize>) -> io::Result<usize> {
         let mut state = self.lock();
+        if state.granted {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
         let result = read();
         if matches!(result, Ok(n) if n > 0) {
             // One reader publishes each read before reading again.
@@ -133,8 +141,9 @@ pub trait Session: Send + Sync {
 struct LeaseState {
     phase: AtomicU8,
 }
-/// Permission is bound to the exact activities inspected by one scan. Its owner additionally
-/// binds it to the operation, installation and Core boot under the panes lock.
+/// The receipt gate is bound to the exact activities inspected by one scan. Its owner also
+/// binds it to the operation, installation and Core boot under the panes lock. It cannot
+/// establish native idleness or authorize Stop without a complete native writer fence.
 pub struct Lease {
     state: Arc<LeaseState>,
     sessions: Vec<(Activity, u64)>,
@@ -217,6 +226,14 @@ impl Lease {
             state.granted = true;
         }
         Ok(())
+    }
+    pub(crate) fn unreadable(&self) {
+        for (activity, _) in &self.sessions {
+            let mut state = activity.lock();
+            state.generation = None;
+            state.last = Instant::now();
+            state.revoke();
+        }
     }
     pub fn revoke(&self) {
         let _ = self
@@ -307,7 +324,7 @@ mod scan_tests {
                         })
                         .collect::<Vec<_>>();
                     let scan =
-                        std::thread::spawn(move || Lease::scan(&sessions, start + HOUR, HOUR));
+                        std::thread::spawn(move || Lease::scan(&sessions, start + HOUR * 2, HOUR));
                     pause.wait();
                     if output {
                         activities[changed].read(|| Ok(1)).unwrap();
@@ -403,5 +420,21 @@ mod scan_tests {
         assert!(Lease::scan(&sessions, start + HOUR * 2, HOUR).is_none());
         drop(pending);
         assert!(Lease::scan(&sessions, start + HOUR * 2, HOUR).is_some());
+    }
+    #[test]
+    fn a_granted_receipt_gate_never_reads_output_or_errors_past_commitment() {
+        let start = Instant::now();
+        let activity = Activity::new(start);
+        let sessions: Vec<Arc<dyn Session>> = vec![Arc::new(Shell {
+            activity: activity.clone(),
+            pause: None,
+        })];
+        let lease = Lease::scan(&sessions, start + HOUR, HOUR).unwrap();
+        lease.grant().unwrap();
+        let result =
+            activity.read(|| panic!("a native read crossed the granted input/receipt gate"));
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        lease.release();
+        assert_eq!(activity.read(|| Ok(1)).unwrap(), 1);
     }
 }
