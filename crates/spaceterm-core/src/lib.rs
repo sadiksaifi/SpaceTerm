@@ -10,6 +10,7 @@ pub mod diagnostics;
 pub mod direct;
 pub mod hierarchy;
 mod host;
+pub mod idle_restart;
 pub mod labels;
 #[cfg(target_os = "macos")]
 mod launch_services;
