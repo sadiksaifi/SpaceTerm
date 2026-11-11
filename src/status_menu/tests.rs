@@ -8,7 +8,7 @@ use spaceterm_core::update::facts::{
 };
 
 use super::model::{Command, FlatRow, MachineRow, Menu};
-use super::{Alert, StatusHost, StatusMenu};
+use super::{Alert, AlertButtons, StatusHost, StatusMenu};
 use crate::updates::copy::settings as copy;
 use crate::updates::machines::testing::ScriptedMachines;
 use crate::updates::machines::{
@@ -201,8 +201,8 @@ fn only_this_mac_offers_stop_and_stopping_with_sessions_asks(cx: &mut TestAppCon
     cx.update(|cx| fixture.menu.perform(stop, None, cx));
     cx.run_until_parked();
     assert_eq!(
-        fixture.host.alerts.borrow()[0].confirm.as_deref(),
-        Some("Stop")
+        fixture.host.alerts.borrow()[0].buttons,
+        AlertButtons::Destructive("Stop".to_owned())
     );
     assert_eq!(
         fixture.machines.executed_actions(),
@@ -437,7 +437,7 @@ fn a_machine_without_facts_stops_only_on_its_cores_preview(cx: &mut TestAppConte
         .last()
         .cloned()
         .expect("it asks");
-    assert_eq!(alert.confirm.as_deref(), Some("Stop"));
+    assert_eq!(alert.buttons, AlertButtons::Destructive("Stop".to_owned()));
     assert!(
         alert.message.starts_with("This ends 3 Terminal Sessions."),
         "the alert names the sessions the Core reports: {}",
@@ -491,7 +491,11 @@ fn a_refused_preview_never_runs_again_without_a_fresh_confirmation(cx: &mut Test
             .last()
             .cloned()
             .expect("it asks again");
-        assert!(alert.confirm.is_some(), "it asks to confirm");
+        assert_eq!(
+            alert.buttons,
+            AlertButtons::Destructive("Restart Core".to_owned()),
+            "it asks to confirm"
+        );
         fixture.host.answer(approved);
         cx.run_until_parked();
         assert_eq!(
@@ -937,4 +941,41 @@ fn ok_on_how_to_update_dismisses_the_step_and_keeps_the_row(cx: &mut TestAppCont
         row(&fixture.host.menu(), PENGUIN).status.as_deref() == Some("Can't update by itself"),
         "the row keeps the failure"
     );
+}
+
+/// A failure's follow-up ends nothing, so its alert offers Try Again or Check Again as an
+/// ordinary default button beside Cancel, as the title bar and Settings do, never as a
+/// destructive confirmation.
+#[test]
+fn a_failures_follow_up_is_an_ordinary_action() {
+    use crate::updates::confirm::Explanation;
+    use crate::updates::state::DesktopAction;
+
+    let failure = |then: Option<state::Command>, proceed: Option<&str>| Explanation {
+        title: "Couldn't Download SpaceTerm Core 0.9.0 to penguin".into(),
+        message: "penguin is out of disk space. Its Terminal Sessions keep running.".into(),
+        then: then.map(Box::new),
+        proceed: proceed.map(Into::into),
+        dismiss: Some(Box::new(state::Command::Desktop(
+            DesktopAction::DismissFailure,
+        ))),
+    };
+    let install = state::Command::Machine(PENGUIN, MachineAction::Install);
+    let check = state::Command::Machine(PENGUIN, MachineAction::CheckAgain);
+    for (explanation, buttons) in [
+        (
+            failure(Some(install), Some("Try Again")),
+            AlertButtons::FollowUp("Try Again".to_owned()),
+        ),
+        (
+            failure(Some(check), None),
+            AlertButtons::FollowUp("Check Again".to_owned()),
+        ),
+        (failure(None, None), AlertButtons::Ok),
+    ] {
+        assert_eq!(
+            super::controller::explanation_alert(&explanation).buttons,
+            buttons
+        );
+    }
 }

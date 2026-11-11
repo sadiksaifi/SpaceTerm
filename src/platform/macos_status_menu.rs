@@ -5,7 +5,7 @@
 //! menu bar, and only its Quit, or the system's own termination, exits the client.
 use super::macos_alert::{AlertActivation, AlertSeverity, application_alert, run_modal_alert};
 use crate::status_menu::{
-    self, Alert, StatusHost, StatusMenu,
+    self, Alert, AlertButtons, StatusHost, StatusMenu,
     model::{Command, Item, MachineKind, MachineRow, Menu},
 };
 use crate::updates::copy::settings as copy;
@@ -21,8 +21,8 @@ use objc2::{
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy, NSColor,
     NSEvent, NSEventMask, NSEventModifierFlags, NSFont, NSFontAttributeName,
-    NSForegroundColorAttributeName, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
-    NSVariableStatusItemLength,
+    NSForegroundColorAttributeName, NSImage, NSMenu, NSMenuItem, NSModalResponse, NSStatusBar,
+    NSStatusItem, NSVariableStatusItemLength,
 };
 use objc2_foundation::{NSData, NSMutableAttributedString, NSRange, NSString, ns_string};
 use std::{
@@ -144,8 +144,15 @@ impl StatusHost for StatusItem {
         answered: Box<dyn FnOnce(bool) + Send>,
         cx: &mut App,
     ) {
+        let responses = responses(&alert.buttons);
         let alert = native_alert(&alert, self.mtm);
-        present(alert, self.activation, cx.windows().is_empty(), answered);
+        present(
+            alert,
+            responses,
+            self.activation,
+            cx.windows().is_empty(),
+            answered,
+        );
     }
 }
 
@@ -294,41 +301,69 @@ fn symbol(machine: &MachineRow) -> Option<Retained<NSImage>> {
     Some(image)
 }
 
+/// The responses of an alert's yes button and its Cancel, by button position.
+#[derive(Clone, Copy, Debug)]
+struct Responses {
+    proceed: NSModalResponse,
+    cancel: NSModalResponse,
+}
+
+/// The responses of the alert [`native_alert`] builds for `buttons`, or None for a report.
+fn responses(buttons: &AlertButtons) -> Option<Responses> {
+    let first = NSAlertFirstButtonReturn;
+    match buttons {
+        AlertButtons::Ok => None,
+        AlertButtons::Destructive(_) => Some(Responses {
+            proceed: first + 1,
+            cancel: first,
+        }),
+        AlertButtons::FollowUp(_) => Some(Responses {
+            proceed: first,
+            cancel: first + 1,
+        }),
+    }
+}
+
 /// Builds the alert for `alert`. A confirmation offers Cancel, then its destructive button; a
-/// report offers OK.
+/// failure's follow-up offers that button, then Cancel; a report offers OK.
 fn native_alert(alert: &Alert, mtm: MainThreadMarker) -> Retained<NSAlert> {
-    // Restart and Stop, the only confirmations, close Terminal Sessions and the programs in
-    // them. A failure report loses nothing more.
+    // Restart and Stop, the only destructive choices, close Terminal Sessions and the programs
+    // in them. A follow-up such as Try Again or a failure report loses nothing more.
     let native = application_alert(
-        if alert.confirm.is_some() {
-            AlertSeverity::Caution
-        } else {
-            AlertSeverity::Standard
+        match alert.buttons {
+            AlertButtons::Destructive(_) => AlertSeverity::Caution,
+            AlertButtons::FollowUp(_) | AlertButtons::Ok => AlertSeverity::Standard,
         },
         mtm,
     );
     native.setMessageText(&NSString::from_str(&alert.title));
     native.setInformativeText(&NSString::from_str(&alert.message));
-    match &alert.confirm {
-        Some(label) => {
+    match &alert.buttons {
+        AlertButtons::Destructive(label) => {
             native.addButtonWithTitle(ns_string!("Cancel"));
             native
                 .addButtonWithTitle(&NSString::from_str(label))
                 .setHasDestructiveAction(true);
         }
-        None => {
+        AlertButtons::FollowUp(label) => {
+            native.addButtonWithTitle(&NSString::from_str(label));
+            native.addButtonWithTitle(ns_string!("Cancel"));
+        }
+        AlertButtons::Ok => {
             native.addButtonWithTitle(ns_string!("OK"));
         }
     }
     native
 }
 
-/// Shows `alert` one at a time and passes `answered` whether the person chose a confirmation's
-/// destructive button. The alert runs its own modal loop, so it starts from the run loop rather
-/// than inside the application's event handling. It takes the keyboard through `activation`
-/// first. A windowless client hides afterwards, returning focus to the app the person was using.
+/// Shows `alert` one at a time and passes `answered` whether the person chose the button
+/// `responses` names as yes. The alert runs its own modal loop, so it starts from the run loop
+/// rather than inside the application's event handling. It takes the keyboard through
+/// `activation` first. A windowless client hides afterwards, returning focus to the app the
+/// person was using.
 fn present(
     alert: Retained<NSAlert>,
+    responses: Option<Responses>,
     activation: AlertActivation,
     windowless: bool,
     answered: impl FnOnce(bool) + Send + 'static,
@@ -343,10 +378,8 @@ fn present(
             return answered(false);
         }
         let alert = alert.get(mtm);
-        // A confirmation offers Cancel and its destructive button; a report offers only OK.
-        let confirming = alert.buttons().count() > 1;
         let application = NSApplication::sharedApplication(mtm);
-        let escape = confirming.then(cancel_on_escape).flatten();
+        let escape = responses.and_then(|responses| cancel_on_escape(responses.cancel));
         let response = run_modal_alert(alert, activation, bind_alert_keys);
         if let Some(escape) = escape {
             // SAFETY: The monitor came from addLocalMonitorForEventsMatchingMask and is removed
@@ -357,12 +390,12 @@ fn present(
             application.hide(None);
         }
         ALERTING.with(|alerting| alerting.set(false));
-        answered(confirming && response == NSAlertFirstButtonReturn + 1);
+        answered(responses.is_some_and(|responses| response == responses.proceed));
     });
 }
 
-/// Return chooses the first button, Cancel or OK. A confirmation's destructive button has no
-/// key, so it needs a deliberate click or Space.
+/// Return chooses the first button: Cancel on a confirmation, the follow-up on a failure, or
+/// OK. A confirmation's destructive button has no key, so it needs a deliberate click or Space.
 fn bind_alert_keys(alert: &NSAlert) {
     for (index, button) in alert.buttons().iter().enumerate() {
         button.setKeyEquivalent(if index == 0 {
@@ -373,16 +406,17 @@ fn bind_alert_keys(alert: &NSAlert) {
     }
 }
 
-/// A button holds one key equivalent and Cancel holds Return, so Escape stops the modal alert
-/// with Cancel's response through a monitor that lasts only while the alert is open.
-fn cancel_on_escape() -> Option<Retained<AnyObject>> {
+/// A button holds one key equivalent and the first button holds Return, so Escape stops the
+/// modal alert with Cancel's response `cancel` through a monitor that lasts only while the alert
+/// is open.
+fn cancel_on_escape(cancel: NSModalResponse) -> Option<Retained<AnyObject>> {
     const ESCAPE: u16 = 53;
-    let handler = RcBlock::new(|event: NonNull<NSEvent>| -> *mut NSEvent {
+    let handler = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
         // SAFETY: AppKit passes a live event for the duration of the call.
         let key = unsafe { event.as_ref() }.keyCode();
         match MainThreadMarker::new() {
             Some(mtm) if key == ESCAPE => {
-                NSApplication::sharedApplication(mtm).stopModalWithCode(NSAlertFirstButtonReturn);
+                NSApplication::sharedApplication(mtm).stopModalWithCode(cancel);
                 std::ptr::null_mut()
             }
             _ => event.as_ptr(),
@@ -532,19 +566,37 @@ pub(in crate::platform) mod tests {
         );
     }
 
+    /// An alert's buttons, as [`AlertButtons`] with a static label.
+    #[derive(Clone, Copy, Debug)]
+    enum Buttons {
+        Destructive(&'static str),
+        FollowUp(&'static str),
+        Ok,
+    }
+
+    impl Buttons {
+        fn alert(self) -> AlertButtons {
+            match self {
+                Self::Destructive(label) => AlertButtons::Destructive(label.to_owned()),
+                Self::FollowUp(label) => AlertButtons::FollowUp(label.to_owned()),
+                Self::Ok => AlertButtons::Ok,
+            }
+        }
+    }
+
     /// Each alert's button keys and focused button, and whether each answer approves it. Return
-    /// chooses Cancel or OK, focus rests on it for Space, and Escape cancels a confirmation.
-    /// `None` leaves the alert open.
+    /// chooses the first button: Cancel, the follow-up or OK. AppKit rests focus on Cancel for
+    /// Space, and Escape cancels. `None` leaves the alert open.
     type AnswerCase = (
-        Option<&'static str>,
+        Buttons,
         &'static [(&'static str, &'static str)],
         usize,
         &'static [(Answering, Option<bool>)],
     );
 
-    const ANSWER_CASES: [AnswerCase; 3] = [
+    const ANSWER_CASES: [AnswerCase; 4] = [
         (
-            Some("Stop"),
+            Buttons::Destructive("Stop"),
             &[("Cancel", "\r"), ("Stop", "")],
             0,
             &[
@@ -557,7 +609,7 @@ pub(in crate::platform) mod tests {
             ],
         ),
         (
-            Some("Restart"),
+            Buttons::Destructive("Restart"),
             &[("Cancel", "\r"), ("Restart", "")],
             0,
             &[
@@ -570,7 +622,20 @@ pub(in crate::platform) mod tests {
             ],
         ),
         (
-            None,
+            Buttons::FollowUp("Try Again"),
+            &[("Try Again", "\r"), ("Cancel", "")],
+            1,
+            &[
+                (Answering::Click(0), Some(true)),
+                (Answering::Click(1), Some(false)),
+                (Answering::Key("\r", 36), Some(true)),
+                (Answering::Key(" ", 49), Some(false)),
+                (Answering::PostedKey("\u{1b}", 53), Some(false)),
+                (Answering::Stop, Some(false)),
+            ],
+        ),
+        (
+            Buttons::Ok,
             &[("OK", "\r")],
             0,
             &[
@@ -581,30 +646,38 @@ pub(in crate::platform) mod tests {
         ),
     ];
 
-    /// Presents the Stop and Restart confirmations and a failure report as the status item does:
-    /// queued on the main queue, with the test driving the run loop until the alert returns. Each
-    /// alert asks for the keyboard before its modal loop starts. The test records that request
-    /// instead of activating, so the test process never takes the keyboard. Inside each alert's
-    /// modal loop the test answers it by a click or a key. The alert stays transparent, so
-    /// nothing appears on screen.
+    /// Presents the Stop and Restart confirmations, a failure's follow-up and a failure report as
+    /// the status item does: queued on the main queue, with the test driving the run loop until
+    /// the alert returns. Each alert asks for the keyboard before its modal loop starts. The test
+    /// records that request instead of activating, so the test process never takes the keyboard.
+    /// Inside each alert's modal loop the test answers it by a click or a key. The alert stays
+    /// transparent, so nothing appears on screen.
     pub(in crate::platform) fn machine_alerts_take_the_keyboard_and_bind_their_keys() {
         let mtm = MainThreadMarker::new().expect("native test must run on the main thread");
         for (confirm, keys, focused, answers) in ANSWER_CASES {
             for &(answering, expected) in answers {
+                let buttons = confirm.alert();
+                let responses = responses(&buttons);
                 let alert = native_alert(
                     &Alert {
                         title: "Restart SpaceTerm Core on penguin?".to_owned(),
                         message: "This will close your 3 running sessions.".to_owned(),
-                        confirm: confirm.map(str::to_owned),
+                        buttons,
                     },
                     mtm,
                 );
                 alert.window().setAlphaValue(0.0);
                 let (answered, approvals) = std::sync::mpsc::channel();
                 let asking = answer_inside_modal_loop(&alert, answering, || {
-                    present(alert.clone(), RECORDED_ACTIVATION, false, move |approved| {
-                        let _ = answered.send(approved);
-                    });
+                    present(
+                        alert.clone(),
+                        responses,
+                        RECORDED_ACTIVATION,
+                        false,
+                        move |approved| {
+                            let _ = answered.send(approved);
+                        },
+                    );
                 });
                 assert!(asking.modal, "the alert runs its own modal loop");
                 assert_eq!(

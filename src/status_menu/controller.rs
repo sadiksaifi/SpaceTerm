@@ -10,6 +10,7 @@ use spaceterm_core::service::ServiceStatus;
 
 use super::model::{Command, Menu};
 use crate::updates::UpdateService;
+use crate::updates::confirm::Explanation;
 use crate::updates::machines::store::{self, MachineUpdates, MachineUpdatesNotice, Surface};
 use crate::updates::machines::{ActionFailure, MachineAction, MachineId, MachineUpdate};
 use crate::updates::state::{self, DesktopAction};
@@ -19,15 +20,27 @@ use crate::updates::state::{self, DesktopAction};
 pub(crate) struct Alert {
     pub(crate) title: String,
     pub(crate) message: String,
-    /// A confirmation's destructive button, such as "Restart". None for a report, which offers
-    /// only OK.
-    pub(crate) confirm: Option<String>,
+    pub(crate) buttons: AlertButtons,
+}
+
+/// The buttons of an [`Alert`], and which one answers yes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum AlertButtons {
+    /// A report: OK only.
+    Ok,
+    /// Restart or Stop, which end Terminal Sessions: a caution alert with Cancel as the default
+    /// button and this destructive button.
+    Destructive(String),
+    /// A failure's follow-up, such as Try Again or Check Again, which ends nothing: an ordinary
+    /// alert with this button as the default and Cancel.
+    FollowUp(String),
 }
 
 /// The platform's status item.
 pub(crate) trait StatusHost {
     fn render(&self, menu: &Menu);
-    /// Shows `alert` and passes `answered` whether the person chose its destructive button.
+    /// Shows `alert` and passes `answered` whether the person chose its destructive or follow-up
+    /// button.
     /// `activation` is the activation token of the menu click that led to it, if the host
     /// received one, so a window that shows the alert can come forward.
     fn alert(
@@ -160,7 +173,7 @@ impl StatusMenu {
             let alert = Alert {
                 title: confirmation.title.to_string(),
                 message: confirmation.message.to_string(),
-                confirm: Some(confirmation.button.to_string()),
+                buttons: AlertButtons::Destructive(confirmation.button.to_string()),
             };
             let messages = messages.clone();
             host.alert(
@@ -200,7 +213,7 @@ impl StatusMenu {
                     let alert = Alert {
                         title: title.to_string(),
                         message: message.to_string(),
-                        confirm: None,
+                        buttons: AlertButtons::Ok,
                     };
                     self.host.alert(alert, None, Box::new(|_| {}), cx);
                 }
@@ -276,11 +289,7 @@ impl StatusMenu {
             // Only the title bar opens its list.
             state::Command::ShowList => {}
             state::Command::Explain(explanation) => {
-                let alert = Alert {
-                    title: explanation.title.to_string(),
-                    message: explanation.message.to_string(),
-                    confirm: explanation.follow_up().map(|label| label.to_string()),
-                };
+                let alert = explanation_alert(&explanation);
                 let messages = self.messages.clone();
                 self.host.alert(
                     alert,
@@ -299,6 +308,18 @@ impl StatusMenu {
 }
 
 /// Performs `action` through the shared Machine updates, which report back to this menu.
+/// A failure's alert: its follow-up, such as Try Again, is an ordinary action beside Cancel,
+/// since it ends nothing. An alert without one offers OK.
+pub(super) fn explanation_alert(explanation: &Explanation) -> Alert {
+    Alert {
+        title: explanation.title.to_string(),
+        message: explanation.message.to_string(),
+        buttons: explanation.follow_up().map_or(AlertButtons::Ok, |label| {
+            AlertButtons::FollowUp(label.to_string())
+        }),
+    }
+}
+
 fn act(machine: MachineId, action: MachineAction, cx: &mut App) {
     if let Some(store) = MachineUpdates::global(cx) {
         store.update(cx, |store, cx| {

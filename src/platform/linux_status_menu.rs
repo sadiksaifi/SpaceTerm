@@ -6,7 +6,7 @@
 //! the client reports the item unavailable, so closing its last window exits it rather than
 //! leaving it unreachable. `linux_status_host` decides whether a host shows it.
 use crate::status_menu::{
-    self, Alert, StatusHost, StatusMenu,
+    self, Alert, AlertButtons, StatusHost, StatusMenu,
     model::{Command, FlatRow, Menu as StatusMenuModel},
 };
 use gpui::{App, PromptButton, PromptLevel};
@@ -169,17 +169,26 @@ impl StatusHost for LinuxStatusItem {
         let Some(handle) = crate::ui::updates::front_workspace_window(cx) else {
             return answered(false);
         };
-        let (level, buttons) = match &alert.confirm {
-            Some(label) => (
+        // The alert's level, its buttons, and the index of the button that answers yes.
+        let (level, buttons, proceed) = match &alert.buttons {
+            AlertButtons::Destructive(label) => (
                 PromptLevel::Critical,
                 vec![
                     PromptButton::cancel("Cancel"),
                     PromptButton::ok(label.clone()),
                 ],
+                Some(1),
             ),
-            None => (PromptLevel::Info, vec![PromptButton::ok("OK")]),
+            AlertButtons::FollowUp(label) => (
+                PromptLevel::Info,
+                vec![
+                    PromptButton::ok(label.clone()),
+                    PromptButton::cancel("Cancel"),
+                ],
+                Some(0),
+            ),
+            AlertButtons::Ok => (PromptLevel::Info, vec![PromptButton::ok("OK")], None),
         };
-        let confirming = alert.confirm.is_some();
         let answer = handle.update(cx, |_, window, cx| {
             window.prompt(level, &alert.title, Some(&alert.message), &buttons, cx)
         });
@@ -188,7 +197,7 @@ impl StatusHost for LinuxStatusItem {
         };
         cx.spawn(async move |_| {
             let chosen = answer.await.ok();
-            answered(confirming && chosen == Some(1));
+            answered(proceed.is_some() && chosen == proceed);
         })
         .detach();
     }
