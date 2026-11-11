@@ -377,11 +377,18 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
             None,
             format!("{subject} can't check for updates."),
         ),
-        MachineStage::NeedsFloor { floor, .. } => (
-            format!("Needs {floor} first"),
+        // Download asks the Core to fetch the Stepping Stone at the floor from its own feed.
+        MachineStage::NeedsFloor { version, floor, .. } => (
+            blocked(format!("Needs {floor} first")),
             action(DOWNLOAD, None, Command::Machine(id, MachineAction::Install)),
-            None,
-            format!("{subject} needs {floor} first."),
+            Some(format!("Then SpaceTerm Core can update to {version}.")),
+            if too_old {
+                format!(
+                    "{subject} is too old for this SpaceTerm and needs {floor} first. Then it can update to {version}."
+                )
+            } else {
+                format!("{subject} needs {floor} first. Then it can update to {version}.")
+            },
         ),
         MachineStage::SteppingStoneSkipped => (
             "Can't update by itself".to_owned(),

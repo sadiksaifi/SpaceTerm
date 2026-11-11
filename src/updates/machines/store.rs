@@ -776,13 +776,18 @@ impl MachineUpdates {
                 self.dismissed.remove(&(machine, PUSH_FAILURE));
                 let Some(version) = automatic.or_else(|| update.push.clone()).or_else(|| {
                     matches!(failure, ActionFailure::NeedsFloor(_))
-                        .then(|| update.bundled.clone())
+                        .then(|| {
+                            update
+                                .bundled
+                                .as_ref()
+                                .map(|bundled| bundled.version.clone())
+                        })
                         .flatten()
                 }) else {
                     return;
                 };
                 if update.push.as_ref() == Some(&version)
-                    || update.bundled.as_ref() == Some(&version)
+                    || update.bundled.as_ref().map(|bundled| &bundled.version) == Some(&version)
                 {
                     update.failed_push = Some(FailedPush {
                         version,
@@ -838,7 +843,7 @@ impl MachineUpdates {
 fn carried_failure(previous: &MachineUpdate, next: &MachineUpdate) -> Option<FailedPush> {
     previous.failed_push.clone().filter(|failed| {
         next.push.as_ref() == Some(&failed.version)
-            || next.bundled.as_ref() == Some(&failed.version)
+            || next.bundled.as_ref().map(|bundled| &bundled.version) == Some(&failed.version)
     })
 }
 

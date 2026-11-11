@@ -40,11 +40,11 @@ pub(crate) struct MachineUpdate {
     /// This desktop's embedded Core version for the Machine's platform, when it is newer than
     /// `facts.running` and not `facts.skipped`. The shared store pushes it.
     pub(crate) push: Option<Version>,
-    /// This desktop's embedded Core version for the Machine's platform, when it is newer than
+    /// This desktop's embedded Core build for the Machine's platform, when it is newer than
     /// every version the Core has and not `facts.skipped`, whether or not its Update Floor
     /// admits `facts.running`. It differs from `push` while the Core must first reach that floor
     /// from its own feed through a Stepping Stone.
-    pub(crate) bundled: Option<Version>,
+    pub(crate) bundled: Option<Bundled>,
     /// The last push of `push` that failed. The shared store records it, because a push that
     /// breaks off or runs out of disk space records nothing in the Core's facts. Adapters leave
     /// it None.
@@ -53,6 +53,15 @@ pub(crate) struct MachineUpdate {
     /// ended. The shared store records it, so the title bar shows that work and keeps quiet about
     /// the work a Core starts by itself. Adapters leave it None.
     pub(crate) asked: Option<Asked>,
+}
+
+/// This desktop's embedded Core build, as one Machine needs it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Bundled {
+    pub(crate) version: Version,
+    /// The build's Update Floor, when it does not admit `facts.running`. The Core fetches a
+    /// Stepping Stone at that floor from its own feed before it can take `version`.
+    pub(crate) floor: Option<spaceterm_core::update::ordering::Floor>,
 }
 
 /// The work on a Machine that a person started on this desktop.

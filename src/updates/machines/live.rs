@@ -585,10 +585,11 @@ impl Shared {
         Some(Target {
             known: entry.known.clone(),
             facts: entry.update.facts.clone(),
-            floor: entry.update.facts.as_ref().and_then(|facts| {
-                let floor = self.embedded.build(facts.platform)?.candidate.floor()?;
-                (!floor.admits(&facts.running)).then_some(floor)
-            }),
+            floor: entry
+                .update
+                .bundled
+                .as_ref()
+                .and_then(|bundled| bundled.floor),
             push: entry.update.facts.as_ref().and_then(|facts| {
                 entry.update.push.as_ref()?;
                 self.embedded.build(facts.platform)

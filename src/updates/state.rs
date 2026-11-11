@@ -17,7 +17,9 @@ use spaceterm_core::update::ordering::Floor;
 
 use super::ladder::{self, Emphasis, Stage};
 use super::machines::store::MachineUpdates;
-use super::machines::{ActionFailure, Asked, MachineAction, MachineId, MachineLink, MachineUpdate};
+use super::machines::{
+    ActionFailure, Asked, Bundled, MachineAction, MachineId, MachineLink, MachineUpdate,
+};
 use super::policy::DAY;
 use super::{UpdateError, UpdateService, UpdateState};
 
@@ -232,12 +234,14 @@ pub(crate) enum MachineStage {
         here: bool,
     },
     CantCheck,
-    /// A push this run could not make, because the Core must first fetch `floor` and couldn't.
-    /// SpaceTerm does not retry it this run.
+    /// The Core runs below the Update Floor of this desktop's embedded build, so it must first
+    /// fetch a Stepping Stone at `floor` from its own feed.
     NeedsFloor {
-        /// The version the push carried.
+        /// The embedded build's version.
         version: Version,
         floor: Floor,
+        /// A fetch or push this run failed, and SpaceTerm does not retry it this run.
+        failed: bool,
     },
     SteppingStoneSkipped,
 }
@@ -666,7 +670,7 @@ impl MachineRow {
         match &self.stage {
             MachineStage::StartFailed { .. }
             | MachineStage::DownloadFailed { retries: false, .. }
-            | MachineStage::NeedsFloor { .. }
+            | MachineStage::NeedsFloor { failed: true, .. }
             | MachineStage::SteppingStoneSkipped
                 if !self.dismissed =>
             {
@@ -736,6 +740,7 @@ fn machine_stage(
                     return MachineStage::NeedsFloor {
                         version: failed.version.clone(),
                         floor,
+                        failed: true,
                     };
                 }
                 ActionFailure::DiskFull => DownloadCause::DiskFull,
@@ -905,6 +910,20 @@ fn machine_stage(
         && (now.saturating_sub(since) >= CANT_CHECK_AFTER || reason == CheckFailure::ClockBehind)
     {
         return (MachineStage::CantCheck, blocked);
+    }
+    if let Some(Bundled {
+        version,
+        floor: Some(floor),
+    }) = &update.bundled
+    {
+        return (
+            MachineStage::NeedsFloor {
+                version: version.clone(),
+                floor: *floor,
+                failed: false,
+            },
+            blocked,
+        );
     }
     if let Some(version) = &update.push
         && marks.pushes_held

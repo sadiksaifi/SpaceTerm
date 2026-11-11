@@ -6,6 +6,7 @@ use spaceterm_core::service::lane::{LaneAction, LaneEffects};
 use spaceterm_core::update::facts::{PendingVersion, Platform, Protocols, UpdateCheck};
 
 use super::*;
+use crate::updates::machines::Bundled;
 use crate::updates::state::{Dismissed, MachineRow, MachineStage, Marks};
 
 const LOCAL: MachineId = [1; 32];
@@ -1016,6 +1017,15 @@ fn a_core_below_the_embedded_floor_gets_no_push_and_installs_from_its_feed() {
     adapter.start(sent).unwrap();
     let update = changed(&events, "the Core facts", |update| update.facts.is_some());
     assert_eq!(update.push, None, "no push crosses the floor");
+    let floor = spaceterm_core::update::ordering::Floor::parse("1.1.0").unwrap();
+    assert_eq!(
+        update.bundled,
+        Some(Bundled {
+            version: version("1.2.2"),
+            floor: Some(floor),
+        }),
+        "the Machine's row learns the floor it needs first"
+    );
 
     adapter.perform(PENGUIN, MachineAction::Install);
     assert_eq!(finished(&events, &MachineAction::Install), Ok(()));
@@ -1028,9 +1038,7 @@ fn a_core_below_the_embedded_floor_gets_no_push_and_installs_from_its_feed() {
     adapter.perform(PENGUIN, MachineAction::Install);
     assert_eq!(
         finished(&events, &MachineAction::Install),
-        Err(ActionFailure::NeedsFloor(
-            spaceterm_core::update::ordering::Floor::parse("1.1.0").unwrap()
-        ))
+        Err(ActionFailure::NeedsFloor(floor))
     );
 }
 

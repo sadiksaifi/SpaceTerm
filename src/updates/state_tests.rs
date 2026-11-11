@@ -12,7 +12,7 @@ use super::*;
 use crate::updates::copy::title_bar::LABELS;
 use crate::updates::machines::store::Surface;
 use crate::updates::machines::testing::ScriptedMachines;
-use crate::updates::machines::{FailedPush, MachinePreview, MachineUpdatesEvent};
+use crate::updates::machines::{Bundled, FailedPush, MachinePreview, MachineUpdatesEvent};
 use spaceterm_core::update::ordering::Floor;
 
 pub(crate) const NOW: u64 = 100 * DAY;
@@ -266,7 +266,6 @@ pub(crate) fn machine_variants(id: MachineId, name: &str) -> Vec<MachineUpdate> 
             ActionFailure::Busy,
             ActionFailure::RelaunchRequired,
             ActionFailure::Failed,
-            ActionFailure::NeedsFloor(Floor::parse("0.11.5").unwrap()),
         ] {
             pushed.failed_push = Some(FailedPush {
                 version: version("0.11.5"),
@@ -281,6 +280,20 @@ pub(crate) fn machine_variants(id: MachineId, name: &str) -> Vec<MachineUpdate> 
             last_success: None,
         };
         all.push(stone);
+        let mut below = base.clone();
+        below.bundled = Some(Bundled {
+            version: version("0.12.1"),
+            floor: Some(Floor::parse("0.12.0").unwrap()),
+        });
+        all.push(below.clone());
+        let mut fetch_failed = below.clone();
+        fetch_failed.failed_push = Some(FailedPush {
+            version: version("0.12.1"),
+            failure: ActionFailure::NeedsFloor(Floor::parse("0.12.0").unwrap()),
+        });
+        all.push(fetch_failed);
+        below.link = MachineLink::Incompatible(Incompatible::ListenerTooOld);
+        all.push(below);
         all.push(base);
     }
     for link in [
@@ -1142,7 +1155,7 @@ fn the_installed_view_reads_the_apps_ladder_clock(cx: &mut gpui::TestAppContext)
 }
 
 /// D3f dismisses the title-bar step from the row's `How to Update…` as from the pill, and the
-/// row keeps the failure. A floor the Core couldn't fetch is a failure step with D3e.
+/// row keeps the failure.
 #[gpui::test]
 fn failure_alerts_dismiss_the_step_and_keep_the_row(cx: &mut gpui::TestAppContext) {
     let (adapter, store) = installed_store(cx);
@@ -1177,25 +1190,136 @@ fn failure_alerts_dismiss_the_step_and_keep_the_row(cx: &mut gpui::TestAppContex
         adapter.performed().is_empty(),
         "the Core's facts stay as they are"
     );
+}
 
-    let mut floor = machine(PENGUIN, "penguin", false, Some(facts("0.11.3", 1)));
-    floor.push = Some(version("0.12.1"));
-    floor.failed_push = Some(FailedPush {
-        version: version("0.12.1"),
-        failure: ActionFailure::NeedsFloor(Floor::parse("0.12.0").unwrap()),
+/// A connected Core below the Update Floor of this desktop's embedded build, with no push tried.
+fn below_the_floor() -> MachineUpdate {
+    let mut below = machine(PENGUIN, "penguin", false, Some(facts("0.11.3", 2)));
+    below.bundled = Some(Bundled {
+        version: version("0.14.0"),
+        floor: Some(Floor::parse("0.12.0").unwrap()),
     });
-    let view = Desk::new().view(app(&state), &[floor], NOW);
-    assert_eq!(view.step, Some(Step::Failed(Target::Machine(PENGUIN))));
+    below
+}
+
+/// A Core below the Update Floor offers its Stepping Stone on its row: the floor first, with
+/// Download, which asks its Core to fetch it. The title bar owes nothing until a fetch fails,
+/// and the row follows the Stepping Stone once its Core fetches it.
+#[test]
+fn a_core_below_the_update_floor_offers_its_stepping_stone() {
+    let state = UpdateState::UpToDate;
+    let below = below_the_floor();
+    let view = Desk::new().view(app(&state), std::slice::from_ref(&below), NOW);
+    assert_eq!(view.step, None, "nothing failed");
+    let row = view.machine_rows().remove(0);
+    assert_eq!(row.status.as_deref(), Some("Needs 0.12.0 first"));
+    assert_eq!(
+        row.description.as_deref(),
+        Some("Then SpaceTerm Core can update to 0.14.0.")
+    );
+    let action = row.action.expect("the row offers the Stepping Stone");
+    assert_eq!(action.label.as_ref(), "Download");
+    assert_eq!(
+        action.command,
+        Command::Machine(PENGUIN, MachineAction::Install)
+    );
+
+    let mut too_old = below.clone();
+    too_old.link = MachineLink::Incompatible(Incompatible::ListenerTooOld);
+    let row = Desk::new()
+        .view(app(&state), &[too_old], NOW)
+        .machine_rows()
+        .remove(0);
+    assert_eq!(
+        row.status.as_deref(),
+        Some("Too old for this SpaceTerm \u{b7} Needs 0.12.0 first")
+    );
+    assert_eq!(row.action.unwrap().label.as_ref(), "Download");
+
+    let mut fetching = below.clone();
+    fetching.facts.as_mut().unwrap().operation = Some(Operation::Installing {
+        version: version("0.12.0"),
+        received: 1,
+        total: 4,
+    });
+    let mut fetched = below;
+    fetched.facts.as_mut().unwrap().pending = Some(pending("0.12.0", false, NOW));
+    let view = Desk::new().view(app(&state), &[fetching, fetched], NOW);
+    assert!(matches!(
+        &view.machines[0].stage,
+        MachineStage::Downloading { version: v, .. } if *v == version("0.12.0")
+    ));
+    assert!(matches!(
+        &view.machines[1].stage,
+        MachineStage::Downloaded { version: v, .. } if *v == version("0.12.0")
+    ));
+}
+
+/// Download on a Core below the Update Floor asks its Core to fetch from its feed. A fetch that
+/// fails shows once as `Update Failed` with the floor's D3e; dismissing it keeps the row and its
+/// Download, and the next failure shows again.
+#[gpui::test]
+fn a_failed_stepping_stone_fetch_shows_once_and_keeps_the_download(cx: &mut gpui::TestAppContext) {
+    let (adapter, store) = installed_store(cx);
+    adapter.emit(MachineUpdatesEvent::Machines(vec![below_the_floor()]));
+    cx.run_until_parked();
+    let state = UpdateState::UpToDate;
+    let download = |cx: &mut gpui::TestAppContext| {
+        let row = store_view(cx, &app(&state)).0.machine_row(PENGUIN).unwrap();
+        assert_eq!(row.status.as_deref(), Some("Needs 0.12.0 first"));
+        let Some(RowAction {
+            label,
+            command: Command::Machine(id, action),
+            ..
+        }) = row.action
+        else {
+            panic!("the row keeps its Download");
+        };
+        assert_eq!(label.as_ref(), "Download");
+        store.update(cx, |store, cx| {
+            store.perform(id, action, Surface::Window, cx)
+        });
+        adapter.emit(MachineUpdatesEvent::Finished {
+            machine: PENGUIN,
+            action: MachineAction::Install,
+            outcome: Err(ActionFailure::NeedsFloor(Floor::parse("0.12.0").unwrap())),
+        });
+        cx.run_until_parked();
+    };
+
+    download(cx);
+    assert_eq!(
+        adapter.performed(),
+        [(PENGUIN, MachineAction::Install)],
+        "Download asks the Core to fetch from its feed"
+    );
+    assert_eq!(step_now(cx), Some(Step::Failed(Target::Machine(PENGUIN))));
+    let view = store_view(cx, &app(&state)).0;
     let Some(Command::Explain(alert)) = view.pill().map(|pill| pill.main) else {
         panic!("D3e opens from the main area");
     };
     assert_eq!(
+        alert.title.as_ref(),
+        "Couldn't Download SpaceTerm Core 0.14.0 to penguin"
+    );
+    assert_eq!(
         alert.message.as_ref(),
         "penguin needs SpaceTerm Core 0.12.0 first and couldn't get it. Its Terminal Sessions keep running."
     );
-    let row = view.machine_rows().remove(0);
-    assert_eq!(row.status.as_deref(), Some("Needs 0.12.0 first"));
-    assert_eq!(row.action.unwrap().label.as_ref(), "Download");
+    let Some(Command::Machine(id, dismiss)) = alert.dismiss.map(|dismiss| *dismiss) else {
+        panic!("Cancel dismisses the step");
+    };
+    store.update(cx, |store, cx| {
+        store.perform(id, dismiss, Surface::Window, cx)
+    });
+    assert_eq!(step_now(cx), None, "the failure shows once");
+
+    download(cx);
+    assert_eq!(
+        step_now(cx),
+        Some(Step::Failed(Target::Machine(PENGUIN))),
+        "a new failure shows again"
+    );
 }
 
 /// A Core that reports it restarts after an hour with nothing running keeps that explanation
