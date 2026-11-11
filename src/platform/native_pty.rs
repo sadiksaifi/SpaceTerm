@@ -146,6 +146,10 @@ pub trait NativePtyAdapter: Write + Send {
 
 /// Reads the processes in one shell's terminal session, apart from the PTY's owner.
 pub trait SessionProbe: Send + Sync {
+    /// Reads the PTY foreground now. An unavailable read never proves the shell owns it.
+    fn shell_foreground(&self) -> io::Result<bool> {
+        Err(io::Error::other("the PTY foreground is unavailable"))
+    }
     /// Whether any process other than the shell runs in its terminal session: a running or
     /// stopped job, a background job, or any other child. An error means it could not be read.
     fn others(&self) -> io::Result<bool>;

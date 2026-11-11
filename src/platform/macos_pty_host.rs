@@ -21,13 +21,29 @@ impl UnixPtyHost for MacosPtyHost {
         observe_exactly(process)
     }
 
-    /// The processes whose controlling terminal is the leader's. Every member of a terminal
-    /// session keeps it unless it detached with `TIOCNOTTY`; listing them asks the kernel by
-    /// terminal, so a process this user cannot read is never needed to rule it out.
+    /// A session member can drop its controlling terminal without leaving the session.
+    /// Query every listed PID's session instead of selecting by terminal device. Any
+    /// unreadable PID leaves membership uncertain and therefore counts as work.
     fn session_candidates(&self, leader: i32) -> io::Result<Vec<i32>> {
-        let info =
-            exact_bsd_info(leader)?.ok_or_else(|| io::Error::other("the shell process is gone"))?;
-        terminal_process_ids(info.e_tdev)
+        let mut members = Vec::new();
+        for process in all_process_ids()? {
+            if process < 1 {
+                continue;
+            }
+            // SAFETY: getsid performs a read-only process identity query.
+            let session = unsafe { libc::getsid(process) };
+            if session < 1 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::ESRCH) {
+                    continue;
+                }
+                return Err(error);
+            }
+            if session == leader {
+                members.push(process);
+            }
+        }
+        Ok(members)
     }
 
     fn master_read_error(&self, _error: &io::Error) -> MasterReadError {
@@ -147,43 +163,6 @@ fn process_identity(info: &libc::proc_bsdinfo) -> Option<ProcessIdentity> {
             fine: info.pbi_start_tvusec,
         },
     })
-}
-
-/// `PROC_TTY_ONLY` of `<sys/proc_info.h>`: list the processes of one controlling terminal.
-const PROC_TTY_ONLY: u32 = 3;
-
-/// The processes whose controlling terminal is the device `terminal`.
-fn terminal_process_ids(terminal: u32) -> io::Result<Vec<i32>> {
-    let mut capacity = 64_usize;
-    loop {
-        let mut process_ids = vec![0_i32; capacity];
-        let buffer_size = capacity
-            .checked_mul(std::mem::size_of::<i32>())
-            .and_then(|size| i32::try_from(size).ok())
-            .ok_or_else(|| io::Error::other("process-list buffer size overflowed"))?;
-        // SAFETY: the buffer holds `buffer_size` writable bytes.
-        let listed = unsafe {
-            libc::proc_listpids(
-                PROC_TTY_ONLY,
-                terminal,
-                process_ids.as_mut_ptr().cast::<libc::c_void>(),
-                buffer_size,
-            )
-        };
-        if listed < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // proc_listpids answers in bytes.
-        let count = listed as usize / std::mem::size_of::<i32>();
-        if count >= capacity {
-            capacity = capacity
-                .checked_mul(2)
-                .ok_or_else(|| io::Error::other("process-list capacity overflowed"))?;
-            continue;
-        }
-        process_ids.truncate(count);
-        return Ok(process_ids);
-    }
 }
 
 fn all_process_ids() -> io::Result<Vec<i32>> {

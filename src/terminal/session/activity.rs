@@ -1,6 +1,6 @@
-//! Whether a Terminal Session has work going on, which SpaceTerm Core's idle restart reads
-//! (ADR 0065). The worker records each input and output; the Core reads the rest on demand,
-//! without the worker.
+//! Observations of work in a Terminal Session (ADR 0065). The worker records input and output;
+//! callers read fresh native facts on demand. These observations do not fence queued activity
+//! or authorize an idle restart.
 use super::*;
 use crate::platform::native_pty::SessionProbe;
 use std::io;
@@ -8,9 +8,6 @@ use std::io;
 /// How long a Terminal Session has no input and no output before it can have no work going on:
 /// the idle period of ADR 0065, which SpaceTerm Core's update engine owns.
 pub(crate) const IDLE_PERIOD: Duration = spaceterm_core::service::updates::IDLE_PERIOD;
-/// How long one reading of the processes in a terminal session stays valid while no input or
-/// output arrives.
-const PROBE_VALID: Duration = Duration::from_secs(60);
 
 /// What the worker last recorded for the work-going-on predicate.
 #[derive(Default)]
@@ -20,8 +17,6 @@ pub(super) struct ActivityState {
     /// The owning shell waited at its own empty prompt after `last`.
     empty_prompt: bool,
     probe: Option<Arc<dyn SessionProbe>>,
-    /// The last reading of `probe`, while no input or output arrived since.
-    others: Option<(Instant, bool)>,
 }
 
 impl ActivityState {
@@ -34,7 +29,6 @@ impl ActivityState {
     pub(super) fn note(&mut self, now: Instant, empty_prompt: bool) {
         self.last = Some(now);
         self.empty_prompt = empty_prompt;
-        self.others = None;
     }
 }
 
@@ -62,38 +56,31 @@ impl TerminalRuntime {
 }
 
 impl TerminalEventPublisher {
-    /// See [`TerminalRuntime::work_going_on`]. One negative process reading stays valid for
-    /// [`PROBE_VALID`] while no input or output arrives; nothing that ends a Terminal Session
-    /// relies on it.
+    /// A no-work observation requires fresh foreground and process reads. The published line mode
+    /// and an earlier absence of processes cannot prove that a session is still quiet.
     pub(super) fn work_going_on(&self, now: Instant) -> bool {
-        let (quiet, shell_foreground, empty_prompt, probe, reading) = {
+        let (quiet, running, empty_prompt, probe, last) = {
             let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
             let activity = &state.activity;
             (
                 activity
                     .last
                     .map(|last| now.saturating_duration_since(last)),
-                !state.stopped && state.line.mode.shell_foreground,
+                !state.stopped,
                 activity.empty_prompt,
                 activity.probe.clone(),
-                activity
-                    .others
-                    .filter(|(at, _)| now.saturating_duration_since(*at) < PROBE_VALID),
+                activity.last,
             )
         };
-        work_going_on(quiet, shell_foreground, empty_prompt, || {
-            if let Some((_, others)) = reading {
-                return Ok(others);
-            }
+        let working = work_going_on(quiet, running, empty_prompt, || {
             let probe = probe.ok_or_else(|| io::Error::other("no process facts"))?;
-            let others = probe.others()?;
-            let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
-            // Input or output that arrived meanwhile cleared the reading; keep it cleared.
-            if state.activity.last.is_some_and(|last| last <= now) {
-                state.activity.others = Some((now, others));
+            if !probe.shell_foreground()? {
+                return Ok(true);
             }
-            Ok(others)
-        })
+            probe.others()
+        });
+        let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        working || state.stopped || state.activity.last != last
     }
 
     pub(super) fn set_probe(&self, probe: Option<Arc<dyn SessionProbe>>) {

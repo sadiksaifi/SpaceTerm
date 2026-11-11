@@ -43,6 +43,35 @@ impl UnixPtyHost for LinuxPtyHost {
         Ok(processes)
     }
 
+    fn session_candidates(&self, _leader: i32) -> io::Result<Vec<i32>> {
+        // hidepid can omit a member entirely, rather than making its stat read fail.
+        // Cleanup keeps its best-effort process list; work observations require visibility.
+        let mounts = std::fs::read_to_string("/proc/mounts")?;
+        let mut visible = false;
+        for line in mounts.lines() {
+            let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
+            if fields.get(1) != Some(&"/proc") {
+                continue;
+            }
+            let readable = fields.get(2) == Some(&"proc")
+                && fields.get(3).is_some_and(|options| {
+                    options.split(',').all(|option| {
+                        option
+                            .strip_prefix("hidepid=")
+                            .is_none_or(|mode| matches!(mode, "0" | "off"))
+                    })
+                });
+            if !readable {
+                return Err(io::Error::other("process membership is not visible"));
+            }
+            visible = true;
+        }
+        if !visible {
+            return Err(io::Error::other("process membership is not visible"));
+        }
+        self.process_ids()
+    }
+
     fn master_read_error(&self, error: &io::Error) -> MasterReadError {
         if error.raw_os_error() == Some(libc::EIO) {
             MasterReadError::Hangup

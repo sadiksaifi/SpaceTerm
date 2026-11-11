@@ -5128,8 +5128,11 @@ fn a_hidden_session_reports_retitles_at_most_once_per_interval() {
 }
 
 /// Process facts a test sets: `Some(others)`, or `None` for a failed read.
-struct FixedProbe(Option<bool>);
+struct FixedProbe(Option<bool>, LineMode);
 impl crate::platform::native_pty::SessionProbe for FixedProbe {
+    fn shell_foreground(&self) -> io::Result<bool> {
+        Ok(self.1.shell_foreground)
+    }
     fn others(&self) -> io::Result<bool> {
         self.0.ok_or_else(|| io::Error::other("unreadable"))
     }
@@ -5178,7 +5181,7 @@ fn idle_worker(line: LineMode, others: Option<bool>) -> TerminalWorker {
     };
     worker
         .events
-        .set_probe(Some(Arc::new(FixedProbe(others)) as Arc<_>));
+        .set_probe(Some(Arc::new(FixedProbe(others, line)) as Arc<_>));
     worker
 }
 
@@ -5285,4 +5288,53 @@ fn a_job_beside_the_shell_or_an_unreadable_terminal_session_is_work() {
         );
         worker.finish();
     }
+}
+
+#[test]
+fn a_new_quiet_job_is_not_hidden_by_an_earlier_negative_probe() {
+    struct ChangingProbe(AtomicBool);
+    impl crate::platform::native_pty::SessionProbe for ChangingProbe {
+        fn shell_foreground(&self) -> io::Result<bool> {
+            Ok(true)
+        }
+        fn others(&self) -> io::Result<bool> {
+            Ok(self.0.load(Ordering::Acquire))
+        }
+    }
+    let mut worker = idle_worker(SHELL_FOREGROUND, Some(false));
+    shows(&mut worker, OWNED_PROMPT);
+    let probe = Arc::new(ChangingProbe(AtomicBool::new(false)));
+    worker.events.set_probe(Some(probe.clone()));
+    let now = Instant::now() + IDLE_PERIOD * 2;
+    assert!(!worker.events.work_going_on(now));
+    probe.0.store(true, Ordering::Release);
+    assert!(worker.events.work_going_on(now));
+    worker.finish();
+}
+
+#[test]
+fn fresh_foreground_overrides_the_published_line_mode() {
+    struct Foreground(Mutex<Option<bool>>);
+    impl crate::platform::native_pty::SessionProbe for Foreground {
+        fn shell_foreground(&self) -> io::Result<bool> {
+            self.0
+                .lock()
+                .unwrap()
+                .ok_or_else(|| io::Error::other("unreadable"))
+        }
+        fn others(&self) -> io::Result<bool> {
+            Ok(false)
+        }
+    }
+    let mut worker = idle_worker(SHELL_FOREGROUND, Some(false));
+    shows(&mut worker, OWNED_PROMPT);
+    let probe = Arc::new(Foreground(Mutex::new(Some(true))));
+    worker.events.set_probe(Some(probe.clone()));
+    let now = Instant::now() + IDLE_PERIOD * 2;
+    assert!(!worker.events.work_going_on(now));
+    for foreground in [Some(false), None] {
+        *probe.0.lock().unwrap() = foreground;
+        assert!(worker.events.work_going_on(now));
+    }
+    worker.finish();
 }

@@ -396,9 +396,23 @@ fn process_group_is_alive(process_group: i32) -> io::Result<bool> {
 struct ShellSession {
     host: Arc<dyn UnixPtyHost>,
     session: ProcessSessionIdentity,
+    foreground: std::sync::Weak<OwnedFd>,
 }
 
 impl SessionProbe for ShellSession {
+    fn shell_foreground(&self) -> io::Result<bool> {
+        let descriptor = self
+            .foreground
+            .upgrade()
+            .ok_or_else(|| io::Error::other("the PTY foreground is unavailable"))?;
+        // SAFETY: the probe owns this live PTY master descriptor.
+        let foreground = unsafe { libc::tcgetpgrp(descriptor.as_raw_fd()) };
+        if foreground < 1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(foreground == self.session.leader.process)
+    }
+
     /// Reads every visible process exactly, unlike cleanup's best-effort enumeration: a
     /// process that could not be read is an error, never a process that is not there.
     fn others(&self) -> io::Result<bool> {
@@ -419,6 +433,9 @@ impl SessionProbe for ShellSession {
                 }
                 _ => {}
             }
+        }
+        if self.host.observe_exactly(self.session.session)? != Some(leader) {
+            return Err(io::Error::other("shell process ownership changed"));
         }
         Ok(false)
     }
@@ -497,6 +514,7 @@ mod ownership_tests {
         facts.extend(others);
         ShellSession {
             host: Arc::new(Facts(facts)),
+            foreground: std::sync::Weak::new(),
             session: ProcessSessionIdentity {
                 session: 100,
                 leader: shell.identity,
@@ -536,6 +554,7 @@ mod ownership_tests {
         for leader in [Ok(None), Ok(Some(reused)), Err(())] {
             let probe = ShellSession {
                 host: Arc::new(Facts(vec![(100, leader)])),
+                foreground: std::sync::Weak::new(),
                 session: ProcessSessionIdentity {
                     session: 100,
                     leader: shell.identity,
@@ -645,6 +664,9 @@ struct SpawnedPty {
     /// The shell's process group, which leads its own session.
     shell_process_group: libc::pid_t,
     probe: Arc<ShellSession>,
+    /// The probe borrows this descriptor. It closes before waiting for PTY teardown, even
+    /// when an observer retains the probe after the owner ends.
+    _foreground: Option<Arc<OwnedFd>>,
     // Fields drop in declaration order. Close the PTY handles before waiting for a child whose
     // kernel exit can be waiting for terminal teardown.
     process: SpawnedChild,
@@ -1156,9 +1178,18 @@ fn spawn_command_in_pty(
         session: observation.session,
         leader: observation.identity,
     };
+    let foreground = pair.master.as_raw_fd().and_then(|descriptor| {
+        // SAFETY: pair.master owns this live descriptor throughout cloning.
+        unsafe { BorrowedFd::borrow_raw(descriptor) }
+            .try_clone_to_owned()
+            .ok()
+            .map(Arc::new)
+    });
     let probe = Arc::new(ShellSession {
         host: Arc::clone(&host),
         session,
+        // Failure leaves the read unavailable, which counts as work.
+        foreground: foreground.as_ref().map(Arc::downgrade).unwrap_or_default(),
     });
     let termination = Arc::new(ChildTermination::new_with_session(
         host,
@@ -1175,6 +1206,7 @@ fn spawn_command_in_pty(
             writer,
             shell_process_group: process_group,
             probe,
+            _foreground: foreground,
             process: SpawnedChild {
                 child: Some(child),
                 termination,
@@ -1547,6 +1579,95 @@ mod tests {
             read_output_marker(&mut reader, b"READY");
             let probe = NativePtyAdapter::session_probe(&pty).unwrap();
             assert_eq!(probe.others().unwrap(), others, "{script}");
+            terminator.terminate().unwrap();
+            drop(reader);
+            drop(pty);
+        }
+    }
+
+    #[test]
+    fn the_session_probe_sees_a_member_that_dropped_its_controlling_terminal() {
+        const NAME: &str = "platform::unix_pty::tests::the_session_probe_sees_a_member_that_dropped_its_controlling_terminal";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _lock = lock_real_pty_test();
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args(["-c", "set -m; /usr/bin/python3 -c 'import fcntl, os, termios, time; fcntl.ioctl(os.open(\"/dev/tty\", os.O_RDWR), termios.TIOCNOTTY); print(\"READY\", flush=True); time.sleep(30)' & read line"]);
+        let (mut pty, terminator) =
+            spawn_command_in_pty(test_host(), PtySize::default(), command, Arc::default()).unwrap();
+        let mut reader = pty.take_reader().unwrap();
+        read_output_marker(&mut reader, b"READY");
+        let probe = NativePtyAdapter::session_probe(&pty).unwrap();
+        assert!(probe.shell_foreground().unwrap());
+        assert!(probe.others().unwrap());
+        terminator.terminate().unwrap();
+        drop(reader);
+        drop(pty);
+        assert!(probe.shell_foreground().is_err(), "the PTY owner ended");
+    }
+
+    #[test]
+    fn fresh_session_probes_preserve_quiet_programs_and_jobs() {
+        const NAME: &str =
+            "platform::unix_pty::tests::fresh_session_probes_preserve_quiet_programs_and_jobs";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _lock = lock_real_pty_test();
+        for (case, script, shell_foreground, others) in [
+            ("bare shell", "printf READY; read line", true, false),
+            (
+                "editor-like input",
+                "set -m; /bin/sh -c 'stty -icanon -echo; printf READY; read line'; read line",
+                false,
+                true,
+            ),
+            (
+                "SSH-like foreground",
+                "set -m; /bin/sh -c 'printf READY; exec sleep 30'; read line",
+                false,
+                true,
+            ),
+            (
+                "nested program",
+                "set -m; /bin/sh -c '/bin/sh -c \"printf READY; read line\"; read line'; read line",
+                false,
+                true,
+            ),
+            (
+                "password prompt",
+                "set -m; /bin/sh -c 'stty -echo; printf READY; read line'; read line",
+                false,
+                true,
+            ),
+            (
+                "stopped job",
+                "set -m; sleep 30 & kill -STOP $!; printf READY; read line",
+                true,
+                true,
+            ),
+            (
+                "background job",
+                "set -m; sleep 30 & printf READY; read line",
+                true,
+                true,
+            ),
+        ] {
+            let mut command = CommandBuilder::new("/bin/sh");
+            command.args(["-c", script]);
+            let (mut pty, terminator) =
+                spawn_command_in_pty(test_host(), PtySize::default(), command, Arc::default())
+                    .unwrap();
+            let mut reader = pty.take_reader().unwrap();
+            read_output_marker(&mut reader, b"READY");
+            let probe = NativePtyAdapter::session_probe(&pty).unwrap();
+            assert_eq!(
+                probe.shell_foreground().unwrap(),
+                shell_foreground,
+                "{case}"
+            );
+            assert_eq!(probe.others().unwrap(), others, "{case}");
             terminator.terminate().unwrap();
             drop(reader);
             drop(pty);
@@ -2774,7 +2895,9 @@ mod tests {
                 reader: Some(Box::new(io::empty())),
                 writer: Box::new(io::sink()),
                 shell_process_group: 0,
+                _foreground: None,
                 probe: Arc::new(ShellSession {
+                    foreground: std::sync::Weak::new(),
                     host: test_host(),
                     session: ProcessSessionIdentity {
                         session: 0,

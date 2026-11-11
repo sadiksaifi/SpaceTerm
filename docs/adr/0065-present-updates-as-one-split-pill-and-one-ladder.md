@@ -116,7 +116,9 @@ This release does not enable the idle restart of SpaceTerm Core. SpaceTerm Core 
 The idle restart is enabled only with an idle admission that meets both conditions:
 
 - **It refuses on any activity change across one scan.** Each Terminal Session carries an activity generation, stamped when input is sent to it and when its output is read, not when its worker processes them. The admission reads every live Terminal Session in one scan under the Pane lock, with fresh foreground and process reads, and refuses when any generation changed during that scan.
-- **It blocks input from crossing the restart commitment.** From the membership fence until the server stops, SpaceTerm Core accepts no input to a Terminal Session, so nothing typed after the scan reaches a shell that the restart ends.
+- **It blocks input from crossing the restart commitment.** From the membership fence until the server stops, SpaceTerm Core gates input to every Terminal Session. Input arriving after commitment aborts the restart before it ends a Terminal Session. The detached helper must obtain revocable permission from the running Core at its destructive Stop; checking only before launching the helper leaves a race.
+
+This release reads the foreground and process membership afresh when the work predicate is requested. The update watcher still counts every live Terminal Session as working without probing it, because idle admission remains disabled. Per-session activity generations, one scan under the panes lock and the revocable handoff to the helper's Stop remain requirements for enabling that admission. Fresh work observations alone authorize no restart.
 
 An idle restart ends the shell process with its environment, unsaved history, screen and Scrollback. Workspaces, Tabs, Panes and layouts stay, and the new shell starts in the Pane's last confirmed directory under [ADR 0044](0044-restore-panes-in-their-last-confirmed-directory.md) when the person starts it under [ADR 0043](0043-start-restored-shells-on-first-use.md). The Pane names the idle restart as the cause.
 

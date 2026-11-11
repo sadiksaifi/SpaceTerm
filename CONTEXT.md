@@ -199,7 +199,7 @@ _Avoid_: Hotkey, key equivalent
 
 **Relaunch**: Quitting and reopening SpaceTerm to install a downloaded SpaceTerm update. It keeps every Terminal Session running.
 
-**No Work Going On**: A Terminal Session whose shell owns the foreground at an empty prompt, with no other process in its terminal session and no input or output for the idle period. SpaceTerm Core does not yet restart on it; ADR 0065 names the conditions for enabling that restart.
+**No Work Going On**: A Terminal Session whose shell owns the foreground at an empty prompt, with no other process in its terminal session and no input or output for the idle period. Anything SpaceTerm Core cannot read counts as work. This release still restarts SpaceTerm Core by itself only with no live Terminal Session; ADR 0065 owns the admission requirements for an idle restart.
 _Avoid_ in the interface: idle
 
 **Update Floor**: The oldest release version allowed to update directly to a release. Every release publishes one for SpaceTerm Core and one for the desktops.
