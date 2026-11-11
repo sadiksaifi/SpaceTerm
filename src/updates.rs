@@ -1197,6 +1197,10 @@ impl ApplicationUpdates {
         let failed = matches!(event, UpdateEvent::Failed(_));
         let current = matches!(event, UpdateEvent::UpToDate);
         if let UpdateEvent::Available(version) = &event {
+            // Relaunch installs the release the replacing check found, so the main area names it.
+            if self.replacing.is_some() {
+                self.replacing = Some(version.clone());
+            }
             self.history
                 .observe(env!("SPACETERM_VERSION"), version, self.publication, time);
             self.history.last_check = Some(time);
@@ -1782,6 +1786,13 @@ mod tests {
         adapter.emit(UpdateEvent::Available(found.into()));
         cx.run_until_parked();
         assert_eq!(main(cx), relaunch, "after it finds {found}");
+        assert_eq!(
+            service.read_with(cx, |updates, _| updates
+                .replaces_download()
+                .map(str::to_owned)),
+            Some(found.to_owned()),
+            "the main area names the release Relaunch installs"
+        );
         assert_eq!(adapter.downloads.get(), 2, "it downloads {found} again");
         if fails {
             adapter.emit(UpdateEvent::Failed(UpdateError::Download));

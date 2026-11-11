@@ -135,6 +135,11 @@ pub(crate) fn pill(view: &UpdateView) -> Option<PillView> {
                                 "An update has waited {}. Relaunching keeps Terminal Sessions running.",
                                 days(view.app.waited)
                             )
+                        } else if let Some(version) = &view.app.replacing {
+                            // A scheduled check downloads this release again or a newer one.
+                            format!(
+                                "Relaunching updates SpaceTerm to {version}. Terminal Sessions keep running."
+                            )
                         } else {
                             format!(
                                 "SpaceTerm {} is downloaded. Relaunching keeps Terminal Sessions running.",
@@ -353,5 +358,33 @@ mod tests {
             facts.pending = Some("0.11.5");
             assert_eq!(tooltip(facts), expected, "{error:?}");
         }
+    }
+
+    /// While a scheduled check downloads a newer release in place of the downloaded one, the
+    /// tooltip names the release Relaunch installs and claims no finished download.
+    #[test]
+    fn the_relaunch_tooltip_names_the_release_relaunch_installs() {
+        let downloading = UpdateState::Downloading {
+            version: "0.11.6".into(),
+            received: 1,
+            total: 2,
+        };
+        let mut facts = app(&downloading);
+        facts.pending = Some("0.11.6");
+        facts.replacing = Some("0.11.6");
+        assert_eq!(
+            tooltip(facts),
+            "Relaunching updates SpaceTerm to 0.11.6. Terminal Sessions keep running."
+        );
+
+        let ready = UpdateState::Ready {
+            version: "0.11.6".into(),
+        };
+        let mut facts = app(&ready);
+        facts.pending = Some("0.11.6");
+        assert_eq!(
+            tooltip(facts),
+            "SpaceTerm 0.11.6 is downloaded. Relaunching keeps Terminal Sessions running."
+        );
     }
 }

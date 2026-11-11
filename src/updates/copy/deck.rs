@@ -247,6 +247,16 @@ fn build() -> Deck {
             deck.view(&UpdateView::new(facts, &[], marks, NOW));
         }
     }
+    // A scheduled check downloads a release again in place of the downloaded one.
+    let replacing = UpdateState::Downloading {
+        version: "0.11.5".to_owned(),
+        received: 1,
+        total: 2,
+    };
+    let mut facts = app(&replacing);
+    facts.pending = Some("0.11.5");
+    facts.replacing = Some("0.11.5");
+    deck.view(&UpdateView::new(facts, &[], marks, NOW));
     let state = UpdateState::UpToDate;
     for fleet in &fleets {
         deck.view(&UpdateView::new(app(&state), fleet, marks, NOW));

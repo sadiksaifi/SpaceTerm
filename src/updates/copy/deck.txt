@@ -11,6 +11,7 @@ Downloading Update… | Plain | Downloading SpaceTerm Core 0.11.5 to This Comput
 Downloading Update… | Plain | Downloading SpaceTerm Core 0.11.5 to This Mac.
 Downloading Update… | Plain | Downloading SpaceTerm Core 0.11.5 to penguin.
 Relaunch to Update | Accent | An update has waited 2 days. Relaunching keeps Terminal Sessions running.
+Relaunch to Update | Accent | Relaunching updates SpaceTerm to 0.11.5. Terminal Sessions keep running.
 Relaunch to Update | Accent | SpaceTerm 0.11.5 is downloaded. Relaunching keeps Terminal Sessions running.
 Relaunch to Update | Warning | An update has waited 7 days. Relaunching keeps Terminal Sessions running.
 Relaunching… | Plain | Relaunching SpaceTerm. Terminal Sessions keep running.
