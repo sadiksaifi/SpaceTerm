@@ -4040,13 +4040,12 @@ mod runtime_tests {
         assert_eq!(quit.confirmations(), 1);
     }
 
-    /// A relaunch that has not quit SpaceTerm after 30 seconds fails, and its alert appears even
-    /// though the person closed every window: SpaceTerm opens a Workspace Window to show it. Try
-    /// Again quits through the relaunch, with no quit warning.
+    /// A relaunch that has not quit SpaceTerm after 30 seconds fails. With every window closed,
+    /// SpaceTerm opens no window and no alert, because only a refused click alerts unasked: the
+    /// SpaceTerm row reads "Couldn't relaunch", and its Try Again quits through the relaunch with
+    /// no quit warning.
     #[gpui::test]
-    fn a_failed_relaunch_alerts_without_a_window_and_try_again_quits(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn a_failed_relaunch_waits_in_the_row_and_try_again_quits(cx: &mut gpui::TestAppContext) {
         let (_, quit, service) = relaunch_fixture(cx);
         cx.update(|cx| cx.dispatch_action(&DismissApplication));
         cx.run_until_parked();
@@ -4056,17 +4055,25 @@ mod runtime_tests {
             .advance_clock(std::time::Duration::from_secs(30));
         cx.run_until_parked();
 
-        let windows = cx.update(|cx| workspace_windows(cx));
-        assert_eq!(windows.len(), 1);
-        let cx = &mut gpui::VisualTestContext::from_window(windows[0].into(), cx);
-        cx.run_until_parked();
-        assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+        assert!(cx.update(|cx| cx.windows().is_empty()), "no window opens");
+        assert!(!cx.has_pending_prompt());
         assert_eq!(
             quit.confirmations(),
             1,
             "the relaunch confirmed its quit, and SpaceTerm kept running"
         );
-        click("modal-action-update-relaunch-failure-try-again", cx);
+        let row = cx.update(|cx| crate::updates::state::current(cx).app_row());
+        assert_eq!(row.status.as_deref(), Some("Couldn't relaunch"));
+        let action = row.action.expect("the failed relaunch offers Try Again");
+        assert_eq!(action.label.as_ref(), "Try Again");
+        cx.update(|cx| {
+            crate::ui::updates::commands::perform(
+                action.command,
+                crate::ui::updates::commands::Presenter::Front,
+                cx,
+            );
+        });
+        cx.run_until_parked();
         assert!(!cx.has_pending_prompt());
         assert_eq!(quit.confirmations(), 2);
     }
