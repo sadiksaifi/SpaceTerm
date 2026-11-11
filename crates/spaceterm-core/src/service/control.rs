@@ -50,30 +50,17 @@ impl Confirmation {
     }
 }
 
-/// Shared destructive-action copy, without service access or an authority grant.
+/// Shared destructive-action copy, without service access or an authority grant. It names this
+/// computer: This Mac on macOS, This Computer elsewhere.
 pub struct Wording {
-    /// The Machine the copy names: This Mac, This Computer, or the selected machine's name.
-    machine: String,
     action: Action,
     running: bool,
     startup: ServiceStartup,
 }
 
 impl Wording {
-    /// Names this computer: This Mac on macOS, This Computer elsewhere.
     pub fn local(action: Action, running: bool, startup: ServiceStartup) -> Self {
-        Self::for_machine(this_computer(), action, running, startup)
-    }
-
-    /// Names the Machine the person selected.
-    pub fn for_machine(
-        machine: &str,
-        action: Action,
-        running: bool,
-        startup: ServiceStartup,
-    ) -> Self {
         Self {
-            machine: machine.into(),
             action,
             running,
             startup,
@@ -96,7 +83,7 @@ impl Wording {
     }
 
     pub fn message(&self) -> String {
-        let machine = &self.machine;
+        let machine = this_computer();
         match self.action {
             Action::Stop => format!("Stop SpaceTerm Core on {machine}?"),
             Action::Restart => format!("Restart SpaceTerm Core on {machine}?"),
@@ -256,9 +243,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_remote_confirmation_names_the_selected_machine_with_the_same_copy() {
+    fn a_stop_confirmation_names_this_computer_and_says_what_is_kept() {
         let local = Wording::local(Action::Stop, true, ServiceStartup::AtLogin);
-        let remote = Wording::for_machine("penguin", Action::Stop, true, ServiceStartup::AtLogin);
         let computer = if cfg!(target_os = "macos") {
             "This Mac"
         } else {
@@ -268,9 +254,6 @@ mod tests {
             local.message(),
             format!("Stop SpaceTerm Core on {computer}?")
         );
-        assert_eq!(remote.message(), "Stop SpaceTerm Core on penguin?");
-        assert_eq!(local.title(), remote.title());
-        assert_eq!(local.detail(), remote.detail());
         assert_eq!(
             local.detail(),
             "All Terminal Sessions on it end for every client. Workspaces are kept, and SpaceTerm \
@@ -280,9 +263,8 @@ mod tests {
 
     #[test]
     fn an_uninstall_confirmation_says_what_is_kept_whether_or_not_the_core_runs() {
-        let uninstall = |running, startup| {
-            Wording::for_machine("penguin", Action::Uninstall, running, startup).detail()
-        };
+        let uninstall =
+            |running, startup| Wording::local(Action::Uninstall, running, startup).detail();
         assert_eq!(
             uninstall(true, ServiceStartup::AtLogin),
             "All Terminal Sessions on it end for every client. Workspaces are kept, so you can \
