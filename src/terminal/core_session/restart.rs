@@ -1,31 +1,39 @@
-//! A Core restart's bounded wait and shared progress wording.
-use spaceterm_core::update::facts::{Operation, UpdateFacts};
+//! A Core restart's bounded wait.
+use spaceterm_core::update::facts::{Operation, UpdateFacts, Version};
 use std::time::Duration;
 
 pub(crate) type PaneRestartCauses =
     std::sync::Arc<std::sync::Mutex<Vec<spaceterm_core::client_view::PaneRestart>>>;
 
+/// How long an announced restart may keep a Machine's connections away before SpaceTerm treats
+/// it as an ordinary connection loss.
 pub(crate) const RECONNECT_LIMIT: Duration = Duration::from_secs(180);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CoreRestart {
-    Updating,
-    Restarting,
+/// A restart the Machine's SpaceTerm Core announced in its update facts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CoreRestart {
+    /// The version the Core restarts into, or `None` for a restart without updating.
+    pub(crate) to: Option<Version>,
+    /// The Core restarts by itself because no Terminal Session had work going on. Only the
+    /// detailed update facts of work and service 1.2 report it (`RestartCause::NothingRunning`);
+    /// the update facts every released Core sends never do.
+    pub(crate) while_idle: bool,
 }
 
 impl CoreRestart {
     pub(crate) fn of(facts: &UpdateFacts) -> Option<Self> {
-        match facts.operation {
-            Some(Operation::Restarting { .. }) => Some(Self::Updating),
-            Some(Operation::RestartingSameVersion) => Some(Self::Restarting),
+        match &facts.operation {
+            // A Core that selected minor 0 reports a same-version restart as one to its running
+            // version.
+            Some(Operation::Restarting { to }) if *to != facts.running => Some(Self {
+                to: Some(to.clone()),
+                while_idle: false,
+            }),
+            Some(Operation::Restarting { .. } | Operation::RestartingSameVersion) => Some(Self {
+                to: None,
+                while_idle: false,
+            }),
             _ => None,
-        }
-    }
-
-    pub(crate) fn label(self, machine: &str) -> String {
-        match self {
-            Self::Updating => format!("Updating {machine}…"),
-            Self::Restarting => format!("Restarting {machine}…"),
         }
     }
 }

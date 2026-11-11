@@ -92,7 +92,6 @@ use capture::CaptureAccessRow;
 use catalog::SettingsRowId;
 pub(crate) use catalog::SettingsSectionId;
 pub(crate) use command_line_tool::configure_command_line_tool;
-pub(crate) use core_update::update_offered;
 use editor::{SaveStatus, SettingsEditor};
 use keybindings::ShortcutRows;
 pub(crate) use machine_selection::configure_core_context;
@@ -321,23 +320,6 @@ pub(crate) fn open_machine_settings(target: crate::ui::MachineTarget, cx: &mut A
                     },
                     cx,
                 );
-            });
-        }
-    });
-}
-
-/// Opens Settings on Servers and starts the one Update SpaceTerm Core journey there, for a surface that
-/// offers it elsewhere, such as the incompatible-server screen or the status item. The journey
-/// reads the server first and asks before it changes anything.
-pub(crate) fn open_core_update(cx: &mut App) {
-    open_or_activate(Some(SettingsSectionId::Machines), cx);
-    // An existing window selects the section in a deferred update, so the request follows it.
-    cx.defer(|cx| {
-        if let Some(settings) = open_settings_window(cx) {
-            let _ = settings.update(cx, |settings, _, cx| {
-                // The journey updates the local server, so its detail is the one presented.
-                settings.select_machine(machine_list::MachineChoice::Local, cx);
-                settings.request_core_update(cx);
             });
         }
     });

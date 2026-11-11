@@ -770,6 +770,81 @@ pub(crate) fn start_core_button(
         .on_activate(move |_, window, cx| on_activate(window, cx))
 }
 
+/// What a blocked Workspace surface shows for the Machine `matches` picks: the side that is too
+/// old, the Core's download or downloaded version from the shared update store, and SpaceTerm's
+/// own update. `name` names the Machine until the store knows it. It also returns that Machine,
+/// which its Restart Core acts on.
+pub(crate) fn blocked_surface(
+    incompatible: spaceterm_core::protocol::version::Incompatible,
+    name: &str,
+    matches: impl Fn(&crate::updates::machines::MachineUpdate) -> bool,
+    cx: &App,
+) -> (
+    crate::updates::copy::pane::Blocked,
+    Option<crate::updates::machines::MachineId>,
+) {
+    use crate::updates::copy::pane::AppRelease;
+    let machine = crate::updates::machines::store::MachineUpdates::global(cx).and_then(|store| {
+        store
+            .read(cx)
+            .machines()
+            .iter()
+            .find(|machine| matches(machine))
+            .map(|machine| (machine.machine, machine.name.clone(), machine.facts.clone()))
+    });
+    let app = match cx
+        .try_global::<crate::updates::UpdateService>()
+        .map(|service| service.0.read(cx).state())
+    {
+        Some(crate::updates::UpdateState::Ready { .. }) => AppRelease::Downloaded,
+        Some(crate::updates::UpdateState::Available { .. }) => AppRelease::Available,
+        _ => AppRelease::None,
+    };
+    let facts = machine.as_ref().and_then(|(_, _, facts)| facts.as_ref());
+    let name = machine.as_ref().map_or(name, |(_, name, _)| name.as_ref());
+    (
+        crate::updates::copy::pane::blocked(incompatible, name, facts, app),
+        machine.as_ref().map(|(id, _, _)| *id),
+    )
+}
+
+/// Performs a blocked surface's action through the shared update commands. Restart Core asks
+/// the Machine's Core for a fresh preview and confirms what it ends before anything restarts.
+pub(crate) fn perform_blocked_action(
+    action: crate::updates::copy::pane::BlockedAction,
+    machine: Option<crate::updates::machines::MachineId>,
+    cx: &mut App,
+) {
+    use crate::ui::updates::commands::{Presenter, perform};
+    use crate::updates::copy::pane::BlockedAction;
+    use crate::updates::machines::MachineAction;
+    use crate::updates::presentation::{Command, DesktopAction};
+    let command = match action {
+        BlockedAction::RestartCore => match machine {
+            Some(machine) => Command::Machine(machine, MachineAction::Restart),
+            None => return,
+        },
+        BlockedAction::RelaunchToUpdate => Command::Desktop(DesktopAction::Update),
+        BlockedAction::DownloadUpdate => Command::Desktop(DesktopAction::Download),
+    };
+    perform(command, Presenter::Front, cx);
+}
+
+/// A blocked surface's action in an interruption notice.
+pub(crate) fn blocked_button(
+    selector: SharedString,
+    action: crate::updates::copy::pane::BlockedAction,
+    machine: Option<crate::updates::machines::MachineId>,
+) -> Button {
+    let debug_selector = selector.clone();
+    Button::new(selector, action.label())
+        .variant(ButtonVariant::Link)
+        .size(ButtonSize::Compact)
+        .tab_stop(true)
+        .debug_selector(debug_selector)
+        .on_activate(move |_, _, cx| perform_blocked_action(action, machine, cx))
+}
+
 /// The standard Try Again action of an interruption notice.
 pub(crate) fn retry_button(
     selector: SharedString,
@@ -833,6 +908,22 @@ mod connection {
 
         fn restart_progress(&self) -> Option<CoreRestart> {
             CoreRestart::of(self.directory_core()?.update_facts()?.as_ref())
+        }
+
+        /// The version the Core last failed to start into, as its update facts report it.
+        fn start_failure(&self) -> Option<spaceterm_core::update::facts::Version> {
+            use spaceterm_core::update::facts::FailureKind;
+            self.directory_core()?
+                .update_facts()?
+                .last_failure
+                .as_ref()
+                .filter(|failure| matches!(failure.kind, FailureKind::Start(_)))
+                .map(|failure| failure.version.clone())
+        }
+
+        /// The clock that times an announced restart's deadline.
+        fn now(&self) -> std::time::Instant {
+            std::time::Instant::now()
         }
 
         /// Whether the original presentation admission still occupies a startup slot. Receiving
@@ -1034,12 +1125,19 @@ mod connection {
         connection: Arc<dyn MachinePaneConnection>,
         status: CorePaneStatus,
         running_version: Option<spaceterm_core::update::facts::Version>,
-        restored_update: Option<spaceterm_core::update::facts::Version>,
-        retained_restart: Option<(
-            spaceterm_core::hierarchy::Id,
-            crate::terminal::core_session::restart::PaneRestartCauses,
-        )>,
+        /// The version the Core last reported failing to start into.
+        start_failure: Option<spaceterm_core::update::facts::Version>,
+        /// The announced restart, until its deadline passes.
         restart: Option<CoreRestart>,
+        /// When this Pane first read the restart the Core announces now.
+        restart_since: Option<std::time::Instant>,
+        /// The last restart the Core announced since this Pane's Terminal Session ran.
+        announced: Option<CoreRestart>,
+        /// The running version while this Pane's Terminal Session last ran, if this view saw it
+        /// run. Its end is the restart the Pane explains.
+        session_ran: Option<Option<spaceterm_core::update::facts::Version>>,
+        deadline_hint: Option<async_channel::Sender<()>>,
+        /// The Pane's Machine, which a protocol refusal names.
         machine_name: gpui::SharedString,
         controller: Option<Controller>,
         session_end: Option<SessionEnd>,
@@ -1059,15 +1157,39 @@ mod connection {
         directory_progress: (bool, Option<&'static str>),
     }
 
+    /// How the restart that ended a Pane's Terminal Session went.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum RestartEnd {
+        Updated(spaceterm_core::update::facts::Version),
+        UpdatedWhileIdle(spaceterm_core::update::facts::Version),
+        SameVersion,
+        StartFailed(spaceterm_core::update::facts::Version),
+    }
+
+    /// Hints `hint` once an announced restart's deadline passes. Without the thread, the deadline
+    /// still passes at the next reading.
+    fn wake_at_deadline(hint: async_channel::Sender<()>, since: std::time::Instant) {
+        let deadline = since + crate::terminal::core_session::restart::RECONNECT_LIMIT;
+        let _ = std::thread::Builder::new()
+            .name("spaceterm-pane-restart-deadline".into())
+            .spawn(move || {
+                std::thread::sleep(deadline.saturating_duration_since(std::time::Instant::now()));
+                let _ = hint.try_send(());
+            });
+    }
+
     impl CorePaneView {
         pub(crate) fn new(connection: Arc<dyn MachinePaneConnection>) -> Self {
             let mut view = Self {
                 announcements: ScreenAnnouncements::default(),
                 status: connection.status(),
                 running_version: connection.running_version(),
-                restored_update: None,
-                retained_restart: None,
-                restart: connection.restart_progress(),
+                start_failure: connection.start_failure(),
+                restart: None,
+                restart_since: None,
+                announced: None,
+                session_ran: None,
+                deadline_hint: None,
                 machine_name: gpui::SharedString::default(),
                 controller: connection.controller(),
                 session_end: connection.session_end(),
@@ -1084,32 +1206,51 @@ mod connection {
                 unknown_shown: false,
                 directory_progress: connection.directory_progress(),
             };
+            view.read_restart();
             view.apply();
             view
         }
 
-        pub(crate) fn retain_restart_cause(
-            &mut self,
-            pane: spaceterm_core::hierarchy::Id,
-            causes: crate::terminal::core_session::restart::PaneRestartCauses,
-        ) {
-            self.retained_restart = Some((pane, causes));
-            self.read_restart_cause();
-        }
-
-        fn read_restart_cause(&mut self) {
-            if let Some((pane, causes)) = &self.retained_restart {
-                self.restored_update = causes
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .iter()
-                    .find(|saved| saved.pane == *pane)
-                    .and_then(|saved| saved.updated.clone());
-            }
-        }
-
         pub(crate) fn set_machine_name(&mut self, name: gpui::SharedString) {
             self.machine_name = name;
+        }
+
+        /// Hints `hint` when an announced restart's deadline passes, so the Pane reads its
+        /// connection again then.
+        pub(crate) fn observe_deadlines(&mut self, hint: async_channel::Sender<()>) {
+            if let Some(since) = self.restart_since {
+                wake_at_deadline(hint.clone(), since);
+            }
+            self.deadline_hint = Some(hint);
+        }
+
+        /// Reads the announced restart and reports whether what the Pane shows of it changed.
+        /// An announcement counts for the 180-second restart deadline from when this Pane first
+        /// read it; after that the Pane treats the wait as an ordinary connection loss (ADR 0045).
+        fn read_restart(&mut self) -> bool {
+            use crate::terminal::core_session::restart::RECONNECT_LIMIT;
+            // The deadline belongs to the announcement, whatever the connection's status meanwhile.
+            let reported = self.connection.restart_progress();
+            let now = self.connection.now();
+            let restart = match reported {
+                Some(restart) => {
+                    let since = *self.restart_since.get_or_insert_with(|| {
+                        if let Some(hint) = self.deadline_hint.clone() {
+                            wake_at_deadline(hint, now);
+                        }
+                        now
+                    });
+                    self.announced = Some(restart.clone());
+                    (now.saturating_duration_since(since) < RECONNECT_LIMIT).then_some(restart)
+                }
+                None => {
+                    self.restart_since = None;
+                    None
+                }
+            };
+            let changed = restart != self.restart;
+            self.restart = restart;
+            changed
         }
 
         /// Asks the server for this Pane, which starts or acquires only this Pane. Only an
@@ -1128,25 +1269,17 @@ mod connection {
             // Status first, because a connection publishes its generation before it reports
             // Connected.
             let status = self.connection.status();
-            let restart = self.connection.restart_progress().filter(|_| {
-                !matches!(
-                    status,
-                    CorePaneStatus::Failed(_) | CorePaneStatus::TakeoverFailed(_)
-                )
-            });
-            let restart_changed = restart != self.restart;
-            self.restart = restart;
+            let restart_changed = self.read_restart();
             let version = self.connection.running_version();
             let version_changed = version.is_some() && version != self.running_version;
             if version_changed {
-                if self.running_version.is_some() {
-                    self.restored_update = version.clone();
-                }
                 self.running_version = version;
             }
-            let previous_update = self.restored_update.clone();
-            self.read_restart_cause();
-            let cause_changed = self.restored_update != previous_update;
+            // The ended screen names a start failure the Core may publish after the Pane came
+            // back.
+            let start_failure = self.connection.start_failure();
+            let failure_changed = start_failure != self.start_failure;
+            self.start_failure = start_failure;
             let generation = self.connection.connection_generation();
             let generation_changed = generation != self.generation;
             let progress = self.connection.directory_progress();
@@ -1156,7 +1289,7 @@ mod connection {
             if status == self.status
                 && !version_changed
                 && !restart_changed
-                && !cause_changed
+                && !failure_changed
                 && !generation_changed
                 && progress == self.directory_progress
                 && controller == self.controller
@@ -1213,7 +1346,8 @@ mod connection {
 
         fn apply(&mut self) -> CorePaneSync {
             if self.status == CorePaneStatus::Connected {
-                self.restored_update = None;
+                self.session_ran = Some(self.running_version.clone());
+                self.announced = self.restart.clone();
                 self.announcements = ScreenAnnouncements::default();
                 self.takeover_shown = false;
                 self.take_over_unconfirmed = false;
@@ -1315,21 +1449,58 @@ mod connection {
             self.status == CorePaneStatus::TakeoverFailed(CoreError::SessionUnavailable)
         }
 
-        /// A version change observed by this Pane explains why its former shell ended. A new
-        /// Session clears that cause, so a later ordinary restart cannot inherit it.
+        /// A restart that ended this Pane's Terminal Session names how it went. A Pane this view
+        /// never saw run keeps its first-use copy (ADR 0043). A new Session replaces the evidence,
+        /// so a later ordinary restart cannot inherit an earlier cause.
         pub(crate) fn dormant_copy(&self, ended: Option<SessionEnd>) -> super::DormantCopy {
+            use crate::updates::copy::pane;
             let mut copy = super::DormantCopy::of(ended);
-            if let Some(restart) = self.restart {
-                copy.title = restart.label(&self.machine_name).into();
-                copy.detail = "Pane actions wait for SpaceTerm Core to reconnect.".into();
+            if ended.is_some() {
                 return copy;
             }
-            if ended.is_none()
-                && let Some(version) = &self.restored_update
-            {
-                copy.detail = format!("SpaceTerm Core restarted to update to {version}.").into();
-            }
+            let detail = match self.restart_end() {
+                Some(RestartEnd::Updated(version)) => pane::restarted_into(&version),
+                Some(RestartEnd::UpdatedWhileIdle(version)) => {
+                    pane::restarted_into_while_idle(&version)
+                }
+                Some(RestartEnd::StartFailed(version)) => pane::could_not_restart_into(&version),
+                Some(RestartEnd::SameVersion) => pane::RESTARTED.to_owned(),
+                None => return copy,
+            };
+            copy.title = pane::SESSION_ENDED.into();
+            copy.detail = detail.into();
             copy
+        }
+
+        /// How the restart that ended this Pane's Terminal Session went, from what the facts
+        /// prove: a changed running version, or a start failure for the announced version.
+        fn restart_end(&self) -> Option<RestartEnd> {
+            // Only a Terminal Session this view saw run proves that the restart ended one. A
+            // saved version change alone does not, so such a Pane keeps its first-use copy.
+            let before = self.session_ran.as_ref()?;
+            let running = self.running_version.as_ref();
+            if let (Some(before), Some(running)) = (before, running)
+                && before != running
+            {
+                let while_idle = self
+                    .announced
+                    .as_ref()
+                    .is_some_and(|restart| restart.while_idle);
+                return Some(if while_idle {
+                    RestartEnd::UpdatedWhileIdle(running.clone())
+                } else {
+                    RestartEnd::Updated(running.clone())
+                });
+            }
+            if let Some(target) = self
+                .announced
+                .as_ref()
+                .and_then(|restart| restart.to.clone())
+                && self.start_failure.as_ref() == Some(&target)
+            {
+                return Some(RestartEnd::StartFailed(target));
+            }
+            Some(RestartEnd::SameVersion)
         }
 
         /// The screen replacing the Pane, if one does.
@@ -1446,12 +1617,10 @@ mod connection {
             &self,
         ) -> Option<(gpui::SharedString, gpui::SharedString, super::StatusIntent)> {
             use gpui::SharedString;
-            if let Some(restart) = self.restart {
-                return Some((
-                    restart.label(&self.machine_name).into(),
-                    "Pane actions wait for SpaceTerm Core to reconnect.".into(),
-                    super::StatusIntent::Information,
-                ));
+            // The title bar owns an announced restart's progress. Until its deadline the Pane
+            // keeps its frozen screen with input disabled and adds nothing.
+            if self.restart.is_some() {
+                return None;
             }
             match self.status {
                 CorePaneStatus::Reconnecting | CorePaneStatus::TakeoverReconnecting => Some((
@@ -1492,7 +1661,20 @@ mod connection {
                     super::StatusIntent::Warning,
                 )),
                 CorePaneStatus::Failed(error) | CorePaneStatus::TakeoverFailed(error) => {
-                    let (title, cause) = super::failure_copy(error);
+                    let (title, mut cause) = super::failure_copy(error);
+                    // A protocol refusal names the side that is too old (ADR 0035).
+                    if let CoreError::IncompatibleProtocol(incompatible) = error
+                        && !self.machine_name.is_empty()
+                    {
+                        cause = crate::updates::copy::pane::blocked(
+                            incompatible,
+                            &self.machine_name,
+                            None,
+                            crate::updates::copy::pane::AppRelease::None,
+                        )
+                        .detail
+                        .into();
+                    }
                     // The screen explains an unconfirmed start, so the notice names only the cause.
                     let next = if self.unknown_shown {
                         None
@@ -1526,6 +1708,17 @@ mod connection {
                 "No shell is running in this Pane. Choose Try Again to reconnect."
             } else {
                 "Choose Try Again to reconnect."
+            }
+        }
+
+        /// The protocol refusal that blocks this Pane until SpaceTerm or its Core updates.
+        pub(crate) fn blocked(&self) -> Option<spaceterm_core::protocol::version::Incompatible> {
+            match self.status {
+                CorePaneStatus::Failed(CoreError::IncompatibleProtocol(incompatible))
+                | CorePaneStatus::TakeoverFailed(CoreError::IncompatibleProtocol(incompatible)) => {
+                    Some(incompatible)
+                }
+                _ => None,
             }
         }
 

@@ -975,75 +975,207 @@ fn a_failure_before_inventory_explains_itself_and_offers_recovery(cx: &mut TestA
     harness.edits.set_error(CoreError::NotRunning);
     sync(&harness, cx);
     assert_eq!(harness.launch_title(cx), Some(launch::OPENING_TITLE));
-    // The incompatible refusal only read whether an update is offered.
     assert_eq!(
         harness.launch.steps(),
-        ["run", "update_offered"],
+        ["run"],
         "no implicit Start or runtime activation"
     );
     assert!(harness.edits.submitted().is_empty());
 }
 
-/// A refused server keeps running. Launch names the refusal without guessing which side is
-/// older, and offers the update journey only when a verified included build can update it.
-#[gpui::test]
-fn a_refused_core_offers_an_update_only_from_a_verified_build(cx: &mut TestAppContext) {
-    let (harness, cx) = launch_harness(
-        vec![
-            Err(CoreError::IncompatibleProtocol(
-                spaceterm_core::protocol::version::Incompatible::ListenerTooOld,
-            )),
-            Err(CoreError::IncompatibleProtocol(
-                spaceterm_core::protocol::version::Incompatible::ListenerTooOld,
-            )),
-        ],
-        cx,
-    );
-    cx.run_until_parked();
-    // Without a verified build, the refusal names no side and offers no update.
-    let presentation = harness
-        .manager
-        .read_with(cx, |manager, _| manager.launch_presentation())
-        .expect("the refusal is presented");
-    assert!(
-        presentation
-            .detail
-            .contains("SpaceTerm and this SpaceTerm Core are incompatible.")
-    );
-    assert!(cx.debug_bounds(launch::LAUNCH_UPDATE_SELECTOR).is_none());
+/// This computer's Machine, blocked because its Core is too old for this SpaceTerm.
+const LOCAL_MACHINE: crate::updates::machines::MachineId = [41; 32];
 
-    harness.launch.offer_update();
-    harness.click(LAUNCH_RETRY_SELECTOR, cx);
+fn too_old_core(
+    configure: impl FnOnce(&mut spaceterm_core::update::facts::UpdateFacts),
+) -> crate::updates::machines::MachineUpdate {
+    use spaceterm_core::update::facts::{Platform, UpdateCheck, UpdateFacts, Version};
+    let mut facts = UpdateFacts {
+        revision: 1,
+        platform: Platform::HOST,
+        running: Version::parse("0.11.4").unwrap(),
+        pending: None,
+        sessions: 2,
+        operation: None,
+        check: UpdateCheck::Never,
+        skipped: None,
+        last_failure: None,
+    };
+    configure(&mut facts);
+    crate::updates::machines::MachineUpdate {
+        detailed: None,
+        machine: LOCAL_MACHINE,
+        name: "This Mac".into(),
+        local: true,
+        link: crate::updates::machines::MachineLink::Incompatible(
+            spaceterm_core::protocol::version::Incompatible::ListenerTooOld,
+        ),
+        facts: Some(facts),
+        capabilities: spaceterm_core::protocol::capability::Capabilities::fake(
+            &spaceterm_core::protocol::capability::Capability::ALL,
+        ),
+        push: None,
+        bundled: None,
+        failed_push: None,
+        asked: None,
+        retrying_since: None,
+    }
+}
+
+fn pending_0_14() -> spaceterm_core::update::facts::PendingVersion {
+    spaceterm_core::update::facts::PendingVersion {
+        version: spaceterm_core::update::facts::Version::parse("0.14.0").unwrap(),
+        protocols: spaceterm_core::update::facts::Protocols::CURRENT,
+        breaking: true,
+        installed_at: crate::updates::now() - 60,
+        overdue_since: None,
+        stranded: Vec::new(),
+    }
+}
+
+/// Shared update store whose Machines the test scripts.
+fn scripted_machines(
+    cx: &mut TestAppContext,
+) -> Rc<crate::updates::machines::testing::ScriptedMachines> {
+    let machines = Rc::new(crate::updates::machines::testing::ScriptedMachines::default());
+    cx.update(|cx| {
+        crate::updates::machines::store::MachineUpdates::install(machines.clone(), cx);
+    });
+    machines
+}
+
+fn refused() -> Result<LaunchOutcome, CoreError> {
+    Err(CoreError::IncompatibleProtocol(
+        spaceterm_core::protocol::version::Incompatible::ListenerTooOld,
+    ))
+}
+
+/// A refused server keeps running. Launch names the side that is too old, shows the Core's
+/// download in text beside its progress, and offers Restart Core only once it is downloaded.
+#[gpui::test]
+fn a_refused_core_names_the_older_side_and_shows_its_download(cx: &mut TestAppContext) {
+    use spaceterm_core::update::facts::{Operation, Version};
+    use spaceterm_ui::a11y_testing::A11yTree;
+    let machines = scripted_machines(cx);
+    let (harness, cx) = launch_harness(vec![refused()], cx);
+    cx.run_until_parked();
     let presentation = harness
         .manager
         .read_with(cx, |manager, _| manager.launch_presentation())
         .expect("the refusal is presented");
     assert_eq!(presentation.title, "Incompatible SpaceTerm Core");
-    assert_eq!(
-        presentation.detail,
-        "Updating SpaceTerm Core ends its Terminal Sessions for every client."
+    assert!(
+        presentation
+            .detail
+            .ends_with(" is too old for this SpaceTerm."),
+        "{}",
+        presentation.detail
     );
-    assert!(cx.debug_bounds(launch::LAUNCH_UPDATE_SELECTOR).is_some());
-    assert!(cx.debug_bounds(LAUNCH_RETRY_SELECTOR).is_some());
+    assert!(
+        cx.debug_bounds(launch::LAUNCH_RESTART_CORE_SELECTOR)
+            .is_none()
+    );
+
+    machines.emit(crate::updates::machines::MachineUpdatesEvent::Machines(
+        vec![too_old_core(|facts| {
+            facts.operation = Some(Operation::Installing {
+                version: Version::parse("0.14.0").unwrap(),
+                received: 1,
+                total: 2,
+            });
+        })],
+    ));
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("server-launch-progress-label").is_some(),
+        "the download shows in text beside the ring"
+    );
+    A11yTree::read(cx).text("Downloading SpaceTerm Core 0.14.0\u{2026}");
+    assert!(
+        cx.debug_bounds(launch::LAUNCH_RESTART_CORE_SELECTOR)
+            .is_none(),
+        "nothing is downloaded yet, so nothing restarts"
+    );
+
+    machines.emit(crate::updates::machines::MachineUpdatesEvent::Changed(
+        Box::new(too_old_core(|facts| facts.pending = Some(pending_0_14()))),
+    ));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("server-launch-progress-label").is_none());
+    assert!(
+        cx.debug_bounds(launch::LAUNCH_RESTART_CORE_SELECTOR)
+            .is_some()
+    );
     assert_eq!(
         harness.launch.steps(),
-        ["run", "update_offered", "run", "update_offered"],
-        "reading the offer starts, stages, and activates nothing"
+        ["run"],
+        "nothing starts or activates"
     );
 }
 
-/// A reconnection after the first admission can be refused too, such as by a replaced server.
-/// That refusal reads the same verified offer, once, and offers the same update journey.
+/// Restart Core asks the local Core for a fresh preview and confirms it, also after a start into
+/// the kept version failed. Only the approved preview executes.
 #[gpui::test]
-fn a_refusal_after_admission_offers_the_verified_update(cx: &mut TestAppContext) {
+fn the_launch_restart_core_asks_first_and_restarts_only_the_previewed_target(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_core::update::facts::{FailureKind, StartFailure, UpdateFailure};
+    const CONFIRM: &str = "modal-action-update-confirm-proceed";
+    const CANCEL: &str = "modal-action-update-confirm-cancel";
+    let machines = scripted_machines(cx);
+    let (harness, cx) = launch_harness(vec![refused()], cx);
+    machines.emit(crate::updates::machines::MachineUpdatesEvent::Machines(
+        vec![too_old_core(|facts| {
+            facts.pending = Some(pending_0_14());
+            facts.last_failure = Some(UpdateFailure {
+                id: 1,
+                at: 0,
+                version: pending_0_14().version,
+                kind: FailureKind::Start(StartFailure::PortInUse),
+            });
+        })],
+    ));
+    cx.run_until_parked();
+
+    harness.click(launch::LAUNCH_RESTART_CORE_SELECTOR, cx);
+    assert_eq!(
+        machines.asked(),
+        vec![(
+            LOCAL_MACHINE,
+            crate::updates::machines::MachineAction::Restart
+        )],
+        "the Core previews the restart first"
+    );
+    assert!(cx.debug_bounds(CONFIRM).is_some(), "the confirmation asks");
+    assert!(
+        machines.executed().is_empty(),
+        "nothing runs before approval"
+    );
+
+    harness.click(CANCEL, cx);
+    assert!(machines.executed().is_empty(), "Cancel runs nothing");
+
+    harness.click(launch::LAUNCH_RESTART_CORE_SELECTOR, cx);
+    harness.click(CONFIRM, cx);
+    let executed = machines.executed();
+    assert_eq!(executed.len(), 1, "one restart");
+    assert_eq!(executed[0].machine, LOCAL_MACHINE);
+    assert_eq!(
+        executed[0].action,
+        crate::updates::machines::MachineAction::Restart
+    );
+    assert_eq!(executed[0].target, Some(pending_0_14().version));
+}
+
+/// A reconnection after the first admission can be refused too, such as by a replaced server.
+/// That refusal presents the same blocked screen and starts nothing.
+#[gpui::test]
+fn a_refusal_after_admission_presents_the_blocked_screen(cx: &mut TestAppContext) {
     let edits = ScriptedEdits::new(None);
     edits.set_connected(false);
     let (harness, cx) = launch_harness_with(vec![ready()], edits, [], cx);
-    harness.launch.offer_update();
     cx.run_until_parked();
     sync(&harness, cx);
-    assert_eq!(harness.launch.steps(), ["run"]);
-
     harness.edits.set_error(CoreError::IncompatibleProtocol(
         spaceterm_core::protocol::version::Incompatible::ListenerTooOld,
     ));
@@ -1052,12 +1184,14 @@ fn a_refusal_after_admission_offers_the_verified_update(cx: &mut TestAppContext)
         harness.launch_title(cx),
         Some("Incompatible SpaceTerm Core")
     );
-    assert!(cx.debug_bounds(launch::LAUNCH_UPDATE_SELECTOR).is_some());
-    sync(&harness, cx);
+    assert!(
+        cx.debug_bounds(launch::LAUNCH_RESTART_CORE_SELECTOR)
+            .is_none()
+    );
     assert_eq!(
         harness.launch.steps(),
-        ["run", "update_offered"],
-        "one read per refusal, and nothing starts or activates"
+        ["run"],
+        "nothing starts or activates"
     );
 }
 

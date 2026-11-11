@@ -2913,7 +2913,7 @@ impl WorkspaceManager {
         }
         self.save_arrangements(cx);
         self.report_client_view_error(window, cx);
-        self.read_refusal_offer(cx);
+        self.follow_refusal(cx);
         self.read_background_item(window, cx);
         // Membership, connection, and Git facts all decide what each view presents, including
         // Workspaces nobody is looking at.

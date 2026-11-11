@@ -97,15 +97,6 @@ fn read_facts(
     })
 }
 
-/// Whether an installed bundle offers a newer Core. This read stages and starts nothing.
-pub(crate) fn update_offered(service: &Service) -> bool {
-    CoreUpdateControl::read(service).is_ok_and(|facts| {
-        facts
-            .included
-            .is_ok_and(|included| !included.approved && !included.earlier)
-    })
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum UpdateStep {
     Check,
@@ -209,22 +200,6 @@ impl SettingsWindow {
                     .into_iter()
                     .find(|view| view.machine == machine)
             }
-        }
-    }
-
-    pub(crate) fn request_core_update(&mut self, cx: &mut Context<Self>) {
-        let window = self.update_window;
-        let Some(view) = self.machine_update_view(&MachineChoice::Local, cx) else {
-            return;
-        };
-        if matches!(
-            view.state,
-            presentation::MachineState::Ready { .. }
-                | presentation::MachineState::Overdue { .. }
-                | presentation::MachineState::CoreTooOld { .. }
-        ) && let Some(button) = view.settings_row().button
-        {
-            self.perform_update_command(button.command, window, cx);
         }
     }
 

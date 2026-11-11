@@ -8749,6 +8749,114 @@ fn a_pane_notice_should_never_cover_its_screen_actions(cx: &mut TestAppContext) 
     );
 }
 
+/// A Pane blocked by a Core too old for this SpaceTerm shows the Core's download, then offers
+/// Restart Core, which asks the Core for a preview and confirms before anything restarts.
+#[gpui::test]
+fn a_blocked_pane_follows_the_cores_download_and_restarts_only_after_approval(
+    cx: &mut TestAppContext,
+) {
+    use crate::machine_connection::CoreError;
+    use crate::terminal::core_session::CorePaneStatus;
+    use crate::updates::machines::{
+        MachineAction, MachineLink, MachineUpdate, MachineUpdatesEvent,
+    };
+    use spaceterm_core::protocol::version::Incompatible;
+    use spaceterm_core::update::facts::{
+        Operation, PendingVersion, Platform, Protocols, UpdateCheck, UpdateFacts, Version,
+    };
+    use spaceterm_ui::a11y_testing::A11yTree;
+    const MACHINE: [u8; 32] = [44; 32];
+    const CONFIRM: &str = "modal-action-update-confirm-proceed";
+    const CANCEL: &str = "modal-action-update-confirm-cancel";
+    let update = |operation: Option<Operation>, pending: Option<PendingVersion>| MachineUpdate {
+        detailed: None,
+        machine: MACHINE,
+        name: "This Mac".into(),
+        local: true,
+        link: MachineLink::Incompatible(Incompatible::ListenerTooOld),
+        facts: Some(UpdateFacts {
+            revision: 1,
+            platform: Platform::HOST,
+            running: Version::parse("0.11.4").unwrap(),
+            pending,
+            sessions: 3,
+            operation,
+            check: UpdateCheck::Never,
+            skipped: None,
+            last_failure: None,
+        }),
+        capabilities: spaceterm_core::protocol::capability::Capabilities::fake(
+            &spaceterm_core::protocol::capability::Capability::ALL,
+        ),
+        push: None,
+        bundled: None,
+        failed_push: None,
+        asked: None,
+        retrying_since: None,
+    };
+    let machines = Rc::new(crate::updates::machines::testing::ScriptedMachines::default());
+    cx.update(|cx| {
+        crate::updates::machines::store::MachineUpdates::install(machines.clone(), cx);
+    });
+    let (harness, cx) = pane_harness(cx);
+    let pane = harness.panes.pane(FOCUS_PANE);
+    pane.set(CorePaneStatus::Failed(CoreError::IncompatibleProtocol(
+        Incompatible::ListenerTooOld,
+    )));
+    machines.emit(MachineUpdatesEvent::Machines(vec![update(
+        Some(Operation::Installing {
+            version: Version::parse("0.14.0").unwrap(),
+            received: 1,
+            total: 2,
+        }),
+        None,
+    )]));
+    settle_panes(cx);
+    assert_eq!(
+        A11yTree::read(cx).node("Incompatible SpaceTerm Core")["aria"]["description"],
+        "SpaceTerm Core on This Mac is too old for this SpaceTerm. Downloading SpaceTerm Core \
+         0.14.0\u{2026}"
+    );
+    assert!(cx.debug_bounds("pane-blocked-action-1").is_none());
+
+    let pending = PendingVersion {
+        version: Version::parse("0.14.0").unwrap(),
+        protocols: Protocols::CURRENT,
+        breaking: true,
+        installed_at: crate::updates::now() - 60,
+        overdue_since: None,
+        stranded: Vec::new(),
+    };
+    machines.emit(MachineUpdatesEvent::Changed(Box::new(update(
+        None,
+        Some(pending.clone()),
+    ))));
+    settle_panes(cx);
+    let click = |selector: &'static str, cx: &mut VisualTestContext| {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} was not rendered"));
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        settle_panes(cx);
+    };
+    click("pane-blocked-action-1", cx);
+    assert_eq!(machines.asked(), vec![(MACHINE, MachineAction::Restart)]);
+    assert!(
+        machines.executed().is_empty(),
+        "nothing runs before approval"
+    );
+    click(CANCEL, cx);
+    assert!(machines.executed().is_empty(), "Cancel runs nothing");
+    click("pane-blocked-action-1", cx);
+    click(CONFIRM, cx);
+    let executed = machines.executed();
+    assert_eq!(executed.len(), 1);
+    assert_eq!(
+        (executed[0].machine, executed[0].target.clone()),
+        (MACHINE, Some(pending.version))
+    );
+}
+
 /// A Workspace whose Root Tab is split in two beside a second Tab, presented in this window
 /// with the scripted server that answers its edits.
 struct WorkspaceCloseHarness {

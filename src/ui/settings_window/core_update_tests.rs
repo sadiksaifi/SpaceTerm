@@ -233,15 +233,6 @@ fn settings_tracks_the_shared_install_and_restart_without_starting_another(
 }
 
 #[gpui::test]
-fn an_update_request_never_turns_into_a_same_version_restart(cx: &mut TestAppContext) {
-    let (settings, adapter, cx) = open(cx, None);
-    settings.update(cx, |settings, cx| settings.request_core_update(cx));
-    cx.run_until_parked();
-    assert!(adapter.asked().is_empty());
-    assert!(adapter.executed().is_empty());
-}
-
-#[gpui::test]
 fn a_failed_settings_preview_explains_the_failure(cx: &mut TestAppContext) {
     let (_, adapter, cx) = open(cx, Some("1.6.0"));
     adapter.hold_previews();
