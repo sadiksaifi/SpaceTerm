@@ -21,6 +21,7 @@ struct Connection {
     starts: AtomicUsize,
     retries: AtomicUsize,
     take_overs: AtomicUsize,
+    unsent: Mutex<Option<crate::terminal::core_session::unsent::UnsentInput>>,
 }
 
 impl Connection {
@@ -38,6 +39,7 @@ impl Connection {
             starts: AtomicUsize::new(0),
             retries: AtomicUsize::new(0),
             take_overs: AtomicUsize::new(0),
+            unsent: Mutex::default(),
         })
     }
 
@@ -74,6 +76,9 @@ fn version_of(text: &str) -> spaceterm_core::update::facts::Version {
 }
 
 impl MachinePaneConnection for Connection {
+    fn unsent_input(&self) -> Option<crate::terminal::core_session::unsent::UnsentInput> {
+        self.unsent.lock().unwrap().clone()
+    }
     fn restart_progress(&self) -> Option<crate::terminal::core_session::restart::CoreRestart> {
         self.restart.lock().unwrap().as_ref().map(|to| {
             crate::terminal::core_session::restart::CoreRestart {
@@ -528,6 +533,67 @@ fn a_pane_names_an_idle_restart_the_core_reports() {
     assert_eq!(
         ended_detail(&view).as_deref(),
         Some("SpaceTerm Core restarted into 0.11.1 while nothing was running.")
+    );
+}
+
+/// An idle restart that refused what the person typed says the text wasn't sent and offers it
+/// to copy. Without kept input the detail is the restart alone.
+#[test]
+fn an_idle_restart_says_what_typed_text_it_refused() {
+    use crate::terminal::core_session::unsent::{Delivery, UnsentInput};
+    for kept in [false, true] {
+        let connection = Connection::new(CorePaneStatus::Connected);
+        connection.set_version("0.11.0");
+        connection.idle_restart.store(true, Ordering::SeqCst);
+        let mut view = CorePaneView::new(connection.clone());
+        connection.announce(Some("0.11.1"));
+        view.sync();
+        connection.answer(CorePaneStatus::Reconnecting);
+        view.sync();
+        if kept {
+            *connection.unsent.lock().unwrap() = Some(UnsentInput {
+                delivery: Delivery::NotSent,
+                text: "ls\n".into(),
+            });
+        }
+        connection.announce(None);
+        connection.set_version("0.11.1");
+        connection.answer(CorePaneStatus::Restored);
+        view.sync();
+        let copy = view.dormant_copy(None);
+        if kept {
+            assert_eq!(
+                copy.detail.as_ref(),
+                "SpaceTerm Core restarted into 0.11.1 while nothing was running. What you typed \
+                 during the restart wasn't sent."
+            );
+            assert_eq!(copy.typed.as_deref(), Some("ls\n"));
+        } else {
+            assert_eq!(
+                copy.detail.as_ref(),
+                "SpaceTerm Core restarted into 0.11.1 while nothing was running."
+            );
+            assert_eq!(copy.typed, None);
+        }
+    }
+}
+
+/// A desktop that never saw the restart announced cannot tell an idle restart from an approved
+/// one, so it claims no cause.
+#[test]
+fn a_restart_this_desktop_never_saw_announced_claims_no_cause() {
+    let connection = Connection::new(CorePaneStatus::Connected);
+    connection.set_version("0.11.0");
+    connection.idle_restart.store(true, Ordering::SeqCst);
+    let mut view = CorePaneView::new(connection.clone());
+    connection.answer(CorePaneStatus::Reconnecting);
+    view.sync();
+    connection.set_version("0.11.1");
+    connection.answer(CorePaneStatus::Restored);
+    view.sync();
+    assert_eq!(
+        ended_detail(&view).as_deref(),
+        Some("SpaceTerm Core restarted into 0.11.1.")
     );
 }
 

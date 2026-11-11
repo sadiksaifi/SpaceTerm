@@ -552,6 +552,12 @@ pub trait TerminalSessionHandle {
         false
     }
 
+    /// Consumes what the person typed that the Core refused for an idle restart that then did
+    /// not happen, once the same Terminal Session is interactive again.
+    fn take_unsent_input(&self) -> Option<crate::terminal::core_session::unsent::UnsentInput> {
+        None
+    }
+
     /// Transfers Terminal Input Focus to this Terminal Session's Paste Confirmation.
     fn focus_paste_confirmation(&self, _id: PasteConfirmationId) {
         self.focus(false);

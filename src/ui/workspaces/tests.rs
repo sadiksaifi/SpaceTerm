@@ -722,6 +722,60 @@ fn another_clients_ended_pane_should_show_session_ended_without_starting_one(
     );
 }
 
+/// A restart that ended the Pane's Terminal Session while the person typed says the text wasn't
+/// sent and offers it to copy. Copying puts it on the clipboard and sends or starts nothing,
+/// because the text can hold Return.
+#[gpui::test]
+fn an_ended_pane_offers_what_the_person_typed_during_the_restart_to_copy(cx: &mut TestAppContext) {
+    use crate::terminal::core_session::unsent::{Delivery, UnsentInput};
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (harness, cx) = tab_manager(cx);
+    let pane = harness.panes.pane(ROOT_PANE);
+    pane.set_running_version("0.11.0");
+    pane.reconnect();
+    settle(&harness, cx);
+    pane.keep_unsent(Some(UnsentInput {
+        delivery: Delivery::NotSent,
+        text: "git push\n".into(),
+    }));
+    pane.reconnect_to(CorePaneStatus::Restored);
+    settle(&harness, cx);
+
+    let tree = A11yTree::read(cx);
+    assert!(
+        tree.find(
+            "Terminal Session Ended. SpaceTerm Core restarted. What you typed during the restart \
+             wasn't sent."
+        )
+        .is_some(),
+        "the screen says the typed text wasn't sent"
+    );
+    click("pane-copy-typed-text-1", cx);
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()),
+        Some("git push\n".to_owned())
+    );
+    assert_eq!(pane.restored_starts(), 0, "copying starts nothing");
+    assert!(cx.debug_bounds("pane-start-shell-1").is_some());
+
+    // Input whose delivery is unknown is told apart, and nothing typed offers nothing to copy.
+    pane.keep_unsent(Some(UnsentInput {
+        delivery: Delivery::Unknown,
+        text: String::new(),
+    }));
+    settle(&harness, cx);
+    assert!(
+        A11yTree::read(cx)
+            .find(
+                "Terminal Session Ended. SpaceTerm Core restarted. What you typed during the \
+                 restart may not have been sent."
+            )
+            .is_some()
+    );
+    assert!(cx.debug_bounds("pane-copy-typed-text-1").is_none());
+}
+
 /// Start Session on a Pane whose control grant another client holds takes it over, and the server
 /// starts the shell in that one request.
 #[gpui::test]

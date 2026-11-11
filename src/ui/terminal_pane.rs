@@ -492,6 +492,9 @@ pub(crate) struct TerminalPane {
     diagnostics: DiagnosticBundle,
     status: Option<String>,
     status_intent: StatusIntent,
+    /// The status that says what the person typed wasn't sent, and that text, which Copy Typed
+    /// Text copies while the status shows.
+    unsent_typed: Option<(String, String)>,
     fallback_title: SharedString,
     title: SharedString,
     focus_handle: FocusHandle,
@@ -784,6 +787,7 @@ impl TerminalPane {
             diagnostics: DiagnosticBundle::default(),
             status: None,
             status_intent: StatusIntent::Information,
+            unsent_typed: None,
             title: fallback_title.clone(),
             fallback_title,
             focus_handle,
@@ -3988,6 +3992,38 @@ impl TerminalPane {
         }
     }
 
+    /// The Core refused what the person typed for an idle restart that did not happen. The
+    /// Pane says so and offers the text to copy; it sends nothing again, because the text can
+    /// hold Return.
+    fn sync_unsent_input(&mut self) {
+        use crate::terminal::core_session::unsent::Delivery;
+        if !self.interactive_input_available() {
+            return;
+        }
+        let Some(typed) = self
+            .terminal_session
+            .session
+            .as_ref()
+            .and_then(|session| session.take_unsent_input())
+        else {
+            return;
+        };
+        let status =
+            crate::updates::copy::pane::restart_refused_input(typed.delivery == Delivery::NotSent)
+                .to_owned();
+        self.unsent_typed = (!typed.text.is_empty()).then(|| (status.clone(), typed.text));
+        self.status = Some(status);
+        self.status_intent = StatusIntent::Warning;
+    }
+
+    /// The text Copy Typed Text copies, while its status shows.
+    fn unsent_typed(&self) -> Option<String> {
+        self.unsent_typed
+            .as_ref()
+            .filter(|(status, _)| self.status.as_deref() == Some(status.as_str()))
+            .map(|(_, typed)| typed.clone())
+    }
+
     fn paste_request_guard_is_current(&self, guard: PasteRequestGuard) -> bool {
         self.terminal_session.session.is_some()
             && self.terminal_input_focus
@@ -4984,6 +5020,7 @@ impl Render for TerminalPane {
             );
         self.flush_pending_file_insertion(cx);
         self.sync_paste_unconfirmed();
+        self.sync_unsent_input();
         let surface_active = terminal_surface_active(self.product_focus, native_activity);
         let native_visibility = self
             .visibility_source
@@ -5200,6 +5237,7 @@ impl Render for TerminalPane {
         let diagnostics_available =
             self.pane_state.failure().is_some() && self.diagnostics.record_count() > 0;
         let recovery_available = self.pending_recovery.is_some();
+        let unsent_typed = self.unsent_typed();
         let last_valid_frame_preserved = self.pane_state.last_valid_frame().is_some();
         let export_pane = cx.entity().downgrade();
         let report_pane = cx.entity().downgrade();
@@ -5500,6 +5538,12 @@ impl Render for TerminalPane {
                         appearance
                             .typography
                             .measure(TextRole::Body, "Try Again", window)
+                    } else if unsent_typed.is_some() {
+                        appearance.typography.measure(
+                            TextRole::Body,
+                            crate::updates::copy::pane::COPY_TYPED_TEXT,
+                            window,
+                        )
                     } else {
                         px(0.0)
                     };
@@ -5584,6 +5628,25 @@ impl Render for TerminalPane {
                                                     let _ = retry_pane.update(cx, |pane, cx| {
                                                         pane.retry_recovery(window, cx);
                                                     });
+                                                }),
+                                        )
+                                    })
+                                    .when_some(unsent_typed, |status, typed| {
+                                        use crate::updates::copy::pane;
+                                        status.child(
+                                            Button::new("copy-typed-text", pane::COPY_TYPED_TEXT)
+                                                .variant(ButtonVariant::Link)
+                                                .size(ButtonSize::Compact)
+                                                .accessibility_description(
+                                                    pane::COPY_TYPED_TEXT_DESCRIPTION,
+                                                )
+                                                .debug_selector("copy-typed-text")
+                                                .on_activate(move |_, _, cx| {
+                                                    cx.write_to_clipboard(
+                                                        gpui::ClipboardItem::new_string(
+                                                            typed.clone(),
+                                                        ),
+                                                    );
                                                 }),
                                         )
                                     })

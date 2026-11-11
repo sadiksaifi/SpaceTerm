@@ -2352,6 +2352,41 @@ fn core_pane_uncertain_paste_warns_without_sending_a_second_payload(cx: &mut Tes
     );
 }
 
+/// The Core refused what the person typed for an idle restart that did not happen. The status
+/// says so and Copy Typed Text puts the text on the clipboard; nothing is sent again.
+#[gpui::test]
+fn core_pane_refused_input_offers_its_text_to_copy_without_sending_it(cx: &mut TestAppContext) {
+    use crate::terminal::core_session::unsent::{Delivery, UnsentInput};
+    use spaceterm_ui::a11y_testing::A11yTree;
+    let (pane, cx, records) = core_terminal_pane(cx, true);
+    let sent = records.commands().len();
+    records.keep_unsent_input(
+        1,
+        UnsentInput {
+            delivery: Delivery::NotSent,
+            text: "git push\n".into(),
+        },
+    );
+    pane.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.node("Terminal status")["aria"]["value"], "Warning");
+    assert_eq!(
+        tree.node("Terminal status")["aria"]["description"],
+        "What you typed wasn't sent. SpaceTerm Core was about to restart."
+    );
+    let bounds = cx
+        .debug_bounds("copy-typed-text")
+        .expect("Copy Typed Text renders");
+    cx.simulate_click(bounds.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()),
+        Some("git push\n".to_owned())
+    );
+    assert_eq!(records.commands().len(), sent, "nothing is sent again");
+}
+
 fn current_native_service_origin(
     pane: &Entity<TerminalPane>,
     cx: &mut VisualTestContext,

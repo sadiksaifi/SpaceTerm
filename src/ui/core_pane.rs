@@ -95,6 +95,9 @@ pub(crate) struct DormantCopy {
     pub(crate) description: &'static str,
     pub(crate) progress: &'static str,
     pub(crate) unconfirmed: &'static str,
+    /// What the person typed as a restart ended the Terminal Session, which Copy Typed Text
+    /// copies. None when nothing typed was kept.
+    pub(crate) typed: Option<SharedString>,
 }
 
 impl DormantCopy {
@@ -110,6 +113,7 @@ impl DormantCopy {
                 description: START_DESCRIPTION,
                 progress: "Starting Session…",
                 unconfirmed: "Start Session was not confirmed.",
+                typed: None,
             }
         } else {
             Self {
@@ -121,6 +125,7 @@ impl DormantCopy {
                 description: START_DESCRIPTION,
                 progress: STARTING_SHELL,
                 unconfirmed: START_SHELL_UNCONFIRMED,
+                typed: None,
             }
         }
     }
@@ -305,6 +310,8 @@ impl ScreenCopy {
 pub(crate) struct ScreenActions {
     pub(crate) primary: Option<Button>,
     pub(crate) link: Option<Button>,
+    /// An action about the screen's detail, under it and before the Primary action.
+    pub(crate) supplement: Option<Button>,
 }
 
 fn render_screen_content(
@@ -390,6 +397,9 @@ fn render_screen_content(
                 .text_color(gpui_color(appearance.colors.text))
                 .child(path),
         );
+    }
+    if let Some(supplement) = actions.supplement {
+        state = state.supplement(supplement);
     }
     if let Some(primary) = actions.primary {
         state = state.primary(primary);
@@ -564,6 +574,7 @@ where
                     .debug_selector(retry)
                     .on_activate(move |_, window, cx| on_retry(window, cx)),
             ),
+            supplement: None,
         }
     }
 }
@@ -658,6 +669,7 @@ where
                     .debug_selector(selector)
                     .on_activate(move |_, window, cx| on_machine_settings(window, cx))
             }),
+            supplement: None,
         };
         render_screen_content(
             screen,
@@ -987,6 +999,11 @@ mod connection {
         fn start_waiting(&self) -> bool {
             false
         }
+        /// What the person typed that the Core refused or never confirmed, since the Pane last
+        /// attached to a Terminal Session. SpaceTerm never sends it again by itself.
+        fn unsent_input(&self) -> Option<crate::terminal::core_session::unsent::UnsentInput> {
+            None
+        }
         fn directory_progress(&self) -> (bool, Option<&'static str>) {
             (false, None)
         }
@@ -1007,6 +1024,9 @@ mod connection {
     impl MachinePaneConnection for CorePaneState {
         fn start_waiting(&self) -> bool {
             Self::start_waiting(self)
+        }
+        fn unsent_input(&self) -> Option<crate::terminal::core_session::unsent::UnsentInput> {
+            Self::unsent_input(self)
         }
         fn status(&self) -> CorePaneStatus {
             Self::status(self)
@@ -1473,6 +1493,16 @@ mod connection {
                 None => return copy,
             };
             copy.title = pane::SESSION_ENDED.into();
+            // What the person typed as the restart began is kept for them to copy, and never
+            // sent again. The detail says whether any of it may have reached the shell.
+            let detail = match self.connection.unsent_input() {
+                Some(typed) => {
+                    use crate::terminal::core_session::unsent::Delivery;
+                    copy.typed = (!typed.text.is_empty()).then(|| typed.text.into());
+                    pane::with_typed_input(&detail, typed.delivery == Delivery::NotSent)
+                }
+                None => detail,
+            };
             copy.detail = detail.into();
             copy
         }

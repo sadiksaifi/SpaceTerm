@@ -3225,6 +3225,7 @@ impl TabView {
                     core_pane::ScreenActions {
                         primary: action,
                         link: None,
+                        supplement: None,
                     },
                     status,
                     pane.announcements(),
@@ -3276,6 +3277,23 @@ impl TabView {
                             view.request_close_pane(pane_id, cx);
                         });
                     });
+                // What the person typed as a restart ended the Session goes only to the
+                // clipboard, at their click. Nothing sends it, because it can hold Return.
+                let copy_typed = copy.typed.clone().map(|typed| {
+                    Button::new(
+                        selector("copy-typed-text"),
+                        crate::updates::copy::pane::COPY_TYPED_TEXT,
+                    )
+                    .variant(ButtonVariant::Secondary)
+                    .tab_stop(true)
+                    .accessibility_description(
+                        crate::updates::copy::pane::COPY_TYPED_TEXT_DESCRIPTION,
+                    )
+                    .debug_selector(selector("copy-typed-text"))
+                    .on_activate(move |_, _, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(typed.to_string()));
+                    })
+                });
                 core_pane::render_screen(
                     selector(copy.screen),
                     core_pane::ScreenCopy::new(copy.title, copy.detail)
@@ -3284,6 +3302,7 @@ impl TabView {
                     core_pane::ScreenActions {
                         primary: Some(action),
                         link: Some(close),
+                        supplement: copy_typed,
                     },
                     status,
                     pane.announcements(),

@@ -288,15 +288,22 @@ impl ActiveInput {
                     // A lost acknowledgement may follow a successful write. Neither that
                     // chunk nor the unsent suffix can be replayed on this or a new connection.
                     state.retaining_input.store(true, Ordering::Release);
+                    // The chunk in flight may have been written; the rest never left.
+                    state.keep_input(
+                        unsent::Delivery::Unknown,
+                        &[InputEvent::Paste {
+                            text: remaining[..end].to_owned(),
+                            last: true,
+                        }],
+                    );
                     if !remaining[end..].is_empty() {
-                        state
-                            .unsent_input
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .push(InputEvent::Paste {
+                        state.keep_input(
+                            unsent::Delivery::NotSent,
+                            &[InputEvent::Paste {
                                 text: remaining[end..].to_owned(),
                                 last: true,
-                            });
+                            }],
+                        );
                     }
                     state.invalidate();
                     return Err(match other {
@@ -644,8 +651,10 @@ pub(super) struct PaneLink {
     notify: Arc<dyn Fn() + Send + Sync>,
     /// The highest Input serial sent on the bound channel.
     last_input: std::cell::Cell<u32>,
-    unsent_input: Arc<Mutex<Vec<InputEvent>>>,
-    unconfirmed_input: Arc<Mutex<Vec<InputEvent>>>,
+    /// Shared with [`CorePaneState::unsent`].
+    unsent: Arc<Mutex<unsent::Unsent>>,
+    /// Shared with [`CorePaneState::hidden_input`].
+    hidden_input: Arc<AtomicBool>,
     bound_channel: Arc<std::sync::atomic::AtomicU32>,
     retaining_input: Arc<AtomicBool>,
 }
@@ -685,11 +694,20 @@ impl PaneLink {
             pushed: None,
             notify,
             last_input: std::cell::Cell::new(0),
-            unsent_input: Arc::default(),
-            unconfirmed_input: Arc::default(),
+            unsent: Arc::default(),
+            hidden_input: Arc::default(),
             bound_channel: Arc::default(),
             retaining_input: Arc::default(),
         }
+    }
+
+    /// Keeps the text of `events`, which the Core refused or never confirmed.
+    fn keep(&self, delivery: unsent::Delivery, events: &[InputEvent]) {
+        self.unsent.lock().unwrap_or_else(|e| e.into_inner()).keep(
+            delivery,
+            events,
+            self.hidden_input.load(Ordering::Acquire),
+        );
     }
 
     /// The highest Input serial sent on the bound channel, or 0 before any.
@@ -718,8 +736,8 @@ impl PaneLink {
     fn sink(&self, pushed: Arc<super::inbox::Inbox>) -> Arc<dyn ChannelSink> {
         let inbox = Arc::clone(&self.inbox);
         let returned = self.link.clone();
-        let unsent = Arc::clone(&self.unsent_input);
-        let unconfirmed = Arc::clone(&self.unconfirmed_input);
+        let unsent = Arc::clone(&self.unsent);
+        let hidden_input = Arc::clone(&self.hidden_input);
         let bound_channel = Arc::clone(&self.bound_channel);
         let retaining_input = Arc::clone(&self.retaining_input);
         let notify = Arc::clone(&self.notify);
@@ -729,12 +747,13 @@ impl PaneLink {
                 match event {
                     ChannelEvent::Pane(PaneEvent::InputRestarting { channel, serial }) => {
                         retaining_input.store(true, Ordering::Release);
-                        if let Some(events) = returned.take_unaccepted_input(channel, serial) {
-                            unsent
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .extend(events);
-                        }
+                        let events = returned
+                            .take_unaccepted_input(channel, serial)
+                            .unwrap_or_default();
+                        unsent
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .refused_by_restart(&events, hidden_input.load(Ordering::Acquire));
                         if received.dropped.len() == MAX_DROPPED {
                             received.dropped.pop_front();
                         }
@@ -768,14 +787,19 @@ impl PaneLink {
                     ChannelEvent::Closed(error) => {
                         retaining_input.store(true, Ordering::Release);
                         let channel = Channel(bound_channel.load(Ordering::Acquire));
-                        unconfirmed
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .extend(returned.take_unconfirmed_input(channel));
-                        unsent
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .extend(returned.take_unsent_input(channel));
+                        let hidden = hidden_input.load(Ordering::Acquire);
+                        let mut kept = unsent.lock().unwrap_or_else(|e| e.into_inner());
+                        kept.keep(
+                            unsent::Delivery::Unknown,
+                            &returned.take_unconfirmed_input(channel),
+                            hidden,
+                        );
+                        kept.keep(
+                            unsent::Delivery::NotSent,
+                            &returned.take_unsent_input(channel),
+                            hidden,
+                        );
+                        drop(kept);
                         received.closed.get_or_insert(error.into());
                     }
                     event @ (ChannelEvent::Frame(_)
@@ -784,10 +808,11 @@ impl PaneLink {
                         if matches!(&event, ChannelEvent::Pane(event) if event.last()) {
                             retaining_input.store(true, Ordering::Release);
                             let channel = Channel(bound_channel.load(Ordering::Acquire));
-                            unconfirmed
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .extend(returned.take_unconfirmed_input(channel));
+                            unsent.lock().unwrap_or_else(|e| e.into_inner()).keep(
+                                unsent::Delivery::Unknown,
+                                &returned.take_unconfirmed_input(channel),
+                                hidden_input.load(Ordering::Acquire),
+                            );
                         }
                         drop(received);
                         // The inbox wakes the worker.
@@ -895,9 +920,7 @@ impl PaneLink {
     }
 
     fn claim(&mut self, claim: spaceterm_core::attachments::PaneClaim) -> Result<Reply, CoreError> {
-        if let Some((old, _)) = self.channel.take() {
-            old.detach();
-        }
+        self.retire_channel(true);
         self.pushed = None;
         // A new channel numbers its Input from 1.
         self.last_input.set(0);
@@ -962,10 +985,7 @@ impl PaneLink {
     pub(super) fn exchange(&mut self, request: &Request) -> Result<Reply, CoreError> {
         if let Err(error) = self.reported() {
             self.retaining_input.store(true, Ordering::Release);
-            self.unsent_input
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .extend(request_input(request));
+            self.keep(unsent::Delivery::NotSent, &request_input(request));
             return Err(error);
         }
         let before = self.last_input();
@@ -975,10 +995,9 @@ impl PaneLink {
             let channel = Channel(self.bound_channel.load(Ordering::Acquire));
             let local = self.link.take_unsent_input(channel);
             let captured = !local.is_empty();
-            let mut unsent = self.unsent_input.lock().unwrap_or_else(|e| e.into_inner());
-            unsent.extend(local);
+            self.keep(unsent::Delivery::NotSent, &local);
             if !captured && self.last_input() == before {
-                unsent.extend(request_input(request));
+                self.keep(unsent::Delivery::NotSent, &request_input(request));
             }
         }
         // The Terminal Session is gone, so the channel is released and the server frees its slot.
@@ -1021,8 +1040,32 @@ impl PaneLink {
 
     /// Releases the channel after its last event or once its Terminal Session is gone.
     pub(super) fn release(&mut self) {
-        self.channel = None;
+        self.retire_channel(false);
         self.pushed = None;
+    }
+
+    /// Drops or detaches the bound channel, then keeps the text of input the link still held
+    /// for it: refused input as not sent, the rest as delivery unknown. Nothing sends it again.
+    fn retire_channel(&mut self, detach: bool) {
+        let Some((handle, _)) = self.channel.take() else {
+            return;
+        };
+        let channel = handle.channel().ok();
+        if detach {
+            handle.detach();
+        } else {
+            drop(handle);
+        }
+        if let Some(channel) = channel {
+            self.keep(
+                unsent::Delivery::Unknown,
+                &self.link.take_unconfirmed_input(channel),
+            );
+            self.keep(
+                unsent::Delivery::NotSent,
+                &self.link.take_unsent_input(channel),
+            );
+        }
     }
 
     /// Applies every pushed event in order: each frame is applied, then acknowledged, each
@@ -1089,10 +1132,8 @@ impl PaneLink {
                 let mut batches = key_batches(keys).into_iter();
                 while let Some(batch) = batches.next() {
                     if let Err(error) = self.input(lease, generation, batch) {
-                        self.unsent_input
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .extend(batches.flatten());
+                        let rest: Vec<InputEvent> = batches.flatten().collect();
+                        self.keep(unsent::Delivery::NotSent, &rest);
                         return Err(error);
                     }
                 }
@@ -1203,7 +1244,7 @@ impl PaneLink {
             Request::Release { lease } => {
                 self.bound(lease)?;
                 // Dropping the handle sends `Release` in order behind earlier input.
-                self.channel = None;
+                self.retire_channel(false);
                 Ok(Reply::Unchanged)
             }
             Request::Close { lease } => {
@@ -1240,11 +1281,9 @@ impl PaneLink {
 
 impl Drop for PaneLink {
     /// A dismissed presentation keeps its Pane's control, so the channel is detached, not
-    /// released.
+    /// released. What the link still held of its input is kept for the person.
     fn drop(&mut self) {
-        if let Some((channel, _)) = self.channel.take() {
-            channel.detach();
-        }
+        self.retire_channel(true);
     }
 }
 
@@ -1366,11 +1405,7 @@ fn send(
     });
     if result.is_err() && !entered {
         connection.retaining_input.store(true, Ordering::Release);
-        connection
-            .unsent_input
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .extend(request_input(request));
+        connection.keep(unsent::Delivery::NotSent, &request_input(request));
     }
     result
 }
@@ -1459,8 +1494,8 @@ pub(super) fn present(
                 let state = Arc::clone(&state);
                 Arc::new(move || state.wake.notify())
             });
-            connection.unsent_input = Arc::clone(&state.unsent_input);
-            connection.unconfirmed_input = Arc::clone(&state.unconfirmed_input);
+            connection.unsent = Arc::clone(&state.unsent);
+            connection.hidden_input = Arc::clone(&state.hidden_input);
             connection.retaining_input = Arc::clone(&state.retaining_input);
             let Some(claim::Granted {
                 lease,
@@ -1513,6 +1548,7 @@ pub(super) fn present(
                 .connected(std::time::Instant::now());
             drain_input(&state, &input);
             state.retaining_input.store(false, Ordering::Release);
+            state.attached_session();
             let mut active_input = ActiveInput {
                 epoch,
                 lease,
@@ -1973,11 +2009,7 @@ fn retain_local_input(state: &CorePaneState, input: &Input) {
         },
         _ => return,
     };
-    state
-        .unsent_input
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(event);
+    state.keep_input(unsent::Delivery::NotSent, &[event]);
 }
 fn request_input(request: &Request) -> Vec<InputEvent> {
     match request {
@@ -2090,8 +2122,10 @@ mod tests {
         Ok(Reply::Unchanged)
     }
 
+    /// A refusal keeps the text as not sent; a channel end keeps it as delivery unknown. Neither
+    /// sends it again.
     #[test]
-    fn an_encoded_restart_refusal_or_channel_end_preserves_the_original_client_input() {
+    fn an_encoded_restart_refusal_or_channel_end_keeps_the_typed_text_for_the_person() {
         use protocol::{
             CoreMessage, PaneMessage,
             frame::{RawFrame, encode_core},
@@ -2146,15 +2180,17 @@ mod tests {
             for bytes in &wire.frames {
                 link.receive(RawFrame::parse(bytes).unwrap(), now).unwrap();
             }
-            let retained = if ended {
-                &client.unconfirmed_input
-            } else {
-                &client.unsent_input
-            }
-            .lock()
-            .unwrap();
-            assert!(
-                matches!(&retained[..], [InputEvent::Paste { text, last: true }] if text == "kept")
+            let kept = client.unsent.lock().unwrap().input();
+            assert_eq!(
+                kept,
+                Some(unsent::UnsentInput {
+                    delivery: if ended {
+                        unsent::Delivery::Unknown
+                    } else {
+                        unsent::Delivery::NotSent
+                    },
+                    text: "kept".into(),
+                })
             );
             assert!(client.retaining_input.load(Ordering::Acquire));
             assert!(
@@ -2185,11 +2221,13 @@ mod tests {
         );
         assert_eq!(result, Err(CoreError::ServiceBusy));
         drain_input(&handle.state, &input);
-        let retained = handle.state.unsent_input.lock().unwrap();
-        assert!(retained.iter().any(
-            |event| matches!(event, InputEvent::Key(key) if key.text.as_deref() == Some("kept"))
-        ));
-        drop(retained);
+        assert_eq!(
+            handle.state.unsent_input(),
+            Some(unsent::UnsentInput {
+                delivery: unsent::Delivery::NotSent,
+                text: "kept".into(),
+            })
+        );
         assert!(
             handle
                 .state

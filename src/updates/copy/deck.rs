@@ -14,7 +14,7 @@ use spaceterm_core::update::ordering::Floor;
 
 use crate::updates::UpdateState;
 use crate::updates::confirm::previewed;
-use crate::updates::copy::{Platform, dialogs, rows};
+use crate::updates::copy::{Platform, dialogs, pane, rows};
 use crate::updates::ladder::Stage;
 use crate::updates::machines::{ActionFailure, MachineAction, MachinePreview};
 use crate::updates::state::tests::{
@@ -38,6 +38,8 @@ struct Deck {
     pill: BTreeSet<String>,
     rows: BTreeSet<String>,
     dialogs: BTreeSet<String>,
+    /// What a Pane says after a restart ended or spared its Terminal Session.
+    pane: BTreeSet<String>,
     /// Every rendered field, with its role and the Machines named in its view.
     fields: Vec<(Role, Vec<String>, String)>,
     /// The Machines of the view being rendered.
@@ -144,6 +146,11 @@ impl Deck {
             (
                 "Dialogs: title | body | buttons",
                 &self.dialogs,
+                Section::Alert,
+            ),
+            (
+                "Pane after a restart: title | detail, status or button",
+                &self.pane,
                 Section::Alert,
             ),
         ] {
@@ -334,6 +341,36 @@ fn build() -> Deck {
             }
         }
     }
+    let to = version("0.11.4");
+    for detail in [
+        pane::restarted_into(&to),
+        pane::restarted_into_while_idle(&to),
+        pane::could_not_restart_into(&to),
+        pane::RESTARTED.to_owned(),
+    ] {
+        for detail in [
+            detail.clone(),
+            pane::with_typed_input(&detail, true),
+            pane::with_typed_input(&detail, false),
+        ] {
+            deck.field(Role::Text, pane::SESSION_ENDED);
+            deck.field(Role::Text, &detail);
+            deck.pane
+                .insert(format!("{} | {detail}", pane::SESSION_ENDED));
+        }
+    }
+    for not_sent in [true, false] {
+        let status = pane::restart_refused_input(not_sent);
+        deck.field(Role::Text, status);
+        deck.pane.insert(format!("Status | {status}"));
+    }
+    deck.field(Role::Label, pane::COPY_TYPED_TEXT);
+    deck.field(Role::Text, pane::COPY_TYPED_TEXT_DESCRIPTION);
+    deck.pane.insert(format!(
+        "Button | {} | {}",
+        pane::COPY_TYPED_TEXT,
+        pane::COPY_TYPED_TEXT_DESCRIPTION
+    ));
     deck
 }
 

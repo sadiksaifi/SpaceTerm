@@ -3607,6 +3607,8 @@ mod core_workspaces {
             changes: crate::terminal::changes::Changes,
             /// Whether the connection reaches its Terminal Session once its Pane observes it.
             connect_when_observed: std::sync::atomic::AtomicBool,
+            running_version: Mutex<Option<spaceterm_core::update::facts::Version>>,
+            unsent: Mutex<Option<crate::terminal::core_session::unsent::UnsentInput>>,
         }
 
         impl ScriptedPane {
@@ -3624,7 +3626,25 @@ mod core_workspaces {
                     retries: std::sync::atomic::AtomicUsize::new(0),
                     changes: crate::terminal::changes::Changes::default(),
                     connect_when_observed: std::sync::atomic::AtomicBool::new(false),
+                    running_version: Mutex::default(),
+                    unsent: Mutex::default(),
                 })
+            }
+
+            /// The Core reports running `version`.
+            pub(crate) fn set_running_version(&self, version: &str) {
+                *self.running_version.lock().expect("version") =
+                    Some(spaceterm_core::update::facts::Version::parse(version).unwrap());
+                self.changes.publish();
+            }
+
+            /// The connection kept what the person typed and the Core refused or never confirmed.
+            pub(crate) fn keep_unsent(
+                &self,
+                unsent: Option<crate::terminal::core_session::unsent::UnsentInput>,
+            ) {
+                *self.unsent.lock().expect("unsent") = unsent;
+                self.changes.publish();
             }
 
             pub(crate) fn set(&self, status: crate::terminal::core_session::CorePaneStatus) {
@@ -3708,6 +3728,14 @@ mod core_workspaces {
         impl crate::ui::core_pane::MachinePaneConnection for ScriptedPane {
             fn status(&self) -> crate::terminal::core_session::CorePaneStatus {
                 *self.status.lock().expect("status")
+            }
+
+            fn running_version(&self) -> Option<spaceterm_core::update::facts::Version> {
+                self.running_version.lock().expect("version").clone()
+            }
+
+            fn unsent_input(&self) -> Option<crate::terminal::core_session::unsent::UnsentInput> {
+                self.unsent.lock().expect("unsent").clone()
             }
 
             fn startup_pending(&self) -> bool {

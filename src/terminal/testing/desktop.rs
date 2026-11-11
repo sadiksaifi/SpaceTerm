@@ -149,11 +149,21 @@ pub(crate) struct TestTerminalSessionRecords {
     interactive_availability: Rc<RefCell<BTreeMap<usize, crate::terminal::InteractiveInput>>>,
     input_generations: Rc<RefCell<BTreeMap<usize, u64>>>,
     unconfirmed_pastes: Rc<RefCell<BTreeMap<usize, bool>>>,
+    unsent_inputs: Rc<RefCell<BTreeMap<usize, crate::terminal::core_session::unsent::UnsentInput>>>,
     dropped_session_ids: Rc<RefCell<Vec<usize>>>,
     commands: Rc<RefCell<Vec<RecordedCall>>>,
 }
 
 impl TestTerminalSessionRecords {
+    /// The Core refused `input` for an idle restart that did not happen.
+    pub(crate) fn keep_unsent_input(
+        &self,
+        session_id: usize,
+        input: crate::terminal::core_session::unsent::UnsentInput,
+    ) {
+        self.unsent_inputs.borrow_mut().insert(session_id, input);
+    }
+
     pub(crate) fn retain_unconfirmed_paste(&self, session_id: usize) {
         self.unconfirmed_pastes
             .borrow_mut()
@@ -474,6 +484,12 @@ impl Drop for TestTerminalSessionHandle {
 impl TerminalSessionHandle for TestTerminalSessionHandle {
     fn reading_available(&self) -> bool {
         self.reading_available
+    }
+    fn take_unsent_input(&self) -> Option<crate::terminal::core_session::unsent::UnsentInput> {
+        self.records
+            .unsent_inputs
+            .borrow_mut()
+            .remove(&self.session_id)
     }
     fn take_paste_unconfirmed(&self) -> bool {
         self.records

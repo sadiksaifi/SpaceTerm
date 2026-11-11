@@ -10,7 +10,8 @@ pub(crate) const SESSION_ENDED: &str = "Terminal Session Ended";
 /// After a restart without updating.
 pub(crate) const RESTARTED: &str = "SpaceTerm Core restarted.";
 
-/// After a restart into `version` that a person approved.
+/// After a restart into `version` that a person approved, or whose cause this desktop never
+/// saw announced. It claims no cause.
 pub(crate) fn restarted_into(version: &Version) -> String {
     format!("SpaceTerm Core restarted into {version}.")
 }
@@ -19,6 +20,39 @@ pub(crate) fn restarted_into(version: &Version) -> String {
 pub(crate) fn restarted_into_while_idle(version: &Version) -> String {
     format!("SpaceTerm Core restarted into {version} while nothing was running.")
 }
+
+/// A restart's detail, then what became of what the person typed as it began. `not_sent` says
+/// the Core received none of it; otherwise it may have received some.
+pub(crate) fn with_typed_input(detail: &str, not_sent: bool) -> String {
+    let typed = if not_sent {
+        TYPED_NOT_SENT
+    } else {
+        TYPED_UNCONFIRMED
+    };
+    format!("{detail} {typed}")
+}
+
+/// The Core refused what the person typed during the restart, or it never left this desktop.
+pub(crate) const TYPED_NOT_SENT: &str = "What you typed during the restart wasn't sent.";
+
+/// Some of what the person typed during the restart left this desktop unconfirmed.
+pub(crate) const TYPED_UNCONFIRMED: &str =
+    "What you typed during the restart may not have been sent.";
+
+/// A Pane's status after the Core refused input for an idle restart that then did not happen,
+/// so the same Terminal Session runs on.
+pub(crate) fn restart_refused_input(not_sent: bool) -> &'static str {
+    if not_sent {
+        "What you typed wasn't sent. SpaceTerm Core was about to restart."
+    } else {
+        "What you typed may not have been sent. SpaceTerm Core was about to restart."
+    }
+}
+
+/// Copies the kept text to the clipboard. It sends nothing, because the text can hold Return.
+pub(crate) const COPY_TYPED_TEXT: &str = "Copy Typed Text";
+pub(crate) const COPY_TYPED_TEXT_DESCRIPTION: &str =
+    "Copies what you typed to the clipboard without sending it.";
 
 /// After `version` failed to start and the Core went back to its running version.
 pub(crate) fn could_not_restart_into(version: &Version) -> String {

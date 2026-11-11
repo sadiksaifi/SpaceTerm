@@ -21,6 +21,7 @@ mod scrollback;
 mod semantic_equality_tests;
 #[cfg(test)]
 mod tests;
+pub(crate) mod unsent;
 use super::pointer_input::{PointerInput, WheelInput};
 use super::session::clipboard::ClipboardAuthority;
 use super::session::*;
@@ -68,9 +69,12 @@ enum Admission {
 }
 pub(crate) struct CorePaneState {
     status: Mutex<CorePaneStatus>,
-    /// Input explicitly refused at an idle restart's Stop grant. Never replayed to a new shell.
-    unsent_input: Arc<Mutex<Vec<spaceterm_core::protocol::InputEvent>>>,
-    unconfirmed_input: Arc<Mutex<Vec<spaceterm_core::protocol::InputEvent>>>,
+    /// What the person typed that the Core refused or never confirmed, since the Pane last
+    /// attached. Never sent again by itself; the person can copy it.
+    unsent: Arc<Mutex<unsent::Unsent>>,
+    /// A Terminal Session that survived the idle restart grant that refused its input, until
+    /// the Pane's status says so.
+    unsent_notice: Mutex<Option<unsent::UnsentInput>>,
     retaining_input: Arc<AtomicBool>,
     /// Admission settles before a hidden Pane receives its input-enabling screen.
     admission: Mutex<Admission>,
@@ -96,7 +100,8 @@ pub(crate) struct CorePaneState {
     paste_unconfirmed: AtomicBool,
     interaction: Mutex<Interaction>,
     effect_authority: Arc<ClipboardAuthority>,
-    hidden_input: AtomicBool,
+    /// Shared with the link, which keeps no text typed at a hidden prompt.
+    hidden_input: Arc<AtomicBool>,
     reading: Mutex<reading::Reading>,
     accessibility: Mutex<accessibility::RetainedSemantics>,
     accessibility_demand: AtomicBool,
@@ -111,8 +116,8 @@ impl CorePaneState {
     fn new() -> Self {
         Self {
             status: Mutex::new(CorePaneStatus::Connecting),
-            unsent_input: Arc::default(),
-            unconfirmed_input: Arc::default(),
+            unsent: Arc::default(),
+            unsent_notice: Mutex::default(),
             retaining_input: Arc::default(),
             admission: Mutex::new(Admission::Pending),
             controller: Mutex::default(),
@@ -133,7 +138,7 @@ impl CorePaneState {
             connected_epoch: AtomicU64::new(0),
             paste_unconfirmed: AtomicBool::new(false),
             interaction: Mutex::new(Interaction::default()),
-            hidden_input: AtomicBool::new(false),
+            hidden_input: Arc::default(),
             reading: Mutex::default(),
             accessibility: Mutex::default(),
             accessibility_demand: AtomicBool::new(false),
@@ -259,6 +264,51 @@ impl CorePaneState {
     }
     pub(crate) fn start_waiting(&self) -> bool {
         self.start_restored.load(Ordering::Acquire) || self.created_start.load(Ordering::Acquire)
+    }
+    /// What the person typed that the Core refused or never confirmed, since the Pane last
+    /// attached to a Terminal Session.
+    pub(crate) fn unsent_input(&self) -> Option<unsent::UnsentInput> {
+        self.unsent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .input()
+    }
+    /// Keeps the text of `events`, which the Core refused or never confirmed.
+    fn keep_input<'a>(
+        &self,
+        delivery: unsent::Delivery,
+        events: impl IntoIterator<Item = &'a spaceterm_core::protocol::InputEvent>,
+    ) {
+        let hidden = self.hidden_input.load(Ordering::Acquire);
+        self.unsent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keep(delivery, events, hidden);
+    }
+    /// The Pane attached to a Terminal Session. One that survived the idle restart grant that
+    /// refused input says so once in the Pane's status.
+    fn attached_session(&self) {
+        let notice = self
+            .unsent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .attached();
+        *self.unsent_notice.lock().unwrap_or_else(|e| e.into_inner()) = notice;
+    }
+    /// What the Pane's status says once about a Terminal Session that survived the idle restart
+    /// grant that refused its input.
+    fn take_unsent_notice(&self) -> Option<unsent::UnsentInput> {
+        self.unsent_notice
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+    /// The Terminal Session the kept input was for ended or belongs to another client.
+    fn left_session(&self) {
+        self.unsent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .left_session();
     }
     pub(crate) fn start_restored(&self) {
         let status = self.status.lock().unwrap_or_else(|e| e.into_inner());
@@ -1084,6 +1134,9 @@ impl TerminalSessionHandle for PresentationHandle {
     }
     fn take_paste_unconfirmed(&self) -> bool {
         self.state.paste_unconfirmed.swap(false, Ordering::AcqRel)
+    }
+    fn take_unsent_input(&self) -> Option<unsent::UnsentInput> {
+        self.state.take_unsent_notice()
     }
     fn focus_paste_confirmation(&self, id: super::paste::PasteConfirmationId) {
         let mut interaction = self

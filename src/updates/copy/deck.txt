@@ -440,6 +440,24 @@ Stop SpaceTerm Core on penguin? | This ends 1 Terminal Session. SpaceTerm Core s
 Stop SpaceTerm Core on penguin? | This ends 3 Terminal Sessions. SpaceTerm Core stays stopped until you start it again. | Stop, Cancel
 {cant-replace-title} | {cant-replace-message} | OK (dismisses the step)
 
+## Pane after a restart: title | detail, status or button
+
+Button | Copy Typed Text | Copies what you typed to the clipboard without sending it.
+Status | What you typed may not have been sent. SpaceTerm Core was about to restart.
+Status | What you typed wasn't sent. SpaceTerm Core was about to restart.
+Terminal Session Ended | SpaceTerm Core couldn't restart into 0.11.4.
+Terminal Session Ended | SpaceTerm Core couldn't restart into 0.11.4. What you typed during the restart may not have been sent.
+Terminal Session Ended | SpaceTerm Core couldn't restart into 0.11.4. What you typed during the restart wasn't sent.
+Terminal Session Ended | SpaceTerm Core restarted into 0.11.4 while nothing was running.
+Terminal Session Ended | SpaceTerm Core restarted into 0.11.4 while nothing was running. What you typed during the restart may not have been sent.
+Terminal Session Ended | SpaceTerm Core restarted into 0.11.4 while nothing was running. What you typed during the restart wasn't sent.
+Terminal Session Ended | SpaceTerm Core restarted into 0.11.4.
+Terminal Session Ended | SpaceTerm Core restarted into 0.11.4. What you typed during the restart may not have been sent.
+Terminal Session Ended | SpaceTerm Core restarted into 0.11.4. What you typed during the restart wasn't sent.
+Terminal Session Ended | SpaceTerm Core restarted.
+Terminal Session Ended | SpaceTerm Core restarted. What you typed during the restart may not have been sent.
+Terminal Session Ended | SpaceTerm Core restarted. What you typed during the restart wasn't sent.
+
 ## Platform strings: token | macOS | Linux
 
 {cant-replace-message} | SpaceTerm can't replace itself where it is. | Run the SpaceTerm install script to update.
