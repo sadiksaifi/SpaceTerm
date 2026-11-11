@@ -67,8 +67,13 @@ struct Shared {
     receiver_wakeup: Condvar,
 }
 
+pub(super) struct ReceivedOutput {
+    pub(super) output: NativePtyOutput,
+    pub(super) receipt: Option<spaceterm_core::idle_restart::Receipt>,
+}
+
 struct State {
-    queue: VecDeque<NativePtyOutput>,
+    queue: VecDeque<ReceivedOutput>,
     sender_open: bool,
     receiver_open: bool,
     sender_waiting: bool,
@@ -114,7 +119,15 @@ impl ReaderOutputSender {
     /// queue's worth of read-ahead. The queue's capacity is also the worker's batch limit, so the
     /// worker's first batch after a busy period holds the whole burst, as it would without a wait.
     /// Short reads beyond that are a sustained trickle and wait for receipt.
+    #[cfg(test)]
     pub(super) fn send(&self, output: NativePtyOutput) -> Option<NextRead> {
+        self.send_recorded(output, None)
+    }
+    pub(super) fn send_recorded(
+        &self,
+        output: NativePtyOutput,
+        receipt: Option<spaceterm_core::idle_restart::Receipt>,
+    ) -> Option<NextRead> {
         let now = Instant::now();
         let short =
             matches!(&output, NativePtyOutput::Bytes(bytes) if bytes.len() < TRICKLE_READ_BYTES);
@@ -122,7 +135,7 @@ impl ReaderOutputSender {
         let mut state = self
             .shared
             .wait_for_sender(|state| state.queue.len() < capacity)?;
-        state.queue.push_back(output);
+        state.queue.push_back(ReceivedOutput { output, receipt });
         if state.receiver_waiting {
             self.shared.receiver_wakeup.notify_one();
         }
@@ -170,7 +183,11 @@ pub(super) struct ReaderOutputReceiver {
 
 impl ReaderOutputReceiver {
     /// Receives the oldest read, waiting for one while the reader's end is open.
+    #[cfg(test)]
     pub(super) fn recv(&self) -> Result<NativePtyOutput, ReaderOutputClosed> {
+        self.recv_recorded().map(|received| received.output)
+    }
+    pub(super) fn recv_recorded(&self) -> Result<ReceivedOutput, ReaderOutputClosed> {
         let mut state = self.shared.lock();
         loop {
             if let Some(output) = state.queue.pop_front() {

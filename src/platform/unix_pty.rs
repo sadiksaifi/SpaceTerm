@@ -397,9 +397,17 @@ struct ShellSession {
     host: Arc<dyn UnixPtyHost>,
     session: ProcessSessionIdentity,
     foreground: std::sync::Weak<OwnedFd>,
+    activity: Arc<Mutex<Option<spaceterm_core::idle_restart::Activity>>>,
 }
 
 impl SessionProbe for ShellSession {
+    fn activity(&self) -> Option<spaceterm_core::idle_restart::Activity> {
+        self.activity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     fn shell_foreground(&self) -> io::Result<bool> {
         let descriptor = self
             .foreground
@@ -515,6 +523,7 @@ mod ownership_tests {
         ShellSession {
             host: Arc::new(Facts(facts)),
             foreground: std::sync::Weak::new(),
+            activity: Arc::default(),
             session: ProcessSessionIdentity {
                 session: 100,
                 leader: shell.identity,
@@ -555,6 +564,7 @@ mod ownership_tests {
             let probe = ShellSession {
                 host: Arc::new(Facts(vec![(100, leader)])),
                 foreground: std::sync::Weak::new(),
+                activity: Arc::default(),
                 session: ProcessSessionIdentity {
                     session: 100,
                     leader: shell.identity,
@@ -678,6 +688,7 @@ struct SpawnedChild {
 }
 
 struct PtyReader {
+    activity: Arc<Mutex<Option<spaceterm_core::idle_restart::Activity>>>,
     reader: MasterReader,
     readiness: OwnedFd,
     /// Counts every native read, including each one retried after it would block.
@@ -687,7 +698,15 @@ struct PtyReader {
 impl Read for PtyReader {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         loop {
-            let read = self.reader.read(buffer);
+            let activity = self
+                .activity
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let read = match activity {
+                Some(activity) => activity.read(|| self.reader.read(buffer)),
+                None => self.reader.read(buffer),
+            };
             self.counters.record_pty_read(&read);
             match read {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -944,6 +963,14 @@ impl Write for SpawnedPty {
 }
 
 impl NativePtyAdapter for SpawnedPty {
+    fn bind_activity(&mut self, activity: Option<spaceterm_core::idle_restart::Activity>) {
+        *self
+            .probe
+            .activity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = activity;
+    }
+
     fn take_reader(&mut self) -> io::Result<Box<dyn Read + Send>> {
         Self::take_reader(self)
     }
@@ -1151,7 +1178,9 @@ fn spawn_command_in_pty(
             return Err(PtyError::TakeWriter(source.into()));
         }
     };
+    let activity = Arc::new(Mutex::new(None));
     let reader: Box<dyn Read + Send> = Box::new(PtyReader {
+        activity: Arc::clone(&activity),
         reader,
         readiness,
         counters,
@@ -1190,6 +1219,7 @@ fn spawn_command_in_pty(
         session,
         // Failure leaves the read unavailable, which counts as work.
         foreground: foreground.as_ref().map(Arc::downgrade).unwrap_or_default(),
+        activity,
     });
     let termination = Arc::new(ChildTermination::new_with_session(
         host,
@@ -1348,6 +1378,7 @@ mod reader_tests {
         let (readiness, mut ready) = UnixStream::pair().unwrap();
         ready.write_all(&[1]).unwrap();
         let mut reader = PtyReader {
+            activity: Arc::default(),
             reader: MasterReader {
                 inner: Box::new(Scripted(VecDeque::from([
                     Err(io::ErrorKind::WouldBlock.into()),
@@ -2898,6 +2929,7 @@ mod tests {
                 _foreground: None,
                 probe: Arc::new(ShellSession {
                     foreground: std::sync::Weak::new(),
+                    activity: Arc::default(),
                     host: test_host(),
                     session: ProcessSessionIdentity {
                         session: 0,

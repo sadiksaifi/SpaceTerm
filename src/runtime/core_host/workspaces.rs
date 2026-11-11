@@ -1140,6 +1140,14 @@ impl HostCommands for WorkspaceHost {
             .filter_map(CorePaneHost::live_session)
             .collect()
     }
+
+    fn idle_sessions(&self) -> Option<Vec<Arc<dyn spaceterm_core::idle_restart::Session>>> {
+        self.panes
+            .values()
+            .filter(|pane| pane.live_session().is_some())
+            .map(CorePaneHost::idle_session)
+            .collect()
+    }
     fn working(&self) -> u32 {
         let now = Instant::now();
         let working = self
@@ -1327,6 +1335,22 @@ impl HostCommands for WorkspaceHost {
             })
             .ok_or(Refusal::Missing)?
             .scrollback_page(device, connection, lease, read, reply)
+    }
+    fn received_input(
+        &mut self,
+        pane: [u8; 32],
+        lease: &Lease,
+    ) -> Option<spaceterm_core::idle_restart::Receipt> {
+        let host = self
+            .panes
+            .get(&pane)
+            .filter(|host| host.live_session() == Some(lease.session))?;
+        host.pane
+            .as_ref()?
+            .runtime
+            .receipt_activity()
+            .input(Instant::now())
+            .ok()
     }
     fn input_written(&mut self, lease: &Lease, serial: u32) {
         for host in self.panes.values_mut() {

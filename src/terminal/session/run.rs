@@ -40,7 +40,7 @@ impl TerminalRuntime {
         let (reply, receiver) = mpsc::sync_channel(1);
         if let Some(commands) = &self.commands {
             // A stopped worker drops the command and its reply, which disconnects the receiver.
-            let _ = commands.send(Command::Run(command, reply));
+            let _ = self.send_command(commands, Command::Run(command, reply));
         }
         receiver
     }

@@ -124,11 +124,16 @@ pub enum NativePtyOutput {
 }
 
 pub trait NativePtyOutputSink: Send + Sync + 'static {
+    fn activity(&self) -> Option<spaceterm_core::idle_restart::Activity> {
+        None
+    }
     fn publish(&self, output: NativePtyOutput) -> bool;
 }
 
 /// Input writes must be nonblocking and report WouldBlock under PTY backpressure.
 pub trait NativePtyAdapter: Write + Send {
+    fn bind_activity(&mut self, _activity: Option<spaceterm_core::idle_restart::Activity>) {}
+
     fn take_reader(&mut self) -> io::Result<Box<dyn Read + Send>>;
     fn resize(&self, size: NativePtySize) -> Result<(), NativePtyOperationFailure>;
     /// The line discipline's flags and whether the shell owns the foreground. Each read costs a
@@ -146,6 +151,10 @@ pub trait NativePtyAdapter: Write + Send {
 
 /// Reads the processes in one shell's terminal session, apart from the PTY's owner.
 pub trait SessionProbe: Send + Sync {
+    fn activity(&self) -> Option<spaceterm_core::idle_restart::Activity> {
+        None
+    }
+
     /// Reads the PTY foreground now. An unavailable read never proves the shell owns it.
     fn shell_foreground(&self) -> io::Result<bool> {
         Err(io::Error::other("the PTY foreground is unavailable"))
@@ -384,6 +393,7 @@ impl NativePtyOwner {
         let termination_supervisor = close_handle
             .install(Arc::clone(&parts.termination))
             .map_err(|_| NativePtyStartupFailure::LifecycleCoordination)?;
+        parts.adapter.bind_activity(output.activity());
         let reader = parts
             .adapter
             .take_reader()

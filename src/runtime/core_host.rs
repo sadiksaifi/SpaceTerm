@@ -410,6 +410,13 @@ fn nonce() -> Result<[u8; 32], CoreError> {
     Ok(bytes)
 }
 impl CorePaneHost {
+    pub(crate) fn idle_session(&self) -> Option<Arc<dyn spaceterm_core::idle_restart::Session>> {
+        self.pane
+            .as_ref()
+            .filter(|pane| !pane.ended)?
+            .runtime
+            .idle_session()
+    }
     /// Whether this Pane's running Terminal Session has work going on at `now`. A Pane without
     /// one has none.
     pub(crate) fn work_going_on(&self, now: std::time::Instant) -> bool {

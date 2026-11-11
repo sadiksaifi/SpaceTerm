@@ -662,10 +662,35 @@ fn test_launch_planner() -> ShellLaunchPlanner {
 }
 
 impl TerminalRuntime {
+    fn send_command(
+        &self,
+        commands: &CommandSender<Command>,
+        command: Command,
+    ) -> Result<(), mpsc::SendError<Command>> {
+        let records_input = command.kind() == PaneWorkerCommand::Input
+            || matches!(
+                command,
+                Command::Focus(_) | Command::Resize | Command::ClearScreenAndScrollback
+            );
+        let command = if records_input {
+            let Ok(receipt) = self
+                .event_publisher
+                .receipt_activity()
+                .input(Instant::now())
+            else {
+                return Err(mpsc::SendError(command));
+            };
+            Command::Received(Box::new(command), receipt)
+        } else {
+            command
+        };
+        commands.send(command)
+    }
+
     pub(crate) fn forward_copy_shortcut(&self, modifiers: InputModifiers) {
         let (reply, _receiver) = mpsc::sync_channel(1);
         if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::CopyOrForward(modifiers, reply));
+            let _ = self.send_command(commands, Command::CopyOrForward(modifiers, reply));
         }
     }
     /// Applies a server client's accessible Selection endpoints on the worker.
@@ -678,7 +703,7 @@ impl TerminalRuntime {
     ) -> mpsc::Receiver<bool> {
         let (tx, rx) = mpsc::sync_channel(1);
         if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::CoreAccessibilitySelection(selection, tx));
+            let _ = self.send_command(commands, Command::CoreAccessibilitySelection(selection, tx));
         }
         rx
     }
@@ -686,37 +711,36 @@ impl TerminalRuntime {
     /// A later `AccessibilityDemandSender::request` reactivates semantic publication.
     pub(crate) fn end_core_accessibility_demand(&self) {
         if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::EndAccessibilityDemand(Instant::now()));
+            let _ = self.send_command(commands, Command::EndAccessibilityDemand(Instant::now()));
         }
     }
     /// Ends server client accessibility demand and drops the semantic store. The next demand
     /// builds a complete model again, even when the terminal has not changed.
     pub(crate) fn release_core_accessibility(&self) {
         if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::ReleaseAccessibility(Instant::now()));
+            let _ = self.send_command(commands, Command::ReleaseAccessibility(Instant::now()));
         }
     }
     /// Sends application mouse input without starting a server-owned Selection.
     /// Adapter snapshot numbers fence starts; accepted gestures retain their starting snapshot.
     pub fn application_pointer(&self, input: PointerInput, snapshot: u64, current_snapshot: u64) {
         if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::ApplicationPointer(
-                input,
-                snapshot,
-                current_snapshot,
-            ));
+            let _ = self.send_command(
+                commands,
+                Command::ApplicationPointer(input, snapshot, current_snapshot),
+            );
         }
     }
     /// Balances a rejected continuation at the last accepted application pointer position.
     pub fn cancel_application_pointer(&self) {
         if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::CancelApplicationPointer);
+            let _ = self.send_command(commands, Command::CancelApplicationPointer);
         }
     }
     /// Sends application wheel input without moving server-owned Scrollback.
     pub fn application_wheel(&self, input: WheelInput) {
         if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::ApplicationWheel(input));
+            let _ = self.send_command(commands, Command::ApplicationWheel(input));
         }
     }
     pub(crate) fn client_effect_focus(&self, focused: Option<bool>) {
@@ -726,7 +750,7 @@ impl TerminalRuntime {
     /// continued output to at most one screen per frame at this rate.
     pub(crate) fn set_frame_rate(&self, hz: u8) {
         if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::SetFrameRate(hz));
+            let _ = self.send_command(commands, Command::SetFrameRate(hz));
         }
     }
 
@@ -734,7 +758,7 @@ impl TerminalRuntime {
     /// Input. Screens captured once its bytes reach the PTY carry it as `input_serial`.
     pub(crate) fn note_input_serial(&self, serial: u32) {
         if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::InputSerial(serial));
+            let _ = self.send_command(commands, Command::InputSerial(serial));
         }
     }
 
@@ -742,7 +766,7 @@ impl TerminalRuntime {
     /// earlier claim. Call it before any Input of the new claim.
     pub(crate) fn restart_input_serials(&self) {
         if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::RestartInputSerials);
+            let _ = self.send_command(commands, Command::RestartInputSerials);
         }
     }
 
@@ -763,10 +787,13 @@ impl TerminalRuntime {
         let (accessibility_sender, accessibility) = async_channel::bounded(1);
         let (clipboard_sender, clipboard) = async_channel::bounded(1);
         if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::Subscribe {
-                accessibility: accessibility_sender,
-                clipboard: clipboard_sender,
-            });
+            let _ = self.send_command(
+                commands,
+                Command::Subscribe {
+                    accessibility: accessibility_sender,
+                    clipboard: clipboard_sender,
+                },
+            );
         }
         TerminalSubscription {
             events,
@@ -785,7 +812,7 @@ impl TerminalRuntime {
             eprintln!("failed to terminate shell while shutting down terminal worker: {error}");
         }
         if let Some(commands) = self.commands.take()
-            && commands.send(Command::Shutdown).is_err()
+            && self.send_command(&commands, Command::Shutdown).is_err()
         {
             // The worker already stopped, so there is nothing left to signal.
         }
@@ -844,7 +871,7 @@ impl TerminalRuntime {
 
     pub fn key(&self, input: KeyInput) {
         if let Some(commands) = &self.commands
-            && commands.send(Command::Key(input)).is_err()
+            && self.send_command(commands, Command::Key(input)).is_err()
         {
             eprintln!("terminal key input was dropped because the worker has stopped");
         }
@@ -852,7 +879,9 @@ impl TerminalRuntime {
 
     pub fn clear_screen_and_scrollback(&self) {
         if let Some(commands) = &self.commands
-            && commands.send(Command::ClearScreenAndScrollback).is_err()
+            && self
+                .send_command(commands, Command::ClearScreenAndScrollback)
+                .is_err()
         {
             eprintln!("terminal clear was dropped because the worker has stopped");
         }
@@ -861,7 +890,9 @@ impl TerminalRuntime {
     pub fn focus(&self, focused: bool) {
         self.clipboard_authority.focus(focused);
         if let Some(commands) = &self.commands
-            && commands.send(Command::Focus(focused)).is_err()
+            && self
+                .send_command(commands, Command::Focus(focused))
+                .is_err()
         {
             eprintln!("terminal focus input was dropped because the worker has stopped");
         }
@@ -870,7 +901,9 @@ impl TerminalRuntime {
     pub fn focus_paste_confirmation(&self, id: PasteConfirmationId) {
         self.clipboard_authority.focus(false);
         if let Some(commands) = &self.commands
-            && commands.send(Command::FocusPasteConfirmation(id)).is_err()
+            && self
+                .send_command(commands, Command::FocusPasteConfirmation(id))
+                .is_err()
         {
             eprintln!(
                 "terminal paste confirmation focus was dropped because the worker has stopped"
@@ -881,7 +914,8 @@ impl TerminalRuntime {
     pub fn resize(&self, geometry: TerminalGeometry) {
         if let Some(commands) = &self.commands {
             let should_notify = self.schedule_input.enqueue_resize(geometry);
-            let notification_delivered = should_notify && commands.send(Command::Resize).is_ok();
+            let notification_delivered =
+                should_notify && self.send_command(commands, Command::Resize).is_ok();
             if should_notify && !notification_delivered {
                 eprintln!("terminal resize was dropped because the worker has stopped");
             }
@@ -894,8 +928,7 @@ impl TerminalRuntime {
     ) -> async_channel::Receiver<Result<PasteRequestOutcome, String>> {
         let (reply, receiver) = async_channel::bounded(1);
         let sent = self.commands.as_ref().is_some_and(|commands| {
-            commands
-                .send(Command::RequestPaste(text, reply.clone()))
+            self.send_command(commands, Command::RequestPaste(text, reply.clone()))
                 .is_ok()
         });
         if !sent {
@@ -913,8 +946,7 @@ impl TerminalRuntime {
     ) -> async_channel::Receiver<Result<PasteResolution, String>> {
         let (reply, receiver) = async_channel::bounded(1);
         let sent = self.commands.as_ref().is_some_and(|commands| {
-            commands
-                .send(Command::ResolvePaste(id, decision, reply.clone()))
+            self.send_command(commands, Command::ResolvePaste(id, decision, reply.clone()))
                 .is_ok()
         });
         if !sent {
@@ -938,7 +970,9 @@ impl TerminalRuntime {
 
     pub fn set_presentable(&self, presentable: bool) {
         if let Some(commands) = &self.commands
-            && commands.send(Command::SetPresentable(presentable)).is_err()
+            && self
+                .send_command(commands, Command::SetPresentable(presentable))
+                .is_err()
         {
             eprintln!("terminal presentation state was dropped because the worker has stopped");
         }
@@ -949,7 +983,9 @@ impl TerminalRuntime {
             return;
         };
         if self.schedule_input.enqueue_terminal_appearance(update)
-            && commands.send(Command::AppearanceChanged).is_err()
+            && self
+                .send_command(commands, Command::AppearanceChanged)
+                .is_err()
         {
             eprintln!("terminal appearance update was dropped because the worker has stopped");
         }
@@ -968,10 +1004,15 @@ struct ReaderTransport {
 }
 
 impl ReaderTransport {
-    fn new(commands: CommandSender<Command>, clipboard_authority: Arc<ClipboardAuthority>) -> Self {
+    fn new(
+        commands: CommandSender<Command>,
+        clipboard_authority: Arc<ClipboardAuthority>,
+        activity: spaceterm_core::idle_restart::Activity,
+    ) -> Self {
         let (events, event_rx) = reader_output::reader_output(PTY_OUTPUT_QUEUE_CAPACITY);
         Self {
             output: Arc::new(TerminalSessionNativePtyOutputSink {
+                activity: Some(activity),
                 commands,
                 events,
                 clipboard_authority,
@@ -986,16 +1027,24 @@ impl ReaderTransport {
 }
 
 struct TerminalSessionNativePtyOutputSink {
+    activity: Option<spaceterm_core::idle_restart::Activity>,
     clipboard_authority: Arc<ClipboardAuthority>,
     commands: CommandSender<Command>,
     events: ReaderOutputSender,
 }
 
 impl NativePtyOutputSink for TerminalSessionNativePtyOutputSink {
+    fn activity(&self) -> Option<spaceterm_core::idle_restart::Activity> {
+        self.activity.clone()
+    }
     fn publish(&self, output: NativePtyOutput) -> bool {
         // ReaderReady orders bounded PTY output against the reliable control command lane.
         let epoch = self.clipboard_authority.output_epoch();
-        let Some(next_read) = self.events.send(output) else {
+        let receipt = self
+            .activity
+            .as_ref()
+            .and_then(|activity| activity.output_receipt());
+        let Some(next_read) = self.events.send_recorded(output, receipt) else {
             return false;
         };
         // The wait comes after ReaderReady, so the worker learns of every read it must receive.
@@ -1005,11 +1054,13 @@ impl NativePtyOutputSink for TerminalSessionNativePtyOutputSink {
 }
 
 struct ReaderEventBatch {
+    receipts: Vec<spaceterm_core::idle_restart::Receipt>,
     chunks: Vec<(Vec<u8>, Option<u64>)>,
     reader_stopped: Option<Option<crate::platform::native_pty::NativePtyReadFailure>>,
 }
 
 enum Command {
+    Received(Box<Command>, spaceterm_core::idle_restart::Receipt),
     ReadScrollback(scrollback::ScrollbackRead),
     /// Writes one command at the owning shell's empty prompt, or refuses it.
     Run(String, RunReply),
@@ -1081,6 +1132,9 @@ impl Command {
     /// Semantic construction never does: it binds to the last published presentation, so
     /// demanding semantics adds no frames ahead of the pacing deadline (ADR 0062).
     fn requires_presentation_barrier(&self) -> bool {
+        if let Self::Received(command, _) = self {
+            return command.requires_presentation_barrier();
+        }
         matches!(
             self,
             Self::ApplicationPointer(..) | Self::CoreAccessibilitySelection(..)
@@ -1088,8 +1142,9 @@ impl Command {
     }
 
     /// The Terminal Diagnostics kind of this command.
-    const fn kind(&self) -> PaneWorkerCommand {
+    fn kind(&self) -> PaneWorkerCommand {
         match self {
+            Self::Received(command, _) => command.kind(),
             Self::ReaderReady(_) | Self::ResumeOutput(_) => PaneWorkerCommand::Output,
             Self::Run(..)
             | Self::Key(..)
@@ -1136,6 +1191,7 @@ impl fmt::Debug for Command {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
             Self::ReadScrollback(..) => "ReadScrollback",
+            Self::Received(..) => "Received",
             Self::Run(..) => "Run",
             Self::CoreAccessibilitySelection(..) => "CoreAccessibilitySelection",
             Self::EndAccessibilityDemand(..) => "EndAccessibilityDemand",
@@ -1591,6 +1647,11 @@ impl TerminalWorker {
 
     fn process_command(&mut self, command: Command) -> bool {
         match command {
+            Command::Received(command, _receipt) => {
+                let result = self.process_command(*command);
+                self.note_activity();
+                result
+            }
             Command::ReadScrollback(read) => self.read_scrollback(read),
             Command::Run(command, reply) => self.process_run(&command, reply),
             Command::CoreAccessibilitySelection(selection, reply) => {
@@ -1957,12 +2018,14 @@ impl TerminalWorker {
             }
         };
         let ReaderEventBatch {
+            receipts: _receipts,
             chunks,
             reader_stopped,
         } = batch;
         if !self.process_output_chunks(chunks) {
             return false;
         }
+        self.note_activity();
 
         if let Some(read_error) = reader_stopped {
             if self.clipboard.pending() {
@@ -2001,21 +2064,28 @@ impl TerminalWorker {
         mut epoch: Option<u64>,
     ) -> Result<(ReaderEventBatch, bool), TerminalFailure> {
         let mut batch = ReaderEventBatch {
+            receipts: Vec::with_capacity(limit),
             chunks: Vec::with_capacity(limit),
             reader_stopped: None,
         };
         let mut commands_open = true;
 
         for index in 0..limit {
-            match self.reader_events.recv() {
-                Ok(NativePtyOutput::Bytes(bytes)) => batch.chunks.push((bytes, epoch)),
-                Ok(NativePtyOutput::Stopped(read_error)) => {
-                    batch.reader_stopped = Some(read_error);
-                    break;
-                }
+            let output = match self.reader_events.recv_recorded() {
+                Ok(output) => output,
                 Err(_) => {
                     return Err(TerminalFailure::pty("receive-shell-output")
                         .with_reason(FailureReason::ChannelClosed));
+                }
+            };
+            if let Some(receipt) = output.receipt {
+                batch.receipts.push(receipt);
+            }
+            match output.output {
+                NativePtyOutput::Bytes(bytes) => batch.chunks.push((bytes, epoch)),
+                NativePtyOutput::Stopped(read_error) => {
+                    batch.reader_stopped = Some(read_error);
+                    break;
                 }
             }
 
@@ -2366,8 +2436,12 @@ impl TerminalWorker {
 
     /// Records input or output for the work-going-on predicate.
     fn note_activity(&self) {
-        self.events
-            .note_activity(Instant::now(), self.emulator.at_empty_prompt());
+        self.events.note_activity(
+            Instant::now(),
+            self.emulator.at_empty_prompt()
+                && self.input.deadline().is_none()
+                && !self.clipboard.pending(),
+        );
     }
 
     fn flush_input(&mut self) -> bool {

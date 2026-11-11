@@ -1313,6 +1313,7 @@ fn bounded_output_should_preserve_the_control_lane_and_unblock_the_producer() {
     let (attempted, attempts) = mpsc::channel();
     let (completed, completions) = mpsc::channel();
     let output = TerminalSessionNativePtyOutputSink {
+        activity: None,
         clipboard_authority: Arc::default(),
         commands: command_tx.clone(),
         events: reader_events,
@@ -1367,6 +1368,7 @@ fn a_trickling_shell_gets_one_read_per_worker_receive() {
     let (command_tx, commands) = mpsc::channel();
     let (reader_events, reader_event_rx) = reader_output::reader_output(PTY_OUTPUT_QUEUE_CAPACITY);
     let output = TerminalSessionNativePtyOutputSink {
+        activity: None,
         clipboard_authority: Arc::default(),
         commands: command_tx,
         events: reader_events,
@@ -1425,6 +1427,7 @@ fn a_short_burst_after_idle_reaches_the_first_frame_after_a_busy_worker() {
     let (command_tx, commands) = mpsc::channel();
     let (reader_events, reader_event_rx) = reader_output::reader_output(PTY_OUTPUT_QUEUE_CAPACITY);
     let output = TerminalSessionNativePtyOutputSink {
+        activity: None,
         clipboard_authority: Arc::default(),
         commands: command_tx.clone(),
         events: reader_events,
@@ -3553,7 +3556,7 @@ fn rapid_resizes_should_queue_one_notification_and_retain_only_the_latest_geomet
 
     assert_eq!(
         (
-            matches!(receiver.try_recv(), Ok(Command::Resize)),
+            matches!(receiver.try_recv(), Ok(command) if command.kind() == PaneWorkerCommand::Client),
             receiver.try_recv().is_err(),
             schedules.take_resize(),
         ),
@@ -5337,4 +5340,82 @@ fn fresh_foreground_overrides_the_published_line_mode() {
         assert!(worker.events.work_going_on(now));
     }
     worker.finish();
+}
+
+#[test]
+fn runtime_receipts_in_an_earlier_or_later_session_refuse_a_paused_scan() {
+    use spaceterm_core::idle_restart::{Lease, Session};
+    struct Probe {
+        pause: Option<Arc<std::sync::Barrier>>,
+    }
+    impl crate::platform::native_pty::SessionProbe for Probe {
+        fn shell_foreground(&self) -> io::Result<bool> {
+            Ok(true)
+        }
+        fn others(&self) -> io::Result<bool> {
+            if let Some(pause) = &self.pause {
+                pause.wait();
+                pause.wait();
+            }
+            Ok(false)
+        }
+    }
+    for paused in 0..2 {
+        for changed in 0..2 {
+            for output in [false, true] {
+                let pause = Arc::new(std::sync::Barrier::new(2));
+                let mut workers = [
+                    idle_worker(SHELL_FOREGROUND, Some(false)),
+                    idle_worker(SHELL_FOREGROUND, Some(false)),
+                ];
+                for (index, worker) in workers.iter_mut().enumerate() {
+                    shows(worker, OWNED_PROMPT);
+                    worker.events.set_probe(Some(Arc::new(Probe {
+                        pause: (index == paused).then(|| pause.clone()),
+                    })));
+                }
+                let observations = workers
+                    .iter()
+                    .map(|worker| Arc::new(worker.events.clone()) as Arc<dyn Session>)
+                    .collect::<Vec<_>>();
+                let now = Instant::now() + IDLE_PERIOD * 2;
+                let scan = thread::spawn(move || Lease::scan(&observations, now, IDLE_PERIOD));
+                pause.wait();
+                let publisher = workers[changed].events.clone();
+                let (commands, _input) = mpsc::channel();
+                if output {
+                    let (events, _reader) = reader_output::reader_output(PTY_OUTPUT_QUEUE_CAPACITY);
+                    let activity = publisher.receipt_activity();
+                    activity.read(|| Ok(OWNED_PROMPT.len())).unwrap();
+                    let sink = TerminalSessionNativePtyOutputSink {
+                        activity: Some(activity),
+                        clipboard_authority: Arc::default(),
+                        commands,
+                        events,
+                    };
+                    assert!(sink.publish(NativePtyOutput::Bytes(OWNED_PROMPT.to_vec())));
+                } else {
+                    let runtime = TerminalRuntime {
+                        metadata_state: Default::default(),
+                        commands: Some(commands),
+                        worker: None,
+                        native_pty_close: None,
+                        cleanup_confirmation: None,
+                        schedule_input: Default::default(),
+                        event_publisher: publisher,
+                        clipboard_authority: Arc::default(),
+                    };
+                    runtime.key(text_key(KeyAction::Press));
+                }
+                pause.wait();
+                assert!(
+                    scan.join().unwrap().is_none(),
+                    "paused={paused}, changed={changed}, output={output}"
+                );
+                for worker in workers {
+                    worker.finish();
+                }
+            }
+        }
+    }
 }

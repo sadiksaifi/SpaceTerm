@@ -336,3 +336,60 @@ impl Drop for ShellStartupDirectory {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
+
+#[test]
+fn a_real_integrated_shell_needs_a_quiet_hour_and_receives_input_after_a_lease() {
+    const NAME: &str = "terminal::session::unix_adapter_tests::a_real_integrated_shell_needs_a_quiet_hour_and_receives_input_after_a_lease";
+    let _isolation = crate::platform::unix_pty::lock_real_pty_test();
+    if crate::platform::unix_pty::isolate_real_pty_test(NAME) {
+        return;
+    }
+    let startup = ShellStartupDirectory::new();
+    let (session, events, _) = TerminalRuntime::start(
+        native_pty_adapter_factory(),
+        test_launch_planner(startup.path()),
+        test_geometry(),
+        &std::env::current_dir().unwrap(),
+        Some("fixture.test"),
+        LocalFilesystemAuthority::testing(),
+        Arc::default(),
+    )
+    .unwrap();
+    let session = JoinedRealPtySession(session);
+    wait_for_shell_prompt(&session, &events);
+    let observed = session.idle_session().expect("native receipt tracking");
+    assert!(
+        observed
+            .activity()
+            .generation()
+            .is_some_and(|generation| generation > 0),
+        "the real PTY read stamped output"
+    );
+    let hour = spaceterm_core::service::updates::IDLE_PERIOD;
+    assert!(
+        spaceterm_core::idle_restart::Lease::scan(
+            &[observed.clone()],
+            Instant::now() + hour / 2,
+            hour
+        )
+        .is_none()
+    );
+    let deadline = Instant::now() + REAL_SHELL_DEADLINE;
+    let lease = loop {
+        if let Some(lease) = spaceterm_core::idle_restart::Lease::scan(
+            &[observed.clone()],
+            Instant::now() + hour * 2,
+            hour,
+        ) {
+            break lease;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the integrated shell never became bare at its empty prompt"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    session.key(KeyInput::input_method_commit("x"));
+    assert_eq!(lease.grant(), Err(spaceterm_core::idle_restart::Restarting));
+    lease.release();
+}

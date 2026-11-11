@@ -1,6 +1,5 @@
-//! Observations of work in a Terminal Session (ADR 0065). The worker records input and output;
-//! callers read fresh native facts on demand. These observations do not fence queued activity
-//! or authorize an idle restart.
+//! Work observations and receipt generations for the idle-restart lease of ADR 0065.
+//! The native reader and host admission stamp activity before worker processing.
 use super::*;
 use crate::platform::native_pty::SessionProbe;
 use std::io;
@@ -10,13 +9,24 @@ use std::io;
 pub(crate) const IDLE_PERIOD: Duration = spaceterm_core::service::updates::IDLE_PERIOD;
 
 /// What the worker last recorded for the work-going-on predicate.
-#[derive(Default)]
 pub(super) struct ActivityState {
+    pub(super) receipt: spaceterm_core::idle_restart::Activity,
     /// The last input to the PTY or output from it. None before the first.
     last: Option<Instant>,
     /// The owning shell waited at its own empty prompt after `last`.
     empty_prompt: bool,
     probe: Option<Arc<dyn SessionProbe>>,
+}
+
+impl Default for ActivityState {
+    fn default() -> Self {
+        Self {
+            receipt: spaceterm_core::idle_restart::Activity::new(Instant::now()),
+            last: None,
+            empty_prompt: false,
+            probe: None,
+        }
+    }
 }
 
 impl ActivityState {
@@ -47,15 +57,42 @@ pub(super) fn work_going_on(
 }
 
 impl TerminalRuntime {
+    pub(crate) fn receipt_activity(&self) -> spaceterm_core::idle_restart::Activity {
+        self.event_publisher.receipt_activity()
+    }
+    pub(crate) fn idle_session(&self) -> Option<Arc<dyn spaceterm_core::idle_restart::Session>> {
+        let state = self
+            .event_publisher
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        state.activity.probe.as_ref()?.activity()?;
+        drop(state);
+        Some(Arc::new(self.event_publisher.clone()))
+    }
+
     /// Whether this Terminal Session has work going on at `now`, by [`work_going_on`]. A
     /// stopped Terminal Session, a platform without process facts, and a shell without
     /// prompt markers count as work.
     pub(crate) fn work_going_on(&self, now: Instant) -> bool {
-        self.event_publisher.work_going_on(now)
+        !self
+            .event_publisher
+            .receipt_activity()
+            .quiet(now, IDLE_PERIOD)
+            || self.event_publisher.work_going_on(now)
     }
 }
 
 impl TerminalEventPublisher {
+    pub(super) fn receipt_activity(&self) -> spaceterm_core::idle_restart::Activity {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .activity
+            .receipt
+            .clone()
+    }
+
     /// A no-work observation requires fresh foreground and process reads. The published line mode
     /// and an earlier absence of processes cannot prove that a session is still quiet.
     pub(super) fn work_going_on(&self, now: Instant) -> bool {
@@ -154,5 +191,14 @@ mod tests {
         };
         assert!(work_going_on(HOUR, false, true, probe));
         assert!(!read.get());
+    }
+}
+
+impl spaceterm_core::idle_restart::Session for TerminalEventPublisher {
+    fn activity(&self) -> spaceterm_core::idle_restart::Activity {
+        self.receipt_activity()
+    }
+    fn working(&self, now: Instant) -> bool {
+        !self.receipt_activity().quiet(now, IDLE_PERIOD) || self.work_going_on(now)
     }
 }

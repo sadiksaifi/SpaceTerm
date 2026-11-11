@@ -288,6 +288,10 @@ pub trait HostCommands: Send {
     fn working(&self) -> u32 {
         u32::try_from(self.sessions().len()).unwrap_or(u32::MAX)
     }
+    fn idle_sessions(&self) -> Option<Vec<Arc<dyn spaceterm_core::idle_restart::Session>>> {
+        None
+    }
+
     /// The Terminal Diagnostics counters this host's Terminal Sessions and publications record
     /// into.
     fn terminal_counters(&self) -> Arc<spaceterm_core::diagnostics::TerminalCounters>;
@@ -358,6 +362,14 @@ pub trait HostCommands: Send {
     fn view(&mut self, lease: &Lease, visible: bool, max_hz: u8);
     /// Marks the end of Input `serial`, so screens captured once its bytes reach the PTY carry it.
     fn input_written(&mut self, lease: &Lease, serial: u32);
+    fn received_input(
+        &mut self,
+        _pane: [u8; 32],
+        _lease: &Lease,
+    ) -> Option<spaceterm_core::idle_restart::Receipt> {
+        None
+    }
+
     /// A channel was bound to `lease`, and its Input serials start at 1. Screens report no serial
     /// of an earlier binding.
     fn restart_input(&mut self, lease: &Lease);
@@ -1305,6 +1317,15 @@ impl<H: HostCommands> ConnectionService for Served<H> {
         self.bell.ring();
         dispatch
     }
+    fn received_input(
+        &mut self,
+        peer: &Peer,
+        input: &protocol::Input,
+    ) -> Option<spaceterm_core::idle_restart::Receipt> {
+        let bound = self.bound(peer, input.channel)?;
+        let (pane, lease) = (bound.pane, bound.lease);
+        self.host.received_input(pane, &lease)
+    }
     fn input(&mut self, peer: &Peer, input: protocol::Input) {
         self.input_message(peer, input);
     }
@@ -1435,6 +1456,17 @@ impl<H: HostCommands> ConnectionService for Served<H> {
     }
     fn working(&self) -> u32 {
         self.host.working()
+    }
+    fn idle_sessions(&self) -> Option<Vec<Arc<dyn spaceterm_core::idle_restart::Session>>> {
+        if self.connections.values().any(|connection| {
+            connection
+                .channels
+                .values()
+                .any(|bound| bound.paste.is_some())
+        }) {
+            return None;
+        }
+        self.host.idle_sessions()
     }
 }
 
