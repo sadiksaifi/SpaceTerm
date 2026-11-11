@@ -1052,6 +1052,35 @@ fn a_failed_download_from_check_for_updates_opens_d6(cx: &mut gpui::TestAppConte
     );
 }
 
+/// Check for Updates while SpaceTerm's row shows a download failure answers with that failure's
+/// D6, the state the pill and the row report, instead of a check whose alert says the release is
+/// downloading. Its Try Again downloads.
+#[gpui::test]
+fn check_for_updates_after_a_failed_download_opens_its_d6(cx: &mut gpui::TestAppContext) {
+    let (adapter, _, visual) = failed_check(UpdateError::Download, cx);
+    click("modal-action-update-explain-cancel", visual);
+    assert!(!alert_open(visual));
+    let (checks, downloads) = (adapter.checks.get(), adapter.downloads.get());
+
+    visual.update(|_, cx| cx.defer(crate::ui::updates::check_for_updates));
+    visual.run_until_parked();
+    let tree = A11yTree::read(visual);
+    tree.text("Couldn't Download SpaceTerm 0.4.2");
+    tree.text("Check your network, then try again.");
+    assert!(tree.find("SpaceTerm 0.4.2 Is Downloading").is_none());
+    assert_eq!(adapter.checks.get(), checks, "the alert answers by itself");
+
+    click("modal-action-update-explain-proceed", visual);
+    visual.run_until_parked();
+    adapter.emit(UpdateEvent::Available(version()));
+    visual.run_until_parked();
+    assert_eq!(
+        adapter.downloads.get(),
+        downloads + 1,
+        "Try Again downloads"
+    );
+}
+
 /// While a Core is too new for this SpaceTerm, Cancel on D6 hides only the failure: the hard
 /// stop's `Download Update` stays in the main area.
 #[gpui::test]

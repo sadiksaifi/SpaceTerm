@@ -195,6 +195,19 @@ fn check_for_updates(cx: &mut App) {
         return;
     }
     let state = updates.read(cx).state().clone();
+    // A download failure the row shows answers with its own D6, as `Update Failed` does, so the
+    // alert never reports a retry the pill and the row don't show. Its Try Again checks and
+    // downloads again.
+    if matches!(state, UpdateState::Failed { .. })
+        && let Some(explanation) = download_failure(cx)
+    {
+        commands::perform(
+            Command::Explain(explanation),
+            commands::Presenter::Front,
+            cx,
+        );
+        return;
+    }
     match state {
         UpdateState::Unavailable => present_in_front_window(cx, |window, cx| {
             present_failure(UpdateError::Unavailable, window, cx)
@@ -223,6 +236,14 @@ fn check_for_updates(cx: &mut App) {
         // SpaceTerm is relaunching. The relaunch deadline reports it if it doesn't quit.
         UpdateState::Installing { .. } => {}
     }
+}
+
+/// D6 for the failed download SpaceTerm's row shows, if it shows one.
+fn download_failure(cx: &App) -> Option<state::Explanation> {
+    let app = state::current(cx).app;
+    matches!(app.stage, state::AppStage::DownloadFailed { .. })
+        .then(|| dialogs::app_failure(&app))
+        .flatten()
 }
 
 fn request_install(updates: &Entity<ApplicationUpdates>, request: InstallRequest, cx: &mut App) {
