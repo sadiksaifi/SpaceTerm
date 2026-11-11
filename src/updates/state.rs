@@ -114,6 +114,8 @@ pub(crate) struct AppRow {
     /// The downloaded release a scheduled check replaces. While that check runs, downloads by
     /// itself or retries by itself, the main area keeps its Relaunch; the row tells the work.
     pub(crate) replacing: Option<SharedString>,
+    /// The person dismissed the failure's title-bar step on this desktop. The row keeps it.
+    pub(crate) dismissed: bool,
 }
 
 /// SpaceTerm's update, as the person sees it.
@@ -344,6 +346,8 @@ pub(crate) struct AppFacts<'a> {
     pub(crate) retrying: bool,
     /// The downloaded release a scheduled check replaces, while it does.
     pub(crate) replacing: Option<&'a str>,
+    /// The person dismissed the current failure on this desktop.
+    pub(crate) failure_dismissed: bool,
 }
 
 /// What only this desktop knows about the Machines, from the shared store.
@@ -577,6 +581,7 @@ impl AppRow {
             notes: facts.notes,
             too_old_for,
             replacing,
+            dismissed: facts.failure_dismissed,
         }
     }
 
@@ -602,7 +607,7 @@ impl AppRow {
             AppStage::DownloadFailed { retries: true, .. } => None,
             AppStage::DownloadFailed { retries: false, .. }
             | AppStage::RelaunchFailed { .. }
-            | AppStage::CantReplace => Some(Step::Failed(Target::App)),
+            | AppStage::CantReplace => (!self.dismissed).then_some(Step::Failed(Target::App)),
         }
     }
 
@@ -972,6 +977,7 @@ pub(crate) fn current(cx: &App) -> UpdateView {
                 download_asked: updates.download_asked(),
                 retrying: updates.retries_download(),
                 replacing: updates.replaces_download(),
+                failure_dismissed: updates.failure_dismissed(),
             }
         }
         None => AppFacts {
@@ -986,6 +992,7 @@ pub(crate) fn current(cx: &App) -> UpdateView {
             download_asked: false,
             retrying: false,
             replacing: None,
+            failure_dismissed: false,
         },
     };
     let none = HashMap::new();

@@ -229,6 +229,8 @@ struct UpdateModel {
     /// take back. Until the updater ends its cycle, every quit is that relaunch.
     relaunch_released: bool,
     manual_check: bool,
+    /// How many failures this run reported, which names the current one.
+    failures: u64,
 }
 
 impl UpdateModel {
@@ -248,7 +250,13 @@ impl UpdateModel {
             installer_held: false,
             relaunch_released: false,
             manual_check: false,
+            failures: 0,
         }
+    }
+
+    fn fail(&mut self, error: UpdateError) {
+        self.failures += 1;
+        self.state = UpdateState::Failed { error };
     }
 
     fn begin_check(&mut self, manual: bool) -> bool {
@@ -364,9 +372,7 @@ impl UpdateModel {
         match event {
             UpdateEvent::Available(version) if matches!(self.state, UpdateState::Checking) => {
                 if stable_version(&version).is_none() {
-                    self.state = UpdateState::Failed {
-                        error: UpdateError::Verification,
-                    };
+                    self.fail(UpdateError::Verification);
                     return Some(UpdateNotice::Failed);
                 }
                 self.version = Some(version.clone());
@@ -411,7 +417,7 @@ impl UpdateModel {
                 let visible = self.manual_check
                     || (self.version.is_some() && error != UpdateError::SystemTooOld);
                 self.install_authorized = false;
-                self.state = UpdateState::Failed { error };
+                self.fail(error);
                 return visible.then_some(UpdateNotice::Failed);
             }
             _ => {}
@@ -424,7 +430,7 @@ impl UpdateModel {
     fn fail_relaunch(&mut self, error: UpdateError) {
         self.install_authorized = false;
         self.installer_held = self.cycle_active;
-        self.state = UpdateState::Failed { error };
+        self.fail(error);
     }
 
     /// Approves the relaunch again after it failed while the updater still holds its installer.
@@ -575,6 +581,9 @@ pub(crate) struct ApplicationUpdates {
     /// finishes, SpaceTerm is current, a different release is found, or they dismiss it or
     /// stop a try, so no later try dates it.
     own_download_failed: bool,
+    /// The failure the person dismissed on this desktop, by [`UpdateModel::failures`]. Its
+    /// title-bar step stays hidden until a newer failure replaces it.
+    dismissed_failure: Option<u64>,
     download_requested: bool,
     /// The person chose Relaunch before the release was ready, so it relaunches once it is.
     relaunch_requested: bool,
@@ -724,6 +733,7 @@ impl ApplicationUpdates {
                 automatic_download: false,
                 retrying_since: None,
                 own_download_failed: false,
+                dismissed_failure: None,
                 download_requested: false,
                 relaunch_requested: false,
                 replacing: None,
@@ -1149,15 +1159,23 @@ impl ApplicationUpdates {
         self.model.installer_held
     }
 
-    /// Clears a failed download or installation. The release stays pending, and the next
-    /// scheduled check tries again. An installer the updater already holds stays held.
+    /// Hides the current failure's title-bar step on this desktop. The failure, its Try Again
+    /// and an installer the updater already holds all stay, so every row keeps showing the
+    /// failure until newer updater facts replace it. SpaceTerm's next try by itself is quiet
+    /// again.
     pub(crate) fn dismiss_failure(&mut self, cx: &mut Context<Self>) {
         if matches!(self.model.state, UpdateState::Failed { .. }) {
-            self.model.state = UpdateState::Idle;
+            self.dismissed_failure = Some(self.model.failures);
             self.retrying_since = None;
             self.own_download_failed = false;
             cx.notify();
         }
+    }
+
+    /// Whether the person dismissed the current failure on this desktop.
+    pub(crate) fn failure_dismissed(&self) -> bool {
+        matches!(self.model.state, UpdateState::Failed { .. })
+            && self.dismissed_failure == Some(self.model.failures)
     }
 
     fn receive(&mut self, event: UpdateEvent, cx: &mut Context<Self>) {

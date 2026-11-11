@@ -97,6 +97,7 @@ pub(crate) fn app(state: &UpdateState) -> AppFacts<'_> {
         download_asked: false,
         retrying: false,
         replacing: None,
+        failure_dismissed: false,
     }
 }
 

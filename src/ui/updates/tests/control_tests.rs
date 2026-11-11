@@ -891,25 +891,139 @@ fn failed_relaunch(
     (adapter, updates, visual)
 }
 
+/// SpaceTerm's own update as the title bar and every row show it: the main area's label, then
+/// the row's status and action.
+fn app_shown(cx: &mut gpui::VisualTestContext) -> (Option<String>, String, Option<String>) {
+    cx.update(|_, cx| {
+        let view = state::current(cx);
+        let row = view.app_row();
+        (
+            view.pill().map(|pill| pill.label.to_string()),
+            row.status
+                .map(|status| status.to_string())
+                .unwrap_or_default(),
+            row.action.map(|action| action.label.to_string()),
+        )
+    })
+}
+
+fn failed_step(status: &str, action: Option<&str>) -> (Option<String>, String, Option<String>) {
+    (
+        Some(crate::updates::copy::title_bar::UPDATE_FAILED.to_owned()),
+        status.to_owned(),
+        action.map(str::to_owned),
+    )
+}
+
+fn dismissed_step(status: &str, action: Option<&str>) -> (Option<String>, String, Option<String>) {
+    (None, status.to_owned(), action.map(str::to_owned))
+}
+
+/// Cancel on D7 hides only the failure's title-bar step on this desktop. The updater keeps its
+/// failure and its installer, and the row keeps the failure with its Try Again.
 #[gpui::test]
-fn cancel_on_a_failed_relaunch_dismisses_its_step(cx: &mut gpui::TestAppContext) {
+fn cancel_on_a_failed_relaunch_dismisses_only_its_step(cx: &mut gpui::TestAppContext) {
     let (adapter, updates, visual) = failed_relaunch(cx);
-    click("modal-action-update-explain-cancel", visual);
-    assert!(
-        !relaunch_failed(&updates, visual),
-        "the failure no longer holds the title bar"
+    assert_eq!(
+        app_shown(visual),
+        failed_step("Couldn't relaunch", Some("Try Again"))
     );
+    click("modal-action-update-explain-cancel", visual);
+    assert_eq!(
+        app_shown(visual),
+        dismissed_step("Couldn't relaunch", Some("Try Again")),
+        "the row keeps the failure"
+    );
+    assert!(relaunch_failed(&updates, visual), "the updater keeps it");
     assert_eq!(adapter.installations.get(), 1, "Cancel relaunches nothing");
 }
 
 #[gpui::test]
-fn escape_on_a_failed_relaunch_dismisses_its_step(cx: &mut gpui::TestAppContext) {
+fn escape_on_a_failed_relaunch_dismisses_only_its_step(cx: &mut gpui::TestAppContext) {
     let (adapter, updates, visual) = failed_relaunch(cx);
     visual.simulate_keystrokes("escape");
     visual.run_until_parked();
     assert!(!alert_open(visual));
-    assert!(!relaunch_failed(&updates, visual));
+    assert_eq!(
+        app_shown(visual),
+        dismissed_step("Couldn't relaunch", Some("Try Again"))
+    );
+    assert!(relaunch_failed(&updates, visual));
     assert_eq!(adapter.installations.get(), 1, "Escape relaunches nothing");
+}
+
+/// Check for Updates fails with `error` for release 0.4.2, which an earlier check found.
+fn failed_check(
+    error: UpdateError,
+    cx: &mut gpui::TestAppContext,
+) -> (
+    Rc<crate::updates::testing::RecordingAdapter>,
+    Entity<ApplicationUpdates>,
+    &mut gpui::VisualTestContext,
+) {
+    let (adapter, updates, _) = services(cx);
+    cx.update(crate::ui::updates::init);
+    let visual = workspace(cx);
+    updates.update(visual, |updates, cx| updates.check(false, cx));
+    adapter.emit(UpdateEvent::Available(version()));
+    adapter.emit(UpdateEvent::Finished);
+    visual.run_until_parked();
+    visual.update(|_, cx| cx.defer(crate::ui::updates::check_for_updates));
+    visual.run_until_parked();
+    adapter.emit(UpdateEvent::Failed(error));
+    adapter.emit(UpdateEvent::Finished);
+    visual.run_until_parked();
+    (adapter, updates, visual)
+}
+
+/// A failed Check for Updates opens the same D6 as `Update Failed`, never `Couldn't Check for
+/// Updates`. Cancel then hides only the title-bar step.
+#[gpui::test]
+fn a_failed_download_from_check_for_updates_opens_d6(cx: &mut gpui::TestAppContext) {
+    let (adapter, _, visual) = failed_check(UpdateError::Download, cx);
+    let tree = A11yTree::read(visual);
+    tree.text("Couldn't Download SpaceTerm 0.4.2");
+    tree.text("Check your network, then try again.");
+    tree.node("Try Again");
+    tree.node("Cancel");
+    assert!(tree.find("Couldn't Check for Updates").is_none());
+    assert_eq!(
+        app_shown(visual),
+        failed_step("Couldn't download 0.4.2", Some("Try Again"))
+    );
+
+    let downloads = adapter.downloads.get();
+    click("modal-action-update-explain-cancel", visual);
+    assert!(!alert_open(visual));
+    assert_eq!(
+        app_shown(visual),
+        dismissed_step("Couldn't download 0.4.2", Some("Try Again")),
+        "the row keeps the failure"
+    );
+    assert_eq!(
+        adapter.downloads.get(),
+        downloads,
+        "Cancel downloads nothing"
+    );
+}
+
+/// D8 from a failed Check for Updates. OK hides the title-bar step; the row keeps the failure.
+#[gpui::test]
+fn an_installation_that_cant_be_replaced_from_check_for_updates_opens_d8(
+    cx: &mut gpui::TestAppContext,
+) {
+    use crate::updates::copy::Platform;
+    let (_, _, visual) = failed_check(UpdateError::ReadOnly, cx);
+    let tree = A11yTree::read(visual);
+    tree.text(dialogs::cant_replace_title(Platform::HOST));
+    tree.text(dialogs::cant_replace_message(Platform::HOST));
+    tree.node("OK");
+    let status = crate::updates::copy::rows::cant_replace(Platform::HOST);
+    assert_eq!(app_shown(visual), failed_step(status, None));
+
+    click("modal-action-update-explain-ok", visual);
+    assert!(!alert_open(visual));
+    assert_eq!(app_shown(visual), dismissed_step(status, None));
 }
 
 fn waiting(machine: MachineId, sessions: u32) -> MachineUpdate {
