@@ -660,7 +660,7 @@ impl CoreLink {
 
     fn release(&self, channel: Channel) {
         let mut state = self.lock();
-        let Some(dropped) = state.channels.remove(&channel) else {
+        let Some(dropped) = state.remove_channel(channel) else {
             return;
         };
         if dropped.ended || state.closed.is_some() {
@@ -675,6 +675,21 @@ impl CoreLink {
 }
 
 impl State {
+    fn remove_channel(&mut self, id: Channel) -> Option<ChannelState> {
+        let channel = self.channels.get_mut(&id)?;
+        let remaining = std::mem::take(&mut channel.input)
+            .into_values()
+            .flatten()
+            .collect::<Vec<_>>();
+        if !remaining.is_empty() {
+            self.unconfirmed_input
+                .entry(id)
+                .or_default()
+                .extend(remaining);
+        }
+        self.channels.remove(&id)
+    }
+
     fn usable(&self) -> Result<(), LinkError> {
         match self.closed {
             Some(error) => Err(error),
@@ -1157,7 +1172,7 @@ impl ChannelHandle {
     pub fn detach(self) {
         // Dropping finds no channel to release.
         if let Ok(channel) = self.channel() {
-            self.link.lock().channels.remove(&channel);
+            self.link.lock().remove_channel(channel);
         }
     }
 }
@@ -1352,6 +1367,85 @@ mod tests {
             assert!(
                 matches!(&retained[..], [InputEvent::Paste { text, .. }] if text == "delivery unknown")
             );
+        }
+    }
+    #[test]
+    fn a_local_channel_removal_keeps_later_input_after_only_the_first_refusal() {
+        for detach in [false, true] {
+            for closed in [false, true] {
+                let now = Instant::now();
+                let link = CoreLink::new(Arc::new(|_: LinkEvent| {}), Arc::new(|| {}), now);
+                let channel = link.open_channel(Arc::new(|_: ChannelEvent| {})).unwrap();
+                let _claim = channel
+                    .claim(
+                        crate::attachments::Attachment {
+                            workspace: [1; 32],
+                            generation: 1,
+                        },
+                        [2; 32],
+                        AttachmentClaim::Select { explicit: true },
+                        PaneSize {
+                            columns: 80,
+                            rows: 24,
+                            cell_width: 8,
+                            cell_height: 16,
+                        },
+                        None,
+                    )
+                    .unwrap();
+                let id = channel.channel().unwrap();
+                let first = channel
+                    .input(
+                        1,
+                        vec![InputEvent::Paste {
+                            text: "first".into(),
+                            last: true,
+                        }],
+                    )
+                    .unwrap();
+                let second = channel
+                    .input(
+                        1,
+                        vec![InputEvent::Paste {
+                            text: "second".into(),
+                            last: true,
+                        }],
+                    )
+                    .unwrap();
+                link.dispatch(CoreMessage::Pane(PaneMessage {
+                    channel: id,
+                    event: PaneEvent::InputRestarting {
+                        channel: id,
+                        serial: first,
+                    },
+                }))
+                .unwrap();
+                let refused = link.take_unaccepted_input(id, first).unwrap();
+                if detach {
+                    channel.detach();
+                } else {
+                    drop(channel);
+                }
+                if closed {
+                    link.fail(LinkError::Closed);
+                } else {
+                    link.dispatch(CoreMessage::Pane(PaneMessage {
+                        channel: id,
+                        event: PaneEvent::InputRestarting {
+                            channel: id,
+                            serial: second,
+                        },
+                    }))
+                    .unwrap();
+                }
+                let unknown = link.take_unconfirmed_input(id);
+                assert!(
+                    matches!(&refused[..], [InputEvent::Paste { text, .. }] if text == "first")
+                );
+                assert!(
+                    matches!(&unknown[..], [InputEvent::Paste { text, .. }] if text == "second")
+                );
+            }
         }
     }
 }
