@@ -971,10 +971,10 @@ impl ChannelHandle {
         }
         state.queue_all(&messages, urgent)?;
         for message in &messages {
-            if let ClientMessage::Input(input) = message {
-                if let Some(channel) = state.channels.get_mut(&input.channel) {
-                    channel.input.insert(input.serial, input.events.clone());
-                }
+            if let ClientMessage::Input(input) = message
+                && let Some(channel) = state.channels.get_mut(&input.channel)
+            {
+                channel.input.insert(input.serial, input.events.clone());
             }
         }
         if let Some(channel) = state.channels.get_mut(&self.channel()?) {
