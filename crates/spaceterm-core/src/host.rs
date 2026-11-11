@@ -784,10 +784,15 @@ fn serve_runtime_ready(
             let host = host.upgrade()?;
             (!host.stop.stopping()).then(|| {
                 let sessions = crate::service::lane::LaneHost::sessions(&*host).len();
+                let sessions = u32::try_from(sessions).unwrap_or(u32::MAX);
+                // This release restarts no Core while a Terminal Session is live (ADR 0065), so
+                // nothing reads which sessions have work going on. Every live session counts as
+                // working, as for a host that cannot tell, and the count changes only with
+                // `sessions`.
                 crate::service::updates::Activity {
-                    sessions: u32::try_from(sessions).unwrap_or(u32::MAX),
+                    sessions,
                     requested: requested.swap(false, Ordering::AcqRel),
-                    working: crate::service::lane::LaneHost::working(&*host),
+                    working: sessions,
                 }
             })
         });
