@@ -1031,7 +1031,9 @@ impl ApplicationUpdates {
     /// Whether an automatic download failed and SpaceTerm has tried it again by itself for less
     /// than [`RETRY_QUIETLY_FOR`]. The failure then stays out of the title bar.
     pub(crate) fn retries_download(&self) -> bool {
-        self.preferences().automatic_downloads
+        // A scheduled check's replacement download is SpaceTerm's own, so it retries quietly
+        // whatever the automatic-download preference.
+        (self.preferences().automatic_downloads || self.replacing.is_some())
             && self
                 .retrying_since
                 .is_some_and(|since| self.adapter.now().saturating_sub(since) < RETRY_QUIETLY_FOR)
@@ -1714,7 +1716,23 @@ mod tests {
         scheduled_check_keeps_relaunch("0.1.1", false, cx);
     }
 
+    /// With automatic downloads off, the replacement download fails. SpaceTerm retries it
+    /// quietly, so the main area keeps `Relaunch to Update`.
+    #[gpui::test]
+    fn a_failed_replacement_download_keeps_relaunch_to_update(cx: &mut gpui::TestAppContext) {
+        scheduled_check_keeps_relaunch_or_fails("0.1.1", false, true, cx);
+    }
+
     fn scheduled_check_keeps_relaunch(found: &str, automatic: bool, cx: &mut gpui::TestAppContext) {
+        scheduled_check_keeps_relaunch_or_fails(found, automatic, false, cx);
+    }
+
+    fn scheduled_check_keeps_relaunch_or_fails(
+        found: &str,
+        automatic: bool,
+        fails: bool,
+        cx: &mut gpui::TestAppContext,
+    ) {
         let adapter = Rc::new(RecordingAdapter::available());
         cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
         let service = cx.update(|cx| cx.global::<UpdateService>().0.clone());
@@ -1747,6 +1765,12 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(main(cx), relaunch, "after it finds {found}");
         assert_eq!(adapter.downloads.get(), 2, "it downloads {found} again");
+        if fails {
+            adapter.emit(UpdateEvent::Failed(UpdateError::Download));
+            cx.run_until_parked();
+            assert_eq!(main(cx), relaunch, "after the replacement download fails");
+            return;
+        }
         adapter.emit(UpdateEvent::Downloading {
             received: 1,
             total: 2,
