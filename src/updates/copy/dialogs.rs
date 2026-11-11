@@ -54,15 +54,25 @@ pub(crate) fn restart(described: &[Previewed]) -> (SharedString, SharedString, S
 /// The sentence a breaking restart adds about Paired Devices on an older SpaceTerm.
 pub(crate) fn stranded(machine: &str, devices: &[String]) -> String {
     match devices {
-        [] => format!("Devices with an older SpaceTerm can't connect to {machine} until they update."),
-        [_] => format!("SpaceTerm on {} can't connect to {machine} until it updates.", list_and(devices)),
-        _ => format!("SpaceTerm on {} can't connect to {machine} until they update.", list_and(devices)),
+        [] => {
+            format!("Devices with an older SpaceTerm can't connect to {machine} until they update.")
+        }
+        [_] => format!(
+            "SpaceTerm on {} can't connect to {machine} until it updates.",
+            list_and(devices)
+        ),
+        _ => format!(
+            "SpaceTerm on {} can't connect to {machine} until they update.",
+            list_and(devices)
+        ),
     }
 }
 
 /// Stop SpaceTerm Core, from Settings or the menu bar extra.
 pub(crate) fn stop(described: &[Previewed]) -> (SharedString, SharedString, SharedString) {
-    let name = described.first().map_or_else(SharedString::default, |one| one.name.clone());
+    let name = described
+        .first()
+        .map_or_else(SharedString::default, |one| one.name.clone());
     let sessions = described.iter().map(|one| one.sessions).sum();
     (
         format!("Stop SpaceTerm Core on {name}?").into(),
@@ -79,7 +89,9 @@ pub(crate) fn stop(described: &[Previewed]) -> (SharedString, SharedString, Shar
 pub(crate) fn app_failure(app: &AppRow) -> Option<Explanation> {
     let dismiss = Some(Box::new(Command::Desktop(DesktopAction::DismissFailure)));
     let release = |version: &Option<SharedString>| {
-        version.as_ref().map_or_else(|| "SpaceTerm".to_owned(), |v| format!("SpaceTerm {v}"))
+        version
+            .as_ref()
+            .map_or_else(|| "SpaceTerm".to_owned(), |v| format!("SpaceTerm {v}"))
     };
     Some(match &app.stage {
         AppStage::DownloadFailed { version, error, .. } => Explanation {
@@ -137,8 +149,16 @@ fn cant_replace_message() -> &'static str {
 pub(crate) fn machine_failure(row: &MachineRow) -> Option<Explanation> {
     let name = &row.name;
     let id = row.id;
-    let running = row.running.as_ref().map_or_else(String::new, ToString::to_string);
-    let dismiss = |failure| Some(Box::new(Command::Machine(id, MachineAction::DismissFailure(failure))));
+    let running = row
+        .running
+        .as_ref()
+        .map_or_else(String::new, ToString::to_string);
+    let dismiss = |failure| {
+        Some(Box::new(Command::Machine(
+            id,
+            MachineAction::DismissFailure(failure),
+        )))
+    };
     let restart_title = format!("Couldn't Restart SpaceTerm Core on {name}");
     Some(match &row.stage {
         MachineStage::StartFailed { version, cause, id: failure, .. } => {
@@ -189,21 +209,27 @@ pub(crate) fn machine_failure(row: &MachineRow) -> Option<Explanation> {
             proceed: Some(TRY_AGAIN.into()),
             dismiss: dismiss(PUSH_FAILURE),
         },
-        MachineStage::SteppingStoneSkipped => Explanation {
-            dismiss: dismiss(STEPPING_STONE),
-            ..how_to_update(row)
-        },
+        MachineStage::SteppingStoneSkipped => how_to_update(row),
         _ => return None,
     })
 }
 
-/// D3f, which `How to Update…` opens.
+/// D3f, from the pill's `Update Failed` and the row's `How to Update…` alike. OK dismisses the
+/// title-bar step; the row keeps the failure.
 pub(crate) fn how_to_update(row: &MachineRow) -> Explanation {
     let name = &row.name;
-    Explanation::ok(
-        format!("SpaceTerm Core on {name} Can't Update by Itself"),
-        format!("On {name}, install a newer compatible SpaceTerm Core archive with spaceterm update --archive, or wait for a newer release."),
-    )
+    Explanation {
+        dismiss: Some(Box::new(Command::Machine(
+            row.id,
+            MachineAction::DismissFailure(STEPPING_STONE),
+        ))),
+        ..Explanation::ok(
+            format!("SpaceTerm Core on {name} Can't Update by Itself"),
+            format!(
+                "On {name}, install a newer compatible SpaceTerm Core archive with spaceterm update --archive, or wait for a newer release."
+            ),
+        )
+    }
 }
 
 /// D4: a restart started here got no answer.
@@ -215,8 +241,14 @@ pub(crate) fn not_confirmed(row: &MachineRow) -> Explanation {
     };
     Explanation {
         title: format!("SpaceTerm Can't Confirm the Restart on {name}").into(),
-        message: format!("{name} stopped responding while SpaceTerm Core restarted into {version}.").into(),
-        then: Some(Box::new(Command::Machine(row.id, MachineAction::CheckAgain))),
+        message: format!(
+            "{name} stopped responding while SpaceTerm Core restarted into {version}."
+        )
+        .into(),
+        then: Some(Box::new(Command::Machine(
+            row.id,
+            MachineAction::CheckAgain,
+        ))),
         proceed: Some(CHECK_AGAIN.into()),
         dismiss: None,
     }

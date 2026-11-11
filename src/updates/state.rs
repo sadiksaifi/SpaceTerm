@@ -22,7 +22,7 @@ use spaceterm_core::update::ordering::Floor;
 use super::ladder::{self, Emphasis, Stage};
 use super::machines::store::MachineUpdates;
 use super::machines::{ActionFailure, Asked, MachineAction, MachineId, MachineLink, MachineUpdate};
-use super::policy::{DAY, UpdateStage};
+use super::policy::DAY;
 use super::{UpdateError, UpdateService, UpdateState};
 
 pub(crate) use super::confirm::{Confirmation, Explanation};
@@ -126,17 +126,25 @@ pub(crate) struct AppRow {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum AppStage {
     /// `whats_new`: the first run on a newer SpaceTerm, notes not opened.
-    Current { whats_new: bool },
+    Current {
+        whats_new: bool,
+    },
     /// A release waits, and automatic downloads are off.
-    Available { version: SharedString },
+    Available {
+        version: SharedString,
+    },
     Downloading {
         version: SharedString,
         fraction: Option<f32>,
         /// The person started it on this desktop.
         here: bool,
     },
-    Downloaded { version: SharedString },
-    Relaunching { version: SharedString },
+    Downloaded {
+        version: SharedString,
+    },
+    Relaunching {
+        version: SharedString,
+    },
     /// `retries`: SpaceTerm's one-day quiet retry tries it again by itself.
     DownloadFailed {
         version: Option<SharedString>,
@@ -149,7 +157,9 @@ pub(crate) enum AppStage {
     },
     /// The installation can't be replaced.
     CantReplace,
-    NeedsNewerSystem { version: Option<SharedString> },
+    NeedsNewerSystem {
+        version: Option<SharedString>,
+    },
 }
 
 /// One Machine's update.
@@ -190,7 +200,9 @@ pub(crate) enum MachineStage {
     Offline,
     Stopped,
     /// A push held until SpaceTerm updates or its startup check ends.
-    WaitingForApp { version: Version },
+    WaitingForApp {
+        version: Version,
+    },
     Downloading {
         version: Version,
         fraction: Option<f32>,
@@ -204,7 +216,10 @@ pub(crate) enum MachineStage {
         stranded: Vec<String>,
     },
     /// `to` is None for a same-version restart.
-    Restarting { to: Option<Version>, here: bool },
+    Restarting {
+        to: Option<Version>,
+        here: bool,
+    },
     /// `kept`: the version stays downloaded.
     StartFailed {
         version: Version,
@@ -220,9 +235,16 @@ pub(crate) enum MachineStage {
         id: u64,
     },
     /// A restart got no answer for 180 seconds.
-    NotConfirmed { version: Version, here: bool },
+    NotConfirmed {
+        version: Version,
+        here: bool,
+    },
     CantCheck,
-    NeedsFloor { floor: Floor },
+    /// A push this run could not make, because the Core must first fetch `floor` and couldn't.
+    /// SpaceTerm does not retry it this run.
+    NeedsFloor {
+        floor: Floor,
+    },
     SteppingStoneSkipped,
 }
 
@@ -394,7 +416,10 @@ impl UpdateView {
     /// Local first, then store order. `machine_rows()[i]` describes `machines[i]`, and the
     /// count and order stay stable while facts change.
     pub(crate) fn machine_rows(&self) -> Vec<RowView> {
-        self.machines.iter().map(super::copy::rows::machine_row).collect()
+        self.machines
+            .iter()
+            .map(super::copy::rows::machine_row)
+            .collect()
     }
 
     /// The row of `machine`, when it is listed.
@@ -408,7 +433,15 @@ impl UpdateView {
         let insists = |step: Option<Step>| {
             matches!(
                 step,
-                Some(Step::Act { stage: Some(Stage::Insist), .. } | Step::Act { hard_stop: true, .. })
+                Some(
+                    Step::Act {
+                        stage: Some(Stage::Insist),
+                        ..
+                    } | Step::Act {
+                        hard_stop: true,
+                        ..
+                    }
+                )
             )
         };
         insists(self.app.step()) || self.machines.iter().any(|row| insists(row.waiting_step()))
@@ -469,8 +502,12 @@ impl AppRow {
             UpdateState::Idle if facts.relaunch_held => AppStage::Downloaded {
                 version: pending.clone().unwrap_or_default(),
             },
-            UpdateState::Ready { version: v } => AppStage::Downloaded { version: version(v) },
-            UpdateState::Available { version: v } => AppStage::Available { version: version(v) },
+            UpdateState::Ready { version: v } => AppStage::Downloaded {
+                version: version(v),
+            },
+            UpdateState::Available { version: v } => AppStage::Available {
+                version: version(v),
+            },
             UpdateState::Downloading {
                 version: v,
                 received,
@@ -485,7 +522,9 @@ impl AppRow {
                 fraction: None,
                 here: facts.download_asked,
             },
-            UpdateState::Installing { version: v } => AppStage::Relaunching { version: version(v) },
+            UpdateState::Installing { version: v } => AppStage::Relaunching {
+                version: version(v),
+            },
             UpdateState::Failed {
                 error: UpdateError::SystemTooOld,
             } => AppStage::NeedsNewerSystem { version: pending },
@@ -502,7 +541,8 @@ impl AppRow {
                 error: *error,
             },
             UpdateState::Failed {
-                error: error @ (UpdateError::Download | UpdateError::Verification | UpdateError::DiskFull),
+                error:
+                    error @ (UpdateError::Download | UpdateError::Verification | UpdateError::DiskFull),
             } => AppStage::DownloadFailed {
                 version: pending,
                 error: *error,
@@ -591,15 +631,19 @@ impl MachineRow {
             MachineStage::StartFailed { id, .. } | MachineStage::DownloadFailed { id, .. } => {
                 marks.dismissed.contains(&(update.machine, *id))
             }
+            MachineStage::NeedsFloor { .. } => {
+                marks.dismissed.contains(&(update.machine, PUSH_FAILURE))
+            }
             MachineStage::SteppingStoneSkipped => {
                 marks.dismissed.contains(&(update.machine, STEPPING_STONE))
             }
             _ => false,
         };
         // A hard stop has no deferral.
-        let deferred = blocked.is_none() && ladder.is_some_and(|stage| {
-            ladder::deferral_hides(stage, marks.deferred.get(&update.machine).copied(), now)
-        });
+        let deferred = blocked.is_none()
+            && ladder.is_some_and(|stage| {
+                ladder::deferral_hides(stage, marks.deferred.get(&update.machine).copied(), now)
+            });
         Self {
             id: update.machine,
             name: update.name.clone(),
@@ -621,6 +665,7 @@ impl MachineRow {
         match &self.stage {
             MachineStage::StartFailed { .. }
             | MachineStage::DownloadFailed { retries: false, .. }
+            | MachineStage::NeedsFloor { .. }
             | MachineStage::SteppingStoneSkipped
                 if !self.dismissed =>
             {
@@ -714,7 +759,10 @@ fn machine_stage(
         })
     };
     let detailed = update.detailed.as_ref();
-    let Some(facts) = detailed.map(|detailed| &detailed.facts).or(update.facts.as_ref()) else {
+    let Some(facts) = detailed
+        .map(|detailed| &detailed.facts)
+        .or(update.facts.as_ref())
+    else {
         if let Some(failed) = push_failed() {
             return (failed, blocked);
         }
@@ -777,13 +825,18 @@ fn machine_stage(
             _ => (*pending == failure.version).then_some(std::cmp::Ordering::Equal),
         };
         let superseded = facts.running == failure.version
-            || facts.pending.as_ref().is_some_and(|pending| match failure.kind {
-                FailureKind::Install(_) => matches!(
-                    order(&pending.version),
-                    Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
-                ),
-                FailureKind::Start(_) => order(&pending.version) == Some(std::cmp::Ordering::Greater),
-            });
+            || facts
+                .pending
+                .as_ref()
+                .is_some_and(|pending| match failure.kind {
+                    FailureKind::Install(_) => matches!(
+                        order(&pending.version),
+                        Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+                    ),
+                    FailureKind::Start(_) => {
+                        order(&pending.version) == Some(std::cmp::Ordering::Greater)
+                    }
+                });
         match failure.kind {
             FailureKind::Start(cause) if !superseded => {
                 return (
@@ -825,7 +878,10 @@ fn machine_stage(
     if here(Asked::Restart) {
         return (
             MachineStage::Restarting {
-                to: facts.pending.as_ref().map(|pending| pending.version.clone()),
+                to: facts
+                    .pending
+                    .as_ref()
+                    .map(|pending| pending.version.clone()),
                 here: true,
             },
             blocked,
@@ -879,14 +935,18 @@ pub(crate) fn current(cx: &App) -> UpdateView {
         .map(|service| service.0.read(cx));
     let app = match updates {
         Some(updates) => {
-            let (ladder, waited) = app_ladder(updates.stage());
+            // SpaceTerm's clock: the earliest publication among the versions it waited for,
+            // read on the updater's clock.
+            let waited = updates
+                .waiting_since()
+                .map_or(0, |since| updates.now().saturating_sub(since) / DAY);
             AppFacts {
                 state: updates.state(),
                 pending: updates.pending_version(),
                 running,
-                ladder,
+                ladder: updates.ladder_stage(),
                 waited,
-                whats_new: updates.release_notes_unread(),
+                whats_new: updates.whats_new(),
                 notes,
                 relaunch_held: updates.holds_failed_relaunch(),
                 download_asked: updates.download_asked(),
@@ -928,16 +988,6 @@ pub(crate) fn current(cx: &App) -> UpdateView {
             },
             now,
         ),
-    }
-}
-
-/// SpaceTerm's ladder stage from the three stored `UpdateStage` values, which the ladder slice
-/// maps to Offer, Ask and Insist, and the days that stage implies at least.
-fn app_ladder(stage: UpdateStage) -> (Stage, u64) {
-    match stage {
-        UpdateStage::Optional => (Stage::Offer, 0),
-        UpdateStage::Warning => (Stage::Ask, ladder::ASK_AFTER / DAY),
-        UpdateStage::Overdue => (Stage::Insist, ladder::INSIST_AFTER / DAY),
     }
 }
 

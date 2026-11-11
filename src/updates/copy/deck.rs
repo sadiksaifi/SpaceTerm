@@ -24,15 +24,44 @@ use crate::updates::state::{Command, Dismissed, Marks, RowView, UpdateView};
 
 const DECK: &str = "src/updates/copy/deck.txt";
 
+/// What a rendered field is, for the lint: only a label may be one of the three `Core` labels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Role {
+    /// A pill label, a row action or an alert button.
+    Label,
+    /// A status, description, tooltip, alert title or body, or accessibility text.
+    Text,
+}
+
 #[derive(Default)]
 struct Deck {
     pill: BTreeSet<String>,
     rows: BTreeSet<String>,
     dialogs: BTreeSet<String>,
+    /// Every rendered field, with its role and the Machines named in its view.
+    fields: Vec<(Role, Vec<String>, String)>,
+    /// The Machines of the view being rendered.
+    names: Vec<String>,
 }
 
 impl Deck {
+    fn field(&mut self, role: Role, text: &str) {
+        self.fields
+            .push((role, self.names.clone(), text.to_owned()));
+    }
+
     fn row(&mut self, row: RowView) {
+        self.field(Role::Text, row.status.as_deref().unwrap_or_default());
+        if let Some(description) = &row.description {
+            self.field(Role::Text, description);
+        }
+        self.field(Role::Text, &row.accessibility);
+        if let Some(action) = &row.action {
+            self.field(Role::Label, &action.label);
+            if let Some(subtitle) = &action.subtitle {
+                self.field(Role::Text, subtitle);
+            }
+        }
         let mut line = format!("{} | {}", row.name, row.status.unwrap_or_default());
         if let Some(action) = &row.action {
             line.push_str(&format!(" \u{b7} {}", action.label));
@@ -53,20 +82,43 @@ impl Deck {
     }
 
     fn alert(&mut self, alert: &crate::updates::confirm::Explanation) {
+        self.field(Role::Text, &alert.title);
+        self.field(Role::Text, &alert.message);
+        if let Some(proceed) = &alert.proceed {
+            self.field(Role::Label, proceed);
+        }
         let proceed = alert
             .proceed
             .as_ref()
             .map_or("OK".to_owned(), |label| format!("{label}, Cancel"));
-        self.dialogs
-            .insert(format!("{} | {} | {proceed}", alert.title, alert.message));
+        let dismisses = if alert.dismiss.is_some() {
+            " (dismisses the step)"
+        } else {
+            ""
+        };
+        self.dialogs.insert(format!(
+            "{} | {} | {proceed}{dismisses}",
+            alert.title, alert.message
+        ));
     }
 
     fn view(&mut self, view: &UpdateView) {
+        self.names = view
+            .machines
+            .iter()
+            .map(|row| row.name.to_string())
+            .collect();
         self.row(view.app_row());
-        view.machine_rows().into_iter().for_each(|row| self.row(row));
+        view.machine_rows()
+            .into_iter()
+            .for_each(|row| self.row(row));
         if let Some(pill) = view.pill() {
-            self.pill
-                .insert(format!("{} | {:?} | {}", pill.label, pill.emphasis, pill.tooltip));
+            self.field(Role::Label, &pill.label);
+            self.field(Role::Text, &pill.tooltip);
+            self.pill.insert(format!(
+                "{} | {:?} | {}",
+                pill.label, pill.emphasis, pill.tooltip
+            ));
             if let Command::Explain(alert) = &pill.main {
                 self.alert(alert);
             }
@@ -96,6 +148,10 @@ impl Deck {
 }
 
 fn generate() -> String {
+    build().text()
+}
+
+fn build() -> Deck {
     let mut deck = Deck::default();
     let dismissed = Dismissed::new();
     let deferred = Default::default();
@@ -104,10 +160,14 @@ fn generate() -> String {
         deferred: &deferred,
         pushes_held: false,
     };
-    let fleets: Vec<Vec<_>> = [(LOCAL, "This Mac"), (LOCAL, "This Computer"), (PENGUIN, "penguin")]
-        .into_iter()
-        .flat_map(|(id, name)| machine_variants(id, name).into_iter().map(|one| vec![one]))
-        .collect();
+    let fleets: Vec<Vec<_>> = [
+        (LOCAL, "This Mac"),
+        (LOCAL, "This Computer"),
+        (PENGUIN, "penguin"),
+    ]
+    .into_iter()
+    .flat_map(|(id, name)| machine_variants(id, name).into_iter().map(|one| vec![one]))
+    .collect();
     for (state, pending, asked, retrying, whats_new) in app_states() {
         for ladder in [Stage::Offer, Stage::Ask, Stage::Insist] {
             let mut facts = app(&state);
@@ -134,12 +194,17 @@ fn generate() -> String {
             for breaking in [false, true] {
                 let mut update = waiting(id, name, sessions, breaking, NOW);
                 if breaking && sessions == 3 {
-                    update.facts.as_mut().unwrap().pending.as_mut().unwrap().stranded = vec![
-                        spaceterm_core::update::facts::StrandedDevice {
-                            pairing: Default::default(),
-                            name: "iPad".into(),
-                        },
-                    ];
+                    update
+                        .facts
+                        .as_mut()
+                        .unwrap()
+                        .pending
+                        .as_mut()
+                        .unwrap()
+                        .stranded = vec![spaceterm_core::update::facts::StrandedDevice {
+                        pairing: Default::default(),
+                        name: "iPad".into(),
+                    }];
                 }
                 for (action, target) in [
                     (MachineAction::Restart, Some(version("0.11.4"))),
@@ -154,7 +219,11 @@ fn generate() -> String {
                         target,
                         id: 1,
                     };
+                    deck.names = vec![name.to_owned()];
                     if let Some(confirmation) = previewed(&[update.clone()], &[preview], true) {
+                        deck.field(Role::Text, &confirmation.title);
+                        deck.field(Role::Text, &confirmation.message);
+                        deck.field(Role::Label, &confirmation.button);
                         deck.dialogs.insert(format!(
                             "{} | {} | {}, Cancel",
                             confirmation.title, confirmation.message, confirmation.button
@@ -185,12 +254,14 @@ fn generate() -> String {
                 ActionFailure::Failed,
             ] {
                 if let Some((title, message)) = dialogs::action_failure(name, &action, failure) {
+                    deck.field(Role::Text, &title);
+                    deck.field(Role::Text, &message);
                     deck.dialogs.insert(format!("{title} | {message} | OK"));
                 }
             }
         }
     }
-    deck.text()
+    deck
 }
 
 /// The copy deck matches the copy module byte for byte.
@@ -208,77 +279,114 @@ fn the_copy_deck_matches_the_copy_module() {
     );
 }
 
-/// Why `text` breaks the update vocabulary of design 4.4, if it does.
-pub(crate) fn lint(text: &str) -> Option<&'static str> {
-    let words: Vec<&str> = text
+/// The three labels in which "Core" may stand without "SpaceTerm".
+const CORE_LABELS: [&str; 3] = [
+    "Restart Core\u{2026}",
+    "Restarting Core\u{2026}",
+    "Restart Core",
+];
+
+/// Why `text`, a field of `role` in a view naming `machines`, breaks the update vocabulary of
+/// design 4.4, if it does.
+pub(crate) fn lint(text: &str, role: Role, machines: &[String]) -> Option<&'static str> {
+    let lower = text.to_lowercase();
+    let words: Vec<&str> = lower
         .split(|c: char| !c.is_alphanumeric() && c != '\'')
         .collect();
-    let lower = text.to_lowercase();
-    if words.contains(&"installed") {
-        return Some("\"installed\" for a downloaded version");
+    for (word, why) in [
+        ("installed", "\"installed\" for a downloaded version"),
+        ("ready", "\"ready\""),
+        ("idle", "\"idle\" in person-facing text"),
+    ] {
+        if words.contains(&word) {
+            return Some(why);
+        }
     }
-    if words.iter().any(|word| word.eq_ignore_ascii_case("ready")) {
-        return Some("\"ready\"");
-    }
-    if words.iter().any(|word| word.eq_ignore_ascii_case("idle")) {
-        return Some("\"idle\" in person-facing text");
-    }
-    for place in ["This Mac", "This Computer", "penguin", "build-box"] {
-        if text.contains(&format!("Update {place}")) {
+    for machine in machines
+        .iter()
+        .map(String::as_str)
+        .chain(["this mac", "this computer"])
+    {
+        if lower.contains(&format!("update {}", machine.to_lowercase())) {
             return Some("an \"Update {Machine}\" form");
         }
     }
     if text.contains('\u{2019}') || text.contains('\u{2018}') {
         return Some("a curly apostrophe: update text uses straight ones");
     }
-    if words.contains(&"machine") || text.contains("in Progress") {
+    if text
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|word| word == "machine")
+        || text.contains("in Progress")
+    {
         return Some("lowercase \"machine\" or \"in Progress\"");
     }
-    if lower.contains("0 terminal session") && !lower.contains("10 terminal session") {
+    if words.windows(2).any(|w| w[0] == "0" && w[1] == "terminal") {
         return Some("a zero count");
     }
-    // "Core" alone, outside "SpaceTerm Core" and the three allowed labels.
+    if role == Role::Label && CORE_LABELS.contains(&text) {
+        return None;
+    }
     let mut rest = text;
     while let Some(at) = rest.find("Core") {
-        let before = &rest[..at];
-        let allowed = before.ends_with("SpaceTerm ")
-            || before.ends_with("Restart ")
-            || before.ends_with("Restarting ");
-        if !allowed {
-            return Some("\"Core\" alone");
+        if !rest[..at].ends_with("SpaceTerm ") {
+            return Some("\"Core\" alone outside the three allowed labels");
         }
         rest = &rest[at + 4..];
     }
     None
 }
 
-/// Every line of the copy deck passes the lint.
+/// Every rendered field of the copy deck passes the lint.
 #[test]
-fn every_copy_deck_line_passes_the_lint() {
-    for line in generate().lines().filter(|line| !line.starts_with('#')) {
-        if let Some(why) = lint(line) {
-            panic!("{why}: {line}");
+fn every_copy_deck_field_passes_the_lint() {
+    for (role, machines, text) in build().fields {
+        if let Some(why) = lint(&text, role, &machines) {
+            panic!("{why}: {text}");
         }
     }
 }
 
 #[test]
 fn the_lint_refuses_the_banned_forms() {
-    for (text, refused) in [
-        ("SpaceTerm Core 0.11.4 is installed on This Mac.", true),
-        ("Update ready", true),
-        ("Update This Mac\u{2026}", true),
-        ("Nothing idle", true),
-        ("It can\u{2019}t", true),
-        ("Core restarts", true),
-        ("1 machine", true),
-        ("0 Terminal Sessions", true),
-        ("Restart Core\u{2026}", false),
-        ("Restarting Core\u{2026}", false),
-        ("SpaceTerm Core on penguin can't restart.", false),
-        ("Restarts into 0.11.4 when 10 Terminal Sessions end", false),
+    let machines = vec!["penguin".to_owned(), "studio".to_owned()];
+    for (text, role, refused) in [
+        (
+            "SpaceTerm Core 0.11.4 is installed on This Mac.",
+            Role::Text,
+            true,
+        ),
+        ("Installed", Role::Text, true),
+        ("Update ready", Role::Text, true),
+        ("Update This Mac\u{2026}", Role::Label, true),
+        ("Update studio\u{2026}", Role::Label, true),
+        ("Nothing Idle", Role::Text, true),
+        ("It can\u{2019}t", Role::Text, true),
+        ("Core restarts", Role::Text, true),
+        ("Restart Core failed.", Role::Text, true),
+        ("Restart Core failed.", Role::Label, true),
+        ("Restart Core\u{2026}", Role::Text, true),
+        ("1 machine", Role::Text, true),
+        ("0 Terminal Sessions", Role::Text, true),
+        ("Restart Core\u{2026}", Role::Label, false),
+        ("Restarting Core\u{2026}", Role::Label, false),
+        ("Restart Core", Role::Label, false),
+        (
+            "SpaceTerm Core on penguin can't restart.",
+            Role::Text,
+            false,
+        ),
+        (
+            "Restarts into 0.11.4 when 10 Terminal Sessions end",
+            Role::Text,
+            false,
+        ),
     ] {
-        assert_eq!(lint(text).is_some(), refused, "{text}");
+        assert_eq!(
+            lint(text, role, &machines).is_some(),
+            refused,
+            "{text} as {role:?}"
+        );
     }
 }
 
@@ -295,6 +403,7 @@ fn update_ui_modules_hold_no_update_strings() {
         "Restart Not Confirmed",
         "Download Update",
         "An update has waited",
+        "installed",
     ];
     let mut found = Vec::new();
     for file in [

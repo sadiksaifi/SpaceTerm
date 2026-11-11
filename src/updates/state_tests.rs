@@ -4,7 +4,8 @@ use std::rc::Rc;
 
 use spaceterm_core::protocol::capability::{Capabilities, Capability};
 use spaceterm_core::update::facts::{
-    PendingVersion, Platform, Protocols, StrandedDevice, UpdateCheck, UpdateFacts, UpdateFailure,
+    DetailedUpdateFacts, PendingVersion, Platform, Protocols, StrandedDevice, UpdateCheck,
+    UpdateFacts, UpdateFailure,
 };
 
 use super::*;
@@ -12,6 +13,7 @@ use crate::updates::copy::title_bar::LABELS;
 use crate::updates::machines::store::Surface;
 use crate::updates::machines::testing::ScriptedMachines;
 use crate::updates::machines::{FailedPush, MachinePreview, MachineUpdatesEvent};
+use spaceterm_core::update::ordering::Floor;
 
 pub(crate) const NOW: u64 = 100 * DAY;
 pub(crate) const LOCAL: MachineId = [1; 32];
@@ -263,6 +265,7 @@ pub(crate) fn machine_variants(id: MachineId, name: &str) -> Vec<MachineUpdate> 
             ActionFailure::Busy,
             ActionFailure::RelaunchRequired,
             ActionFailure::Failed,
+            ActionFailure::NeedsFloor(Floor::parse("0.11.5").unwrap()),
         ] {
             pushed.failed_push = Some(FailedPush {
                 version: version("0.11.5"),
@@ -288,6 +291,24 @@ pub(crate) fn machine_variants(id: MachineId, name: &str) -> Vec<MachineUpdate> 
         let mut update = waiting(id, name, 2, false, NOW - 8 * DAY);
         update.link = link;
         all.push(update);
+    }
+    // A Core with the detailed facts reports its engine's own continuation, which can differ
+    // from the one released Cores' facts imply.
+    for continuation in [
+        Continuation::WhenNothingRuns,
+        Continuation::Soon,
+        Continuation::StartFailed,
+    ] {
+        for installed_at in [NOW, NOW - 3 * DAY, NOW - 8 * DAY] {
+            let mut update = waiting(id, name, 2, false, installed_at);
+            update.detailed = Some(DetailedUpdateFacts {
+                facts: update.facts.clone().unwrap(),
+                continuation: Some(continuation),
+                working: 0,
+                restart: None,
+            });
+            all.push(update);
+        }
     }
     all.push(machine(id, name, local, None));
     all
@@ -718,7 +739,7 @@ fn the_rows_and_the_confirmation_name_the_software_and_the_consequence() {
     assert_eq!(action.subtitle.as_deref(), Some("Ends 2 Terminal Sessions"));
     assert_eq!(
         row.accessibility.as_ref(),
-        "SpaceTerm Core on This Mac restarts into 0.11.4 when its 2 Terminal Sessions end. Restart Core ends 2 Terminal Sessions now."
+        "SpaceTerm Core on This Mac restarts into 0.11.4 when its 2 Terminal Sessions end. Restarting SpaceTerm Core now ends 2 Terminal Sessions."
     );
 
     this_mac
@@ -935,4 +956,400 @@ fn r5_only_a_restart_approved_here_shows_restart_progress(cx: &mut gpui::TestApp
         (None, None),
         "the pill hides once the Core is back"
     );
+}
+
+fn installed_store(
+    cx: &mut gpui::TestAppContext,
+) -> (Rc<ScriptedMachines>, gpui::Entity<MachineUpdates>) {
+    let adapter = Rc::new(ScriptedMachines::default());
+    cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
+    let store = cx.update(|cx| MachineUpdates::global(cx).unwrap());
+    (adapter, store)
+}
+
+fn approved_restart() -> MachinePreview {
+    MachinePreview {
+        machine: LOCAL,
+        action: MachineAction::Restart,
+        sessions: 2,
+        running: Some(version("0.11.3")),
+        target: Some(version("0.11.4")),
+        id: 1,
+    }
+}
+
+fn restarting(update: &MachineUpdate) -> MachineUpdate {
+    let mut restarting = update.clone();
+    restarting.facts.as_mut().unwrap().operation = Some(Operation::Restarting {
+        to: version("0.11.4"),
+    });
+    restarting
+}
+
+fn returned() -> MachineUpdate {
+    let mut back = machine(LOCAL, "This Mac", true, Some(facts("0.11.4", 0)));
+    back.facts.as_mut().unwrap().revision = 2;
+    back
+}
+
+fn step_now(cx: &mut gpui::TestAppContext) -> Option<Step> {
+    let state = UpdateState::UpToDate;
+    store_view(cx, &app(&state)).0.step
+}
+
+/// A restart approved here that never comes back is this desktop's `Restart Not Confirmed`,
+/// whichever of the adapter's deadline and the lane's uncertain answer arrives first, and the
+/// store's own later deadline does not end it.
+#[gpui::test]
+fn a_restart_approved_here_is_not_confirmed_after_the_deadline(cx: &mut gpui::TestAppContext) {
+    for uncertain_first in [false, true] {
+        let (adapter, store) = installed_store(cx);
+        let this_mac = waiting(LOCAL, "This Mac", 2, false, NOW);
+        adapter.emit(MachineUpdatesEvent::Machines(vec![this_mac.clone()]));
+        cx.run_until_parked();
+        store.update(cx, |store, cx| {
+            store.execute(approved_restart(), Surface::Window, cx)
+        });
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(restarting(
+            &this_mac,
+        ))));
+        cx.run_until_parked();
+        assert_eq!(step_now(cx), Some(Step::Restarting(LOCAL)));
+        let uncertain = MachineUpdatesEvent::Finished {
+            machine: LOCAL,
+            action: MachineAction::Restart,
+            outcome: Err(ActionFailure::Unreachable),
+        };
+        let unconfirmed = MachineUpdatesEvent::Changed(Box::new(MachineUpdate {
+            link: MachineLink::Unconfirmed {
+                expected: version("0.11.4"),
+                since: NOW,
+            },
+            ..restarting(&this_mac)
+        }));
+        cx.executor()
+            .advance_clock(crate::updates::machines::store::RESTART_DEADLINE);
+        if uncertain_first {
+            adapter.emit(uncertain);
+            adapter.emit(unconfirmed);
+        } else {
+            adapter.emit(unconfirmed);
+            adapter.emit(uncertain);
+        }
+        cx.run_until_parked();
+        assert_eq!(step_now(cx), Some(Step::NotConfirmed(LOCAL)));
+        cx.executor()
+            .advance_clock(2 * crate::updates::machines::store::RESTART_DEADLINE);
+        cx.run_until_parked();
+        assert_eq!(
+            step_now(cx),
+            Some(Step::NotConfirmed(LOCAL)),
+            "it stays this desktop's"
+        );
+        let state = UpdateState::UpToDate;
+        let pill = store_view(cx, &app(&state)).0.pill().unwrap();
+        assert_eq!(pill.label.as_ref(), "Restart Not Confirmed");
+        let Command::Explain(alert) = pill.main else {
+            panic!("D4 opens from the main area");
+        };
+        assert_eq!(alert.proceed.as_deref(), Some("Check Again"));
+
+        // The Core answers again on the new version: the restart settled.
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(returned())));
+        cx.run_until_parked();
+        assert_eq!(step_now(cx), None);
+    }
+}
+
+/// A restart settles once the Core is back without a restart operation, even when the facts
+/// arrive before the request answers, and even when its restart was never observed.
+#[gpui::test]
+fn a_restart_settles_when_the_core_returns_whatever_the_order(cx: &mut gpui::TestAppContext) {
+    for observed in [true, false] {
+        let (adapter, store) = installed_store(cx);
+        let this_mac = waiting(LOCAL, "This Mac", 2, false, NOW);
+        adapter.emit(MachineUpdatesEvent::Machines(vec![this_mac.clone()]));
+        cx.run_until_parked();
+        store.update(cx, |store, cx| {
+            store.execute(approved_restart(), Surface::Window, cx)
+        });
+        if observed {
+            adapter.emit(MachineUpdatesEvent::Changed(Box::new(restarting(
+                &this_mac,
+            ))));
+        }
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(returned())));
+        cx.run_until_parked();
+        assert_eq!(
+            step_now(cx),
+            None,
+            "back before the answer, observed: {observed}"
+        );
+        adapter.emit(MachineUpdatesEvent::Finished {
+            machine: LOCAL,
+            action: MachineAction::Restart,
+            outcome: Ok(()),
+        });
+        cx.run_until_parked();
+        assert_eq!(step_now(cx), None);
+        assert_eq!(
+            store.read_with(cx, |store, _| store.machines()[0].asked),
+            None
+        );
+    }
+}
+
+/// SpaceTerm's step reads the ladder's own clock: the days since the earliest publication on
+/// the updater's clock, and What's New only on the first run after an update.
+#[gpui::test]
+fn the_installed_view_reads_the_apps_ladder_clock(cx: &mut gpui::TestAppContext) {
+    use crate::updates::testing::RecordingAdapter;
+    use crate::updates::{ApplicationUpdates, UpdateEvent};
+    let adapter = RecordingAdapter::available();
+    *adapter.clock.borrow_mut() = Some(Box::new(|| NOW));
+    let adapter = Rc::new(adapter);
+    cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
+    let service = cx.update(|cx| cx.global::<UpdateService>().0.clone());
+    service.update(cx, |updates, cx| updates.check(false, cx));
+    adapter.emit(UpdateEvent::ReleaseMetadata {
+        published_at: NOW - 6 * DAY,
+        prepared: false,
+    });
+    adapter.emit(UpdateEvent::Available("99.0.0".into()));
+    adapter.emit(UpdateEvent::Ready);
+    cx.run_until_parked();
+    let view = cx.update(|cx| current(cx));
+    assert!(
+        matches!(view.app.stage, AppStage::Downloaded { .. }),
+        "{:?}",
+        view.app.stage
+    );
+    assert_eq!((view.app.ladder, view.app.waited), (Stage::Ask, 6));
+    assert_eq!(
+        view.pill().unwrap().tooltip.as_ref(),
+        "An update has waited 6 days. Relaunching keeps Terminal Sessions running."
+    );
+
+    let mut later = RecordingAdapter::available();
+    later.history.launched("0.0.1", 0);
+    later.history.launched(env!("SPACETERM_VERSION"), 1);
+    let later = Rc::new(later);
+    cx.update(|cx| ApplicationUpdates::install(later.clone(), cx));
+    let view = cx.update(|cx| current(cx));
+    assert_eq!(view.app.stage, AppStage::Current { whats_new: false });
+    assert_eq!(view.step, None, "a later launch owes no What's New");
+}
+
+/// D3f dismisses the title-bar step from the row's `How to Update…` as from the pill, and the
+/// row keeps the failure. A floor the Core couldn't fetch is a failure step with D3e.
+#[gpui::test]
+fn failure_alerts_dismiss_the_step_and_keep_the_row(cx: &mut gpui::TestAppContext) {
+    let (adapter, store) = installed_store(cx);
+    let mut stone = machine(PENGUIN, "penguin", false, Some(facts("0.11.3", 1)));
+    stone.facts.as_mut().unwrap().check = UpdateCheck::Failing {
+        since: NOW,
+        last_success: None,
+        reason: CheckFailure::SteppingStoneSkipped,
+    };
+    adapter.emit(MachineUpdatesEvent::Machines(vec![stone]));
+    cx.run_until_parked();
+    assert_eq!(step_now(cx), Some(Step::Failed(Target::Machine(PENGUIN))));
+    let state = UpdateState::UpToDate;
+    let row = store_view(cx, &app(&state)).0.machine_row(PENGUIN).unwrap();
+    let Some(RowAction {
+        command: Command::Explain(alert),
+        ..
+    }) = row.action
+    else {
+        panic!("How to Update… opens D3f");
+    };
+    let Some(Command::Machine(id, action)) = alert.dismiss.map(|dismiss| *dismiss) else {
+        panic!("OK dismisses the step");
+    };
+    store.update(cx, |store, cx| {
+        store.perform(id, action, Surface::Window, cx)
+    });
+    assert_eq!(step_now(cx), None);
+    let row = store_view(cx, &app(&state)).0.machine_row(PENGUIN).unwrap();
+    assert_eq!(row.status.as_deref(), Some("Can't update by itself"));
+    assert!(
+        adapter.performed().is_empty(),
+        "the Core's facts stay as they are"
+    );
+
+    let mut floor = machine(PENGUIN, "penguin", false, Some(facts("0.11.3", 1)));
+    floor.push = Some(version("0.12.1"));
+    floor.failed_push = Some(FailedPush {
+        version: version("0.12.1"),
+        failure: ActionFailure::NeedsFloor(Floor::parse("0.12.0").unwrap()),
+    });
+    let view = Desk::new().view(app(&state), &[floor], NOW);
+    assert_eq!(view.step, Some(Step::Failed(Target::Machine(PENGUIN))));
+    let Some(Command::Explain(alert)) = view.pill().map(|pill| pill.main) else {
+        panic!("D3e opens from the main area");
+    };
+    assert_eq!(
+        alert.message.as_ref(),
+        "penguin needs SpaceTerm Core 0.12.0 first and couldn't get it. Its Terminal Sessions keep running."
+    );
+    let row = view.machine_rows().remove(0);
+    assert_eq!(row.status.as_deref(), Some("Needs 0.12.0 first"));
+    assert_eq!(row.action.unwrap().label.as_ref(), "Download");
+}
+
+/// A Core that reports it restarts after an hour with nothing running keeps that explanation
+/// and adds how long the update waited from Ask.
+#[test]
+fn a_reported_continuation_takes_precedence_and_keeps_the_waiting_age() {
+    let state = UpdateState::UpToDate;
+    let mut update = waiting(LOCAL, "This Mac", 2, false, NOW - 3 * DAY);
+    update.detailed = Some(DetailedUpdateFacts {
+        facts: update.facts.clone().unwrap(),
+        continuation: Some(Continuation::WhenNothingRuns),
+        working: 0,
+        restart: None,
+    });
+    let row = Desk::new()
+        .view(app(&state), &[update], NOW)
+        .machine_rows()
+        .remove(0);
+    assert_eq!(
+        row.status.as_deref(),
+        Some("Restarts into 0.11.4 after an hour with nothing running")
+    );
+    assert_eq!(
+        row.description.as_deref(),
+        Some(
+            "Nothing running means no program in any Terminal Session and nothing typed or shown. An update has waited 3 days."
+        )
+    );
+}
+
+/// A confirmation describes the Core's fresh preview, not cached facts; an unobserved target
+/// asks even with nothing open; and the approval covers exactly the described work.
+#[test]
+fn a_confirmation_follows_the_fresh_preview_and_its_approval_the_described_work() {
+    use crate::updates::confirm::previewed;
+    let mut cached = waiting(LOCAL, "This Mac", 0, false, NOW);
+    cached.facts.as_mut().unwrap().running = version("0.11.2");
+    let fresh = approved_restart();
+    let confirmation = previewed(
+        std::slice::from_ref(&cached),
+        std::slice::from_ref(&fresh),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        confirmation.message.as_ref(),
+        "SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 2 Terminal Sessions. Workspaces, Tabs and Panes stay."
+    );
+    assert!(
+        !confirmation.approval.holds(std::slice::from_ref(&cached)),
+        "the cached facts differ from what the alert described"
+    );
+
+    let observed = waiting(LOCAL, "This Mac", 0, false, NOW);
+    let nothing_open = MachinePreview {
+        sessions: 0,
+        ..fresh.clone()
+    };
+    assert_eq!(
+        previewed(
+            std::slice::from_ref(&observed),
+            std::slice::from_ref(&nothing_open),
+            false
+        ),
+        None,
+        "nothing ends and nothing breaks: no question"
+    );
+    let unobserved = machine(LOCAL, "This Mac", true, Some(facts("0.11.3", 0)));
+    let asked = previewed(
+        std::slice::from_ref(&unobserved),
+        std::slice::from_ref(&nothing_open),
+        false,
+    )
+    .expect("an unobserved target may be breaking, so it asks");
+    assert!(!asked.approval.holds(std::slice::from_ref(&unobserved)));
+
+    let two = waiting(LOCAL, "This Mac", 2, false, NOW);
+    let approval = previewed(
+        std::slice::from_ref(&two),
+        std::slice::from_ref(&fresh),
+        false,
+    )
+    .unwrap()
+    .approval;
+    let mut unrelated = two.clone();
+    unrelated.facts.as_mut().unwrap().revision = 9;
+    unrelated.name = "Renamed".into();
+    assert!(
+        approval.holds(&[unrelated]),
+        "other changes keep the approval"
+    );
+    let mut retargeted = two.clone();
+    retargeted
+        .facts
+        .as_mut()
+        .unwrap()
+        .pending
+        .as_mut()
+        .unwrap()
+        .version = version("0.11.5");
+    assert!(!approval.holds(&[retargeted]));
+    assert!(!approval.holds(&[]), "a removed Machine ends the approval");
+    assert!(!approval.still_approves(&MachinePreview {
+        target: None,
+        ..fresh.clone()
+    }));
+    assert!(approval.retargets(&MachinePreview {
+        target: Some(version("0.11.5")),
+        ..fresh
+    }));
+}
+
+/// Through the store: a restart that ends sessions asks, approving executes exactly the
+/// previewed work, and Cancel records the Ask-stage deferral.
+#[gpui::test]
+fn a_requested_restart_asks_then_runs_or_defers(cx: &mut gpui::TestAppContext) {
+    use crate::updates::machines::store::{Ask, request};
+    for approve in [true, false] {
+        let (adapter, store) = installed_store(cx);
+        adapter.emit(MachineUpdatesEvent::Machines(vec![waiting(
+            LOCAL, "This Mac", 2, false, NOW,
+        )]));
+        cx.run_until_parked();
+        let asked = Rc::new(std::cell::Cell::new(0));
+        let counted = asked.clone();
+        let ask: Ask = Rc::new(move |confirmation, answered, cx| {
+            assert_eq!(
+                confirmation.title.as_ref(),
+                "Restart SpaceTerm Core on This Mac?"
+            );
+            counted.set(counted.get() + 1);
+            answered(approve, cx);
+        });
+        cx.update(|cx| {
+            request(
+                vec![(LOCAL, MachineAction::Restart)],
+                false,
+                Surface::Window,
+                ask,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        assert_eq!(asked.get(), 1);
+        assert_eq!(
+            adapter.executed_actions(),
+            if approve {
+                vec![(LOCAL, MachineAction::Restart)]
+            } else {
+                Vec::new()
+            }
+        );
+        assert_eq!(
+            store.read_with(cx, |store, _| store.deferred().contains_key(&LOCAL)),
+            !approve
+        );
+    }
 }

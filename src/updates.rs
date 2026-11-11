@@ -599,10 +599,6 @@ pub(crate) struct ApplicationUpdates {
     stage: Stage,
     reminder: Option<Stage>,
     /// This launch is the first run on a newer version than the last launch.
-    #[allow(
-        dead_code,
-        reason = "the update view reads it once the presentation goes"
-    )]
     updated_this_launch: bool,
     presence: Rc<dyn Presence>,
     /// The last keyboard, input-method or pointer input to SpaceTerm on the update clock. The
@@ -891,10 +887,6 @@ impl ApplicationUpdates {
     }
     /// The ladder stage of the waiting SpaceTerm update, from the earliest publication among
     /// the versions it has waited for. Offer when nothing waits.
-    #[allow(
-        dead_code,
-        reason = "the update view reads it once the presentation goes"
-    )]
     pub(crate) fn ladder_stage(&self) -> Stage {
         self.stage
     }
@@ -919,10 +911,6 @@ impl ApplicationUpdates {
     /// Whether `What's New` is owed: this launch is the first run on a newer version, and its
     /// release notes have not opened since. It never returns on a later launch. Whether the
     /// build carries notes is the presentation's to check.
-    #[allow(
-        dead_code,
-        reason = "the update view reads it once the presentation goes"
-    )]
     pub(crate) fn whats_new(&self) -> bool {
         self.updated_this_launch && self.release_notes_unread()
     }

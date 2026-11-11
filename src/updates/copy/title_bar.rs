@@ -6,8 +6,8 @@ use super::{days, dialogs, sessions, this_ends};
 use crate::updates::ladder::Stage;
 use crate::updates::machines::MachineAction;
 use crate::updates::state::{
-    ActKind, AppStage, Blocked, Command, DesktopAction, Glyph, MachineRow, MachineStage,
-    PillView, Step, Target, UpdateView,
+    ActKind, AppStage, Blocked, Command, DesktopAction, Glyph, MachineRow, MachineStage, PillView,
+    Step, Target, UpdateView,
 };
 use spaceterm_core::update::continuation::Continuation;
 
@@ -74,7 +74,13 @@ pub(crate) fn pill(view: &UpdateView) -> Option<PillView> {
                     }
                     _ => format!("Restarting SpaceTerm Core on {}.", row.name),
                 };
-                (RESTARTING_CORE, Glyph::Working, tooltip, Command::ShowList, None)
+                (
+                    RESTARTING_CORE,
+                    Glyph::Working,
+                    tooltip,
+                    Command::ShowList,
+                    None,
+                )
             }
             Step::Downloading(target) => {
                 let (tooltip, progress) = match target {
@@ -97,7 +103,13 @@ pub(crate) fn pill(view: &UpdateView) -> Option<PillView> {
                         }
                     }
                 };
-                (DOWNLOADING_UPDATE, Glyph::Working, tooltip, Command::ShowList, progress)
+                (
+                    DOWNLOADING_UPDATE,
+                    Glyph::Working,
+                    tooltip,
+                    Command::ShowList,
+                    progress,
+                )
             }
             Step::Relaunching => (
                 RELAUNCHING,
@@ -193,7 +205,10 @@ fn restart_tooltip(row: &MachineRow, asking: bool) -> String {
             0 => "No Terminal Session is open.".to_owned(),
             n => format!("Restarting into {version} ends {}.", sessions(n)),
         };
-        return format!("An update has waited {} on {name}. {ends}", days(row.waited));
+        return format!(
+            "An update has waited {} on {name}. {ends}",
+            days(row.waited)
+        );
     }
     let ends = match n {
         0 => "No Terminal Session is open.".to_owned(),

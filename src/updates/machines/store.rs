@@ -34,8 +34,8 @@ use crate::updates::state::{Dismissed, PUSH_FAILURE};
 /// again.
 pub(crate) const RECONNECT_WAIT: Duration = Duration::from_secs(10);
 
-/// How long a restart approved here reads as this desktop's while its facts never show it begin,
-/// and how long the Core has to come back before its row reads Not responding.
+/// The adapter's restart deadline. Past it, a restart that never came back reads as
+/// Unconfirmed, and a restart approved here stays this desktop's step as Restart Not Confirmed.
 pub(crate) const RESTART_DEADLINE: Duration = super::live::RESTART_LIMIT;
 
 /// A check, install or restart a person started, until the Core's facts show it ended.
@@ -47,6 +47,9 @@ struct AskedWork {
     serial: u64,
     /// A restart: the facts showed it begin, by a restart operation or the Core going away.
     began: bool,
+    /// A restart: the running version the approved preview observed, so a Core that came back
+    /// on another version settles the restart even when its restart was never observed.
+    running: Option<Version>,
 }
 
 enum Phase {
@@ -335,6 +338,7 @@ impl MachineUpdates {
                 phase: Phase::Requested,
                 serial: self.serial,
                 began: false,
+                running: None,
             });
         }
         self.mark();
@@ -368,15 +372,20 @@ impl MachineUpdates {
             .map(|facts| facts.revision);
         // A request the Core refused, or that never reached it, ran no work of the person's.
         // An operation the Core's facts report, and the result that follows, are the Core's own.
-        if matches!(
-            outcome,
-            Err(ActionFailure::Busy
-                | ActionFailure::Unavailable(_)
-                | ActionFailure::Unreachable
-                | ActionFailure::RelaunchRequired
-                | ActionFailure::Changed
-                | ActionFailure::LoginItemOff)
-        ) {
+        // A restart that loses its lane answers Unreachable although the Core may have accepted
+        // it, so only the facts settle that restart.
+        let unknown = asked == Asked::Restart && *outcome == Err(ActionFailure::Unreachable);
+        if !unknown
+            && matches!(
+                outcome,
+                Err(ActionFailure::Busy
+                    | ActionFailure::Unavailable(_)
+                    | ActionFailure::Unreachable
+                    | ActionFailure::RelaunchRequired
+                    | ActionFailure::Changed
+                    | ActionFailure::LoginItemOff)
+            )
+        {
             self.asked.remove(index);
             return;
         }
@@ -438,23 +447,30 @@ impl MachineUpdates {
                         Some(Operation::Restarting { .. } | Operation::RestartingSameVersion)
                     )
                 });
+            let running = facts.map(|facts| &facts.running);
             self.asked.retain_mut(|work| {
                 if work.machine != machine {
                     return true;
                 }
                 match (&work.phase, work.asked) {
-                    (Phase::Requested, _) => true,
-                    // A restart stays marked from the approval until the Core comes back
-                    // without one, or while its Machine does not answer: past the deadline the
-                    // link reads Unconfirmed, and the mark makes that this desktop's step.
-                    (Phase::Answered, Asked::Restart) => {
+                    // A restart stays marked from the approval, whether or not its request has
+                    // answered, until the Core comes back without one: after it was seen to
+                    // begin, or on another version than the approval observed. While its
+                    // Machine does not answer it stays marked, so past the adapter's deadline
+                    // the Unconfirmed link is this desktop's step.
+                    (_, Asked::Restart) => {
                         if restarting || !reachable {
                             work.began = true;
-                            true
-                        } else {
-                            !work.began
+                            return true;
                         }
+                        let moved = work
+                            .running
+                            .as_ref()
+                            .zip(running)
+                            .is_some_and(|(approved, now)| approved != now);
+                        !(work.began || moved)
                     }
+                    (Phase::Requested, _) => true,
                     (Phase::Answered, _) => working,
                     (Phase::Reconnecting(link), _) => *link == update.link,
                 }
@@ -551,18 +567,41 @@ impl MachineUpdates {
                 phase: Phase::Requested,
                 serial,
                 began: false,
+                running: preview.running.clone().or_else(|| {
+                    self.machines
+                        .iter()
+                        .find(|update| update.machine == preview.machine)
+                        .and_then(|update| update.facts.as_ref())
+                        .map(|facts| facts.running.clone())
+                }),
             });
+            // The adapter's own deadline turns a restart that never came back into an
+            // Unconfirmed link, which keeps the mark. This later one only ends a mark whose
+            // restart never began while its Core answers as before.
             cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(RESTART_DEADLINE).await;
+                cx.background_executor().timer(2 * RESTART_DEADLINE).await;
                 let _ = this.update(cx, |this, cx| {
-                    let unconfirmed: Vec<MachineId> = this
+                    let quiet: Vec<MachineId> = this
                         .machines
                         .iter()
-                        .filter(|update| matches!(update.link, MachineLink::Unconfirmed { .. }))
+                        .filter(|update| {
+                            matches!(
+                                update.link,
+                                MachineLink::Connected | MachineLink::Incompatible(_)
+                            ) && update.facts.as_ref().is_some_and(|facts| {
+                                !matches!(
+                                    facts.operation,
+                                    Some(
+                                        Operation::Restarting { .. }
+                                            | Operation::RestartingSameVersion
+                                    )
+                                )
+                            })
+                        })
                         .map(|update| update.machine)
                         .collect();
                     this.asked.retain(|work| {
-                        work.serial != serial || unconfirmed.contains(&work.machine)
+                        work.serial != serial || work.began || !quiet.contains(&work.machine)
                     });
                     this.mark();
                     cx.notify();
@@ -1334,9 +1373,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn failures_reach_only_the_surface_that_performed_them(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn failures_reach_only_the_surface_that_performed_them(cx: &mut gpui::TestAppContext) {
         let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
         cx.update(|cx| crate::updates::ApplicationUpdates::install(updater.clone(), cx));
         let adapter = Rc::new(ScriptedMachines::default());

@@ -18,9 +18,7 @@ use spaceterm_core::update::facts::{
 };
 
 use super::machines::store::MachineUpdates;
-use super::machines::{
-    ActionFailure, Asked, MachineAction, MachineId, MachineLink, MachineUpdate,
-};
+use super::machines::{ActionFailure, Asked, MachineAction, MachineId, MachineLink, MachineUpdate};
 use super::policy::{DAY, UpdateStage};
 use super::{UpdateError, UpdateService, UpdateState};
 
@@ -1002,8 +1000,8 @@ impl MachineView {
                     title: "Relaunch Required".into(),
                     subtitle: None,
                     command: Command::Explain(Explanation {
-                proceed: None,
-                dismiss: None,
+                        proceed: None,
+                        dismiss: None,
                         title: "Relaunch SpaceTerm to Update Machines".into(),
                         message: self.sentence(),
                         then: None,
@@ -2336,4 +2334,3 @@ fn list_and(names: &[String]) -> String {
         [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
 }
-

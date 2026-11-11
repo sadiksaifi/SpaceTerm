@@ -7,8 +7,7 @@ use super::{dialogs, sessions, waited};
 use crate::updates::ladder::Stage;
 use crate::updates::machines::MachineAction;
 use crate::updates::state::{
-    AppRow, AppStage, Blocked, Command, DesktopAction, MachineRow, MachineStage, RowAction,
-    RowView,
+    AppRow, AppStage, Blocked, Command, DesktopAction, MachineRow, MachineStage, RowAction, RowView,
 };
 
 pub(crate) const APP_NAME: &str = "SpaceTerm";
@@ -68,7 +67,9 @@ pub(crate) fn app_row(app: &AppRow) -> RowView {
                 Command::Desktop(DesktopAction::Update),
             ),
             None,
-            format!("SpaceTerm {version} is downloaded. Relaunching keeps Terminal Sessions running."),
+            format!(
+                "SpaceTerm {version} is downloaded. Relaunching keeps Terminal Sessions running."
+            ),
         ),
         AppStage::Relaunching { .. } => (
             "Relaunching\u{2026}".to_owned(),
@@ -83,9 +84,17 @@ pub(crate) fn app_row(app: &AppRow) -> RowView {
                 || "Couldn't download the update".to_owned(),
                 |v| format!("Couldn't download {v}"),
             );
-            let sentence = format!("SpaceTerm {status}.").replace("SpaceTerm Couldn't", "SpaceTerm couldn't");
+            let sentence = version.as_ref().map_or_else(
+                || "SpaceTerm couldn't download the update.".to_owned(),
+                |v| format!("SpaceTerm couldn't download {v}."),
+            );
             if *retries {
-                (status, None, Some("SpaceTerm tries again later.".to_owned()), sentence)
+                (
+                    status,
+                    None,
+                    Some("SpaceTerm tries again later.".to_owned()),
+                    sentence,
+                )
             } else {
                 (
                     status,
@@ -115,9 +124,11 @@ pub(crate) fn app_row(app: &AppRow) -> RowView {
             (status, None, None, sentence)
         }
     };
-    let description = description.or_else(|| {
-        (app.waiting().is_some() && app.ladder >= Stage::Ask).then(|| waited(app.waited))
-    });
+    let age = (app.waiting().is_some() && app.ladder >= Stage::Ask).then(|| waited(app.waited));
+    let description = match (description, age) {
+        (Some(text), Some(age)) => Some(format!("{text} {age}")),
+        (text, age) => text.or(age),
+    };
     RowView {
         name: APP_NAME.into(),
         version: Some(app.running.clone()),
@@ -165,7 +176,13 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
         0 => None,
         n => Some(format!("Ends {}", sessions(n))),
     };
-    let restart = || action(RESTART_CORE, ends.clone(), Command::Machine(id, MachineAction::Restart));
+    let restart = || {
+        action(
+            RESTART_CORE,
+            ends.clone(),
+            Command::Machine(id, MachineAction::Restart),
+        )
+    };
     let too_old = row.blocked == Some(Blocked::CoreTooOld);
     let blocked = |text: String| {
         if too_old {
@@ -175,173 +192,221 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
         }
     };
     let subject = format!("SpaceTerm Core on {name}");
-    let (status, row_action, description, sentence): (String, Option<RowAction>, Option<String>, String) =
-        match &row.stage {
-            MachineStage::Running => match (row.blocked, &running) {
-                (Some(Blocked::CoreTooOld), _) => (
-                    "Too old for this SpaceTerm".to_owned(),
-                    None,
-                    None,
-                    format!("{subject} is too old for this SpaceTerm."),
-                ),
-                (Some(Blocked::AppTooOld), _) => (
-                    "Needs a newer SpaceTerm".to_owned(),
-                    None,
-                    None,
-                    format!("This SpaceTerm is too old for {subject}."),
-                ),
-                (None, Some(running)) => (
-                    running.clone(),
-                    None,
-                    None,
-                    format!("{subject} runs {running}."),
-                ),
-                (None, None) => (
-                    "Connecting\u{2026}".to_owned(),
-                    None,
-                    None,
-                    format!("Connecting to {subject}."),
-                ),
-            },
-            MachineStage::Connecting => (
+    let (status, row_action, description, sentence): (
+        String,
+        Option<RowAction>,
+        Option<String>,
+        String,
+    ) = match &row.stage {
+        MachineStage::Running => match (row.blocked, &running) {
+            (Some(Blocked::CoreTooOld), _) => (
+                "Too old for this SpaceTerm".to_owned(),
+                None,
+                None,
+                format!("{subject} is too old for this SpaceTerm."),
+            ),
+            (Some(Blocked::AppTooOld), _) => (
+                "Needs a newer SpaceTerm".to_owned(),
+                None,
+                None,
+                format!("This SpaceTerm is too old for {subject}."),
+            ),
+            (None, Some(running)) => (
+                running.clone(),
+                None,
+                None,
+                format!("{subject} runs {running}."),
+            ),
+            (None, None) => (
                 "Connecting\u{2026}".to_owned(),
                 None,
                 None,
                 format!("Connecting to {subject}."),
             ),
-            MachineStage::Offline => ("Offline".to_owned(), None, None, format!("{name} is offline.")),
-            MachineStage::Stopped => ("Stopped".to_owned(), None, None, format!("{subject} is stopped.")),
-            MachineStage::WaitingForApp { version } => (
-                "Waiting for the SpaceTerm update".to_owned(),
-                None,
-                None,
-                format!("SpaceTerm downloads SpaceTerm Core {version} to {name} after the SpaceTerm update."),
+        },
+        MachineStage::Connecting => (
+            "Connecting\u{2026}".to_owned(),
+            None,
+            None,
+            format!("Connecting to {subject}."),
+        ),
+        MachineStage::Offline => (
+            "Offline".to_owned(),
+            None,
+            None,
+            format!("{name} is offline."),
+        ),
+        MachineStage::Stopped => (
+            "Stopped".to_owned(),
+            None,
+            None,
+            format!("{subject} is stopped."),
+        ),
+        MachineStage::WaitingForApp { version } => (
+            "Waiting for the SpaceTerm update".to_owned(),
+            None,
+            None,
+            format!(
+                "SpaceTerm downloads SpaceTerm Core {version} to {name} after the SpaceTerm update."
             ),
-            MachineStage::Downloading { version, .. } => (
-                blocked(format!("Downloading {version}\u{2026}")),
-                None,
-                None,
-                format!("Downloading SpaceTerm Core {version} to {name}."),
-            ),
-            MachineStage::Downloaded {
-                version,
-                continuation,
-                ..
-            } => {
-                let version = version.to_string();
-                let consequence = match row.sessions {
-                    0 => "No Terminal Session is open.".to_owned(),
-                    n => format!("Restart Core ends {} now.", sessions(n)),
-                };
-                if too_old {
-                    (
-                        blocked(format!("{version} downloaded")),
+        ),
+        MachineStage::Downloading { version, .. } => (
+            blocked(format!("Downloading {version}\u{2026}")),
+            None,
+            None,
+            format!("Downloading SpaceTerm Core {version} to {name}."),
+        ),
+        MachineStage::Downloaded {
+            version,
+            continuation,
+            ..
+        } => {
+            let version = version.to_string();
+            let consequence = match row.sessions {
+                0 => "No Terminal Session is open.".to_owned(),
+                n => format!("Restarting SpaceTerm Core now ends {}.", sessions(n)),
+            };
+            if too_old {
+                (
+                    blocked(format!("{version} downloaded")),
+                    restart(),
+                    None,
+                    format!(
+                        "{subject} is too old for this SpaceTerm and has {version} downloaded. {consequence}"
+                    ),
+                )
+            } else {
+                match continuation {
+                    Continuation::Soon => (
+                        format!("Restarts into {version} in a moment"),
+                        None,
+                        None,
+                        format!("{subject} restarts into {version} in a moment."),
+                    ),
+                    Continuation::WhenSessionsEnd => (
+                        when_sessions_end(&version, row.sessions),
                         restart(),
                         None,
-                        format!("{subject} is too old for this SpaceTerm and has {version} downloaded. {consequence}"),
-                    )
-                } else {
-                    match continuation {
-                        Continuation::Soon => (
-                            format!("Restarts into {version} in a moment"),
-                            None,
-                            None,
-                            format!("{subject} restarts into {version} in a moment."),
+                        format!(
+                            "{subject} restarts into {version} when its {} end. {consequence}",
+                            sessions(row.sessions)
+                        )
+                        .replace("1 Terminal Session end.", "1 Terminal Session ends."),
+                    ),
+                    Continuation::WhenNothingRuns => (
+                        format!("Restarts into {version} after an hour with nothing running"),
+                        restart(),
+                        Some(NOTHING_RUNNING.to_owned()),
+                        format!(
+                            "{subject} restarts into {version} after an hour with nothing running. {consequence}"
                         ),
-                        Continuation::WhenSessionsEnd => (
-                            when_sessions_end(&version, row.sessions),
-                            restart(),
+                    ),
+                    Continuation::StartFailed => (
+                        format!("Couldn't restart into {version}"),
+                        action(
+                            TRY_AGAIN_ASKS,
                             None,
-                            format!(
-                                "{subject} restarts into {version} when its {} end. {consequence}",
-                                sessions(row.sessions)
-                            )
-                            .replace("1 Terminal Session end.", "1 Terminal Session ends."),
+                            Command::Machine(id, MachineAction::Restart),
                         ),
-                        Continuation::WhenNothingRuns => (
-                            format!("Restarts into {version} after an hour with nothing running"),
-                            restart(),
-                            Some(NOTHING_RUNNING.to_owned()),
-                            format!("{subject} restarts into {version} after an hour with nothing running. {consequence}"),
-                        ),
-                        Continuation::StartFailed => (
-                            format!("Couldn't restart into {version}"),
-                            action(TRY_AGAIN_ASKS, None, Command::Machine(id, MachineAction::Restart)),
-                            None,
-                            format!("{subject} couldn't restart into {version}."),
-                        ),
-                        Continuation::NeedsConfirmation | Continuation::Unknown => (
-                            format!("{version} downloaded"),
-                            restart(),
-                            None,
-                            format!("{subject} has {version} downloaded. {consequence}"),
-                        ),
-                    }
+                        None,
+                        format!("{subject} couldn't restart into {version}."),
+                    ),
+                    Continuation::NeedsConfirmation | Continuation::Unknown => (
+                        format!("{version} downloaded"),
+                        restart(),
+                        None,
+                        format!("{subject} has {version} downloaded. {consequence}"),
+                    ),
                 }
             }
-            MachineStage::Restarting { to: Some(to), .. } => (
-                format!("Restarting into {to}\u{2026}"),
-                None,
-                None,
-                format!("{subject} is restarting into {to}."),
-            ),
-            MachineStage::Restarting { to: None, .. } => (
-                "Restarting\u{2026}".to_owned(),
-                None,
-                None,
-                format!("{subject} is restarting."),
-            ),
-            MachineStage::StartFailed { version, kept, .. } => (
-                format!("Couldn't restart into {version}"),
-                kept.then(|| action(TRY_AGAIN_ASKS, None, Command::Machine(id, MachineAction::Restart)))
-                    .flatten(),
-                (!kept).then(|| "SpaceTerm waits for the next update.".to_owned()),
-                format!("{subject} couldn't restart into {version}."),
-            ),
-            MachineStage::DownloadFailed {
-                version, retries, ..
-            } => (
-                format!("Couldn't download {version}"),
-                (!retries)
-                    .then(|| action(TRY_AGAIN, None, Command::Machine(id, MachineAction::Install)))
-                    .flatten(),
-                retries.then(|| "SpaceTerm Core tries again later.".to_owned()),
-                format!("SpaceTerm couldn't download SpaceTerm Core {version} to {name}."),
-            ),
-            MachineStage::NotConfirmed { .. } => (
-                "Not responding".to_owned(),
-                action(CHECK_AGAIN, None, Command::Machine(id, MachineAction::CheckAgain)),
-                None,
-                format!("{name} stopped responding while SpaceTerm Core restarted."),
-            ),
-            MachineStage::CantCheck => (
-                "Can't check for updates".to_owned(),
-                action(CHECK_AGAIN, None, Command::Machine(id, MachineAction::CheckAgain)),
-                None,
-                format!("{subject} can't check for updates."),
-            ),
-            MachineStage::NeedsFloor { floor } => (
-                format!("Needs {floor} first"),
-                action(DOWNLOAD, None, Command::Machine(id, MachineAction::Install)),
-                None,
-                format!("{subject} needs {floor} first."),
-            ),
-            MachineStage::SteppingStoneSkipped => (
-                "Can't update by itself".to_owned(),
+        }
+        MachineStage::Restarting { to: Some(to), .. } => (
+            format!("Restarting into {to}\u{2026}"),
+            None,
+            None,
+            format!("{subject} is restarting into {to}."),
+        ),
+        MachineStage::Restarting { to: None, .. } => (
+            "Restarting\u{2026}".to_owned(),
+            None,
+            None,
+            format!("{subject} is restarting."),
+        ),
+        MachineStage::StartFailed { version, kept, .. } => (
+            format!("Couldn't restart into {version}"),
+            kept.then(|| {
                 action(
-                    HOW_TO_UPDATE,
+                    TRY_AGAIN_ASKS,
                     None,
-                    Command::Explain(dialogs::how_to_update(row)),
-                ),
+                    Command::Machine(id, MachineAction::Restart),
+                )
+            })
+            .flatten(),
+            (!kept).then(|| "SpaceTerm waits for the next update.".to_owned()),
+            format!("{subject} couldn't restart into {version}."),
+        ),
+        MachineStage::DownloadFailed {
+            version, retries, ..
+        } => (
+            format!("Couldn't download {version}"),
+            (!retries)
+                .then(|| {
+                    action(
+                        TRY_AGAIN,
+                        None,
+                        Command::Machine(id, MachineAction::Install),
+                    )
+                })
+                .flatten(),
+            retries.then(|| "SpaceTerm Core tries again later.".to_owned()),
+            format!("SpaceTerm couldn't download SpaceTerm Core {version} to {name}."),
+        ),
+        MachineStage::NotConfirmed { .. } => (
+            "Not responding".to_owned(),
+            action(
+                CHECK_AGAIN,
                 None,
-                format!("{subject} can't update by itself."),
+                Command::Machine(id, MachineAction::CheckAgain),
             ),
-        };
-    let description = description.or_else(|| {
-        row.ladder
-            .filter(|stage| *stage >= Stage::Ask)
-            .map(|_| waited(row.waited))
-    });
+            None,
+            format!("{name} stopped responding while SpaceTerm Core restarted."),
+        ),
+        MachineStage::CantCheck => (
+            "Can't check for updates".to_owned(),
+            action(
+                CHECK_AGAIN,
+                None,
+                Command::Machine(id, MachineAction::CheckAgain),
+            ),
+            None,
+            format!("{subject} can't check for updates."),
+        ),
+        MachineStage::NeedsFloor { floor } => (
+            format!("Needs {floor} first"),
+            action(DOWNLOAD, None, Command::Machine(id, MachineAction::Install)),
+            None,
+            format!("{subject} needs {floor} first."),
+        ),
+        MachineStage::SteppingStoneSkipped => (
+            "Can't update by itself".to_owned(),
+            action(
+                HOW_TO_UPDATE,
+                None,
+                Command::Explain(dialogs::how_to_update(row)),
+            ),
+            None,
+            format!("{subject} can't update by itself."),
+        ),
+    };
+    // From Ask, a waiting row adds how long the update waited, after its own description.
+    let age = row
+        .ladder
+        .filter(|stage| *stage >= Stage::Ask)
+        .map(|_| waited(row.waited));
+    let description = match (description, age) {
+        (Some(text), Some(age)) => Some(format!("{text} {age}")),
+        (text, age) => text.or(age),
+    };
     RowView {
         name: name.clone(),
         version: running.map(Into::into),

@@ -5,7 +5,6 @@
 //! SpaceTerm's clock is `UpdateHistory.published_at`; a SpaceTerm Core's clock is
 //! `PendingVersion.installed_at`. Both keep the earliest time across a replacing version. The
 //! desktop ignores `overdue_since`.
-#![allow(dead_code, reason = "contract C2: its consumers land after it")]
 
 /// How long an update waits at Offer before it asks.
 pub(crate) const ASK_AFTER: u64 = 2 * 86_400;
