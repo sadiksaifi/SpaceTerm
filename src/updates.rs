@@ -495,18 +495,6 @@ pub(crate) fn now() -> u64 {
         .as_secs()
 }
 
-/// Records a Machine's finished update in Recent, which the desktop's update history keeps
-/// across relaunch.
-#[allow(
-    dead_code,
-    reason = "Recent is no longer recorded; the title-bar and surfaces slices delete its last tests"
-)]
-pub(crate) fn record_recent(text: String, cx: &mut App) {
-    if let Some(service) = cx.try_global::<UpdateService>().map(|s| s.0.clone()) {
-        service.update(cx, |updates, cx| updates.record_recent(text, cx));
-    }
-}
-
 pub(crate) type ResumeQuit = Rc<dyn Fn(&mut App)>;
 
 /// What SpaceTerm's relaunch by itself observes about the person's use of SpaceTerm.
@@ -885,14 +873,6 @@ impl ApplicationUpdates {
     #[allow(dead_code, reason = "Recent is no longer recorded or shown")]
     pub(crate) fn recent(&self) -> &[policy::RecentUpdate] {
         self.history.recent()
-    }
-
-    /// Adds a finished update to Recent, such as "penguin updated to 0.9.0".
-    #[allow(dead_code, reason = "Recent is no longer recorded")]
-    pub(crate) fn record_recent(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
-        self.history.record(text, self.adapter.now());
-        self.save_history();
-        cx.notify();
     }
 
     /// Records that the person opened this build's release notes.
