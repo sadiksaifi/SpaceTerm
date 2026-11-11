@@ -90,9 +90,9 @@ pub(crate) trait MachineLane: Send + Sync {
     ) -> Result<Observed, ActionFailure>;
     /// `Check`.
     fn check(&self) -> Result<(), ActionFailure>;
-    /// Pushes `build` when supplied, otherwise fetches from the Core's feed. Answers whether a
-    /// version was downloaded: a feed that names nothing newer downloads none.
-    fn install(&self, build: Option<&EmbeddedCore>) -> Result<bool, ActionFailure>;
+    /// Pushes `build` when supplied, otherwise fetches from the Core's feed. Answers with the
+    /// Core's facts after it. A feed that names nothing newer downloads nothing.
+    fn install(&self, build: Option<&EmbeddedCore>) -> Result<UpdateFacts, ActionFailure>;
     /// `Preview` of `change`: the Core's token and what it affects.
     fn preview(&self, change: LaneChange) -> Result<admin::Preview, ActionFailure>;
     /// `Execute` of exactly `preview`, followed until it settles.
@@ -431,14 +431,16 @@ fn act(target: &Target, action: &MachineAction) -> Result<(), ActionFailure> {
         };
     };
     match action {
-        // Below the floor, Install asks the Core to fetch the Stepping Stone. A fetch that
-        // downloads nothing couldn't get it.
+        // Below the floor, Install asks the Core to fetch the Stepping Stone. The Core has it
+        // when its answer shows it downloaded, whether this fetch or its own check fetched it.
         MachineAction::Install => match (lane.install(target.push.as_deref()), target.floor) {
-            (Ok(true), _) | (Ok(false), None) => Ok(()),
-            (Ok(false) | Err(ActionFailure::Failed | ActionFailure::Unreachable), Some(floor)) => {
+            (Ok(facts), Some(floor)) if !super::reaches(floor, &facts) => {
                 Err(ActionFailure::NeedsFloor(floor))
             }
-            (Err(failure), _) => Err(failure),
+            (Err(ActionFailure::Failed | ActionFailure::Unreachable), Some(floor)) => {
+                Err(ActionFailure::NeedsFloor(floor))
+            }
+            (result, _) => result.map(drop),
         },
         _ => lane.check(),
     }

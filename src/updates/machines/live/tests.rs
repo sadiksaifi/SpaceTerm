@@ -65,7 +65,8 @@ struct ScriptedLane {
     waits: Mutex<mpsc::Receiver<Result<Observed, ActionFailure>>>,
     answer: Mutex<mpsc::Sender<Result<Observed, ActionFailure>>>,
     previewed: Mutex<u32>,
-    install_result: Mutex<Result<bool, ActionFailure>>,
+    /// The facts each Install answers with.
+    install_result: Mutex<Result<UpdateFacts, ActionFailure>>,
     requests: Mutex<Vec<String>>,
 }
 
@@ -77,7 +78,7 @@ impl ScriptedLane {
             waits: Mutex::new(waits),
             answer: Mutex::new(answer),
             previewed: Mutex::new(0),
-            install_result: Mutex::new(Ok(true)),
+            install_result: Mutex::new(Ok(self::facts(2, 0, Some("0.9.0")).facts)),
             requests: Mutex::new(Vec::new()),
         })
     }
@@ -147,12 +148,12 @@ impl MachineLane for ScriptedLane {
         Ok(())
     }
 
-    fn install(&self, build: Option<&EmbeddedCore>) -> Result<bool, ActionFailure> {
+    fn install(&self, build: Option<&EmbeddedCore>) -> Result<UpdateFacts, ActionFailure> {
         self.record(build.map_or_else(
             || "install".into(),
             |build| format!("push {}", build.candidate.version()),
         ));
-        *self.install_result.lock().unwrap()
+        self.install_result.lock().unwrap().clone()
     }
 
     fn preview(&self, change: LaneChange) -> Result<admin::Preview, ActionFailure> {
@@ -1009,7 +1010,7 @@ fn a_core_below_the_embedded_floor_gets_no_push_and_installs_from_its_feed() {
     let catalog = Catalog::floored("spaceterm-development", "1.2.2", "1.1.0");
     let mut observed = facts(1, 2, None);
     observed.facts.running = version("1.0.0");
-    let lane = ScriptedLane::new([Ok(observed)]);
+    let lane = ScriptedLane::new([Ok(observed.clone())]);
     let machine = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
     let sources = ScriptedSources::with(vec![known(PENGUIN, "penguin", false, &machine)]);
     let adapter = LiveMachines::new(sources, catalog.embedded("spaceterm-development"));
@@ -1027,6 +1028,11 @@ fn a_core_below_the_embedded_floor_gets_no_push_and_installs_from_its_feed() {
         "the Machine's row learns the floor it needs first"
     );
 
+    // The fetch leaves the Stepping Stone downloaded, whether it fetched it now or the Core's
+    // own check had already, before this desktop's facts showed it.
+    let mut fetched = observed.facts.clone();
+    fetched.pending = facts(2, 2, Some("1.1.0")).facts.pending;
+    *lane.install_result.lock().unwrap() = Ok(fetched);
     adapter.perform(PENGUIN, MachineAction::Install);
     assert_eq!(finished(&events, &MachineAction::Install), Ok(()));
     assert!(
@@ -1035,8 +1041,8 @@ fn a_core_below_the_embedded_floor_gets_no_push_and_installs_from_its_feed() {
     );
 
     // The Core couldn't get the Stepping Stone: its feed failed, or named nothing newer.
-    for result in [Err(ActionFailure::Unreachable), Ok(false)] {
-        *lane.install_result.lock().unwrap() = result;
+    for result in [Err(ActionFailure::Unreachable), Ok(observed.facts.clone())] {
+        *lane.install_result.lock().unwrap() = result.clone();
         adapter.perform(PENGUIN, MachineAction::Install);
         assert_eq!(
             finished(&events, &MachineAction::Install),
