@@ -186,10 +186,46 @@ impl UpdateAdapter for PreviewUpdates {
             (Duration::ZERO, UpdateEvent::Finished),
         ])
     }
+
+    fn release_relaunch(&self) -> bool {
+        // The preview completes through synthetic events. Leave SpaceTerm running to receive
+        // them instead of asking it to quit for an installer that does not exist.
+        true
+    }
 }
 
 impl Drop for PreviewUpdates {
     fn drop(&mut self) {
         self.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::quit_policy::{ApplicationQuitRequest, QuitAction, RelaunchQuit};
+
+    #[test]
+    fn a_failed_preview_relaunch_keeps_the_app_running_until_its_failure_arrives() {
+        let preview = PreviewUpdates::new(Scenario::RelaunchError);
+        let (sender, events) = async_channel::unbounded();
+        preview.start(sender).unwrap();
+        preview.install().unwrap();
+
+        let mut quit = RelaunchQuit::default();
+        assert_eq!(
+            quit.request(ApplicationQuitRequest::Exit, Some(1)),
+            QuitAction::SaveSettings
+        );
+        assert_eq!(quit.saved(true, Some(1)), QuitAction::Release);
+        assert_eq!(
+            quit.released(preview.release_relaunch(), Some(1)),
+            QuitAction::Nothing,
+            "the preview must leave the app running to receive its synthetic failure"
+        );
+        assert!(matches!(
+            events.recv_blocking().unwrap(),
+            UpdateEvent::Finished
+        ));
     }
 }
