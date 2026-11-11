@@ -253,12 +253,7 @@ impl RemoteMachineControl for LaneControl {
 
     fn perform(&self, preview: Preview) -> Result<Performed, RemoteFailure> {
         let (lane, pending, session, settled) = self.open()?;
-        // The Core ends the lane once its uninstall begins, as it does for a Stop.
-        let wait = if preview.action == LaneAction::Uninstall {
-            admin::STOP_WAIT
-        } else {
-            admin::wait(&preview.action)
-        };
+        let wait = admin::wait(&preview.action);
         let outcome = admin::execute(
             &lane,
             session,
@@ -300,15 +295,13 @@ pub(super) fn installed(cx: &App) -> Option<ControlSource> {
         .map(|installed| Arc::clone(&installed.0))
 }
 
-/// The change a confirmed preview or a settled receipt names.
+/// The change a settled receipt names. The card performs only Remove Machine's uninstall, and
+/// names the others only as an earlier operation a connection settled.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum Act {
     Stop,
     Restart,
-    /// A Network Access change. Only the CLI makes one, so the card names it only as an earlier
-    /// operation a connection settled.
     NetworkAccess,
-    /// Remove Machine's uninstall.
     Uninstall,
 }
 
@@ -377,7 +370,8 @@ pub(super) enum Work {
     Preparing(Change),
     /// The confirmation is open.
     Confirming,
-    Performing(Act),
+    /// The confirmed uninstall is underway.
+    Removing,
 }
 
 #[derive(Default)]
@@ -541,7 +535,7 @@ fn uninstall_started(outcome: &Outcome) -> bool {
     }
 }
 
-/// What a finished flow established about `act`.
+/// What a finished flow established about the uninstall.
 fn settlement(outcome: &Outcome) -> Settlement {
     Settlement::of(admin::verdict(outcome))
 }
@@ -631,9 +625,7 @@ impl SettingsWindow {
     /// The verb of a change underway on `route`, which the Server row names under its label.
     pub(super) fn remote_operation(&self, route: &DirectRouteId) -> Option<&'static str> {
         match self.remote_work(route)? {
-            // The card performs only Remove Machine's uninstall.
-            Work::Performing(Act::Stop | Act::Restart | Act::NetworkAccess) => None,
-            Work::Performing(Act::Uninstall) => Some("Removing\u{2026}"),
+            Work::Removing => Some("Removing\u{2026}"),
             Work::Reading | Work::Preparing(_) | Work::Confirming => None,
         }
     }
@@ -646,12 +638,10 @@ impl SettingsWindow {
 
     /// The change underway on `route`, as the Server row names it once it runs long.
     pub(super) fn remote_progress(&self, route: &DirectRouteId) -> Option<SharedString> {
-        let text = match self.remote_work(route)? {
-            Work::Performing(Act::Stop | Act::Restart | Act::NetworkAccess) => return None,
-            Work::Performing(Act::Uninstall) => "Uninstalling SpaceTerm Core\u{2026}".to_owned(),
-            Work::Reading | Work::Preparing(_) | Work::Confirming => return None,
-        };
-        Some(text.into())
+        match self.remote_work(route)? {
+            Work::Removing => Some("Uninstalling SpaceTerm Core\u{2026}".into()),
+            Work::Reading | Work::Preparing(_) | Work::Confirming => None,
+        }
     }
 
     /// What `route`'s card explains about its last lane step, if anything.
@@ -835,8 +825,6 @@ impl SettingsWindow {
             admin.ended = Some(Ended::Refused(RemoteFailure::Unreachable));
             return;
         };
-        let act = Act::of(&preview.action);
-        let performing = act.clone();
         let task = cx.spawn(async move |settings, cx| {
             let performed = cx
                 .background_spawn(async move { control.perform(preview) })
@@ -844,7 +832,7 @@ impl SettingsWindow {
             let _ = settings.update(cx, |settings, cx| {
                 let removed = matches!(
                     &performed,
-                    Ok(performed) if act == Act::Uninstall && uninstall_started(&performed.outcome)
+                    Ok(performed) if uninstall_started(&performed.outcome)
                 );
                 if removed {
                     // The Core's uninstall started, which revokes every pairing, so the machine
@@ -870,7 +858,7 @@ impl SettingsWindow {
             });
         });
         let admin = self.remote_mut(route);
-        admin.work = Some(Work::Performing(performing));
+        admin.work = Some(Work::Removing);
         admin.ended = None;
         admin._task = Some(task);
         cx.notify();
