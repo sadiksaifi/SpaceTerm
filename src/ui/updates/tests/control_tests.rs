@@ -961,7 +961,21 @@ fn failed_check(
     Entity<ApplicationUpdates>,
     &mut gpui::VisualTestContext,
 ) {
-    let (adapter, updates, _) = services(cx);
+    failed_check_beside(error, Vec::new(), cx)
+}
+
+/// [`failed_check`] while `machines` are connected.
+fn failed_check_beside(
+    error: UpdateError,
+    machines: Vec<MachineUpdate>,
+    cx: &mut gpui::TestAppContext,
+) -> (
+    Rc<crate::updates::testing::RecordingAdapter>,
+    Entity<ApplicationUpdates>,
+    &mut gpui::VisualTestContext,
+) {
+    let (adapter, updates, scripted) = services(cx);
+    scripted.emit(MachineUpdatesEvent::Machines(machines));
     cx.update(crate::ui::updates::init);
     let visual = workspace(cx);
     updates.update(visual, |updates, cx| updates.check(false, cx));
@@ -1030,6 +1044,68 @@ fn a_failed_download_from_check_for_updates_opens_d6(cx: &mut gpui::TestAppConte
         app_shown(visual),
         failed_step("Couldn't download 0.4.2", Some("Try Again")),
         "a newer failure shows again"
+    );
+}
+
+/// While a Core is too new for this SpaceTerm, Cancel on D6 hides only the failure: the hard
+/// stop's `Download Update` stays in the main area.
+#[gpui::test]
+fn cancel_on_d6_under_a_hard_stop_keeps_download_update(cx: &mut gpui::TestAppContext) {
+    use spaceterm_core::protocol::version::Incompatible;
+    let mut too_new = waiting(PENGUIN, 2);
+    too_new.link = crate::updates::machines::MachineLink::Incompatible(Incompatible::CallerTooOld);
+    let (_, _, visual) = failed_check_beside(UpdateError::Download, vec![too_new], cx);
+    assert_eq!(
+        app_shown(visual),
+        failed_step("Couldn't download 0.4.2", Some("Try Again"))
+    );
+    click("modal-action-update-explain-cancel", visual);
+    assert_eq!(
+        app_shown(visual),
+        (
+            Some(crate::updates::copy::title_bar::DOWNLOAD_UPDATE.to_owned()),
+            "Couldn't download 0.4.2".to_owned(),
+            Some("Try Again".to_owned())
+        ),
+        "the hard stop keeps its step; the row keeps the failure"
+    );
+}
+
+/// A relaunch that ran out of time leaves its installer with the updater, and no check runs
+/// while it does. Cancel on D7 hides only the failure: `Relaunch to Update` stays in the main
+/// area, because only a relaunch installs that update.
+#[gpui::test]
+fn cancel_on_d7_with_a_held_installer_keeps_relaunch_to_update(cx: &mut gpui::TestAppContext) {
+    let (adapter, updates, _) = services(cx);
+    let visual = workspace(cx);
+    updates.update(visual, |updates, cx| updates.check(false, cx));
+    adapter.emit(UpdateEvent::Available(version()));
+    visual.run_until_parked();
+    updates.update(visual, |updates, cx| updates.download(cx));
+    adapter.emit(UpdateEvent::Ready);
+    visual.run_until_parked();
+    updates.update(visual, |updates, cx| updates.relaunch(cx));
+    visual
+        .executor()
+        .advance_clock(crate::updates::RELAUNCH_DEADLINE);
+    visual.run_until_parked();
+    assert!(visual.update(|_, cx| updates.read(cx).holds_failed_relaunch()));
+    visual.update(|_, cx| cx.defer(crate::ui::updates::check_for_updates));
+    visual.run_until_parked();
+    A11yTree::read(visual).text("Couldn't Relaunch SpaceTerm");
+    assert_eq!(
+        app_shown(visual),
+        failed_step("Couldn't relaunch", Some("Try Again"))
+    );
+    click("modal-action-update-explain-cancel", visual);
+    assert_eq!(
+        app_shown(visual),
+        (
+            Some(crate::updates::copy::title_bar::RELAUNCH_TO_UPDATE.to_owned()),
+            "Couldn't relaunch".to_owned(),
+            Some("Try Again".to_owned())
+        ),
+        "the held update keeps its step; the row keeps the failure"
     );
 }
 

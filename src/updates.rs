@@ -452,7 +452,7 @@ impl UpdateModel {
 /// How long a download that SpaceTerm tries again by itself keeps failing before the title bar
 /// shows it. Settings and the menu bar extra show it at once.
 const RETRY_QUIETLY_FOR: u64 = policy::DAY;
-const RELAUNCH_DEADLINE: Duration = Duration::from_secs(30);
+pub(crate) const RELAUNCH_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Whether Sparkle may install the appcast item: a stable release whose enclosure is that
 /// release's disk image, named as the release publishes it.

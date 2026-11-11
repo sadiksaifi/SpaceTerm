@@ -143,7 +143,7 @@ pub(crate) fn pill(view: &UpdateView) -> Option<PillView> {
                         } else {
                             format!(
                                 "SpaceTerm {} is downloaded. Relaunching keeps Terminal Sessions running.",
-                                view.app.waiting().cloned().unwrap_or_default()
+                                release(&view.app)
                             )
                         },
                         Command::Desktop(DesktopAction::Update),
@@ -162,10 +162,7 @@ pub(crate) fn pill(view: &UpdateView) -> Option<PillView> {
                     ActKind::Download => (
                         DOWNLOAD_UPDATE,
                         Glyph::Download,
-                        format!(
-                            "SpaceTerm {} is available.",
-                            view.app.waiting().cloned().unwrap_or_default()
-                        ),
+                        format!("SpaceTerm {} is available.", release(&view.app)),
                         Command::Desktop(DesktopAction::Download),
                         None,
                     ),
@@ -231,6 +228,20 @@ fn restart_tooltip(row: &MachineRow, asking: bool) -> String {
         text.push_str(&dialogs::stranded(name, stranded));
     }
     text
+}
+
+/// The release an action step names: the one that waits, or the one whose failure the person
+/// dismissed while its step still applies.
+fn release(app: &AppRow) -> SharedString {
+    app.waiting()
+        .cloned()
+        .or_else(|| match &app.stage {
+            AppStage::DownloadFailed { version, .. } | AppStage::RelaunchFailed { version, .. } => {
+                version.clone()
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// The tooltip of `Update Failed` for SpaceTerm's own failure: what failed, then why, in at
@@ -382,6 +393,19 @@ mod tests {
         };
         let mut facts = app(&ready);
         facts.pending = Some("0.11.6");
+        assert_eq!(
+            tooltip(facts),
+            "SpaceTerm 0.11.6 is downloaded. Relaunching keeps Terminal Sessions running."
+        );
+
+        // A dismissed failed relaunch whose installer the updater still holds.
+        let failed = UpdateState::Failed {
+            error: UpdateError::Relaunch,
+        };
+        let mut facts = app(&failed);
+        facts.pending = Some("0.11.6");
+        facts.relaunch_held = true;
+        facts.failure_dismissed = true;
         assert_eq!(
             tooltip(facts),
             "SpaceTerm 0.11.6 is downloaded. Relaunching keeps Terminal Sessions running."

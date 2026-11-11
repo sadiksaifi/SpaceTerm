@@ -116,7 +116,7 @@ pub(crate) fn app_failure(app: &AppRow) -> Option<Explanation> {
             proceed: Some(TRY_AGAIN.into()),
             dismiss,
         },
-        AppStage::RelaunchFailed { version, error } => {
+        AppStage::RelaunchFailed { version, error, .. } => {
             relaunch_failure(version.as_deref(), *error == UpdateError::SettingsUnsaved)
         }
         AppStage::CantReplace => Explanation {

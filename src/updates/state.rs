@@ -147,9 +147,11 @@ pub(crate) enum AppStage {
         error: UpdateError,
         retries: bool,
     },
+    /// `held`: the updater still holds the installer, so only a relaunch installs it.
     RelaunchFailed {
         version: Option<SharedString>,
         error: UpdateError,
+        held: bool,
     },
     /// The installation can't be replaced.
     CantReplace,
@@ -530,6 +532,7 @@ impl AppRow {
             } => AppStage::RelaunchFailed {
                 version: pending,
                 error: *error,
+                held: facts.relaunch_held,
             },
             UpdateState::Failed {
                 error:
@@ -607,7 +610,22 @@ impl AppRow {
             AppStage::DownloadFailed { retries: true, .. } => None,
             AppStage::DownloadFailed { retries: false, .. }
             | AppStage::RelaunchFailed { .. }
-            | AppStage::CantReplace => (!self.dismissed).then_some(Step::Failed(Target::App)),
+            | AppStage::CantReplace
+                if !self.dismissed =>
+            {
+                Some(Step::Failed(Target::App))
+            }
+            // A dismissal hides only the failure. A held installer still waits for Relaunch, and
+            // a hard stop still asks for the download.
+            AppStage::RelaunchFailed { held: true, .. } => Some(act(ActKind::Relaunch)),
+            AppStage::DownloadFailed { retries: false, .. } | AppStage::RelaunchFailed { .. }
+                if hard_stop =>
+            {
+                Some(act(ActKind::Download))
+            }
+            AppStage::DownloadFailed { retries: false, .. }
+            | AppStage::RelaunchFailed { .. }
+            | AppStage::CantReplace => None,
         }
     }
 
