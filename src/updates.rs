@@ -3,6 +3,7 @@
 #[cfg(feature = "developer-tools")]
 pub(crate) mod preview;
 
+pub(crate) mod ladder;
 pub(crate) mod machines;
 pub(crate) mod policy;
 pub(crate) mod presentation;
