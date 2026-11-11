@@ -10,11 +10,7 @@ const CONNECTED: LocalCoreStatus = LocalCoreStatus::Connected(ConnectedCore {
 
 #[test]
 fn a_running_local_core_reads_as_running_for_this_account_and_live() {
-    let state = local_state(
-        CONNECTED,
-        Some((Some(ServicePhase::Running), None, false)),
-        false,
-    );
+    let state = local_state(CONNECTED, Some((Some(ServicePhase::Running), None, false)));
 
     assert_eq!(state.state.as_ref(), "Running");
     assert_eq!(state.short.as_ref(), "Running \u{b7} this account");
@@ -31,7 +27,6 @@ fn a_stopped_or_uninstalled_local_core_is_not_live() {
         let state = local_state(
             LocalCoreStatus::Failed(CoreError::NotRunning),
             Some((Some(phase), None, false)),
-            false,
         );
 
         assert_eq!(state.state.as_ref(), expected);
@@ -44,7 +39,6 @@ fn a_local_core_waiting_for_startup_authorization_says_so() {
     let state = local_state(
         LocalCoreStatus::Failed(CoreError::AuthorizationRequired),
         Some((Some(ServicePhase::Stopped), None, true)),
-        false,
     );
 
     assert_eq!(state.state.as_ref(), "Needs authorization");
@@ -62,7 +56,6 @@ fn a_local_service_step_underway_keeps_the_state_and_names_its_verb() {
         let state = local_state(
             CONNECTED,
             Some((Some(ServicePhase::Running), Some(action), false)),
-            false,
         );
 
         assert_eq!(state.state.as_ref(), "Running");
@@ -82,7 +75,6 @@ fn a_local_service_read_keeps_a_running_core_live() {
             Some(ServiceAction::Check),
             false,
         )),
-        false,
     );
 
     assert_eq!(state.state.as_ref(), "Running");
@@ -92,25 +84,12 @@ fn a_local_service_read_keeps_a_running_core_live() {
 }
 
 #[test]
-fn an_update_still_running_names_updating_when_settings_reopens() {
-    let state = local_state(
-        LocalCoreStatus::Failed(CoreError::ActivationUnresolved),
-        Some((Some(ServicePhase::Stopped), None, false)),
-        true,
-    );
-
-    assert_eq!(state.state.as_ref(), "Stopped");
-    assert_eq!(state.operation, Some("Updating\u{2026}"));
-}
-
-#[test]
 fn a_local_core_without_a_protocol_in_common_needs_an_update() {
     let state = local_state(
         LocalCoreStatus::Failed(CoreError::IncompatibleProtocol(
             spaceterm_core::protocol::version::Incompatible::ListenerTooOld,
         )),
         Some((Some(ServicePhase::Running), None, false)),
-        false,
     );
 
     assert_eq!(state.state.as_ref(), "Needs update");

@@ -15,9 +15,10 @@ use crate::local_startup::CandidateError;
 use crate::machine_connection::CoreError;
 use crate::machine_connection::service::activation::{ActivationStatus, is_released_downgrade};
 use crate::machine_connection::service::{RetainedInstallation, Service, ServiceStatus};
+use crate::updates::copy::dialogs;
 use crate::updates::machines::store::{self, MachineUpdates, Surface};
-use crate::updates::machines::{ActionFailure, MachineAction};
-use crate::updates::presentation::{self, Command, Confirmation, MachineView};
+use crate::updates::machines::{ActionFailure, MachineAction, MachineId, MachineUpdate};
+use crate::updates::state::{self, Command, Confirmation, Explanation, RowView};
 
 pub(super) const UPDATE_SELECTOR: &str = "settings-server-update";
 pub(super) const UPDATE_CONFIRM_SELECTOR: &str = "settings-server-update-confirm";
@@ -127,6 +128,14 @@ impl MachineUpdateRow {
     }
 }
 
+/// Whether a Pending Version waits on `update`'s Core.
+pub(super) fn pending(update: &MachineUpdate) -> bool {
+    update
+        .facts
+        .as_ref()
+        .is_some_and(|facts| facts.pending.is_some())
+}
+
 impl SettingsWindow {
     pub(super) fn check_core_update(&mut self, cx: &mut Context<Self>) {
         let Some(row) = &mut self.core_update else {
@@ -176,31 +185,37 @@ impl SettingsWindow {
         }
     }
 
-    /// The same Machine presentation that the title bar reads. Saved route identity, rather
+    /// The Machine `choice` names in the shared Machine updates. Saved route identity, rather
     /// than its editable label, selects a paired Machine.
-    pub(super) fn machine_update_view(
-        &self,
-        choice: &MachineChoice,
-        cx: &App,
-    ) -> Option<MachineView> {
-        let shared = presentation::current(cx);
-        match choice {
-            MachineChoice::Local => shared.machines.into_iter().find(|view| view.local),
-            MachineChoice::Direct(route) => {
-                let machine = self
-                    .direct_routes
+    pub(super) fn machine_update(&self, choice: &MachineChoice, cx: &App) -> Option<MachineUpdate> {
+        let id = match choice {
+            MachineChoice::Local => None,
+            MachineChoice::Direct(route) => Some(
+                self.direct_routes
                     .as_ref()?
                     .connections
                     .route(route)?
                     .paired
                     .pin
-                    .core;
-                shared
-                    .machines
-                    .into_iter()
-                    .find(|view| view.machine == machine)
-            }
-        }
+                    .core,
+            ),
+        };
+        MachineUpdates::global(cx)?
+            .read(cx)
+            .machines()
+            .iter()
+            .find(|update| match id {
+                None => update.local,
+                Some(id) => update.machine == id,
+            })
+            .cloned()
+    }
+
+    /// The update row `choice` shows, the same row the title-bar list and the menu bar extra
+    /// show. Reading it opens no connection.
+    pub(super) fn machine_update_row(&self, choice: &MachineChoice, cx: &App) -> Option<RowView> {
+        let machine = self.machine_update(choice, cx)?.machine;
+        state::current(cx).machine_row(machine)
     }
 
     pub(super) fn request_machine_restart(
@@ -209,14 +224,23 @@ impl SettingsWindow {
         window: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
-        let Some(view) = self.machine_update_view(choice, cx) else {
+        let Some(update) = self.machine_update(choice, cx) else {
             return;
         };
         self.perform_update_command(
-            Command::Machine(view.machine, MachineAction::Restart),
+            Command::Machine(update.machine, MachineAction::Restart),
             window,
             cx,
         );
+    }
+
+    /// Asks `machine`'s SpaceTerm Core to check its feed, over the connection SpaceTerm holds.
+    pub(super) fn ask_core_to_check(&self, machine: MachineId, cx: &mut Context<Self>) {
+        if let Some(store) = MachineUpdates::global(cx) {
+            store.update(cx, |store, cx| {
+                store.perform(machine, MachineAction::CheckAgain, Surface::Settings, cx);
+            });
+        }
     }
 
     pub(super) fn perform_update_command(
@@ -343,10 +367,10 @@ impl SettingsWindow {
             } else if failure == ActionFailure::LoginItemOff {
                 crate::local_startup::open_login_items();
             } else if let Some((title, message)) =
-                presentation::action_failure(&notice.name, notice.local, &notice.action, failure)
+                dialogs::action_failure(&notice.name, &notice.action, failure)
             {
                 settings.perform_update_command(
-                    Command::Explain(presentation::Explanation::ok(title, message)),
+                    Command::Explain(Explanation::ok(title, message)),
                     window,
                     cx,
                 );
@@ -359,7 +383,7 @@ impl SettingsWindow {
 /// Presents `explanation` over Settings, outside any update of it.
 fn present_explanation(
     owner: gpui::WeakEntity<SettingsWindow>,
-    explanation: presentation::Explanation,
+    explanation: Explanation,
     window: AnyWindowHandle,
     cx: &mut App,
 ) {

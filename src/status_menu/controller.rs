@@ -1,6 +1,6 @@
 //! The status menu's behavior, shared by every platform's status item: it follows the desktop's
-//! update service and the shared Machine updates, renders after each change, and performs each
-//! command, asking first wherever the update presentation says a command asks.
+//! update service and the shared Machine updates, renders the one update view after each change,
+//! and performs each command, asking first wherever a command asks.
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -10,9 +10,10 @@ use spaceterm_core::service::ServiceStatus;
 
 use super::model::{Command, Menu};
 use crate::updates::UpdateService;
+use crate::updates::copy::dialogs;
 use crate::updates::machines::store::{self, MachineUpdates, MachineUpdatesNotice, Surface};
 use crate::updates::machines::{ActionFailure, MachineAction, MachineId, MachineUpdate};
-use crate::updates::presentation::{self, DesktopAction};
+use crate::updates::state::{self, DesktopAction};
 
 /// A native alert the status item shows by itself.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -46,7 +47,7 @@ pub(crate) trait StatusHost {
 
 enum Message {
     /// The person closed an explanation that runs this command next.
-    Answered(presentation::Command),
+    Answered(state::Command),
     /// The person answered the confirmation with this ID.
     Confirmed(u64, bool),
 }
@@ -196,12 +197,9 @@ impl StatusMenu {
             // menu still offers Start, and the person chooses it.
             Err(ActionFailure::LoginItemOff) => self.host.open_login_items(),
             Err(failure) => {
-                if let Some((title, message)) = presentation::action_failure(
-                    &notice.name,
-                    notice.local,
-                    &notice.action,
-                    failure,
-                ) {
+                if let Some((title, message)) =
+                    dialogs::action_failure(&notice.name, &notice.action, failure)
+                {
                     let alert = Alert {
                         title: title.to_string(),
                         message: message.to_string(),
@@ -236,10 +234,10 @@ impl StatusMenu {
     }
 
     fn render(&self, cx: &App) {
-        let update = presentation::current(cx);
+        let view = state::current(cx);
         let machines: &[MachineUpdate] =
             MachineUpdates::global(cx).map_or(&[], |store| store.read(cx).machines());
-        let menu = Menu::new(&update, machines, crate::updates::recent_lines(cx));
+        let menu = Menu::new(&view, machines);
         if self.menu.borrow().as_ref() == Some(&menu) {
             return;
         }
@@ -271,20 +269,20 @@ impl StatusMenu {
         }
     }
 
-    fn run(&self, command: presentation::Command, activation: Option<String>, cx: &mut App) {
+    fn run(&self, command: state::Command, activation: Option<String>, cx: &mut App) {
         match command {
-            presentation::Command::Machine(
+            state::Command::Machine(
                 machine,
                 action @ (MachineAction::Restart | MachineAction::Stop),
             ) => self.request(vec![(machine, action)], false, activation, cx),
-            presentation::Command::Machine(machine, action) => act(machine, action, cx),
+            state::Command::Machine(machine, action) => act(machine, action, cx),
             // The confirmation is built again from the Cores' previews before it shows.
-            presentation::Command::Confirm(confirmation) => {
+            state::Command::Confirm(confirmation) => {
                 self.request(confirmation.actions, false, activation, cx);
             }
             // Only the title bar opens its list.
-            presentation::Command::ShowList => {}
-            presentation::Command::Explain(explanation) => {
+            state::Command::ShowList => {}
+            state::Command::Explain(explanation) => {
                 let alert = Alert {
                     title: explanation.title.to_string(),
                     message: explanation.message.to_string(),
@@ -303,7 +301,7 @@ impl StatusMenu {
                     cx,
                 );
             }
-            presentation::Command::Desktop(action) => desktop(action, activation, cx),
+            state::Command::Desktop(action) => desktop(action, activation, cx),
         }
     }
 }
@@ -339,7 +337,7 @@ fn desktop(action: DesktopAction, activation: Option<String>, cx: &mut App) {
             crate::ui::updates::whats_new::open_whats_new(cx);
             cx.activate(true);
         }
-        // The menu bar extra offers Retry SpaceTerm Update instead of a dismissal.
+        // The menu offers no dismissal; the title bar's failure step owns it.
         DesktopAction::DismissFailure => {}
     }
 }

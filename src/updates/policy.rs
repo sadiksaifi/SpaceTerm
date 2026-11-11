@@ -259,6 +259,7 @@ impl UpdateHistory {
     }
 
     /// Newest first.
+    #[allow(dead_code, reason = "Recent is no longer recorded or shown")]
     pub(crate) fn recent(&self) -> &[RecentUpdate] {
         &self.recent
     }

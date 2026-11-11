@@ -493,37 +493,6 @@ pub(crate) fn now() -> u64 {
         .as_secs()
 }
 
-/// Recent Updates as every surface lists it, newest first: "penguin updated to 0.9.0 · 09:41".
-pub(crate) fn recent_lines(cx: &App) -> Vec<String> {
-    let Some(service) = cx.try_global::<UpdateService>() else {
-        return Vec::new();
-    };
-    service
-        .0
-        .read(cx)
-        .recent()
-        .iter()
-        .map(|entry| format!("{} \u{b7} {}", entry.text, recent_time(entry.at, cx)))
-        .collect()
-}
-
-/// "09:41" today, otherwise "Nov 3", in this computer's local time.
-fn recent_time(at: u64, cx: &App) -> String {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let Some(calendar) = cx.try_global::<crate::desktop_profile::DesktopPresentation>() else {
-        return "earlier".to_owned();
-    };
-    match (calendar.local_time(at), calendar.local_time(now())) {
-        (Some(at), Some(now)) if (at.year, at.month, at.day) == (now.year, now.month, now.day) => {
-            format!("{:02}:{:02}", at.hour, at.minute)
-        }
-        (Some(at), _) => format!("{} {}", MONTHS.get(at.month).copied().unwrap_or(""), at.day),
-        (None, _) => "earlier".to_owned(),
-    }
-}
-
 /// Records a Machine's finished update in Recent, which the desktop's update history keeps
 /// across relaunch.
 #[allow(
@@ -916,6 +885,7 @@ impl ApplicationUpdates {
     }
 
     /// Finished updates of this desktop and every Machine, newest first.
+    #[allow(dead_code, reason = "Recent is no longer recorded or shown")]
     pub(crate) fn recent(&self) -> &[policy::RecentUpdate] {
         self.history.recent()
     }

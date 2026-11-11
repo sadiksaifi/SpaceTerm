@@ -1499,13 +1499,23 @@ impl SettingsWindow {
         for &row in &rows {
             let title = row.descriptor().group;
             let ends = CardEnds::of(&rows, &row, |other| other.descriptor().group == title);
-            let rendered = self.render_row(row, ends, appearance, window, cx);
-            // Each paired device has a row of its own under Devices. They follow every catalog
-            // row of their card, so the card's row bounds still pair with its catalog rows.
-            let devices = if row == SettingsRowId::PairedDevices {
-                self.render_device_rows(appearance, window, cx)
+            // Each Machine has an update row of its own under SpaceTerm Core. The first stands
+            // in the catalog row's place, so the card's row bounds still pair with it.
+            let (rendered, devices) = if row == SettingsRowId::CoreUpdates {
+                let mut machines = self.render_update_machine_rows(appearance, window, cx);
+                let first = machines.remove(0);
+                (first, machines)
             } else {
-                Vec::new()
+                let rendered = self.render_row(row, ends, appearance, window, cx);
+                // Each paired device has a row of its own under Devices. They follow every
+                // catalog row of their card, so the card's row bounds still pair with its
+                // catalog rows.
+                let devices = if row == SettingsRowId::PairedDevices {
+                    self.render_device_rows(appearance, window, cx)
+                } else {
+                    Vec::new()
+                };
+                (rendered, devices)
             };
             match groups.iter_mut().find(|(current, _, _)| *current == title) {
                 Some((_, ids, members)) => {
@@ -1740,6 +1750,9 @@ impl SettingsWindow {
             SettingsRowId::AddMachine => self.render_add_machine_row(ends, appearance, cx),
             SettingsRowId::CommandLineTool => self.render_command_line_tool(appearance, cx),
             SettingsRowId::UpdateStatus => self.render_update_status(cx),
+            // The section renders each Machine's row in this row's place.
+            SettingsRowId::CoreUpdates => div().into_any_element(),
+            SettingsRowId::UpdateCheckNow => self.render_update_check_now(cx),
             SettingsRowId::AutomaticUpdateDownloads => self.render_automatic_update_downloads(cx),
             SettingsRowId::UpdateCheckInterval => self.render_update_check_interval(cx),
             SettingsRowId::Shortcut(command) => self.render_shortcut(command, cx),
@@ -2543,7 +2556,8 @@ fn row_layout(row: SettingsRowId) -> FormRowLayout {
     match row {
         SettingsRowId::TerminalTheme
         | SettingsRowId::InstalledThemes
-        | SettingsRowId::SettingsFile => FormRowLayout::Full,
+        | SettingsRowId::SettingsFile
+        | SettingsRowId::UpdateCheckNow => FormRowLayout::Full,
         SettingsRowId::AllMachines | SettingsRowId::AddMachine => FormRowLayout::Items,
         _ => FormRowLayout::Beside,
     }
@@ -2674,9 +2688,9 @@ impl SettingsWindow {
             ),
             SettingsRowId::SidebarDefaultState => Some("The sidebar state in each new window."),
             SettingsRowId::TerminalFontFamily => Some("Only monospace fonts."),
-            SettingsRowId::AutomaticUpdateDownloads | SettingsRowId::UpdateCheckInterval => {
-                updates::update_row_description(row)
-            }
+            SettingsRowId::AutomaticUpdateDownloads
+            | SettingsRowId::UpdateCheckInterval
+            | SettingsRowId::UpdateCheckNow => updates::update_row_description(row),
             SettingsRowId::MicrophoneAccess => {
                 Some(self.microphone_access.presentation().explanation)
             }
