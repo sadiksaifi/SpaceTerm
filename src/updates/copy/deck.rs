@@ -479,41 +479,96 @@ fn update_ui_modules_hold_no_update_strings() {
         "installed",
     ];
     let mut found = Vec::new();
-    for file in [
-        "src/updates/state.rs",
-        "src/updates/confirm.rs",
-        "src/updates/machines/store.rs",
-        "src/ui/updates.rs",
-        "src/ui/updates/commands.rs",
-        "src/ui/updates/control.rs",
-        "src/ui/updates/whats_new.rs",
-        "src/status_menu/model.rs",
-        "src/status_menu/controller.rs",
-        "src/ui/settings_window/updates.rs",
-        "src/ui/settings_window/machine_card.rs",
-        "src/ui/settings_window/core_update.rs",
-    ] {
-        let text = std::fs::read_to_string(root.join(file)).unwrap();
-        // An inline test module ends the production code.
-        let text = text
-            .split("#[cfg(test)]\nmod tests {")
-            .next()
-            .unwrap_or_default();
-        for (number, line) in text.lines().enumerate() {
-            let code = line.trim_start();
-            if code.starts_with("//") {
+    for file in UPDATE_UI_MODULES {
+        for (number, literal) in literals(root, file) {
+            // The Core service's own state, not an update's.
+            if literal == "Not installed" {
                 continue;
             }
-            for literal in code.split('"').skip(1).step_by(2) {
-                // The Core service's own state, not an update's.
-                if literal == "Not installed" {
-                    continue;
-                }
-                if phrases.iter().any(|phrase| literal.contains(phrase)) {
-                    found.push(format!("{file}:{}: {literal}", number + 1));
-                }
+            if phrases.iter().any(|phrase| literal.contains(phrase)) {
+                found.push(format!("{file}:{number}: {literal}"));
             }
         }
     }
     assert!(found.is_empty(), "update strings outside copy/: {found:#?}");
+}
+
+/// The update UI modules, whose text comes from `copy/`.
+const UPDATE_UI_MODULES: [&str; 12] = [
+    "src/updates/state.rs",
+    "src/updates/confirm.rs",
+    "src/updates/machines/store.rs",
+    "src/ui/updates.rs",
+    "src/ui/updates/commands.rs",
+    "src/ui/updates/control.rs",
+    "src/ui/updates/whats_new.rs",
+    "src/status_menu/model.rs",
+    "src/status_menu/controller.rs",
+    "src/ui/settings_window/updates.rs",
+    "src/ui/settings_window/machine_card.rs",
+    "src/ui/settings_window/core_update.rs",
+];
+
+/// Every string literal in `file`'s production code, with its line number. An inline test module
+/// ends the production code, and comments are skipped.
+fn literals(root: &Path, file: &str) -> Vec<(usize, String)> {
+    let text = std::fs::read_to_string(root.join(file)).unwrap();
+    let text = text
+        .split("#[cfg(test)]\nmod tests {")
+        .next()
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for (number, line) in text.lines().enumerate() {
+        let code = line.trim_start();
+        if code.starts_with("//") {
+            continue;
+        }
+        for literal in code.split('"').skip(1).step_by(2) {
+            out.push((number + 1, literal.to_owned()));
+        }
+    }
+    out
+}
+
+/// Update text uses straight apostrophes on every surface, including the updater's own error
+/// messages, which no copy deck field renders. The Machine card's reachability guidance is
+/// Machines text, not update text.
+#[test]
+fn update_text_uses_straight_apostrophes() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let copy = std::fs::read_dir(root.join("src/updates/copy"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+        .filter(|path| !path.ends_with("deck.rs"))
+        .map(|path| {
+            path.strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    let mut found = Vec::new();
+    for file in UPDATE_UI_MODULES
+        .iter()
+        .filter(|file| !file.ends_with("machine_card.rs"))
+        .copied()
+        .chain(["src/updates.rs"])
+        .chain(copy.iter().map(String::as_str))
+    {
+        for (number, literal) in literals(root, file) {
+            let curly = ['\u{2018}', '\u{2019}']
+                .iter()
+                .any(|mark| literal.contains(*mark))
+                || literal.contains("\\u{2018}")
+                || literal.contains("\\u{2019}");
+            if curly {
+                found.push(format!("{file}:{number}: {literal}"));
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "curly apostrophes in update text: {found:#?}"
+    );
 }
