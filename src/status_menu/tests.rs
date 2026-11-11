@@ -772,8 +772,14 @@ fn relaunch_to_update_relaunches_without_asking(cx: &mut TestAppContext) {
     let fixture = start(vec![machine(PENGUIN, "penguin", 3)], cx);
     let menu = fixture.host.menu();
     let step = menu.step.clone().expect("SpaceTerm has a step");
-    assert_eq!(step.title.as_ref(), copy::RELAUNCH_TO_UPDATE);
-    assert_eq!(step.subtitle.as_deref(), Some(copy::KEEPS_RUNNING));
+    assert_eq!(
+        step.title.as_ref(),
+        crate::updates::copy::rows::RELAUNCH_TO_UPDATE
+    );
+    assert_eq!(
+        step.subtitle.as_deref(),
+        Some(crate::updates::copy::rows::KEEP_RUNNING)
+    );
     let view = cx.update(|cx| state::current(cx));
     assert_eq!(
         Some(step.command.clone()),

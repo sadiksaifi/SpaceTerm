@@ -6,6 +6,7 @@
 use gpui::SharedString;
 use spaceterm_core::update::facts::Platform;
 
+use crate::updates::copy::rows;
 use crate::updates::copy::settings as copy;
 use crate::updates::machines::{MachineAction, MachineId, MachineLink, MachineUpdate};
 use crate::updates::state::{self, DesktopAction, RowView, UpdateView};
@@ -64,7 +65,7 @@ pub(crate) struct Menu {
     pub(crate) attention: bool,
     /// The header's subtitle: "{v}" or "{v} · {status}".
     pub(crate) header: String,
-    /// SpaceTerm's step: Relaunch to Update or Download Update.
+    /// SpaceTerm's row action, such as Relaunch to Update, Download Update or Try Again.
     pub(crate) step: Option<Item>,
     pub(crate) machines: Vec<MachineRow>,
 }
@@ -87,15 +88,20 @@ impl Menu {
     pub(crate) fn new(view: &UpdateView, machines: &[MachineUpdate]) -> Self {
         let app = view.app_row();
         let header = copy::line(app.version.as_deref(), app.status.as_deref());
+        // SpaceTerm's step is its row's action, so a failure offers the same `Try Again` here as
+        // in Settings and the title-bar list. What's New stays in the title bar and Help.
         let step = app.action.and_then(|action| {
-            let title = match &action.command {
-                state::Command::Desktop(DesktopAction::Update) => copy::RELAUNCH_TO_UPDATE,
-                state::Command::Desktop(DesktopAction::Download) => copy::DOWNLOAD_UPDATE,
-                _ => return None,
+            if action.command == state::Command::Desktop(DesktopAction::WhatsNew) {
+                return None;
+            }
+            let title = if action.label.as_ref() == rows::DOWNLOAD {
+                copy::DOWNLOAD_UPDATE.into()
+            } else {
+                action.label
             };
             Some(Item {
-                title: title.into(),
-                subtitle: Some(copy::KEEPS_RUNNING.into()),
+                title,
+                subtitle: action.subtitle,
                 command: Command::Update(action.command),
             })
         });

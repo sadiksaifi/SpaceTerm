@@ -590,6 +590,36 @@ fn i7_the_pill_and_the_row_agree() {
     });
 }
 
+/// I7 for SpaceTerm's own row: the menu bar extra's SpaceTerm step is the row's action, with the
+/// same command, label and subtitle. Only `Download` reads `Download Update` there, the label
+/// the pill gives it.
+#[test]
+fn i7_the_menu_bar_extra_offers_the_spaceterm_row_action() {
+    use crate::status_menu::model::{Command as MenuCommand, Menu};
+    use crate::updates::copy::{rows, settings};
+    scenes(|view, fleet| {
+        let menu = Menu::new(view, fleet);
+        let action = view
+            .app_row()
+            .action
+            .filter(|action| action.command != Command::Desktop(DesktopAction::WhatsNew));
+        match (action, menu.step) {
+            (None, None) => {}
+            (Some(action), Some(step)) => {
+                let label = if action.label.as_ref() == rows::DOWNLOAD {
+                    settings::DOWNLOAD_UPDATE.into()
+                } else {
+                    action.label
+                };
+                assert_eq!(step.title, label);
+                assert_eq!(step.subtitle, action.subtitle);
+                assert_eq!(step.command, MenuCommand::Update(action.command));
+            }
+            (action, step) => panic!("row {action:?}, extra {step:?}"),
+        }
+    });
+}
+
 /// L1: presence, emphasis and cadence follow the stage only, and no label or row status
 /// changes text between stages.
 #[test]

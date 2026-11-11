@@ -25,10 +25,8 @@ pub(crate) const NO_MACHINES: &str = "No Machines yet";
 /// waits, because a restart moves into a waiting one.
 pub(crate) const RESTART_SAME_VERSION: &str = "Restart SpaceTerm Core\u{2026}";
 
-/// The menu bar extra's SpaceTerm step items.
-pub(crate) const RELAUNCH_TO_UPDATE: &str = "Relaunch to Update";
+/// The menu bar extra's name for the SpaceTerm row's `Download`, the label the pill gives it.
 pub(crate) const DOWNLOAD_UPDATE: &str = "Download Update";
-pub(crate) const KEEPS_RUNNING: &str = "Terminal Sessions keep running";
 pub(crate) const STOP_CORE: &str = "Stop SpaceTerm Core\u{2026}";
 pub(crate) const START_CORE: &str = "Start SpaceTerm Core";
 pub(crate) const SETTINGS: &str = "SpaceTerm Settings\u{2026}";
