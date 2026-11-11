@@ -991,7 +991,8 @@ fn failed_check_beside(
 }
 
 /// A failed Check for Updates opens the same D6 as `Update Failed`, never `Couldn't Check for
-/// Updates`. Cancel then hides only the title-bar step.
+/// Updates`. Cancel then hides only the failure: the release is still not downloaded, so the
+/// main area offers `Download Update` and the title bar never looks up to date.
 #[gpui::test]
 fn a_failed_download_from_check_for_updates_opens_d6(cx: &mut gpui::TestAppContext) {
     let (adapter, _, visual) = failed_check(UpdateError::Download, cx);
@@ -1011,8 +1012,12 @@ fn a_failed_download_from_check_for_updates_opens_d6(cx: &mut gpui::TestAppConte
     assert!(!alert_open(visual));
     assert_eq!(
         app_shown(visual),
-        dismissed_step("Couldn't download 0.4.2", Some("Try Again")),
-        "the row keeps the failure"
+        (
+            Some(crate::updates::copy::title_bar::DOWNLOAD_UPDATE.to_owned()),
+            "Couldn't download 0.4.2".to_owned(),
+            Some("Try Again".to_owned())
+        ),
+        "the release keeps its step; the row keeps the failure"
     );
     assert_eq!(
         adapter.downloads.get(),

@@ -615,17 +615,13 @@ impl AppRow {
             {
                 Some(Step::Failed(Target::App))
             }
-            // A dismissal hides only the failure. A held installer still waits for Relaunch, and
-            // a hard stop still asks for the download.
+            // A dismissal hides only the failure. A held installer still waits for Relaunch, a
+            // release that never downloaded still asks for the download, and a hard stop still
+            // asks for it after a failed relaunch.
             AppStage::RelaunchFailed { held: true, .. } => Some(act(ActKind::Relaunch)),
-            AppStage::DownloadFailed { retries: false, .. } | AppStage::RelaunchFailed { .. }
-                if hard_stop =>
-            {
-                Some(act(ActKind::Download))
-            }
-            AppStage::DownloadFailed { retries: false, .. }
-            | AppStage::RelaunchFailed { .. }
-            | AppStage::CantReplace => None,
+            AppStage::DownloadFailed { retries: false, .. } => Some(act(ActKind::Download)),
+            AppStage::RelaunchFailed { .. } if hard_stop => Some(act(ActKind::Download)),
+            AppStage::RelaunchFailed { .. } | AppStage::CantReplace => None,
         }
     }
 

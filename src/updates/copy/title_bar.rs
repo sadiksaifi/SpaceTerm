@@ -162,7 +162,12 @@ pub(crate) fn pill(view: &UpdateView) -> Option<PillView> {
                     ActKind::Download => (
                         DOWNLOAD_UPDATE,
                         Glyph::Download,
-                        format!("SpaceTerm {} is available.", release(&view.app)),
+                        match release(&view.app) {
+                            version if version.is_empty() => {
+                                "A SpaceTerm update is available.".to_owned()
+                            }
+                            version => format!("SpaceTerm {version} is available."),
+                        },
                         Command::Desktop(DesktopAction::Download),
                         None,
                     ),
@@ -368,6 +373,33 @@ mod tests {
             let mut facts = app(&state);
             facts.pending = Some("0.11.5");
             assert_eq!(tooltip(facts), expected, "{error:?}");
+        }
+    }
+
+    /// After a dismissed download failure the main area offers `Download Update`, whose tooltip
+    /// names the release, or says only that one is available when the failure named none.
+    #[test]
+    fn a_dismissed_download_failure_offers_its_release() {
+        let failed = UpdateState::Failed {
+            error: UpdateError::Download,
+        };
+        for (pending, expected) in [
+            (Some("0.11.5"), "SpaceTerm 0.11.5 is available."),
+            (None, "A SpaceTerm update is available."),
+        ] {
+            let mut facts = app(&failed);
+            facts.pending = pending;
+            facts.failure_dismissed = true;
+            let marks = Marks {
+                dismissed: &Dismissed::new(),
+                deferred: &HashMap::new(),
+                pushes_held: false,
+            };
+            let pill = UpdateView::new(facts, &[], marks, NOW)
+                .pill()
+                .expect("the release keeps a step");
+            assert_eq!(pill.label.as_ref(), super::DOWNLOAD_UPDATE);
+            assert_eq!(pill.tooltip.as_ref(), expected);
         }
     }
 
