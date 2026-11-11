@@ -246,12 +246,12 @@ fn machine_row(update: &MachineUpdate, row: RowView) -> MachineRow {
     }
 }
 
-/// Whether `command` restarts a SpaceTerm Core, at once or after its confirmation.
+/// Whether `command` restarts a SpaceTerm Core.
 fn restarts_core(command: &Command) -> bool {
-    match command {
-        Command::Update(state::Command::Machine(_, MachineAction::Restart)) => true,
-        _ => false,
-    }
+    matches!(
+        command,
+        Command::Update(state::Command::Machine(_, MachineAction::Restart))
+    )
 }
 
 fn kind(update: &MachineUpdate) -> MachineKind {

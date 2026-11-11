@@ -164,9 +164,12 @@ fn generate() -> String {
     text
 }
 
+/// Renders one platform-dependent string.
+type PlatformString = fn(Platform) -> String;
+
 /// Each platform-dependent string and its token, longest first: the Linux D8 body contains the
 /// Linux row status.
-const PLATFORM_STRINGS: [(&str, fn(Platform) -> String); 4] = [
+const PLATFORM_STRINGS: [(&str, PlatformString); 4] = [
     ("{cant-replace-message}", |p| {
         dialogs::cant_replace_message(p).to_owned()
     }),
