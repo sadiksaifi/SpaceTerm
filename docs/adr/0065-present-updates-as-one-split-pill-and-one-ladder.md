@@ -142,7 +142,7 @@ The derivation never promises the idle restart, because the update facts cannot 
 
 ## Words
 
-ADRs state what a text must carry: the software it changes, the Machine, the versions, what ends and what stays. [The copy module](../../src/updates/copy/) holds every person-facing update string of the desktop, and its copy deck lists every string for every state, stage and surface. A wording change is one reviewed diff of the deck. The copy lint refuses the terms CONTEXT.md marks to avoid, and the CLI's update text runs through the same lint. Only this record and ADR 0034 name actions, and only as concepts: Restart Core for SpaceTerm Core, Relaunch for SpaceTerm.
+ADRs state what a text must carry: the software it changes, the Machine, the versions, what ends and what stays. [The copy module](../../src/updates/copy/) holds every person-facing update string of the desktop, and its [copy deck](../../src/updates/copy/deck.txt) lists every string for every state, stage and surface. A wording change is one reviewed diff of the deck. The copy lint refuses the terms CONTEXT.md marks to avoid, and the CLI's update text runs through the same lint. Only this record and ADR 0034 name actions, and only as concepts: Restart Core for SpaceTerm Core, Relaunch for SpaceTerm.
 
 ## Release rehearsal
 
