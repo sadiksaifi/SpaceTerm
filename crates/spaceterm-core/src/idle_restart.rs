@@ -45,7 +45,8 @@ impl Activity {
         let generation = state.record(now);
         Ok(self.receipt(generation))
     }
-    /// The native adapter calls this around one nonblocking read, outside its readiness wait.
+    /// The native adapter calls this around one nonblocking read into a nonempty buffer,
+    /// outside its readiness wait. EOF or a read failure makes the observation unreadable.
     pub fn read(&self, read: impl FnOnce() -> io::Result<usize>) -> io::Result<usize> {
         let mut state = self.lock();
         let result = read();
@@ -55,6 +56,11 @@ impl Activity {
                 state.generation = None;
             }
             state.output = state.record(Instant::now());
+        } else if !matches!(&result, Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted))
+        {
+            state.generation = None;
+            state.last = Instant::now();
+            state.revoke();
         }
         result
     }
@@ -88,12 +94,15 @@ impl State {
         if let Some(n) = self.generation {
             self.pending.insert(n);
         }
+        self.revoke();
+        self.generation
+    }
+    fn revoke(&self) {
         if let Some(lease) = self.lease.upgrade() {
             let _ = lease
                 .phase
                 .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire);
         }
-        self.generation
     }
 }
 /// Completion shared by commands generated from one receipt. Dropping the last one settles it.
@@ -359,6 +368,29 @@ mod scan_tests {
         reader.join().unwrap().unwrap();
         assert_eq!(grant.join().unwrap(), Err(Restarting));
     }
+    #[test]
+    fn native_read_failures_are_work_and_revoke_an_ungranted_lease() {
+        for failure in [
+            None,
+            Some(io::ErrorKind::PermissionDenied),
+            Some(io::ErrorKind::BrokenPipe),
+        ] {
+            let start = Instant::now();
+            let activity = Activity::new(start);
+            let sessions: Vec<Arc<dyn Session>> = vec![Arc::new(Shell {
+                activity: activity.clone(),
+                pause: None,
+            })];
+            let lease = Lease::scan(&sessions, start + HOUR, HOUR).unwrap();
+            let _ = activity.read(|| match failure {
+                None => Ok(0),
+                Some(kind) => Err(kind.into()),
+            });
+            assert_eq!(lease.grant(), Err(Restarting));
+            assert!(!activity.quiet(start + HOUR * 24, HOUR));
+        }
+    }
+
     #[test]
     fn queued_work_is_never_idle_even_when_its_receipt_is_an_hour_old() {
         let start = Instant::now();
