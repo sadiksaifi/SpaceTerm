@@ -625,6 +625,9 @@ impl MachineConnection {
             ));
         }
         crate::service::check_admission(&self.paths, self.admission_wait(), cancelled)?;
+        if host::capacity::full(&self.paths)? {
+            return Err(CoreError::Capacity);
+        }
         let mut stream = host::connect(&self.paths)?;
         let base = self.base_client_id()?;
         let core = self.machine_id()?;
@@ -639,6 +642,9 @@ impl MachineConnection {
             &self.identity,
         );
         self.record_work(&admitted);
+        if admitted == Err(protocol::Refused::NoReply) && host::capacity::full(&self.paths)? {
+            return Err(CoreError::Capacity);
+        }
         admitted?;
         let carrier =
             crate::connection::unix::UnixCarrier::new(stream).map_err(|_| CoreError::Protocol)?;
@@ -832,7 +838,20 @@ impl MachineConnection {
         &self,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<AuthenticatedStatus, CoreError> {
-        self.refresh_with(Some(cancelled))
+        let mut retry = crate::retry::Backoff::new(crate::retry::WaitingFor::LocalAdmission);
+        loop {
+            if cancelled() {
+                return Err(CoreError::ServiceBusy);
+            }
+            match self.refresh_with(Some(cancelled)) {
+                Err(CoreError::Capacity) if self.direct.is_none() => {
+                    if !retry.pause(cancelled) {
+                        return Err(CoreError::ServiceBusy);
+                    }
+                }
+                result => return result,
+            }
+        }
     }
     fn refresh_with(
         &self,

@@ -71,6 +71,7 @@ pub(crate) struct Paths {
     pub data: PathBuf,
     pub runtime: PathBuf,
 }
+
 impl Paths {
     pub fn for_identity(identity: &str) -> Result<Self, CoreError> {
         // SAFETY: geteuid has no preconditions.
@@ -110,6 +111,8 @@ impl Paths {
         self.runtime.join("s")
     }
 }
+
+pub(crate) mod capacity;
 
 pub(crate) fn check_peer(stream: &UnixStream) -> Result<(), CoreError> {
     #[cfg(target_os = "macos")]
@@ -724,6 +727,7 @@ pub(crate) fn forget_service_operations(data: std::path::PathBuf) -> crate::dire
 
 /// One serving thread and what ends it: its socket's read side and its I/O thread's wake pipe.
 pub(crate) struct Running {
+    local: Option<capacity::LocalConnection>,
     thread: std::thread::JoinHandle<()>,
     /// Set by the thread just before it rings the host's bell and ends.
     done: Arc<AtomicBool>,
@@ -976,6 +980,7 @@ fn serve_runtime_ready(
         });
     }
     let mut connections: Vec<Running> = Vec::new();
+    let mut capacity = capacity::Publisher::new(&runtime);
     let mut network: Vec<Running> = Vec::new();
     // A listener that failed to accept, for example out of descriptors, rests until a connection
     // ends or the pause passes, instead of waking the loop at once forever.
@@ -987,6 +992,7 @@ fn serve_runtime_ready(
         if reap(&mut connections, &mut network) {
             local_paused = None;
         }
+        capacity.update(&connections);
         let now = Instant::now();
         local_paused = local_paused.filter(|until| now < *until);
         let deadline = [deadline, local_paused].into_iter().flatten().min();
@@ -1023,10 +1029,12 @@ fn serve_runtime_ready(
                 }
             };
             if connections.len() >= MAX_LOCAL_CONNECTIONS || check_peer(&stream).is_err() {
+                capacity.update(&connections);
                 continue;
             }
             if let Ok(running) = spawn_local(stream, core, paths, &environment) {
                 connections.push(running);
+                capacity.update(&connections);
             }
         }
     }
@@ -1201,6 +1209,8 @@ fn spawn_local(
     paths: &Paths,
     environment: &Environment,
 ) -> Result<Running, CoreError> {
+    let local = capacity::LocalConnection::new(&stream);
+    let phase = Arc::clone(&local.phase);
     let (waker, wake) = Waker::new().map_err(|_| CoreError::Protocol)?;
     let cancel = stream.try_clone().map_err(|_| CoreError::Protocol)?;
     let identity = paths.identity.clone();
@@ -1215,10 +1225,19 @@ fn spawn_local(
                 done: finished,
                 wake: Arc::clone(&environment.stop.wake),
             };
-            let _ = serve_local(stream, core, &identity, waker, outbox_wake, &environment);
+            let _ = serve_local(
+                stream,
+                core,
+                &identity,
+                waker,
+                outbox_wake,
+                &environment,
+                phase,
+            );
         })
         .map_err(|_| CoreError::Protocol)?;
     Ok(Running {
+        local: Some(local),
         thread,
         done,
         sever: Box::new(move || {
@@ -1235,6 +1254,7 @@ fn serve_local(
     waker: Waker,
     wake: Arc<dyn Wake>,
     environment: &Environment,
+    phase: Arc<std::sync::atomic::AtomicU8>,
 ) -> Result<(), CoreError> {
     let protocol::Admitted {
         client,
@@ -1246,10 +1266,12 @@ fn serve_local(
         // Account authority never changes while the server runs. Stopping severs this
         // socket's reading, which ends the lane's wait for a request.
         protocol::Admission::Service(admitted) => {
+            phase.store(2, Ordering::Release);
             let lane = environment.lane.as_ref().ok_or(CoreError::Unsupported)?;
             return lane.serve(&mut stream, admitted, None, &|| Ok(()));
         }
     };
+    phase.store(1, Ordering::Release);
     let peer = Peer {
         client,
         connection: protocol::random()?,
@@ -1305,6 +1327,7 @@ pub(crate) fn spawn_network(
         })
         .map_err(|_| CoreError::Protocol)?;
     Ok(Running {
+        local: None,
         thread,
         done,
         sever: Box::new(move || lane.stop()),
@@ -1987,6 +2010,7 @@ mod tests {
             done,
             sever,
             wake,
+            ..
         } = running;
         drop((sever, wake));
         assert!(thread.join().is_err(), "the service panicked");
@@ -2436,6 +2460,9 @@ mod startup_tests {
         .unwrap();
         link(stream, Arc::new(|_| {})).unwrap()
     }
+
+    #[cfg(feature = "client")]
+    mod capacity_tests;
 
     #[test]
     #[ignore = "runs only as a child of the server startup tests"]

@@ -43,7 +43,10 @@ impl RetainedClientViews {
                 }) {
                     Ok(Some(store)) => Ok(store),
                     Ok(None) => return,
-                    Err(error) => Err(error),
+                    Err(error) => {
+                        eprintln!("spaceterm_startup_failure classification=ClientViewRead error={error:?} attempts=1");
+                        Err(error)
+                    },
                 };
                 {
                     let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());

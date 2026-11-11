@@ -335,6 +335,26 @@ impl Directory {
     pub fn try_lock(&self, name: &str) -> Result<Option<Lock>, CoreError> {
         self.try_flock(name, libc::LOCK_EX)
     }
+    /// Probe an existing private lock without creating it or waiting for its holder.
+    #[cfg(feature = "client")]
+    pub(crate) fn existing_lock_held(&self, name: &str) -> Result<bool, CoreError> {
+        let file = match self.file(name, false) {
+            Ok(file) => file,
+            Err(CoreError::NotSetUp) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        // SAFETY: flock acts only on this retained descriptor and never waits.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0 {
+            // Release explicitly even if a concurrently forked child inherited the descriptor.
+            drop(Lock(file));
+            return Ok(false);
+        }
+        if std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock {
+            Ok(true)
+        } else {
+            Err(CoreError::StorageUnavailable)
+        }
+    }
     fn try_flock(&self, name: &str, operation: libc::c_int) -> Result<Option<Lock>, CoreError> {
         let file = self.file(name, true)?;
         // SAFETY: flock acts only on the supplied live descriptor.

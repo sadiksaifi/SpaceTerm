@@ -124,6 +124,9 @@ pub(crate) enum Refused {
         core: CoreVersions,
     },
     Failed(CoreError),
+    /// Account-local admission ended before receiving even one reply byte. This is still a
+    /// protocol failure unless the local host independently proves that its capacity is full.
+    NoReply,
 }
 
 impl From<CoreError> for Refused {
@@ -137,6 +140,7 @@ impl From<Refused> for CoreError {
         match refused {
             Refused::Incompatible { older, .. } => Self::IncompatibleProtocol(older),
             Refused::Failed(error) => error,
+            Refused::NoReply => Self::Protocol,
         }
     }
 }
@@ -262,29 +266,43 @@ impl Preamble for UnixStream {
     }
 
     fn receive(&mut self, max: usize, deadline: Instant) -> Result<Vec<u8>, CoreError> {
-        self.set_nonblocking(true)
-            .map_err(|_| CoreError::Protocol)?;
-        let mut size = [0; 4];
-        read_exact(self, &mut size, deadline)?;
-        let size = u32::from_be_bytes(size) as usize;
-        if size > max {
-            return Err(CoreError::Protocol);
-        }
-        let mut bytes = vec![0; size];
-        read_exact(self, &mut bytes, deadline)?;
-        Ok(bytes)
+        receive_frame(self, max, deadline, &mut 0)
     }
+}
+
+fn receive_frame(
+    stream: &mut UnixStream,
+    max: usize,
+    deadline: Instant,
+    received: &mut usize,
+) -> Result<Vec<u8>, CoreError> {
+    stream
+        .set_nonblocking(true)
+        .map_err(|_| CoreError::Protocol)?;
+    let mut size = [0; 4];
+    read_exact(stream, &mut size, deadline, received)?;
+    let size = u32::from_be_bytes(size) as usize;
+    if size > max {
+        return Err(CoreError::Protocol);
+    }
+    let mut bytes = vec![0; size];
+    read_exact(stream, &mut bytes, deadline, received)?;
+    Ok(bytes)
 }
 
 fn read_exact(
     stream: &mut UnixStream,
     mut bytes: &mut [u8],
     deadline: Instant,
+    received: &mut usize,
 ) -> Result<(), CoreError> {
     while !bytes.is_empty() {
         match stream.read(bytes) {
             Ok(0) => return Err(CoreError::Protocol),
-            Ok(count) => bytes = &mut bytes[count..],
+            Ok(count) => {
+                *received += count;
+                bytes = &mut bytes[count..];
+            }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 if !crate::connection::io::wait_fd(stream.as_raw_fd(), false, deadline) {
                     return Err(CoreError::Protocol);
@@ -527,7 +545,30 @@ pub(crate) fn admit_client<'a>(
     build: &str,
 ) -> Result<Negotiated, Refused> {
     crate::host::check_peer(stream)?;
-    admit_transport(stream, caller, core, build)
+    let mut observed = ObservedReply {
+        stream,
+        received: 0,
+    };
+    let result = admit_transport(&mut observed, caller, core, build);
+    if result == Err(Refused::Failed(CoreError::Protocol)) && observed.received == 0 {
+        Err(Refused::NoReply)
+    } else {
+        result
+    }
+}
+
+struct ObservedReply<'a> {
+    stream: &'a mut UnixStream,
+    received: usize,
+}
+
+impl Preamble for ObservedReply<'_> {
+    fn send(&mut self, frame: &[u8], deadline: Instant) -> Result<(), CoreError> {
+        self.stream.send(frame, deadline)
+    }
+    fn receive(&mut self, max: usize, deadline: Instant) -> Result<Vec<u8>, CoreError> {
+        receive_frame(self.stream, max, deadline, &mut self.received)
+    }
 }
 
 /// Admits a work connection as `caller`, offering this build's work versions.

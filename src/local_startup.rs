@@ -13,7 +13,10 @@ pub fn run(cancelled: impl Fn() -> bool) -> Result<StartupOutcome, CoreError> {
             return Ok(StartupOutcome::Cancelled);
         }
         let core = spaceterm_core::MachineConnection::for_identity(identity)?;
-        let status = core.refresh_cancellable(&cancelled)?;
+        let status = match core.refresh_cancellable(&cancelled) {
+            Err(CoreError::ServiceBusy) if cancelled() => return Ok(StartupOutcome::Cancelled),
+            status => status?,
+        };
         return Ok(StartupOutcome::Ready { core, status });
     }
     LocalStartup::for_identity(identity)?.run(
