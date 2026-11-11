@@ -1005,6 +1005,32 @@ fn a_failed_download_from_check_for_updates_opens_d6(cx: &mut gpui::TestAppConte
         downloads,
         "Cancel downloads nothing"
     );
+
+    // The row's Try Again fails again: that newer failure is the person's to see.
+    let try_again = visual.update(|_, cx| {
+        state::current(cx)
+            .app_row()
+            .action
+            .expect("the row offers Try Again")
+            .command
+    });
+    visual.update(|_, cx| commands::perform(try_again, commands::Presenter::Front, cx));
+    visual.run_until_parked();
+    adapter.emit(UpdateEvent::Available(version()));
+    visual.run_until_parked();
+    assert_eq!(
+        adapter.downloads.get(),
+        downloads + 1,
+        "Try Again downloads"
+    );
+    adapter.emit(UpdateEvent::Failed(UpdateError::Download));
+    adapter.emit(UpdateEvent::Finished);
+    visual.run_until_parked();
+    assert_eq!(
+        app_shown(visual),
+        failed_step("Couldn't download 0.4.2", Some("Try Again")),
+        "a newer failure shows again"
+    );
 }
 
 /// D8 from a failed Check for Updates. OK hides the title-bar step; the row keeps the failure.
