@@ -181,7 +181,7 @@ json_field() {
     sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n 1
 }
 
-# Tagged URLs work while greenfield releases are held with --latest=false.
+# Downloads the checksums from the tagged release of the requested or pinned version.
 find_release() {
     work="$(mktemp -d "${TMPDIR:-/tmp}/spaceterm-install.XXXXXX")"
     version="${requested_version:-$DEFAULT_VERSION}"
