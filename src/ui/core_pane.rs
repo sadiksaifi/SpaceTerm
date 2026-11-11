@@ -1483,7 +1483,11 @@ mod connection {
             if ended.is_some() {
                 return copy;
             }
-            let detail = match self.restart_end() {
+            let end = self.restart_end();
+            // An idle restart ends a Session only after its grant proves no kept input reached
+            // the shell, and refuses all input from the grant until Stop.
+            let proven = matches!(end, Some(RestartEnd::UpdatedWhileIdle(_)));
+            let detail = match end {
                 Some(RestartEnd::Updated(version)) => pane::restarted_into(&version),
                 Some(RestartEnd::UpdatedWhileIdle(version)) => {
                     pane::restarted_into_while_idle(&version)
@@ -1499,7 +1503,7 @@ mod connection {
                 Some(typed) => {
                     use crate::terminal::core_session::unsent::Delivery;
                     copy.typed = (!typed.text.is_empty()).then(|| typed.text.into());
-                    pane::with_typed_input(&detail, typed.delivery == Delivery::NotSent)
+                    pane::with_typed_input(&detail, proven || typed.delivery == Delivery::NotSent)
                 }
                 None => detail,
             };

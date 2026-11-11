@@ -536,8 +536,9 @@ fn a_pane_names_an_idle_restart_the_core_reports() {
     );
 }
 
-/// An idle restart that refused what the person typed says the text wasn't sent and offers it
-/// to copy. Without kept input the detail is the restart alone.
+/// An idle restart that refused what the person typed says the text wasn't sent, even input the
+/// Core never confirmed, and offers it to copy. Without kept input the detail is the restart
+/// alone.
 #[test]
 fn an_idle_restart_says_what_typed_text_it_refused() {
     use crate::terminal::core_session::unsent::{Delivery, UnsentInput};
@@ -551,8 +552,9 @@ fn an_idle_restart_says_what_typed_text_it_refused() {
         connection.answer(CorePaneStatus::Reconnecting);
         view.sync();
         if kept {
+            // The grant proves the Core applied none of it, even what it never confirmed.
             *connection.unsent.lock().unwrap() = Some(UnsentInput {
-                delivery: Delivery::NotSent,
+                delivery: Delivery::Unknown,
                 text: "ls\n".into(),
             });
         }
