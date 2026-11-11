@@ -3433,6 +3433,9 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                     .when_some(self.query_prefix.clone(), |query, prefix| {
                         query.child(
                             div()
+                                .id("command-palette-query-prefix")
+                                .role(accesskit::Role::Label)
+                                .aria_label(prefix.clone())
                                 .debug_selector(|| "command-palette-query-prefix".to_owned())
                                 .flex_shrink_0()
                                 .max_w(gpui::relative(0.4))

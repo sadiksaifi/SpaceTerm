@@ -15146,9 +15146,10 @@ fn open_remote_directory_should_browse_the_chosen_machine(cx: &mut TestAppContex
             .read_with(cx, |manager, _| manager.pin_picker.is_some()),
         "the picker opens on the saved server"
     );
-    assert!(
-        cx.debug_bounds("command-palette-query-prefix").is_some(),
-        "the search line names the server, which a local picker never does"
+    assert_eq!(
+        spaceterm_ui::a11y_testing::A11yTree::read(cx).node("penguin:")["aria"]["role"],
+        "Label",
+        "the search line names the server the picker browses"
     );
     assert_eq!(harness.local.submitted(), Vec::new());
 }
