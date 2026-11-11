@@ -1692,9 +1692,7 @@ mod tests {
     /// Design 4.5: a scheduled check of a downloaded release ends its cycle and downloads it
     /// again by itself. The main area keeps `Relaunch to Update` through the whole check.
     #[gpui::test]
-    fn a_scheduled_check_keeps_relaunch_to_update_in_the_main_area(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn a_scheduled_check_keeps_relaunch_to_update_in_the_main_area(cx: &mut gpui::TestAppContext) {
         let adapter = Rc::new(RecordingAdapter::available());
         cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
         let service = cx.update(|cx| cx.global::<UpdateService>().0.clone());

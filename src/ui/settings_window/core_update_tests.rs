@@ -298,7 +298,10 @@ fn ok_on_how_to_update_in_settings_dismisses_the_step(cx: &mut TestAppContext) {
     };
     adapter.emit(MachineUpdatesEvent::Changed(Box::new(stone)));
     cx.run_until_parked();
-    assert!(cx.update(|_, cx| crate::updates::state::current(cx).step).is_some());
+    assert!(
+        cx.update(|_, cx| crate::updates::state::current(cx).step)
+            .is_some()
+    );
     click(UPDATE_SELECTOR, cx);
     answer("settings-update-explanation-ok", cx);
     assert_eq!(

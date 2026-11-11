@@ -17,9 +17,9 @@ use spaceterm_ui::{
 
 use super::WorkspaceManager;
 use crate::updates::copy::dialogs;
-use crate::updates::state::{self, Command};
 use crate::updates::machines::store::{MachineUpdates, MachineUpdatesNotice};
 use crate::updates::reminders::{ReminderActivated, UpdateReminders};
+use crate::updates::state::{self, Command};
 use crate::updates::{ApplicationUpdates, UpdateError, UpdateNotice, UpdateService, UpdateState};
 
 actions!(spaceterm, [CheckForUpdates]);
@@ -285,9 +285,11 @@ fn present_result(state: UpdateState, cx: &mut App) {
         UpdateState::Failed { error } if error.relaunch_failed() => present_relaunch_failure(cx),
         // A failure the person can act on opens the same alert as `Update Failed`.
         UpdateState::Failed { error } => match dialogs::app_failure(&state::current(cx).app) {
-            Some(explanation) => {
-                commands::perform(Command::Explain(explanation), commands::Presenter::Front, cx)
-            }
+            Some(explanation) => commands::perform(
+                Command::Explain(explanation),
+                commands::Presenter::Front,
+                cx,
+            ),
             None => {
                 present_in_front_window(cx, move |window, cx| present_failure(error, window, cx))
             }
@@ -538,7 +540,11 @@ fn present_relaunch_failure(cx: &mut App) {
         cx.activate(true);
     }
     let explanation = dialogs::relaunch_failure(version.as_deref(), unsaved);
-    commands::perform(Command::Explain(explanation), commands::Presenter::Front, cx);
+    commands::perform(
+        Command::Explain(explanation),
+        commands::Presenter::Front,
+        cx,
+    );
 }
 
 fn install_alert(version: &str) -> Alert<PromptAction> {

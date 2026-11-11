@@ -173,7 +173,9 @@ const PLATFORM_STRINGS: [(&str, fn(Platform) -> String); 4] = [
     ("{cant-replace-title}", |p| {
         dialogs::cant_replace_title(p).to_owned()
     }),
-    ("{cant-replace-status}", |p| rows::cant_replace(p).to_owned()),
+    ("{cant-replace-status}", |p| {
+        rows::cant_replace(p).to_owned()
+    }),
     ("{newer-system}", |p| format!("newer {}", rows::system(p))),
 ];
 
