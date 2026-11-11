@@ -1,14 +1,15 @@
-//! Status, Restart, Update and Remove Machine of a paired Machine from its Machines card.
+//! Status and Remove Machine of a paired Machine from its Machines card.
 //!
-//! The card takes the CLI's steps over the server's service lane:
+//! The card takes the CLI's steps over the Machine's service lane:
 //! [`spaceterm_core::service::lane::admin`] settles what this desktop left pending, previews
-//! each change, and follows a confirmed one until it settles. A confirmation binds the server's
-//! own preview, so the server refuses a change whose Terminal Sessions or service changed since.
-//! Start and Stop stay on the Machine itself, because a stopped SpaceTerm Core accepts no connection.
+//! the uninstall, and follows a confirmed one until it settles. A confirmation binds the
+//! SpaceTerm Core's own preview, so the Core refuses an uninstall whose Terminal Sessions or
+//! service changed since. Start and Stop stay on the Machine itself, because a stopped SpaceTerm
+//! Core accepts no connection.
 //!
-//! Nothing here connects on its own: Check Now, Restart and Update each open a lane
-//! connection only when the person asks. Each route keeps its work and its last outcome while
-//! this window is open, so selecting another server and back shows them again.
+//! Nothing here connects on its own: Check Now and Remove Machine each open a lane connection
+//! only when the person asks. Each route keeps its work and its last outcome while this window
+//! is open, so selecting another Machine and back shows them again.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -89,11 +90,6 @@ pub(crate) enum RemoteFailure {
     Busy,
     /// The server holds as many unfinished operations as it can.
     Capacity,
-    /// The server found no newer release for itself.
-    NoUpdate,
-    /// The server runs below the release's Update Floor and must install that floor version
-    /// first, which it can't fetch itself.
-    BelowFloor(spaceterm_core::update::ordering::Floor),
     /// The server couldn't verify the release it fetched.
     Unverified,
     /// An earlier update on the server hasn't finished, so it takes no other.
@@ -115,10 +111,9 @@ impl RemoteFailure {
     pub(crate) fn of_code(code: &str) -> Self {
         match code {
             "unreachable" | "not_running" | "stopped" | "network_off" => Self::Unreachable,
-            "changed" | "candidate_changed" => Self::Changed,
+            "changed" => Self::Changed,
             "service_busy" => Self::Busy,
             "capacity" => Self::Capacity,
-            "no_candidate" => Self::NoUpdate,
             "candidate_unverified" => Self::Unverified,
             "activation_unresolved" => Self::ActivationUnresolved,
             "startup_failed" => Self::StartupFailed,
@@ -141,7 +136,9 @@ impl RemoteFailure {
     pub(crate) fn of_lane(error: LaneError) -> Self {
         match error {
             LaneError::Code(code) => Self::of_code(&code),
-            LaneError::BelowFloor(floor) => Self::BelowFloor(floor),
+            // Only an update check or install is answered this way, and the card asks for
+            // neither.
+            LaneError::BelowFloor(_) => Self::Protocol,
             LaneError::Core(error) => Self::of_core(error),
             LaneError::Interrupted => Self::Failed,
         }
@@ -164,11 +161,6 @@ impl RemoteFailure {
             Self::Capacity => {
                 format!("{name} holds too many unfinished changes. Try again later.")
             }
-            Self::NoUpdate => format!("{name} found no newer release to install."),
-            Self::BelowFloor(floor) => format!(
-                "{name} needs SpaceTerm Core {floor} before it can update. Install {floor} on \
-                 {name}, then try again."
-            ),
             Self::Unverified => {
                 format!("{name} couldn\u{2019}t verify the update, so nothing changed.")
             }
@@ -198,8 +190,7 @@ type ReadAnswer<'a> = std::pin::Pin<
 pub(crate) trait RemoteMachineControl: Send + Sync {
     /// Reads the server's Status and its update facts. Changes nothing.
     fn read(&self) -> ReadAnswer<'_>;
-    /// Asks the server to preview `change`. Update first has the server install its newest
-    /// signed release, and previews the restart into it.
+    /// Asks the Machine to preview `change`.
     fn prepare(&self, change: Change) -> Result<Prepared, RemoteFailure>;
     /// Executes a confirmed preview and follows it until it settles or its wait passes.
     fn perform(&self, preview: Preview) -> Result<Performed, RemoteFailure>;
@@ -279,8 +270,8 @@ pub(crate) type ControlSource =
 struct InstalledSource(ControlSource);
 impl Global for InstalledSource {}
 
-/// Makes `source` the desktop's way to reach a paired server's service lane. Without it, paired
-/// server cards offer no Restart or Update.
+/// Makes `source` the desktop's way to reach a paired Machine's service lane. Without it, a
+/// paired Machine's card reads no Status, and Remove Machine only removes the Machine here.
 pub(crate) fn install(source: ControlSource, cx: &mut App) {
     cx.set_global(InstalledSource(source));
 }
@@ -334,8 +325,8 @@ pub(super) enum Settlement {
     NotPerformed,
     /// Nothing proves whether the change happened.
     Uncertain,
-    /// The server closed the lane after Stop was admitted, or may have been: it is stopping or
-    /// stopped, and only its own computer can read the outcome.
+    /// The Machine closed the lane after the uninstall was admitted, or may have: it is
+    /// uninstalling or uninstalled, and only its own computer can read the outcome.
     Shutdown,
 }
 
