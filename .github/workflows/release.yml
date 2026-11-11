@@ -180,7 +180,7 @@ jobs:
       - name: Authorize the disposable floor account's user service
         if: matrix.candidate == 'client'
         run: sudo loginctl enable-linger "$USER"
-      - name: Check both protocol lanes against the listed release
+      - name: Check both protocol lanes against the paired release
         env:
           GH_TOKEN: ${{ github.token }}
           PAIRED_TAG: ${{ matrix.release }}
