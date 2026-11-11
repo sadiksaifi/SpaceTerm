@@ -1530,8 +1530,13 @@ mod tests {
         for (script, others) in [
             ("printf READY; exec sleep 30", false),
             ("sleep 30 & printf READY; wait", true),
-            // Job control puts the job in its own process group, and stops it.
-            ("set -m; sleep 30 & kill -STOP $!; printf READY; wait", true),
+            // Job control puts the job in its own process group, and stops it. The shell then
+            // reads its terminal, because dash's `wait` returns at once for a stopped job: the
+            // shell would exit and the kernel would end the orphaned job before the probe reads.
+            (
+                "set -m; sleep 30 & kill -STOP $!; printf READY; read line",
+                true,
+            ),
         ] {
             let mut command = CommandBuilder::new("/bin/sh");
             command.args(["-c", script]);
