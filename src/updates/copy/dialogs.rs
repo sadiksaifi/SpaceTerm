@@ -220,8 +220,8 @@ pub(crate) fn machine_failure(row: &MachineRow) -> Option<Explanation> {
                 dismiss: dismiss(PUSH_FAILURE),
             }
         }
-        MachineStage::NeedsFloor { floor } => Explanation {
-            title: format!("Couldn't Download SpaceTerm Core to {name}").into(),
+        MachineStage::NeedsFloor { version, floor } => Explanation {
+            title: format!("Couldn't Download SpaceTerm Core {version} to {name}").into(),
             message: format!("{name} needs SpaceTerm Core {floor} first and couldn't get it. Its Terminal Sessions keep running.").into(),
             then: Some(Box::new(Command::Machine(id, MachineAction::Install))),
             proceed: Some(TRY_AGAIN.into()),

@@ -235,6 +235,8 @@ pub(crate) enum MachineStage {
     /// A push this run could not make, because the Core must first fetch `floor` and couldn't.
     /// SpaceTerm does not retry it this run.
     NeedsFloor {
+        /// The version the push carried.
+        version: Version,
         floor: Floor,
     },
     SteppingStoneSkipped,
@@ -731,7 +733,10 @@ fn machine_stage(
         update.failed_push.as_ref().map(|failed| {
             let cause = match failed.failure {
                 ActionFailure::NeedsFloor(floor) => {
-                    return MachineStage::NeedsFloor { floor };
+                    return MachineStage::NeedsFloor {
+                        version: failed.version.clone(),
+                        floor,
+                    };
                 }
                 ActionFailure::DiskFull => DownloadCause::DiskFull,
                 ActionFailure::Unreachable | ActionFailure::Unavailable(_) => {

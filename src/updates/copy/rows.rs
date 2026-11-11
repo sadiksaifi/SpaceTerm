@@ -377,7 +377,7 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
             None,
             format!("{subject} can't check for updates."),
         ),
-        MachineStage::NeedsFloor { floor } => (
+        MachineStage::NeedsFloor { floor, .. } => (
             format!("Needs {floor} first"),
             action(DOWNLOAD, None, Command::Machine(id, MachineAction::Install)),
             None,
