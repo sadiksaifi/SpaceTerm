@@ -536,13 +536,14 @@ fn a_pane_names_an_idle_restart_the_core_reports() {
     );
 }
 
-/// An idle restart that refused what the person typed says the text wasn't sent, even input the
-/// Core never confirmed, and offers it to copy. Without kept input the detail is the restart
-/// alone.
+/// An idle restart says what the person typed wasn't sent only for input the Core refused, and
+/// offers the text to copy. Without kept input the detail is the restart alone.
 #[test]
 fn an_idle_restart_says_what_typed_text_it_refused() {
     use crate::terminal::core_session::unsent::{Delivery, UnsentInput};
-    for kept in [false, true] {
+    // Input the Core refused wasn't sent. Input a lost connection left unconfirmed may have run
+    // before the idle period began, so the restart proves nothing about it.
+    for kept in [None, Some(Delivery::NotSent), Some(Delivery::Unknown)] {
         let connection = Connection::new(CorePaneStatus::Connected);
         connection.set_version("0.11.0");
         connection.idle_restart.store(true, Ordering::SeqCst);
@@ -551,32 +552,29 @@ fn an_idle_restart_says_what_typed_text_it_refused() {
         view.sync();
         connection.answer(CorePaneStatus::Reconnecting);
         view.sync();
-        if kept {
-            // The grant proves the Core applied none of it, even what it never confirmed.
-            *connection.unsent.lock().unwrap() = Some(UnsentInput {
-                delivery: Delivery::Unknown,
-                text: "ls\n".into(),
-            });
-        }
+        *connection.unsent.lock().unwrap() = kept.map(|delivery| UnsentInput {
+            delivery,
+            text: "make deploy\n".into(),
+        });
         connection.announce(None);
         connection.set_version("0.11.1");
         connection.answer(CorePaneStatus::Restored);
         view.sync();
         let copy = view.dormant_copy(None);
-        if kept {
-            assert_eq!(
-                copy.detail.as_ref(),
-                "SpaceTerm Core restarted into 0.11.1 while nothing was running. What you typed \
-                 during the restart wasn't sent."
-            );
-            assert_eq!(copy.typed.as_deref(), Some("ls\n"));
-        } else {
-            assert_eq!(
-                copy.detail.as_ref(),
-                "SpaceTerm Core restarted into 0.11.1 while nothing was running."
-            );
-            assert_eq!(copy.typed, None);
-        }
+        let restarted = "SpaceTerm Core restarted into 0.11.1 while nothing was running.";
+        let (detail, typed) = match kept {
+            None => (restarted.to_owned(), None),
+            Some(Delivery::NotSent) => (
+                format!("{restarted} What you typed during the restart wasn't sent."),
+                Some("make deploy\n"),
+            ),
+            Some(Delivery::Unknown) => (
+                format!("{restarted} What you typed during the restart may not have been sent."),
+                Some("make deploy\n"),
+            ),
+        };
+        assert_eq!(copy.detail.as_ref(), detail, "{kept:?}");
+        assert_eq!(copy.typed.as_deref(), typed);
     }
 }
 

@@ -450,6 +450,7 @@ Terminal Session Ended | SpaceTerm Core couldn't restart into 0.11.4.
 Terminal Session Ended | SpaceTerm Core couldn't restart into 0.11.4. What you typed during the restart may not have been sent.
 Terminal Session Ended | SpaceTerm Core couldn't restart into 0.11.4. What you typed during the restart wasn't sent.
 Terminal Session Ended | SpaceTerm Core restarted into 0.11.4 while nothing was running.
+Terminal Session Ended | SpaceTerm Core restarted into 0.11.4 while nothing was running. What you typed during the restart may not have been sent.
 Terminal Session Ended | SpaceTerm Core restarted into 0.11.4 while nothing was running. What you typed during the restart wasn't sent.
 Terminal Session Ended | SpaceTerm Core restarted into 0.11.4.
 Terminal Session Ended | SpaceTerm Core restarted into 0.11.4. What you typed during the restart may not have been sent.

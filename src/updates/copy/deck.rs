@@ -342,19 +342,17 @@ fn build() -> Deck {
         }
     }
     let to = version("0.11.4");
-    // An idle restart's grant proves no kept input reached the shell, so only the other endings
-    // can say it may not have been sent.
-    for (detail, proven) in [
-        (pane::restarted_into(&to), false),
-        (pane::restarted_into_while_idle(&to), true),
-        (pane::could_not_restart_into(&to), false),
-        (pane::RESTARTED.to_owned(), false),
+    for detail in [
+        pane::restarted_into(&to),
+        pane::restarted_into_while_idle(&to),
+        pane::could_not_restart_into(&to),
+        pane::RESTARTED.to_owned(),
     ] {
-        let mut details = vec![detail.clone(), pane::with_typed_input(&detail, true)];
-        if !proven {
-            details.push(pane::with_typed_input(&detail, false));
-        }
-        for detail in details {
+        for detail in [
+            detail.clone(),
+            pane::with_typed_input(&detail, true),
+            pane::with_typed_input(&detail, false),
+        ] {
             deck.field(Role::Text, pane::SESSION_ENDED);
             deck.field(Role::Text, &detail);
             deck.pane
