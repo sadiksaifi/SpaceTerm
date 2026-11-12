@@ -532,9 +532,7 @@ fn finishes(
     }
     Some(if sessions == 0 {
         Continuation::Soon
-    } else if crate::idle_restart::NATIVE_WRITER_FENCE_AVAILABLE
-        && now.saturating_sub(pending.installed_at) >= IDLE_RESTART_AFTER
-    {
+    } else if now.saturating_sub(pending.installed_at) >= IDLE_RESTART_AFTER {
         Continuation::WhenNothingRuns
     } else {
         Continuation::WhenSessionsEnd
@@ -781,12 +779,10 @@ impl Updates {
     }
     pub(crate) fn probes_work(&self) -> bool {
         let live = self.shared.lock();
-        crate::idle_restart::NATIVE_WRITER_FENCE_AVAILABLE
-            && live.record.pending.as_ref().is_some_and(|pending| {
-                !breaking(&self.shared.protocols, &pending.protocols)
-                    && now().saturating_sub(pending.installed_at) >= IDLE_RESTART_AFTER
-            })
-            && !live.busy()
+        live.record.pending.as_ref().is_some_and(|pending| {
+            !breaking(&self.shared.protocols, &pending.protocols)
+                && now().saturating_sub(pending.installed_at) >= IDLE_RESTART_AFTER
+        }) && !live.busy()
     }
 
     /// Begin a restart. A restart into a Pending Version goes through a helper from the running

@@ -1362,32 +1362,109 @@ fn following(machine: &Machine, admitted: &Arc<Admitted>) -> (Updates, Arc<dyn R
 }
 
 #[test]
-fn an_ask_stage_core_preserves_live_sessions_without_a_complete_native_writer_fence() {
+fn an_ask_stage_core_restarts_when_every_session_has_no_work() {
     with_fixture_trust(|| {
-        for age in [0, IDLE_RESTART_AFTER, 7 * 86_400] {
+        let machine = machine("1.0.0");
+        let updates = Updates::open(machine.service.clone()).unwrap();
+        install(
+            &updates,
+            &machine,
+            "1.1.0",
+            Protocols::CURRENT,
+            Source::Feed,
+        )
+        .unwrap();
+        // The update waited a week, and no Terminal Session has had work for a day.
+        backdate(&machine, 7 * 86_400);
+        let admitted = Arc::new(Admitted::default());
+        let (updates, _restarter) = following(&machine, &admitted);
+        let start = Instant::now();
+        updates.observe(working(2, 0), start);
+        updates.observe(working(2, 0), start + 24 * IDLE_PERIOD);
+        assert_eq!(admitted.0.lock().unwrap().len(), 1);
+        assert_eq!(
+            updates.detailed().restart,
+            Some(RestartCause::NothingRunning)
+        );
+        assert_eq!(updates.restart(Restart::Silent), Err(RestartRefusal::Busy));
+    });
+}
+
+#[test]
+fn only_a_nonbreaking_ask_stage_update_probes_work_and_reports_the_idle_continuation() {
+    with_fixture_trust(|| {
+        for (age, breaking, probes, continuation) in [
+            (0, false, false, Continuation::WhenSessionsEnd),
+            (
+                IDLE_RESTART_AFTER - 60,
+                false,
+                false,
+                Continuation::WhenSessionsEnd,
+            ),
+            (
+                IDLE_RESTART_AFTER,
+                false,
+                true,
+                Continuation::WhenNothingRuns,
+            ),
+            (
+                IDLE_RESTART_AFTER,
+                true,
+                false,
+                Continuation::NeedsConfirmation,
+            ),
+        ] {
             let machine = machine("1.0.0");
             let updates = Updates::open(machine.service.clone()).unwrap();
-            install(
-                &updates,
-                &machine,
-                "1.1.0",
-                Protocols::CURRENT,
-                Source::Feed,
-            )
-            .unwrap();
+            assert!(!updates.probes_work());
+            let protocols = if breaking {
+                with_major(
+                    Protocols::CURRENT.work.major + 1,
+                    Protocols::CURRENT.service.major,
+                )
+            } else {
+                Protocols::CURRENT
+            };
+            install(&updates, &machine, "1.1.0", protocols, Source::Feed).unwrap();
             backdate(&machine, age);
             let admitted = Arc::new(Admitted::default());
             let (updates, _restarter) = following(&machine, &admitted);
-            updates.observe(working(2, 0), Instant::now());
-            updates.observe(working(2, 0), Instant::now() + 24 * IDLE_PERIOD);
-            assert_eq!(admitted.0.lock().unwrap().len(), 0);
-            assert!(!updates.probes_work());
-            assert_eq!(
-                updates.detailed().continuation,
-                Some(Continuation::WhenSessionsEnd)
-            );
-            assert_eq!(updates.detailed().restart, None);
+            updates.observe(working(2, 2), Instant::now());
+            assert_eq!(updates.probes_work(), probes);
+            assert_eq!(updates.detailed().continuation, Some(continuation));
+            updates.observe(working(2, 0), Instant::now() + IDLE_PERIOD);
+            assert_eq!(admitted.0.lock().unwrap().len(), usize::from(probes));
+            if probes {
+                assert!(!updates.probes_work());
+            }
         }
+    });
+}
+
+#[test]
+fn an_aborted_idle_helper_waits_another_hour_before_retrying() {
+    with_fixture_trust(|| {
+        let machine = machine("1.0.0");
+        let updates = Updates::open(machine.service.clone()).unwrap();
+        install(
+            &updates,
+            &machine,
+            "1.1.0",
+            Protocols::CURRENT,
+            Source::Feed,
+        )
+        .unwrap();
+        backdate(&machine, IDLE_RESTART_AFTER);
+        let admitted = Arc::new(Admitted::default());
+        let (updates, _restarter) = following(&machine, &admitted);
+        updates.observe(working(1, 0), Instant::now());
+        assert_eq!(admitted.0.lock().unwrap().len(), 1);
+        updates.operations_settled();
+        let start = Instant::now();
+        updates.observe(working(1, 0), start + IDLE_PERIOD / 2);
+        assert_eq!(admitted.0.lock().unwrap().len(), 1);
+        updates.observe(working(1, 0), start + IDLE_PERIOD);
+        assert_eq!(admitted.0.lock().unwrap().len(), 2);
     });
 }
 
