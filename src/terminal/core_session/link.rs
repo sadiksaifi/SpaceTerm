@@ -293,18 +293,9 @@ impl ActiveInput {
             match result {
                 Ok(Reply::Unchanged) => remaining = &remaining[end..],
                 other => {
-                    // A lost acknowledgement may follow a successful write. Neither that
-                    // chunk nor the unsent suffix can be replayed on this or a new connection.
+                    // The exchange retains the submitted chunk with its delivery classification.
+                    // This loop keeps only the suffix it never submitted.
                     state.retaining_input.store(true, Ordering::Release);
-                    // The chunk in flight may have been written; the rest never left.
-                    state.keep_input(
-                        unsent::Delivery::Unknown,
-                        &[InputEvent::Paste {
-                            text: remaining[..end].to_owned(),
-                            last: true,
-                        }],
-                        hidden,
-                    );
                     if !remaining[end..].is_empty() {
                         state.keep_input(
                             unsent::Delivery::NotSent,
@@ -2657,6 +2648,92 @@ mod tests {
         let digest = format!("{:x}", Sha256::digest(expected.as_bytes()));
         wait(&mut host, Some(&digest));
         host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn an_interrupted_commit_is_kept_once_by_the_pane_worker_and_link() {
+        use spaceterm_core::connection::link::LinkEvent;
+        for (text, close_during_send) in [
+            ("日本".to_owned(), false),
+            ("界🙂".repeat(2500), false),
+            ("界🙂".repeat(2500), true),
+        ] {
+            let mut adapter = Adapter::new();
+            let state = Arc::clone(&adapter.handle.state);
+            let close_on_send = Arc::new(AtomicBool::new(false));
+            let waking_link = Arc::new(Mutex::new(None::<CoreLink>));
+            let link = CoreLink::new(
+                Arc::new(|_: LinkEvent| {}),
+                Arc::new({
+                    let close_on_send = Arc::clone(&close_on_send);
+                    let waking_link = Arc::clone(&waking_link);
+                    move || {
+                        if close_on_send.swap(false, Ordering::AcqRel) {
+                            let link = waking_link.lock().unwrap().clone().unwrap();
+                            link.fail(LinkError::Closed);
+                        }
+                    }
+                }),
+                std::time::Instant::now(),
+            );
+            *waking_link.lock().unwrap() = Some(link.clone());
+            let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+            let mut connection = PaneLink::new(link.clone(), None, Arc::clone(&notify));
+            connection.unsent = Arc::clone(&state.unsent);
+            connection.retaining_input = Arc::clone(&state.retaining_input);
+            let channel = link
+                .open_channel(connection.sink(super::super::inbox::Inbox::new(notify)))
+                .unwrap();
+            let _claim = channel
+                .claim(
+                    spaceterm_core::attachments::Attachment {
+                        workspace: [1; 32],
+                        generation: 1,
+                    },
+                    [2; 32],
+                    pane::AttachmentClaim::Select { explicit: true },
+                    *adapter.handle.size.lock().unwrap(),
+                    None,
+                )
+                .unwrap();
+            connection
+                .bound_channel
+                .store(channel.channel().unwrap().0, Ordering::Release);
+            connection.channel = Some((channel, adapter.active.lease));
+            adapter
+                .active
+                .sync_focus(&state, &mut |request| connection.exchange(request))
+                .unwrap();
+            let outcome = adapter.handle.commit_input_method(&text).unwrap();
+            if close_during_send {
+                // The first chunk reaches the link, which closes before returning its serial.
+                // That chunk is delivery-unknown; the next chunk and suffix never leave.
+                close_on_send.store(true, Ordering::Release);
+            } else {
+                link.fail(LinkError::Closed);
+            }
+            let result = adapter.drain_rounds(1, |request| connection.exchange(request));
+            waking_link.lock().unwrap().take();
+            assert!(result.is_err());
+            assert_eq!(outcome.try_recv().unwrap(), InputMethodOutcome::Interrupted);
+            connection.release();
+            assert_eq!(
+                state.unsent_input(),
+                Some(unsent::UnsentInput {
+                    delivery: if close_during_send {
+                        unsent::Delivery::Unknown
+                    } else {
+                        unsent::Delivery::NotSent
+                    },
+                    text: text.clone(),
+                })
+            );
+            state.attached_session();
+            let notice = adapter.handle.take_unsent_input().notice.unwrap();
+            assert_eq!(notice.input.text.as_bytes(), text.as_bytes());
+            assert_eq!(notice.input.delivery, unsent::Delivery::Unknown);
+            assert!(link.next_frame().is_none(), "kept input is never replayed");
+        }
     }
 
     #[test]
