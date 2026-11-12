@@ -1568,7 +1568,9 @@ mod reader_tests {
         drop(owner_stop);
         let stopped = result.recv_timeout(std::time::Duration::from_secs(3));
         // Also join the worker if a regression leaves it waiting for master readiness.
-        outside_holder.write_all(&[1]).unwrap();
+        if stopped.is_err() {
+            let _ = outside_holder.write_all(&[1]);
+        }
         worker.join().unwrap();
         assert_eq!(
             stopped
