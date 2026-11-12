@@ -25,7 +25,7 @@ pub(crate) const CHECK_AGAIN: &str = "Check Again";
 pub(crate) const HOW_TO_UPDATE: &str = "How to Update\u{2026}";
 pub(crate) const KEEP_RUNNING: &str = "Terminal Sessions keep running";
 pub(crate) const NOTHING_RUNNING: &str =
-    "Nothing running means no program in any Terminal Session and nothing typed or shown.";
+    "Nothing running means no program, no typing and no output in any Terminal Session.";
 
 fn action(label: &str, subtitle: Option<String>, command: Command) -> Option<RowAction> {
     Some(RowAction {

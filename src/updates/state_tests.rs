@@ -1517,8 +1517,9 @@ fn a_reported_continuation_takes_precedence_and_keeps_the_waiting_age() {
     assert_eq!(
         row.description.as_deref(),
         Some(
-            "Nothing running means no program in any Terminal Session and nothing typed or shown. An update has waited 3 days."
-        )
+            "Nothing running means no program, no typing and no output in any Terminal Session. An update has waited 3 days."
+        ),
+        "a Pane on screen keeps nothing running"
     );
 }
 
