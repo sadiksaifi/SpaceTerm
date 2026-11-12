@@ -28,9 +28,9 @@ pub(crate) struct Alert {
 pub(crate) enum AlertButtons {
     /// A report: OK only.
     Ok,
-    /// Restart or Stop, which end Terminal Sessions: a caution alert with Cancel as the default
-    /// button and this destructive button.
-    Destructive(String),
+    /// Restart or Stop, which end Terminal Sessions: a caution alert with the `cancel` button as
+    /// the default, such as Cancel or Remind Me Tomorrow, and the destructive `proceed` button.
+    Destructive { proceed: String, cancel: String },
     /// A failure's follow-up, such as Try Again or Check Again, which ends nothing: an ordinary
     /// alert with this button as the default and Cancel.
     FollowUp(String),
@@ -173,7 +173,10 @@ impl StatusMenu {
             let alert = Alert {
                 title: confirmation.title.to_string(),
                 message: confirmation.message.to_string(),
-                buttons: AlertButtons::Destructive(confirmation.button.to_string()),
+                buttons: AlertButtons::Destructive {
+                    proceed: confirmation.button.to_string(),
+                    cancel: confirmation.cancel.to_string(),
+                },
             };
             let messages = messages.clone();
             host.alert(

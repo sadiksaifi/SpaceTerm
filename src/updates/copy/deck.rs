@@ -300,13 +300,23 @@ fn build() -> Deck {
                         id: 1,
                     };
                     deck.names = vec![name.to_owned()];
-                    if let Some(confirmation) = previewed(&[update.clone()], &[preview], true) {
+                    // At Offer and at Ask, where the other button hides the step for a day.
+                    for now in [NOW, NOW + 3 * 86_400] {
+                        let Some(confirmation) =
+                            previewed(&[update.clone()], &[preview.clone()], true, now)
+                        else {
+                            continue;
+                        };
                         deck.field(Role::Text, &confirmation.title);
                         deck.field(Role::Text, &confirmation.message);
                         deck.field(Role::Label, &confirmation.button);
+                        deck.field(Role::Label, &confirmation.cancel);
                         deck.dialogs.insert(format!(
-                            "{} | {} | {}, Cancel",
-                            confirmation.title, confirmation.message, confirmation.button
+                            "{} | {} | {}, {}",
+                            confirmation.title,
+                            confirmation.message,
+                            confirmation.button,
+                            confirmation.cancel
                         ));
                     }
                 }

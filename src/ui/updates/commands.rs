@@ -147,7 +147,7 @@ pub(super) fn confirmation_alert(confirmation: &Confirmation) -> Alert<Answer> {
             .with_intent(ModalActionIntent::Destructive),
             button(
                 Answer::Cancel,
-                CANCEL,
+                confirmation.cancel.clone(),
                 ModalActionRole::Cancel,
                 "update-confirm-cancel",
             ),

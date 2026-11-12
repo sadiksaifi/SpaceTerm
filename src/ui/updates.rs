@@ -874,6 +874,7 @@ mod tests {
             title: "Restart SpaceTerm Core on penguin?".into(),
             message: "SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 3 Terminal Sessions. Workspaces, Tabs and Panes stay.".into(),
             button: "Restart Core".into(),
+            cancel: "Remind Me Tomorrow".into(),
             actions: Vec::new(),
             approval: crate::updates::confirm::Approval::default(),
         };

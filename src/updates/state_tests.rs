@@ -825,6 +825,7 @@ fn the_rows_and_the_confirmation_name_the_software_and_the_consequence() {
         std::slice::from_ref(&this_mac),
         std::slice::from_ref(&preview),
         false,
+        NOW,
     )
     .unwrap();
     assert_eq!(
@@ -836,7 +837,36 @@ fn the_rows_and_the_confirmation_name_the_software_and_the_consequence() {
         "SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 2 Terminal Sessions. Workspaces, Tabs and Panes stay."
     );
     assert_eq!(confirmation.button.as_ref(), "Restart Core");
+    assert_eq!(
+        confirmation.cancel.as_ref(),
+        "Remind Me Tomorrow",
+        "at Ask the other button hides the step for a day, and says so"
+    );
     assert!(confirmation.approval.holds(&[this_mac.clone()]));
+    for days in [1, 8] {
+        let mut staged = this_mac.clone();
+        staged
+            .facts
+            .as_mut()
+            .unwrap()
+            .pending
+            .as_mut()
+            .unwrap()
+            .installed_at = NOW - days * DAY;
+        let cancel = super::super::confirm::previewed(
+            std::slice::from_ref(&staged),
+            std::slice::from_ref(&preview),
+            false,
+            NOW,
+        )
+        .unwrap()
+        .cancel;
+        assert_eq!(
+            cancel.as_ref(),
+            "Cancel",
+            "at Offer and Insist it changes nothing: {days} days"
+        );
+    }
 
     let mut breaking = this_mac.clone();
     let pending = breaking.facts.as_mut().unwrap().pending.as_mut().unwrap();
@@ -849,7 +879,7 @@ fn the_rows_and_the_confirmation_name_the_software_and_the_consequence() {
         sessions: 0,
         ..preview
     };
-    let confirmation = super::super::confirm::previewed(&[breaking], &[none], false).unwrap();
+    let confirmation = super::super::confirm::previewed(&[breaking], &[none], false, NOW).unwrap();
     assert_eq!(
         confirmation.message.as_ref(),
         "SpaceTerm Core restarts from 0.11.3 to 0.11.4. No Terminal Session is open. Workspaces, Tabs and Panes stay. SpaceTerm on iPad can't connect to This Mac until it updates."
@@ -1504,6 +1534,7 @@ fn a_confirmation_follows_the_fresh_preview_and_its_approval_the_described_work(
         std::slice::from_ref(&cached),
         std::slice::from_ref(&fresh),
         false,
+        NOW,
     )
     .unwrap();
     assert_eq!(
@@ -1524,7 +1555,8 @@ fn a_confirmation_follows_the_fresh_preview_and_its_approval_the_described_work(
         previewed(
             std::slice::from_ref(&observed),
             std::slice::from_ref(&nothing_open),
-            false
+            false,
+            NOW
         ),
         None,
         "nothing ends and nothing breaks: no question"
@@ -1534,6 +1566,7 @@ fn a_confirmation_follows_the_fresh_preview_and_its_approval_the_described_work(
         std::slice::from_ref(&unobserved),
         std::slice::from_ref(&nothing_open),
         false,
+        NOW,
     )
     .expect("an unobserved target may be breaking, so it asks");
     assert!(!asked.approval.holds(std::slice::from_ref(&unobserved)));
@@ -1543,6 +1576,7 @@ fn a_confirmation_follows_the_fresh_preview_and_its_approval_the_described_work(
         std::slice::from_ref(&two),
         std::slice::from_ref(&fresh),
         false,
+        NOW,
     )
     .unwrap()
     .approval;

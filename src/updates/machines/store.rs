@@ -573,7 +573,7 @@ impl MachineUpdates {
                 let machines = MachineUpdates::global(cx)
                     .map(|store| store.read(cx).machines.clone())
                     .unwrap_or_default();
-                match confirm::previewed(&machines, &previews, always) {
+                match confirm::previewed(&machines, &previews, always, crate::updates::now()) {
                     Some(confirmation) => Prepared::Ask(confirmation, previews),
                     None => Prepared::Run(previews),
                 }

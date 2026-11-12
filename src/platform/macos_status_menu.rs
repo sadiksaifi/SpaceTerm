@@ -313,7 +313,7 @@ fn responses(buttons: &AlertButtons) -> Option<Responses> {
     let first = NSAlertFirstButtonReturn;
     match buttons {
         AlertButtons::Ok => None,
-        AlertButtons::Destructive(_) => Some(Responses {
+        AlertButtons::Destructive { .. } => Some(Responses {
             proceed: first + 1,
             cancel: first,
         }),
@@ -331,7 +331,7 @@ fn native_alert(alert: &Alert, mtm: MainThreadMarker) -> Retained<NSAlert> {
     // in them. A follow-up such as Try Again or a failure report loses nothing more.
     let native = application_alert(
         match alert.buttons {
-            AlertButtons::Destructive(_) => AlertSeverity::Caution,
+            AlertButtons::Destructive { .. } => AlertSeverity::Caution,
             AlertButtons::FollowUp(_) | AlertButtons::Ok => AlertSeverity::Standard,
         },
         mtm,
@@ -339,10 +339,10 @@ fn native_alert(alert: &Alert, mtm: MainThreadMarker) -> Retained<NSAlert> {
     native.setMessageText(&NSString::from_str(&alert.title));
     native.setInformativeText(&NSString::from_str(&alert.message));
     match &alert.buttons {
-        AlertButtons::Destructive(label) => {
-            native.addButtonWithTitle(ns_string!("Cancel"));
+        AlertButtons::Destructive { proceed, cancel } => {
+            native.addButtonWithTitle(&NSString::from_str(cancel));
             native
-                .addButtonWithTitle(&NSString::from_str(label))
+                .addButtonWithTitle(&NSString::from_str(proceed))
                 .setHasDestructiveAction(true);
         }
         AlertButtons::FollowUp(label) => {
@@ -577,7 +577,10 @@ pub(in crate::platform) mod tests {
     impl Buttons {
         fn alert(self) -> AlertButtons {
             match self {
-                Self::Destructive(label) => AlertButtons::Destructive(label.to_owned()),
+                Self::Destructive(label) => AlertButtons::Destructive {
+                    proceed: label.to_owned(),
+                    cancel: "Cancel".to_owned(),
+                },
                 Self::FollowUp(label) => AlertButtons::FollowUp(label.to_owned()),
                 Self::Ok => AlertButtons::Ok,
             }

@@ -315,7 +315,7 @@ impl SettingsWindow {
                             .with_emphasis(ModalActionEmphasis::Prominent),
                             ModalAction::new(
                                 false,
-                                "Cancel",
+                                confirmation.cancel,
                                 ModalActionRole::Cancel,
                                 UPDATE_CANCEL_SELECTOR,
                             ),

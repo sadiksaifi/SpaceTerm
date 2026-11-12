@@ -417,20 +417,32 @@ Restart SpaceTerm Core on This Mac? | SpaceTerm Core 0.11.3 restarts without upd
 Restart SpaceTerm Core on This Mac? | SpaceTerm Core 0.11.3 restarts without updating. This ends 1 Terminal Session. Workspaces, Tabs and Panes stay. | Restart Core, Cancel
 Restart SpaceTerm Core on This Mac? | SpaceTerm Core 0.11.3 restarts without updating. This ends 3 Terminal Sessions. Workspaces, Tabs and Panes stay. | Restart Core, Cancel
 Restart SpaceTerm Core on This Mac? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. No Terminal Session is open. Workspaces, Tabs and Panes stay. Devices with an older SpaceTerm can't connect to This Mac until they update. | Restart Core, Cancel
+Restart SpaceTerm Core on This Mac? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. No Terminal Session is open. Workspaces, Tabs and Panes stay. Devices with an older SpaceTerm can't connect to This Mac until they update. | Restart Core, Remind Me Tomorrow
 Restart SpaceTerm Core on This Mac? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. No Terminal Session is open. Workspaces, Tabs and Panes stay. | Restart Core, Cancel
+Restart SpaceTerm Core on This Mac? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. No Terminal Session is open. Workspaces, Tabs and Panes stay. | Restart Core, Remind Me Tomorrow
 Restart SpaceTerm Core on This Mac? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 1 Terminal Session. Workspaces, Tabs and Panes stay. Devices with an older SpaceTerm can't connect to This Mac until they update. | Restart Core, Cancel
+Restart SpaceTerm Core on This Mac? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 1 Terminal Session. Workspaces, Tabs and Panes stay. Devices with an older SpaceTerm can't connect to This Mac until they update. | Restart Core, Remind Me Tomorrow
 Restart SpaceTerm Core on This Mac? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 1 Terminal Session. Workspaces, Tabs and Panes stay. | Restart Core, Cancel
+Restart SpaceTerm Core on This Mac? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 1 Terminal Session. Workspaces, Tabs and Panes stay. | Restart Core, Remind Me Tomorrow
 Restart SpaceTerm Core on This Mac? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 3 Terminal Sessions. Workspaces, Tabs and Panes stay. SpaceTerm on iPad can't connect to This Mac until it updates. | Restart Core, Cancel
+Restart SpaceTerm Core on This Mac? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 3 Terminal Sessions. Workspaces, Tabs and Panes stay. SpaceTerm on iPad can't connect to This Mac until it updates. | Restart Core, Remind Me Tomorrow
 Restart SpaceTerm Core on This Mac? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 3 Terminal Sessions. Workspaces, Tabs and Panes stay. | Restart Core, Cancel
+Restart SpaceTerm Core on This Mac? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 3 Terminal Sessions. Workspaces, Tabs and Panes stay. | Restart Core, Remind Me Tomorrow
 Restart SpaceTerm Core on penguin? | SpaceTerm Core 0.11.3 restarts without updating. No Terminal Session is open. Workspaces, Tabs and Panes stay. | Restart Core, Cancel
 Restart SpaceTerm Core on penguin? | SpaceTerm Core 0.11.3 restarts without updating. This ends 1 Terminal Session. Workspaces, Tabs and Panes stay. | Restart Core, Cancel
 Restart SpaceTerm Core on penguin? | SpaceTerm Core 0.11.3 restarts without updating. This ends 3 Terminal Sessions. Workspaces, Tabs and Panes stay. | Restart Core, Cancel
 Restart SpaceTerm Core on penguin? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. No Terminal Session is open. Workspaces, Tabs and Panes stay. Devices with an older SpaceTerm can't connect to penguin until they update. | Restart Core, Cancel
+Restart SpaceTerm Core on penguin? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. No Terminal Session is open. Workspaces, Tabs and Panes stay. Devices with an older SpaceTerm can't connect to penguin until they update. | Restart Core, Remind Me Tomorrow
 Restart SpaceTerm Core on penguin? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. No Terminal Session is open. Workspaces, Tabs and Panes stay. | Restart Core, Cancel
+Restart SpaceTerm Core on penguin? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. No Terminal Session is open. Workspaces, Tabs and Panes stay. | Restart Core, Remind Me Tomorrow
 Restart SpaceTerm Core on penguin? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 1 Terminal Session. Workspaces, Tabs and Panes stay. Devices with an older SpaceTerm can't connect to penguin until they update. | Restart Core, Cancel
+Restart SpaceTerm Core on penguin? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 1 Terminal Session. Workspaces, Tabs and Panes stay. Devices with an older SpaceTerm can't connect to penguin until they update. | Restart Core, Remind Me Tomorrow
 Restart SpaceTerm Core on penguin? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 1 Terminal Session. Workspaces, Tabs and Panes stay. | Restart Core, Cancel
+Restart SpaceTerm Core on penguin? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 1 Terminal Session. Workspaces, Tabs and Panes stay. | Restart Core, Remind Me Tomorrow
 Restart SpaceTerm Core on penguin? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 3 Terminal Sessions. Workspaces, Tabs and Panes stay. SpaceTerm on iPad can't connect to penguin until it updates. | Restart Core, Cancel
+Restart SpaceTerm Core on penguin? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 3 Terminal Sessions. Workspaces, Tabs and Panes stay. SpaceTerm on iPad can't connect to penguin until it updates. | Restart Core, Remind Me Tomorrow
 Restart SpaceTerm Core on penguin? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 3 Terminal Sessions. Workspaces, Tabs and Panes stay. | Restart Core, Cancel
+Restart SpaceTerm Core on penguin? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 3 Terminal Sessions. Workspaces, Tabs and Panes stay. | Restart Core, Remind Me Tomorrow
 SpaceTerm Can't Confirm the Restart on This Computer | This Computer stopped responding while SpaceTerm Core restarted into 0.11.5. | Check Again, Cancel
 SpaceTerm Can't Confirm the Restart on This Mac | This Mac stopped responding while SpaceTerm Core restarted into 0.11.5. | Check Again, Cancel
 SpaceTerm Can't Confirm the Restart on penguin | penguin stopped responding while SpaceTerm Core restarted into 0.11.5. | Check Again, Cancel

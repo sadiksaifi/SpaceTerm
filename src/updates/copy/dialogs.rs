@@ -25,6 +25,10 @@ pub(crate) fn downloaded(version: &str) -> (&'static str, String, &'static str) 
 /// The destructive button of D1 and D2.
 pub(crate) const RESTART_BUTTON: &str = "Restart Core";
 pub(crate) const STOP_BUTTON: &str = "Stop";
+/// D1's other button. It closes the alert and changes nothing.
+pub(crate) const CANCEL: &str = "Cancel";
+/// D1's other button at the Ask stage, where it hides that Machine's step for a day.
+pub(crate) const REMIND_ME_TOMORROW: &str = "Remind Me Tomorrow";
 pub(crate) const TRY_AGAIN: &str = "Try Again";
 pub(crate) const CHECK_AGAIN: &str = "Check Again";
 

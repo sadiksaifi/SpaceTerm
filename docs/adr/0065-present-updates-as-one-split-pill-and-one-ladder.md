@@ -60,7 +60,7 @@ A newer version can therefore appear with a step only on a Machine that has alre
 | Stage | From | Title bar | Emphasis | Update Reminders | Cancel in the Restart Core confirmation | Applies by itself |
 |---|---|---|---|---|---|---|
 | Offer | The download | SpaceTerm's relaunch or download; Restart Core only for a breaking or blocking SpaceTerm Core update. A SpaceTerm Core update that applies itself shows only in the list. | Accent | None | Closes the alert; the step stays | SpaceTerm Core with no Terminal Session at all, under ADR 0034 |
-| Ask | 2 days | Every waiting update, including a SpaceTerm Core update that applies itself | Accent | One a day | Hides that Machine's step on this desktop for 24 hours | Also when no work is going on for an hour: SpaceTerm on macOS relaunches. SpaceTerm Core restarts under the native freeze and final checks below. Never a breaking SpaceTerm Core update |
+| Ask | 2 days | Every waiting update, including a SpaceTerm Core update that applies itself | Accent | One a day | Named for what it does, and hides that Machine's step and its reminders on this desktop for 24 hours | Also when no work is going on for an hour: SpaceTerm on macOS relaunches. SpaceTerm Core restarts under the native freeze and final checks below. Never a breaking SpaceTerm Core update |
 | Insist | 7 days | The same steps | Warning; the menu bar extra's icon shows a dot | One every 4 hours | Closes the alert; the step stays | As in Ask |
 
 Each stage adds presence, emphasis or cadence, never words: a step's label is the same text at every stage. The last stage is Insist. No stage ends a Terminal Session that has work going on, and no stage holds a launch.

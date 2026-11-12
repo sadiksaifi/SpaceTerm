@@ -171,11 +171,11 @@ impl StatusHost for LinuxStatusItem {
         };
         // The alert's level, its buttons, and the index of the button that answers yes.
         let (level, buttons, proceed) = match &alert.buttons {
-            AlertButtons::Destructive(label) => (
+            AlertButtons::Destructive { proceed, cancel } => (
                 PromptLevel::Critical,
                 vec![
-                    PromptButton::cancel("Cancel"),
-                    PromptButton::ok(label.clone()),
+                    PromptButton::cancel(cancel.clone()),
+                    PromptButton::ok(proceed.clone()),
                 ],
                 Some(1),
             ),

@@ -13,6 +13,9 @@ pub(crate) struct Confirmation {
     pub(crate) message: SharedString,
     /// The destructive button: "Restart Core" or "Stop".
     pub(crate) button: SharedString,
+    /// The other button, the alert's Cancel: "Remind Me Tomorrow" when it hides a Machine's
+    /// Ask step for a day, otherwise "Cancel", which changes nothing.
+    pub(crate) cancel: SharedString,
     pub(crate) actions: Vec<(MachineId, MachineAction)>,
     /// The work the alert described. Approving it authorizes exactly that work.
     pub(crate) approval: Approval,
@@ -137,6 +140,19 @@ impl Approval {
     }
 }
 
+/// Whether `update` waits at the Ask stage with a step a deferral can hide: not blocked, since
+/// a hard stop never hides.
+fn asks_today(update: &MachineUpdate, now: u64) -> bool {
+    use super::ladder::{Stage, stage};
+    use super::machines::MachineLink;
+    !matches!(update.link, MachineLink::Incompatible(_))
+        && update
+            .facts
+            .as_ref()
+            .and_then(|facts| facts.pending.as_ref())
+            .is_some_and(|pending| stage(pending.installed_at, now) == Stage::Ask)
+}
+
 /// One previewed Machine, as its confirmation describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Previewed {
@@ -207,11 +223,12 @@ impl Previewed {
 /// The confirmation for the Restarts or the Stop `previews` describe, with the sessions each
 /// Core itself will end. None when nothing asks: no session ends and no breaking change waits,
 /// unless `always`, as after a Core refused a preview the person never saw. A Machine no
-/// longer listed is left out.
+/// longer listed is left out. `now` places each waiting update on the ladder.
 pub(crate) fn previewed(
     machines: &[MachineUpdate],
     previews: &[MachinePreview],
     always: bool,
+    now: u64,
 ) -> Option<Confirmation> {
     let described: Vec<Previewed> = previews
         .iter()
@@ -235,10 +252,25 @@ pub(crate) fn previewed(
         MachineAction::Stop => dialogs::stop(&described),
         _ => dialogs::restart(&described),
     };
+    // Cancel on a restart at the Ask stage hides that Machine's step for a day, so it says so.
+    let defers = action == MachineAction::Restart
+        && described.iter().any(|one| {
+            one.target.is_some()
+                && machines
+                    .iter()
+                    .find(|update| update.machine == one.machine)
+                    .is_some_and(|update| asks_today(update, now))
+        });
     Some(Confirmation {
         title,
         message,
         button,
+        cancel: if defers {
+            dialogs::REMIND_ME_TOMORROW
+        } else {
+            dialogs::CANCEL
+        }
+        .into(),
         actions: described
             .iter()
             .map(|one| (one.machine, action.clone()))

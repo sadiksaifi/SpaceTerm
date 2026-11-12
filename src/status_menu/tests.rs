@@ -202,7 +202,10 @@ fn only_this_mac_offers_stop_and_stopping_with_sessions_asks(cx: &mut TestAppCon
     cx.run_until_parked();
     assert_eq!(
         fixture.host.alerts.borrow()[0].buttons,
-        AlertButtons::Destructive("Stop".to_owned())
+        AlertButtons::Destructive {
+            proceed: "Stop".to_owned(),
+            cancel: "Cancel".to_owned()
+        }
     );
     assert_eq!(
         fixture.machines.executed_actions(),
@@ -437,7 +440,13 @@ fn a_machine_without_facts_stops_only_on_its_cores_preview(cx: &mut TestAppConte
         .last()
         .cloned()
         .expect("it asks");
-    assert_eq!(alert.buttons, AlertButtons::Destructive("Stop".to_owned()));
+    assert_eq!(
+        alert.buttons,
+        AlertButtons::Destructive {
+            proceed: "Stop".to_owned(),
+            cancel: "Cancel".to_owned()
+        }
+    );
     assert!(
         alert.message.starts_with("This ends 3 Terminal Sessions."),
         "the alert names the sessions the Core reports: {}",
@@ -493,7 +502,10 @@ fn a_refused_preview_never_runs_again_without_a_fresh_confirmation(cx: &mut Test
             .expect("it asks again");
         assert_eq!(
             alert.buttons,
-            AlertButtons::Destructive("Restart Core".to_owned()),
+            AlertButtons::Destructive {
+                proceed: "Restart Core".to_owned(),
+                cancel: "Cancel".to_owned()
+            },
             "it asks to confirm"
         );
         fixture.host.answer(approved);
