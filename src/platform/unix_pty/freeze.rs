@@ -418,7 +418,7 @@ impl SlavePermissions {
             uid: metadata.uid(),
             gid: metadata.gid(),
         };
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000))?;
         let closed = std::fs::symlink_metadata(path)?;
         if closed.mode() & 0o7777 != 0
             || closed.uid() != saved.uid
@@ -526,6 +526,7 @@ mod tests {
         Output,
         Reused,
     }
+    type InspectionPause = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
     struct Data {
         fault: Mutex<Fault>,
         scans: AtomicUsize,
@@ -533,7 +534,7 @@ mod tests {
         stopped: Mutex<BTreeSet<i32>>,
         signals: Mutex<Vec<(i32, i32)>>,
         permissions: AtomicUsize,
-        stall: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+        stall: Mutex<Option<InspectionPause>>,
     }
     #[derive(Clone)]
     struct Facts(Arc<Data>);
