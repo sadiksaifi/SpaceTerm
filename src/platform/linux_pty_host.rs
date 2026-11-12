@@ -10,6 +10,60 @@ use crate::platform::unix_pty::{
 pub(super) struct LinuxPtyHost;
 
 impl UnixPtyHost for LinuxPtyHost {
+    fn pin_process(
+        &self,
+        identity: ProcessIdentity,
+    ) -> io::Result<Box<dyn super::unix_pty::ProcessControl>> {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        // SAFETY: pidfd_open returns an owned descriptor for this process instance.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, identity.process, 0) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the successful syscall returned a new owned descriptor.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+        if self.observe_exactly(identity.process)?.map(|p| p.identity) != Some(identity) {
+            return Err(io::Error::other("process identity changed"));
+        }
+        Ok(Box::new(PinnedProcess { identity, fd }))
+    }
+
+    fn complete_process_ids(&self) -> io::Result<Vec<i32>> {
+        self.session_candidates(0)
+    }
+    fn holds_slave(&self, pid: i32, slave: &std::path::Path) -> io::Result<bool> {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        let expected = std::fs::metadata(slave)?;
+        let directory = format!("/proc/{pid}/fd");
+        let list = || -> io::Result<Vec<std::path::PathBuf>> {
+            let mut entries = std::fs::read_dir(&directory)?
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<io::Result<Vec<_>>>()?;
+            entries.sort();
+            Ok(entries)
+        };
+        let mut entries = Vec::new();
+        let mut found = false;
+        // Keep read_dir alive while inspecting its entries. For this Core's own PID that
+        // directory descriptor is itself in the list; closing it early would make it unreadable.
+        for entry in std::fs::read_dir(&directory)? {
+            let path = entry?.path();
+            let target = std::fs::read_link(&path)?;
+            let metadata = std::fs::metadata(&path)?;
+            if target == slave
+                || (metadata.file_type().is_char_device() && metadata.rdev() == expected.rdev())
+            {
+                found = true;
+            }
+            entries.push(path);
+        }
+        entries.sort();
+        if list()? != entries {
+            return Err(io::Error::other("process descriptors changed"));
+        }
+        Ok(found)
+    }
+
     fn observe_process(&self, process: i32) -> Option<ProcessObservation> {
         let stat = read_process_stat(process)?;
         (!stat.exited).then_some(stat.observation)
@@ -77,6 +131,69 @@ impl UnixPtyHost for LinuxPtyHost {
             MasterReadError::Hangup
         } else {
             MasterReadError::Failure
+        }
+    }
+}
+
+struct PinnedProcess {
+    identity: ProcessIdentity,
+    fd: std::os::fd::OwnedFd,
+}
+impl super::unix_pty::ProcessControl for PinnedProcess {
+    fn identity(&self) -> ProcessIdentity {
+        self.identity
+    }
+    fn stopped(&self) -> io::Result<bool> {
+        if LinuxPtyHost
+            .observe_exactly(self.identity.process)?
+            .map(|p| p.identity)
+            != Some(self.identity)
+        {
+            return Err(io::Error::other("process identity changed"));
+        }
+        let directory = format!("/proc/{}/task", self.identity.process);
+        let list = || -> io::Result<Vec<std::path::PathBuf>> {
+            let mut paths = std::fs::read_dir(&directory)?
+                .map(|e| e.map(|e| e.path()))
+                .collect::<io::Result<Vec<_>>>()?;
+            paths.sort();
+            Ok(paths)
+        };
+        let threads = list()?;
+        if threads.is_empty() {
+            return Err(io::Error::other("the process has no readable threads"));
+        }
+        for thread in &threads {
+            let stat = std::fs::read(thread.join("stat"))?;
+            let end = stat
+                .iter()
+                .rposition(|byte| *byte == b')')
+                .ok_or_else(|| io::Error::other("unreadable thread"))?;
+            let state = stat[end + 1..]
+                .split(|b| b.is_ascii_whitespace())
+                .find(|s| !s.is_empty());
+            if !matches!(state, Some(b"T" | b"t")) {
+                return Ok(false);
+            }
+        }
+        Ok(list()? == threads)
+    }
+    fn signal(&self, signal: i32) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+        // SAFETY: the pidfd identifies exactly the captured process, including after PID reuse.
+        if unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                self.fd.as_raw_fd(),
+                signal,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        } == 0
+        {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
         }
     }
 }
@@ -229,6 +346,35 @@ mod tests {
         assert_eq!(LinuxPtyHost.observe_exactly(i32::MAX).unwrap(), None);
     }
 
+    #[cfg(feature = "native-tests")]
+    #[test]
+    fn a_dead_pidfd_never_signals_the_live_pid_in_its_metadata() {
+        use crate::platform::unix_pty::ProcessControl;
+        use std::os::fd::{FromRawFd, OwnedFd};
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        // SAFETY: the child is unreaped, so pidfd_open binds its exact process instance.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id() as i32, 0) };
+        assert!(fd >= 0);
+        // SAFETY: this is the newly owned successful syscall result.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+        child.wait().unwrap();
+        let current = LinuxPtyHost
+            .observe_exactly(std::process::id() as i32)
+            .unwrap()
+            .unwrap()
+            .identity;
+        let dead = PinnedProcess {
+            fd,
+            identity: current,
+        };
+        assert_eq!(
+            dead.signal(0).unwrap_err().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
     #[cfg(feature = "native-tests")]
     #[test]
     fn linux_host_retains_an_exited_owned_child_without_reporting_it_alive() {

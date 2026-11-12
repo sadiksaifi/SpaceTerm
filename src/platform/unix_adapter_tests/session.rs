@@ -390,6 +390,9 @@ fn a_real_integrated_shell_needs_a_quiet_hour_and_receives_input_after_a_lease()
         thread::sleep(Duration::from_millis(10));
     };
     session.key(KeyInput::input_method_commit("x"));
-    assert_eq!(lease.grant(), Err(spaceterm_core::idle_restart::Restarting));
+    assert_eq!(
+        lease.freeze_and_grant(),
+        Err(spaceterm_core::idle_restart::Restarting)
+    );
     lease.release();
 }

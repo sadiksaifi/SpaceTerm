@@ -132,6 +132,38 @@ impl TerminalEventPublisher {
 }
 
 impl spaceterm_core::idle_restart::Session for TerminalEventPublisher {
+    fn freeze(
+        &self,
+        now: Instant,
+    ) -> Result<
+        Box<dyn spaceterm_core::idle_restart::Frozen>,
+        spaceterm_core::idle_restart::Restarting,
+    > {
+        use spaceterm_core::idle_restart::Restarting;
+        // The lease owns every receipt lock. Do not acquire one from this native operation.
+        let (probe, last) = {
+            let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            if state.stopped
+                || !state.activity.empty_prompt
+                || !state
+                    .activity
+                    .last
+                    .is_some_and(|last| now.saturating_duration_since(last) >= IDLE_PERIOD)
+            {
+                return Err(Restarting);
+            }
+            (
+                state.activity.probe.clone().ok_or(Restarting)?,
+                state.activity.last,
+            )
+        };
+        let frozen = probe.freeze().map_err(|_| Restarting)?;
+        let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if state.stopped || !state.activity.empty_prompt || state.activity.last != last {
+            return Err(Restarting);
+        }
+        Ok(frozen)
+    }
     fn activity(&self) -> spaceterm_core::idle_restart::Activity {
         self.receipt_activity()
     }

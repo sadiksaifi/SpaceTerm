@@ -151,6 +151,9 @@ pub trait NativePtyAdapter: Write + Send {
 
 /// Reads the processes in one shell's terminal session, apart from the PTY's owner.
 pub trait SessionProbe: Send + Sync {
+    fn freeze(&self) -> io::Result<Box<dyn spaceterm_core::idle_restart::Frozen>> {
+        Err(io::Error::other("native freeze is unavailable"))
+    }
     fn activity(&self) -> Option<spaceterm_core::idle_restart::Activity> {
         None
     }

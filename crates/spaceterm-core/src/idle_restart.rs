@@ -8,11 +8,6 @@ use std::time::{Duration, Instant};
 /// Work and service minor that add the Stop grant and the retained-input refusal.
 pub const MINOR: u16 = 3;
 
-/// Neither supported OS exposes a complete, exclusive fence over PTY slave references.
-/// Process FD tables omit references queued in SCM_RIGHTS messages. No live-session Stop
-/// can be admitted until an adapter proves every writer is fenced, including those references.
-pub(crate) const NATIVE_WRITER_FENCE_AVAILABLE: bool = false;
-
 /// Input was not admitted because Stop has been granted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Restarting;
@@ -137,16 +132,30 @@ impl Drop for Completion {
 pub trait Session: Send + Sync {
     fn activity(&self) -> Activity;
     fn working(&self, now: Instant) -> bool;
+    /// Freeze native execution, then verify prompt, foreground, membership, slave holders
+    /// and pending output. Dropping the returned guard thaws exactly this attempt's processes.
+    /// Receipt locks are held here; this operation must not acquire them again.
+    fn freeze(&self, _now: Instant) -> Result<Box<dyn Frozen>, Restarting> {
+        Err(Restarting)
+    }
+}
+pub trait Frozen: Send + Sync {
+    /// Recheck the same native population immediately before Stop, without thawing it.
+    fn verify(&self) -> Result<(), Restarting> {
+        Err(Restarting)
+    }
 }
 struct LeaseState {
     phase: AtomicU8,
 }
 /// The receipt gate is bound to the exact activities inspected by one scan. Its owner also
 /// binds it to the operation, installation and Core boot under the panes lock. It cannot
-/// establish native idleness or authorize Stop without a complete native writer fence.
+/// establish native idleness or authorize Stop without the native freeze and final recheck.
 pub struct Lease {
     state: Arc<LeaseState>,
     sessions: Vec<(Activity, u64)>,
+    native: Vec<Arc<dyn Session>>,
+    frozen: Mutex<Vec<Box<dyn Frozen>>>,
 }
 impl Lease {
     pub fn scan(sessions: &[Arc<dyn Session>], now: Instant, period: Duration) -> Option<Self> {
@@ -166,7 +175,9 @@ impl Lease {
         if working.into_iter().any(|working| working) {
             return None;
         }
-        Self::admit(observed, now, period)
+        let mut lease = Self::admit(observed, now, period)?;
+        lease.native = sessions.to_vec();
+        Some(lease)
     }
     fn admit(sessions: Vec<(Activity, u64)>, now: Instant, period: Duration) -> Option<Self> {
         for (index, (activity, _)) in sessions.iter().enumerate() {
@@ -198,9 +209,51 @@ impl Lease {
             activity.lease = Arc::downgrade(&state);
         }
         drop(guards);
-        Some(Self { state, sessions })
+        Some(Self {
+            state,
+            sessions,
+            native: Vec::new(),
+            frozen: Mutex::new(Vec::new()),
+        })
     }
-    pub fn grant(&self) -> Result<(), Restarting> {
+    pub fn freeze_and_grant(&self) -> Result<(), Restarting> {
+        if self.granted() {
+            return self.verify_frozen();
+        }
+        let mut guards = self
+            .sessions
+            .iter()
+            .map(|(a, _)| a.lock())
+            .collect::<Vec<_>>();
+        if self.state.phase.load(Ordering::Acquire) != 0
+            || guards
+                .iter()
+                .zip(&self.sessions)
+                .any(|(state, (_, generation))| {
+                    state.generation != Some(*generation) || !state.pending.is_empty()
+                })
+        {
+            return Err(Restarting);
+        }
+        let mut frozen = Vec::new();
+        for (index, session) in self.native.iter().enumerate() {
+            match session.freeze(Instant::now()) {
+                Ok(guard) => frozen.push(guard),
+                Err(error) => {
+                    let state = &mut guards[index];
+                    state.last = Instant::now();
+                    state.generation = state.generation.and_then(|n| n.checked_add(1));
+                    state.revoke();
+                    return Err(error);
+                }
+            }
+        }
+        self.commit(&mut guards)?;
+        *self.frozen.lock().unwrap_or_else(|e| e.into_inner()) = frozen;
+        Ok(())
+    }
+    #[cfg(test)]
+    fn grant(&self) -> Result<(), Restarting> {
         let mut guards = self
             .sessions
             .iter()
@@ -215,25 +268,66 @@ impl Lease {
         {
             return Err(Restarting);
         }
+        self.commit(&mut guards)
+    }
+    pub fn verify_frozen(&self) -> Result<(), Restarting> {
+        let mut guards = self
+            .sessions
+            .iter()
+            .map(|(a, _)| a.lock())
+            .collect::<Vec<_>>();
+        let mut frozen = self.frozen.lock().unwrap_or_else(|e| e.into_inner());
+        let valid = self.granted()
+            && frozen.len() == self.native.len()
+            && guards
+                .iter()
+                .zip(&self.sessions)
+                .all(|(state, (_, generation))| {
+                    state.granted
+                        && state.generation == Some(*generation)
+                        && state.pending.is_empty()
+                })
+            && frozen.iter().all(|native| native.verify().is_ok());
+        if valid {
+            return Ok(());
+        }
+        self.refuse_locked(&mut guards, &mut frozen);
+        Err(Restarting)
+    }
+    pub(crate) fn refuse(&self) {
+        let mut guards = self
+            .sessions
+            .iter()
+            .map(|(a, _)| a.lock())
+            .collect::<Vec<_>>();
+        let mut frozen = self.frozen.lock().unwrap_or_else(|e| e.into_inner());
+        self.refuse_locked(&mut guards, &mut frozen);
+    }
+    fn refuse_locked(
+        &self,
+        guards: &mut [MutexGuard<'_, State>],
+        frozen: &mut Vec<Box<dyn Frozen>>,
+    ) {
+        self.state.phase.store(1, Ordering::Release);
+        frozen.clear();
+        for state in guards {
+            state.granted = false;
+            state.last = Instant::now();
+            state.generation = state.generation.and_then(|n| n.checked_add(1));
+        }
+    }
+    fn commit(&self, guards: &mut [MutexGuard<'_, State>]) -> Result<(), Restarting> {
         self.state
             .phase
             .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| Restarting)?;
-        for state in &mut guards {
+        for state in guards {
             // Grant consumes the revocable lease and leaves the input barrier until Stop
             // completes, or its owner proves that the helper can no longer Stop.
             state.lease = Weak::new();
             state.granted = true;
         }
         Ok(())
-    }
-    pub(crate) fn unreadable(&self) {
-        for (activity, _) in &self.sessions {
-            let mut state = activity.lock();
-            state.generation = None;
-            state.last = Instant::now();
-            state.revoke();
-        }
     }
     pub fn revoke(&self) {
         let _ = self
@@ -246,6 +340,17 @@ impl Lease {
     }
     /// Only after the helper is proven unable to Stop, or its activation has settled.
     pub fn release(self) {
+        drop(self);
+    }
+}
+impl Drop for Lease {
+    fn drop(&mut self) {
+        // Native execution resumes before input admission resumes. On a completed Stop these
+        // exact process handles are already dead, so thaw cannot signal a reused PID.
+        self.frozen
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         for (activity, _) in &self.sessions {
             let mut state = activity.lock();
             state.granted = false;
@@ -257,6 +362,115 @@ impl Lease {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct NativeSession {
+        activity: Activity,
+        index: usize,
+        refuse: bool,
+        events: Arc<Mutex<Vec<(usize, bool)>>>,
+    }
+    struct Stopped {
+        index: usize,
+        events: Arc<Mutex<Vec<(usize, bool)>>>,
+    }
+    impl Frozen for Stopped {
+        fn verify(&self) -> Result<(), Restarting> {
+            Ok(())
+        }
+    }
+    impl Drop for Stopped {
+        fn drop(&mut self) {
+            self.events.lock().unwrap().push((self.index, false));
+        }
+    }
+    impl Session for NativeSession {
+        fn activity(&self) -> Activity {
+            self.activity.clone()
+        }
+        fn working(&self, _: Instant) -> bool {
+            false
+        }
+        fn freeze(&self, _: Instant) -> Result<Box<dyn Frozen>, Restarting> {
+            self.events.lock().unwrap().push((self.index, true));
+            let stopped = Stopped {
+                index: self.index,
+                events: self.events.clone(),
+            };
+            if self.refuse {
+                return Err(Restarting);
+            }
+            Ok(Box::new(stopped))
+        }
+    }
+    #[test]
+    fn native_freezes_are_owned_until_release_or_shutdown_and_every_refusal_thaws() {
+        for refuse in [Some(0), Some(1), None] {
+            for explicit_release in [false, true] {
+                let start = Instant::now();
+                let events = Arc::new(Mutex::new(Vec::new()));
+                let activities = [Activity::new(start), Activity::new(start)];
+                let sessions: Vec<Arc<dyn Session>> = activities
+                    .iter()
+                    .enumerate()
+                    .map(|(index, activity)| {
+                        Arc::new(NativeSession {
+                            activity: activity.clone(),
+                            index,
+                            refuse: refuse == Some(index),
+                            events: events.clone(),
+                        }) as Arc<dyn Session>
+                    })
+                    .collect();
+                let lease = Lease::scan(
+                    &sessions,
+                    start + Duration::from_secs(7200),
+                    Duration::from_secs(3600),
+                )
+                .unwrap();
+                assert_eq!(
+                    lease.freeze_and_grant(),
+                    if refuse.is_some() {
+                        Err(Restarting)
+                    } else {
+                        Ok(())
+                    }
+                );
+                if let Some(index) = refuse {
+                    assert_ne!(
+                        activities[index].generation(),
+                        Some(0),
+                        "a refused native observation records work"
+                    );
+                    assert!(activities[0].input(Instant::now()).is_ok());
+                } else {
+                    assert_eq!(*events.lock().unwrap(), vec![(0, true), (1, true)]);
+                    assert!(activities[0].input(Instant::now()).is_err());
+                }
+                if explicit_release {
+                    lease.release();
+                } else {
+                    drop(lease);
+                }
+                let recorded = events.lock().unwrap();
+                for index in 0..=refuse.unwrap_or(1) {
+                    assert_eq!(
+                        recorded
+                            .iter()
+                            .filter(|entry| **entry == (index, true))
+                            .count(),
+                        1
+                    );
+                    assert_eq!(
+                        recorded
+                            .iter()
+                            .filter(|entry| **entry == (index, false))
+                            .count(),
+                        1
+                    );
+                }
+                assert!(activities[0].input(Instant::now()).is_ok());
+            }
+        }
+    }
     struct Shell(Activity);
     impl Session for Shell {
         fn activity(&self) -> Activity {

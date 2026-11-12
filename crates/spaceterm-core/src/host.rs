@@ -449,7 +449,19 @@ impl PaneService for HostService {
         self.inner.disconnected(peer)
     }
     fn shutdown(&mut self) -> Result<(), CoreError> {
-        self.inner.shutdown()
+        let result = self.inner.shutdown();
+        // A completed Stop has already ended its sessions. Every other shutdown releases
+        // this Core's native freezes, including an inner shutdown that failed.
+        if let Some(operation) = self
+            .idle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .lease
+            .take()
+        {
+            operation.lease.release();
+        }
+        result
     }
 }
 
@@ -606,20 +618,34 @@ impl crate::service::lane::LaneHost for HostLane {
             || operation.candidate != candidate
             || sessions != expected
             || self.requested.load(Ordering::Acquire)
+            || self.stop.stopping()
             || (operation.idle
                 && idle
                     .connections
                     .values()
                     .any(|outbox| outbox.work().minor < crate::idle_restart::MINOR))
         {
+            if operation.lease.granted() {
+                operation.lease.refuse();
+            }
             return Err(CoreError::Changed);
         }
-        check(operation.idle)?;
-        if operation.idle && !crate::idle_restart::NATIVE_WRITER_FENCE_AVAILABLE {
-            operation.lease.unreadable();
-            return Err(CoreError::Unsupported);
+        if let Err(error) = check(operation.idle) {
+            if operation.lease.granted() {
+                operation.lease.refuse();
+            }
+            return Err(error);
         }
-        operation.lease.grant().map_err(|_| CoreError::Changed)
+        if operation.lease.granted() {
+            return operation
+                .lease
+                .verify_frozen()
+                .map_err(|_| CoreError::Changed);
+        }
+        operation
+            .lease
+            .freeze_and_grant()
+            .map_err(|_| CoreError::Changed)
     }
     fn idle_granted(&self) -> bool {
         self.idle
@@ -3350,8 +3376,31 @@ mod idle_restart_tests {
     use crate::service::operations::OperationId;
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
-    struct Shell(Activity);
+    struct Shell(Activity, Option<(Arc<AtomicUsize>, Arc<AtomicBool>)>);
+    struct FrozenCount(Arc<AtomicUsize>, Arc<AtomicBool>);
+    impl crate::idle_restart::Frozen for FrozenCount {
+        fn verify(&self) -> Result<(), crate::idle_restart::Restarting> {
+            if self.1.load(Ordering::Acquire) {
+                Ok(())
+            } else {
+                Err(crate::idle_restart::Restarting)
+            }
+        }
+    }
+    impl Drop for FrozenCount {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
     impl Session for Shell {
+        fn freeze(
+            &self,
+            _: Instant,
+        ) -> Result<Box<dyn crate::idle_restart::Frozen>, crate::idle_restart::Restarting> {
+            let (count, valid) = self.1.clone().ok_or(crate::idle_restart::Restarting)?;
+            count.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(FrozenCount(count, valid)))
+        }
         fn activity(&self) -> Activity {
             self.0.clone()
         }
@@ -3362,7 +3411,9 @@ mod idle_restart_tests {
     struct Panes {
         activity: Activity,
         delivered: Arc<AtomicUsize>,
-        live: bool,
+        live: Arc<AtomicBool>,
+        native: Option<(Arc<AtomicUsize>, Arc<AtomicBool>)>,
+        shutdown_error: bool,
     }
     impl PaneService for Panes {
         fn admitted(&mut self, _: &Peer, _: ClientName, _: Outbox) {}
@@ -3380,14 +3431,22 @@ mod idle_restart_tests {
         fn acknowledge(&mut self, _: &Peer, _: u64) {}
         fn disconnected(&mut self, _: &Peer) {}
         fn shutdown(&mut self) -> Result<(), CoreError> {
-            Ok(())
+            if self.shutdown_error {
+                Err(CoreError::CleanupUnresolved)
+            } else {
+                Ok(())
+            }
         }
         fn sessions(&self) -> Vec<[u8; 32]> {
-            if self.live { vec![[4; 32]] } else { Vec::new() }
+            if self.live.load(Ordering::Acquire) {
+                vec![[4; 32]]
+            } else {
+                Vec::new()
+            }
         }
         fn idle_sessions(&self) -> Option<Vec<Arc<dyn Session>>> {
-            Some(if self.live {
-                vec![Arc::new(Shell(self.activity.clone())) as Arc<dyn Session>]
+            Some(if self.live.load(Ordering::Acquire) {
+                vec![Arc::new(Shell(self.activity.clone(), self.native.clone())) as Arc<dyn Session>]
             } else {
                 Vec::new()
             })
@@ -3398,12 +3457,18 @@ mod idle_restart_tests {
         peer: Peer,
         outbox: Outbox,
         delivered: Arc<AtomicUsize>,
+        frozen: Arc<AtomicUsize>,
+        valid: Arc<AtomicBool>,
+        live: Arc<AtomicBool>,
     }
     impl World {
         fn new(minor: u16) -> Self {
             Self::with_live_session(minor, true)
         }
         fn with_live_session(minor: u16, live: bool) -> Self {
+            Self::with_native(minor, live, false, false)
+        }
+        fn with_native(minor: u16, live: bool, native: bool, shutdown_error: bool) -> Self {
             let idle = Arc::new(Mutex::new(IdleHost::default()));
             let fence = Arc::new(AtomicBool::new(false));
             let requested = Arc::new(AtomicBool::new(false));
@@ -3412,12 +3477,17 @@ mod idle_restart_tests {
                 wake: Arc::new(|| {}),
             });
             let delivered = Arc::new(AtomicUsize::new(0));
+            let frozen = Arc::new(AtomicUsize::new(0));
+            let valid = Arc::new(AtomicBool::new(true));
+            let live = Arc::new(AtomicBool::new(live));
             let activity = Activity::new(Instant::now() - Duration::from_secs(7200));
             let mut host = HostService {
                 inner: Box::new(Panes {
                     activity,
                     delivered: delivered.clone(),
-                    live,
+                    live: live.clone(),
+                    native: native.then(|| (frozen.clone(), valid.clone())),
+                    shutdown_error,
                 }),
                 paths: Paths {
                     identity: "spaceterm-development".into(),
@@ -3454,6 +3524,9 @@ mod idle_restart_tests {
                 peer,
                 outbox,
                 delivered,
+                frozen,
+                valid,
+                live,
             }
         }
         fn lease(&self) -> Result<(), CoreError> {
@@ -3491,12 +3564,96 @@ mod idle_restart_tests {
         }
     }
     #[test]
+    fn the_second_grant_rechecks_native_facts_and_thaws_on_refusal() {
+        let world = World::with_native(crate::idle_restart::MINOR, true, true, false);
+        world.lease().unwrap();
+        world.grant([5; 32], [6; 32]).unwrap();
+        world.valid.store(false, Ordering::Release);
+        assert_eq!(world.grant([5; 32], [6; 32]), Err(CoreError::Changed));
+        assert_eq!(world.frozen.load(Ordering::SeqCst), 0);
+        assert!(!world.lane.idle_granted());
+        world.input();
+        assert_eq!(world.delivered.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            world.grant([5; 32], [6; 32]),
+            Err(CoreError::Changed),
+            "a refused lease cannot be granted again"
+        );
+    }
+    #[test]
+    fn every_final_binding_or_policy_refusal_thaws_the_granted_population() {
+        for fault in 0..8 {
+            let world = World::with_native(crate::idle_restart::MINOR, true, true, false);
+            world.lease().unwrap();
+            world.grant([5; 32], [6; 32]).unwrap();
+            assert_eq!(world.frozen.load(Ordering::SeqCst), 1);
+            let mut id = OperationId([3; 16]);
+            let mut candidate = [5; 32];
+            let mut boot = [6; 32];
+            match fault {
+                0 => id = OperationId([9; 16]),
+                1 => candidate = [9; 32],
+                2 => boot = [9; 32],
+                3 => {
+                    world.lane.requested.store(true, Ordering::Release);
+                }
+                4 => {
+                    let mut peer = world.peer;
+                    peer.connection = [9; 32];
+                    world.lane.panes.lock().unwrap().admitted(
+                        &peer,
+                        "legacy".into(),
+                        Outbox::new(
+                            Arc::new(|| {}),
+                            crate::protocol::version::ProtocolVersion { major: 1, minor: 2 },
+                        ),
+                    );
+                }
+                5 => {}
+                6 => world.lane.stop.request(),
+                7 => world.live.store(false, Ordering::Release),
+                _ => unreachable!(),
+            }
+            let result = world.lane.grant_stop(id, candidate, boot, &mut |_| {
+                if fault == 5 {
+                    Err(CoreError::Changed)
+                } else {
+                    Ok(())
+                }
+            });
+            assert_eq!(result, Err(CoreError::Changed), "fault {fault}");
+            assert_eq!(
+                world.frozen.load(Ordering::SeqCst),
+                0,
+                "fault {fault}: thaw before replying"
+            );
+            assert!(!world.lane.idle_granted());
+            world.input();
+            assert_eq!(world.delivered.load(Ordering::SeqCst), 1);
+        }
+    }
+    #[test]
+    fn shutdown_without_native_stop_thaws_even_when_pane_shutdown_fails() {
+        for error in [false, true] {
+            let world = World::with_native(crate::idle_restart::MINOR, true, true, error);
+            world.lease().unwrap();
+            world.grant([5; 32], [6; 32]).unwrap();
+            world.grant([5; 32], [6; 32]).unwrap();
+            assert_eq!(world.frozen.load(Ordering::SeqCst), 1);
+            assert_eq!(world.lane.panes.lock().unwrap().shutdown().is_err(), error);
+            assert_eq!(world.frozen.load(Ordering::SeqCst), 0);
+            assert!(!world.lane.idle_granted());
+            world.input();
+            assert_eq!(world.delivered.load(Ordering::SeqCst), 1);
+        }
+    }
+    #[test]
     fn input_after_the_lease_is_delivered_and_refuses_the_final_grant() {
         let world = World::new(crate::idle_restart::MINOR);
         world.lease().unwrap();
         world.input();
         assert_eq!(world.delivered.load(Ordering::SeqCst), 1);
-        assert_eq!(world.grant([5; 32], [6; 32]), Err(CoreError::Unsupported));
+        assert_eq!(world.grant([5; 32], [6; 32]), Err(CoreError::Changed));
         assert!(!world.lane.idle_granted());
     }
     #[test]
@@ -3533,7 +3690,7 @@ mod idle_restart_tests {
         world.lease().unwrap();
         assert_eq!(world.grant([7; 32], [6; 32]), Err(CoreError::Changed));
         assert_eq!(world.grant([5; 32], [7; 32]), Err(CoreError::Changed));
-        assert_eq!(world.grant([5; 32], [6; 32]), Err(CoreError::Unsupported));
+        assert_eq!(world.grant([5; 32], [6; 32]), Err(CoreError::Changed));
     }
     #[test]
     fn a_work_1_2_peer_joining_after_the_lease_refuses_before_policy_or_stop() {
@@ -3564,10 +3721,10 @@ mod idle_restart_tests {
         assert!(!world.lane.idle_granted());
     }
     #[test]
-    fn a_live_session_cannot_grant_stop_without_a_complete_native_writer_fence() {
+    fn a_native_refusal_never_grants_stop_and_input_still_reaches_the_session() {
         let world = World::new(crate::idle_restart::MINOR);
         world.lease().unwrap();
-        assert_eq!(world.grant([5; 32], [6; 32]), Err(CoreError::Unsupported));
+        assert_eq!(world.grant([5; 32], [6; 32]), Err(CoreError::Changed));
         assert!(!world.lane.idle_granted());
         world.input();
         assert_eq!(world.delivered.load(Ordering::SeqCst), 1);
