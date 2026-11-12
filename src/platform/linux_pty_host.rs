@@ -32,8 +32,6 @@ impl UnixPtyHost for LinuxPtyHost {
         self.session_candidates(0)
     }
     fn holds_slave(&self, pid: i32, slave: &std::path::Path) -> io::Result<bool> {
-        use std::os::unix::fs::{FileTypeExt, MetadataExt};
-        let expected = std::fs::metadata(slave)?;
         let directory = format!("/proc/{pid}/fd");
         let list = || -> io::Result<Vec<std::path::PathBuf>> {
             let mut entries = std::fs::read_dir(&directory)?
@@ -49,10 +47,7 @@ impl UnixPtyHost for LinuxPtyHost {
         for entry in std::fs::read_dir(&directory)? {
             let path = entry?.path();
             let target = std::fs::read_link(&path)?;
-            let metadata = std::fs::metadata(&path)?;
-            if target == slave
-                || (metadata.file_type().is_char_device() && metadata.rdev() == expected.rdev())
-            {
+            if target == slave {
                 found = true;
             }
             entries.push(path);
