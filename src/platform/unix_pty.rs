@@ -109,8 +109,15 @@ pub(super) trait UnixPtyHost: Send + Sync + 'static {
     ) -> io::Result<bool> {
         Err(io::Error::other("native prompt wait is unavailable"))
     }
-    fn fence_slave(&self, slave: &std::path::Path) -> io::Result<Box<dyn SlaveFence>> {
-        Ok(Box::new(freeze::SlavePermissions::close(slave)?))
+    fn fence_slave(
+        &self,
+        slave: &std::path::Path,
+        master: &std::sync::Weak<OwnedFd>,
+    ) -> io::Result<Box<dyn SlaveFence>> {
+        Ok(Box::new(freeze::SlavePermissions::close(
+            slave,
+            master.clone(),
+        )?))
     }
     fn pin_process(&self, _identity: ProcessIdentity) -> io::Result<Box<dyn ProcessControl>> {
         Err(io::Error::other("stable process signalling is unavailable"))
@@ -2093,6 +2100,67 @@ mod tests {
         drop(reader);
         drop(pty);
         assert!(refused, "a detached /dev/tty holder must refuse the grant");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn restoring_a_closed_terminal_never_changes_a_reused_slave_node() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        const NAME: &str = "platform::unix_pty::tests::restoring_a_closed_terminal_never_changes_a_reused_slave_node";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _isolation = lock_real_pty_test();
+        let spawn = || {
+            let mut command = idle_shell_command();
+            command.args(["-c", "printf READY; read line"]);
+            let (mut pty, terminator) = spawn_command_in_pty(
+                freeze_test_host(),
+                PtySize::default(),
+                command,
+                Arc::default(),
+            )
+            .unwrap();
+            let mut reader = pty.take_reader().unwrap();
+            read_output_marker(&mut reader, b"READY");
+            (pty, reader, terminator)
+        };
+        let (original, reader, terminator) = spawn();
+        let path = original.probe.slave.clone().unwrap();
+        let before = std::fs::metadata(&path).unwrap();
+        assert!(freeze::SlavePermissions::close(&path, std::sync::Weak::new()).is_err());
+        assert_eq!(std::fs::metadata(&path).unwrap().mode(), before.mode());
+        let permissions =
+            freeze::SlavePermissions::close(&path, original.probe.foreground.clone()).unwrap();
+        terminator.terminate().unwrap();
+        drop(reader);
+        drop(original);
+        // Linux devpts reuses both the index and inode number after the master closes,
+        // even while a slave descriptor still refers to the removed inode instance.
+        let (replacement, reader, terminator) = spawn();
+        assert_eq!(replacement.probe.slave.as_ref().unwrap(), &path);
+        let replacement_mode = if before.mode() & 0o7777 == 0o600 {
+            0o640
+        } else {
+            0o600
+        };
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(replacement_mode)).unwrap();
+        let before_restore = std::fs::metadata(&path).unwrap();
+        assert_eq!(
+            (before.dev(), before.ino()),
+            (before_restore.dev(), before_restore.ino()),
+            "the regression must exercise reused devpts identity numbers"
+        );
+        drop(permissions);
+        let after = std::fs::metadata(&path).unwrap();
+        terminator.terminate().unwrap();
+        drop(reader);
+        drop(replacement);
+        assert_eq!(
+            after.mode() & 0o7777,
+            replacement_mode,
+            "restoration must target only the original device instance"
+        );
     }
 
     #[test]

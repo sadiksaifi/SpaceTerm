@@ -263,7 +263,7 @@ impl Population {
         let slave = slave.to_owned();
         let facts = bounded(cleanup.clone(), deadline, move || {
             let observed = members(host.as_ref(), session)?;
-            let permissions = host.fence_slave(&slave)?;
+            let permissions = host.fence_slave(&slave, &master)?;
             owned.install(permissions)?;
             let facts = Arc::new(Facts {
                 baseline,
@@ -372,6 +372,7 @@ impl Facts {
 }
 
 pub(super) struct SlavePermissions {
+    master: std::sync::Weak<OwnedFd>,
     path: std::path::PathBuf,
     device: u64,
     inode: u64,
@@ -396,13 +397,20 @@ impl SlaveFence for SlavePermissions {
     }
 }
 impl SlavePermissions {
-    pub(super) fn close(path: &std::path::Path) -> io::Result<Self> {
+    pub(super) fn close(
+        path: &std::path::Path,
+        master: std::sync::Weak<OwnedFd>,
+    ) -> io::Result<Self> {
+        let _owner = master
+            .upgrade()
+            .ok_or_else(|| io::Error::other("the terminal owner ended"))?;
         use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
         let metadata = std::fs::symlink_metadata(path)?;
         if !metadata.file_type().is_char_device() {
             return Err(io::Error::other("the slave is not a device node"));
         }
         let saved = Self {
+            master,
             path: path.into(),
             device: metadata.dev(),
             inode: metadata.ino(),
@@ -423,6 +431,13 @@ impl SlavePermissions {
         Ok(saved)
     }
     fn restore(&self) -> io::Result<()> {
+        // This existing master pins the original terminal instance during restoration.
+        // Once its owner has ended, its path/inode numbers may belong to a new terminal.
+        // Never restore permissions through that recycled path or retain a new master
+        // that would delay native Stop and terminal hangup.
+        let Some(_owner) = self.master.upgrade() else {
+            return Ok(());
+        };
         use std::os::unix::{
             ffi::OsStrExt,
             fs::{MetadataExt, PermissionsExt},
@@ -600,7 +615,11 @@ mod tests {
         ) -> io::Result<bool> {
             Ok(self.fault() != Fault::NotWaiting)
         }
-        fn fence_slave(&self, _: &std::path::Path) -> io::Result<Box<dyn SlaveFence>> {
+        fn fence_slave(
+            &self,
+            _: &std::path::Path,
+            _: &std::sync::Weak<OwnedFd>,
+        ) -> io::Result<Box<dyn SlaveFence>> {
             self.0.permissions.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(Permissions(self.0.clone())))
         }
