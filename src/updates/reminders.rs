@@ -71,6 +71,15 @@ impl Global for InstalledReminders {}
 
 impl EventEmitter<ReminderActivated> for UpdateReminders {}
 
+/// Watches `window`'s activation, so a reminder that came due while it was active posts once
+/// the person leaves SpaceTerm from it. Every SpaceTerm window that takes focus installs this.
+pub(crate) fn watch_activation<T: 'static>(window: &mut gpui::Window, cx: &mut Context<T>) {
+    cx.observe_window_activation(window, |_, _, cx| {
+        UpdateReminders::activation_changed(cx);
+    })
+    .detach();
+}
+
 /// The notification key of `key`: "desktop", or the Machine ID in hex.
 fn key_text(key: Target) -> String {
     match key {
@@ -588,6 +597,44 @@ mod tests {
             fixture.shown(),
             1,
             "it posts once the person left SpaceTerm"
+        );
+    }
+
+    /// Leaving SpaceTerm from a window that is not a Workspace window, such as Settings, posts
+    /// the reminder that came due while SpaceTerm was in front.
+    #[gpui::test]
+    fn leaving_from_any_spaceterm_window_posts_the_due_reminder(cx: &mut gpui::TestAppContext) {
+        struct Other;
+        impl gpui::Render for Other {
+            fn render(
+                &mut self,
+                _: &mut gpui::Window,
+                _: &mut Context<Self>,
+            ) -> impl gpui::IntoElement {
+                gpui::Empty
+            }
+        }
+        let fixture = Fixture::new(cx);
+        let other = cx.add_window(|window, cx| {
+            watch_activation(window, cx);
+            Other
+        });
+        other
+            .update(cx, |_, window, _| window.activate_window())
+            .unwrap();
+        fixture
+            .machines
+            .emit(MachineUpdatesEvent::Machines(vec![waiting_penguin(3)]));
+        cx.run_until_parked();
+        fixture.at(DOWNLOADED + ASK_AFTER, waiting_penguin(3), cx);
+        assert_eq!(fixture.shown(), 0, "SpaceTerm is in front");
+        gpui::VisualTestContext::from_window(other.into(), cx).deactivate_window();
+        cx.executor().advance_clock(LEFT_SPACETERM);
+        cx.run_until_parked();
+        assert_eq!(
+            fixture.shown(),
+            1,
+            "it posts once the person left from that window"
         );
     }
 

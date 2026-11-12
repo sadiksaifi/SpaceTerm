@@ -606,6 +606,8 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> Self {
         super::appearance_runtime::complete_font_catalog(cx);
+        // A reminder that came due while this window was in front posts once the person leaves.
+        crate::updates::reminders::watch_activation(window, cx);
         // Transparent native chrome hides this visually while retaining a stable Operating-System
         // window identity for the Window menu and accessibility clients.
         window.set_window_title("Settings");

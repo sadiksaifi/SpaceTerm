@@ -358,6 +358,8 @@ impl DeveloperWorkbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        // A reminder that came due while this window was in front posts once the person leaves.
+        crate::updates::reminders::watch_activation(window, cx);
         // Transparent native chrome hides this visually while retaining a stable Operating-System
         // window identity for the Window menu, accessibility clients, and development automation.
         window.set_window_title(WINDOW_TITLE);
