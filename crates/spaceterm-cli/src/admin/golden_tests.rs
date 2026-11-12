@@ -146,8 +146,8 @@ fn status_reports_service_network_devices_and_held_outcomes() {
     assert_golden("status", &envelope);
     assert!(
         text.contains(
-            "Downloaded: 0.8.0 at 2026-11-03T09:12:00Z. An update has waited 3 days on \
-             penguin. Restarting into SpaceTerm Core 0.8.0 ends 2 Terminal Sessions. Restart \
+            "Downloaded: 0.8.0 at 2026-11-03T09:12:00Z. A SpaceTerm Core update to 0.8.0 has \
+             waited 3 days on penguin. Restarting into it ends 2 Terminal Sessions. Restart \
              with: spaceterm --machine penguin restart\n  SpaceTerm on old-mini can't \
              connect to penguin until it updates.\n"
         ),
@@ -178,10 +178,10 @@ fn status_calls_a_pending_version_overdue_after_two_days_whichever_core_reported
     };
     let (marker, text) = read(INSTALLED + 86_400 + 43_200);
     assert_eq!(marker, serde_json::Value::Null);
-    assert!(!text.contains("An update has waited"), "{text}");
+    assert!(!text.contains("has waited"), "{text}");
     let (marker, text) = read(INSTALLED + 2 * 86_400);
     assert_eq!(marker, "2026-11-05T09:12:00Z");
-    assert!(text.contains("An update has waited 2 days"), "{text}");
+    assert!(text.contains("has waited 2 days"), "{text}");
 }
 
 #[test]

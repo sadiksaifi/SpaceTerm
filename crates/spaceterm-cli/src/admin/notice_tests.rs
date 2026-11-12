@@ -189,8 +189,8 @@ fn a_1_2_core_s_reported_continuation_reaches_the_notice_and_an_older_core_s_is_
         )
         .as_deref(),
         Some(
-            "notice: An update has waited 2 days on penguin. Restarting into SpaceTerm Core 0.8.0 \
-             ends 2 Terminal Sessions. Restart with: spaceterm --machine penguin restart"
+            "notice: A SpaceTerm Core update to 0.8.0 has waited 2 days on penguin. Restarting \
+             into it ends 2 Terminal Sessions. Restart with: spaceterm --machine penguin restart"
         )
     );
 }
@@ -230,7 +230,7 @@ fn status_says_what_a_1_2_core_reports_and_keeps_its_envelope() {
     );
     let (older, text) = render(None);
     assert!(
-        text.contains("An update has waited 2 days on penguin."),
+        text.contains("A SpaceTerm Core update to 0.8.0 has waited 2 days on penguin."),
         "{text}"
     );
     assert_eq!(

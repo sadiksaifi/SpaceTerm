@@ -323,9 +323,9 @@ mod tests {
                 RESTART,
                 INSTALLED + ASK_AFTER
             ),
-            "SpaceTerm Core 0.8.0 is already downloaded. SpaceTerm Core 0.7.0 keeps running. An \
-             update has waited 2 days on penguin. Restarting into SpaceTerm Core 0.8.0 ends 1 \
-             Terminal Session. Restart with: spaceterm --machine penguin restart\n"
+            "SpaceTerm Core 0.8.0 is already downloaded. SpaceTerm Core 0.7.0 keeps running. A \
+             SpaceTerm Core update to 0.8.0 has waited 2 days on penguin. Restarting into it \
+             ends 1 Terminal Session. Restart with: spaceterm --machine penguin restart\n"
         );
         assert_eq!(
             text(
@@ -336,9 +336,9 @@ mod tests {
                 RESTART,
                 INSTALLED + INSIST_AFTER
             ),
-            "SpaceTerm Core 0.8.0 is already downloaded. SpaceTerm Core 0.7.0 keeps running. An \
-             update has waited 7 days on penguin. Restarting into SpaceTerm Core 0.8.0 ends 3 \
-             Terminal Sessions. Restart with: spaceterm --machine penguin restart\n"
+            "SpaceTerm Core 0.8.0 is already downloaded. SpaceTerm Core 0.7.0 keeps running. A \
+             SpaceTerm Core update to 0.8.0 has waited 7 days on penguin. Restarting into it \
+             ends 3 Terminal Sessions. Restart with: spaceterm --machine penguin restart\n"
         );
     }
 

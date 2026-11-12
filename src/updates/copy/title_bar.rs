@@ -2,9 +2,8 @@
 //! section 4.5; none carries a count or a Machine's name.
 use gpui::SharedString;
 
-use super::{days, dialogs, sessions, this_ends};
+use super::{dialogs, sessions, this_ends};
 use crate::updates::UpdateError;
-use crate::updates::ladder::Stage;
 use crate::updates::machines::MachineAction;
 use crate::updates::state::{
     ActKind, AppRow, AppStage, Blocked, Command, DesktopAction, DownloadCause, Glyph, MachineRow,
@@ -124,18 +123,14 @@ pub(crate) fn pill(view: &UpdateView) -> Option<PillView> {
                 Command::ShowList,
                 None,
             ),
-            Step::Act { kind, stage, .. } => {
-                let asking = matches!(stage, Some(Stage::Ask | Stage::Insist));
+            // A stage changes emphasis and cadence, never words: every stage's tooltip names the
+            // software and its version, as Offer's does.
+            Step::Act { kind, .. } => {
                 match kind {
                     ActKind::Relaunch => (
                         RELAUNCH_TO_UPDATE,
                         Glyph::Restart,
-                        if asking {
-                            format!(
-                                "An update has waited {}. Relaunching keeps Terminal Sessions running.",
-                                days(view.app.waited)
-                            )
-                        } else if let Some(version) = &view.app.replacing {
+                        if let Some(version) = &view.app.replacing {
                             // A scheduled check downloads this release again or a newer one.
                             format!(
                                 "Relaunching updates SpaceTerm to {version}. Terminal Sessions keep running."
@@ -154,7 +149,7 @@ pub(crate) fn pill(view: &UpdateView) -> Option<PillView> {
                         (
                             RESTART_CORE,
                             Glyph::UpdateCore,
-                            restart_tooltip(row, asking),
+                            restart_tooltip(row),
                             Command::Machine(id, MachineAction::Restart),
                             None,
                         )
@@ -191,8 +186,8 @@ pub(crate) fn pill(view: &UpdateView) -> Option<PillView> {
     })
 }
 
-/// The tooltip of `Restart Core…`: blocked, then waiting from Ask, then breaking.
-fn restart_tooltip(row: &MachineRow, asking: bool) -> String {
+/// The tooltip of `Restart Core…`: blocked, then downloaded, with what breaking costs.
+fn restart_tooltip(row: &MachineRow) -> String {
     let name = &row.name;
     let n = row.sessions;
     let (version, breaking, stranded) = match &row.stage {
@@ -209,18 +204,8 @@ fn restart_tooltip(row: &MachineRow, asking: bool) -> String {
     };
     if row.blocked == Some(Blocked::CoreTooOld) {
         return format!(
-            "{name}'s Workspaces open after SpaceTerm Core restarts into {version}. {}",
+            "{name}'s Workspaces can't open until SpaceTerm Core restarts into {version}. {}",
             this_ends(n)
-        );
-    }
-    if asking {
-        let ends = match n {
-            0 => "No Terminal Session is open.".to_owned(),
-            n => format!("Restarting into {version} ends {}.", sessions(n)),
-        };
-        return format!(
-            "An update has waited {} on {name}. {ends}",
-            days(row.waited)
         );
     }
     let ends = match n {

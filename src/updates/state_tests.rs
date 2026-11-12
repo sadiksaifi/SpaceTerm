@@ -648,6 +648,7 @@ fn l1_a_stage_changes_emphasis_never_words() {
         let (ask, insist) = (at(3), at(8));
         let (ask_pill, insist_pill) = (ask.pill().unwrap(), insist.pill().unwrap());
         assert_eq!(ask_pill.label, insist_pill.label);
+        assert_eq!(ask_pill.tooltip, insist_pill.tooltip);
         assert_eq!(ask_pill.emphasis, Emphasis::Accent);
         assert_eq!(insist_pill.emphasis, Emphasis::Warning);
         assert_eq!(offer.machine_rows()[0].status, ask.machine_rows()[0].status);
@@ -804,7 +805,8 @@ fn the_rows_and_the_confirmation_name_the_software_and_the_consequence() {
     assert_eq!(pill.glyph, Glyph::UpdateCore);
     assert_eq!(
         pill.tooltip.as_ref(),
-        "An update has waited 2 days on This Mac. Restarting into 0.11.4 ends 2 Terminal Sessions."
+        "SpaceTerm Core 0.11.4 is downloaded on This Mac. Restarting into it ends 2 Terminal Sessions.",
+        "a stage changes emphasis, never the tooltip's words"
     );
     assert_eq!(
         view.machine_rows()[0].description.as_deref(),
@@ -1175,7 +1177,7 @@ fn the_installed_view_reads_the_apps_ladder_clock(cx: &mut gpui::TestAppContext)
     assert_eq!((view.app.ladder, view.app.waited), (Stage::Ask, 6));
     assert_eq!(
         view.pill().unwrap().tooltip.as_ref(),
-        "An update has waited 6 days. Relaunching keeps Terminal Sessions running."
+        "SpaceTerm 99.0.0 is downloaded. Relaunching keeps Terminal Sessions running."
     );
 
     let mut later = RecordingAdapter::available();

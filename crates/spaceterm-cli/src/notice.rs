@@ -133,17 +133,19 @@ pub fn finish(
         | Continuation::StartFailed
         | Continuation::Unknown => {}
     }
+    // The wait belongs to the update, not to this version, which may have inherited its clock.
     if stage(pending.installed_at, now) >= Stage::Ask {
         let ends = match facts.sessions {
             0 => "No Terminal Session is open.".to_owned(),
             sessions => format!(
-                "Restarting into SpaceTerm Core {} ends {}.",
-                pending.version,
+                "Restarting into it ends {}.",
                 crate::admin::lifecycle::terminal_sessions(sessions)
             ),
         };
         return Some(Finish::Waited(format!(
-            "An update has waited {} on {machine}. {ends} Restart with: {restart}",
+            "A SpaceTerm Core update to {} has waited {} on {machine}. {ends} Restart with: \
+             {restart}",
+            pending.version,
             days(now.saturating_sub(pending.installed_at))
         )));
     }
@@ -373,19 +375,19 @@ mod tests {
         );
         assert_eq!(
             notice(&facts(4, false), None, INSTALLED + ASK_AFTER),
-            "notice: An update has waited 2 days on penguin. Restarting into SpaceTerm Core 0.7.2 \
-             ends 4 Terminal Sessions. Restart with: spaceterm --machine penguin restart"
+            "notice: A SpaceTerm Core update to 0.7.2 has waited 2 days on penguin. Restarting \
+             into it ends 4 Terminal Sessions. Restart with: spaceterm --machine penguin restart"
         );
         assert_eq!(
             notice(&facts(1, true), None, INSTALLED + INSIST_AFTER + 5),
-            "notice: An update has waited 7 days on penguin. Restarting into SpaceTerm Core 0.7.2 \
-             ends 1 Terminal Session. Restart with: spaceterm --machine penguin restart",
+            "notice: A SpaceTerm Core update to 0.7.2 has waited 7 days on penguin. Restarting \
+             into it ends 1 Terminal Session. Restart with: spaceterm --machine penguin restart",
             "Insist adds no words"
         );
         assert_eq!(
             notice(&facts(0, true), None, INSTALLED + 3 * 86_400),
-            "notice: An update has waited 3 days on penguin. No Terminal Session is open. Restart \
-             with: spaceterm --machine penguin restart"
+            "notice: A SpaceTerm Core update to 0.7.2 has waited 3 days on penguin. No Terminal \
+             Session is open. Restart with: spaceterm --machine penguin restart"
         );
         let mut older = facts(4, false);
         older.pending.as_mut().unwrap().overdue_since = Some(INSTALLED + OVERDUE_SINCE_AFTER);
@@ -456,8 +458,8 @@ mod tests {
         assert_eq!(older.continuation, None);
         assert_eq!(
             notice(&older.facts, older.continuation, INSTALLED + ASK_AFTER),
-            "notice: An update has waited 2 days on penguin. Restarting into SpaceTerm Core 0.7.2 \
-             ends 2 Terminal Sessions. Restart with: spaceterm --machine penguin restart",
+            "notice: A SpaceTerm Core update to 0.7.2 has waited 2 days on penguin. Restarting \
+             into it ends 2 Terminal Sessions. Restart with: spaceterm --machine penguin restart",
             "an older Core's continuation is derived from its facts"
         );
         assert_eq!(Reported::of(None, None), None);

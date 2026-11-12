@@ -10,53 +10,58 @@ Downloading Update… | Plain | Downloading SpaceTerm 0.11.5.
 Downloading Update… | Plain | Downloading SpaceTerm Core 0.11.5 to This Computer.
 Downloading Update… | Plain | Downloading SpaceTerm Core 0.11.5 to This Mac.
 Downloading Update… | Plain | Downloading SpaceTerm Core 0.11.5 to penguin.
-Relaunch to Update | Accent | An update has waited 2 days. Relaunching keeps Terminal Sessions running.
 Relaunch to Update | Accent | Relaunching updates SpaceTerm to 0.11.5. Terminal Sessions keep running.
 Relaunch to Update | Accent | SpaceTerm 0.11.5 is downloaded. Relaunching keeps Terminal Sessions running.
-Relaunch to Update | Warning | An update has waited 7 days. Relaunching keeps Terminal Sessions running.
+Relaunch to Update | Warning | SpaceTerm 0.11.5 is downloaded. Relaunching keeps Terminal Sessions running.
 Relaunching… | Plain | Relaunching SpaceTerm. Terminal Sessions keep running.
-Restart Core… | Accent | An update has waited 3 days on This Computer. No Terminal Session is open.
-Restart Core… | Accent | An update has waited 3 days on This Computer. Restarting into 0.11.4 ends 1 Terminal Session.
-Restart Core… | Accent | An update has waited 3 days on This Computer. Restarting into 0.11.4 ends 2 Terminal Sessions.
-Restart Core… | Accent | An update has waited 3 days on This Computer. Restarting into 0.11.4 ends 3 Terminal Sessions.
-Restart Core… | Accent | An update has waited 3 days on This Mac. No Terminal Session is open.
-Restart Core… | Accent | An update has waited 3 days on This Mac. Restarting into 0.11.4 ends 1 Terminal Session.
-Restart Core… | Accent | An update has waited 3 days on This Mac. Restarting into 0.11.4 ends 2 Terminal Sessions.
-Restart Core… | Accent | An update has waited 3 days on This Mac. Restarting into 0.11.4 ends 3 Terminal Sessions.
-Restart Core… | Accent | An update has waited 3 days on penguin. No Terminal Session is open.
-Restart Core… | Accent | An update has waited 3 days on penguin. Restarting into 0.11.4 ends 1 Terminal Session.
-Restart Core… | Accent | An update has waited 3 days on penguin. Restarting into 0.11.4 ends 2 Terminal Sessions.
-Restart Core… | Accent | An update has waited 3 days on penguin. Restarting into 0.11.4 ends 3 Terminal Sessions.
+Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Computer. No Terminal Session is open.
 Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Computer. No Terminal Session is open. Devices with an older SpaceTerm can't connect to This Computer until they update.
+Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Computer. Restarting into it ends 1 Terminal Session.
 Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Computer. Restarting into it ends 1 Terminal Session. Devices with an older SpaceTerm can't connect to This Computer until they update.
+Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Computer. Restarting into it ends 2 Terminal Sessions.
+Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Computer. Restarting into it ends 3 Terminal Sessions.
 Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Computer. Restarting into it ends 3 Terminal Sessions. Devices with an older SpaceTerm can't connect to This Computer until they update.
+Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Mac. No Terminal Session is open.
 Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Mac. No Terminal Session is open. Devices with an older SpaceTerm can't connect to This Mac until they update.
+Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Mac. Restarting into it ends 1 Terminal Session.
 Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Mac. Restarting into it ends 1 Terminal Session. Devices with an older SpaceTerm can't connect to This Mac until they update.
+Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Mac. Restarting into it ends 2 Terminal Sessions.
+Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Mac. Restarting into it ends 3 Terminal Sessions.
 Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Mac. Restarting into it ends 3 Terminal Sessions. Devices with an older SpaceTerm can't connect to This Mac until they update.
+Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on penguin. No Terminal Session is open.
 Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on penguin. No Terminal Session is open. Devices with an older SpaceTerm can't connect to penguin until they update.
+Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on penguin. Restarting into it ends 1 Terminal Session.
 Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on penguin. Restarting into it ends 1 Terminal Session. Devices with an older SpaceTerm can't connect to penguin until they update.
+Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on penguin. Restarting into it ends 2 Terminal Sessions.
+Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on penguin. Restarting into it ends 3 Terminal Sessions.
 Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on penguin. Restarting into it ends 3 Terminal Sessions. Devices with an older SpaceTerm can't connect to penguin until they update.
-Restart Core… | Warning | An update has waited 8 days on This Computer. No Terminal Session is open.
-Restart Core… | Warning | An update has waited 8 days on This Computer. Restarting into 0.11.4 ends 1 Terminal Session.
-Restart Core… | Warning | An update has waited 8 days on This Computer. Restarting into 0.11.4 ends 2 Terminal Sessions.
-Restart Core… | Warning | An update has waited 8 days on This Computer. Restarting into 0.11.4 ends 3 Terminal Sessions.
-Restart Core… | Warning | An update has waited 8 days on This Mac. No Terminal Session is open.
-Restart Core… | Warning | An update has waited 8 days on This Mac. Restarting into 0.11.4 ends 1 Terminal Session.
-Restart Core… | Warning | An update has waited 8 days on This Mac. Restarting into 0.11.4 ends 2 Terminal Sessions.
-Restart Core… | Warning | An update has waited 8 days on This Mac. Restarting into 0.11.4 ends 3 Terminal Sessions.
-Restart Core… | Warning | An update has waited 8 days on penguin. No Terminal Session is open.
-Restart Core… | Warning | An update has waited 8 days on penguin. Restarting into 0.11.4 ends 1 Terminal Session.
-Restart Core… | Warning | An update has waited 8 days on penguin. Restarting into 0.11.4 ends 2 Terminal Sessions.
-Restart Core… | Warning | An update has waited 8 days on penguin. Restarting into 0.11.4 ends 3 Terminal Sessions.
-Restart Core… | Warning | This Computer's Workspaces open after SpaceTerm Core restarts into 0.11.4. No Terminal Session is open.
-Restart Core… | Warning | This Computer's Workspaces open after SpaceTerm Core restarts into 0.11.4. This ends 1 Terminal Session.
-Restart Core… | Warning | This Computer's Workspaces open after SpaceTerm Core restarts into 0.11.4. This ends 3 Terminal Sessions.
-Restart Core… | Warning | This Mac's Workspaces open after SpaceTerm Core restarts into 0.11.4. No Terminal Session is open.
-Restart Core… | Warning | This Mac's Workspaces open after SpaceTerm Core restarts into 0.11.4. This ends 1 Terminal Session.
-Restart Core… | Warning | This Mac's Workspaces open after SpaceTerm Core restarts into 0.11.4. This ends 3 Terminal Sessions.
-Restart Core… | Warning | penguin's Workspaces open after SpaceTerm Core restarts into 0.11.4. No Terminal Session is open.
-Restart Core… | Warning | penguin's Workspaces open after SpaceTerm Core restarts into 0.11.4. This ends 1 Terminal Session.
-Restart Core… | Warning | penguin's Workspaces open after SpaceTerm Core restarts into 0.11.4. This ends 3 Terminal Sessions.
+Restart Core… | Warning | SpaceTerm Core 0.11.4 is downloaded on This Computer. No Terminal Session is open. Devices with an older SpaceTerm can't connect to This Computer until they update.
+Restart Core… | Warning | SpaceTerm Core 0.11.4 is downloaded on This Computer. Restarting into it ends 1 Terminal Session.
+Restart Core… | Warning | SpaceTerm Core 0.11.4 is downloaded on This Computer. Restarting into it ends 1 Terminal Session. Devices with an older SpaceTerm can't connect to This Computer until they update.
+Restart Core… | Warning | SpaceTerm Core 0.11.4 is downloaded on This Computer. Restarting into it ends 2 Terminal Sessions.
+Restart Core… | Warning | SpaceTerm Core 0.11.4 is downloaded on This Computer. Restarting into it ends 3 Terminal Sessions.
+Restart Core… | Warning | SpaceTerm Core 0.11.4 is downloaded on This Computer. Restarting into it ends 3 Terminal Sessions. Devices with an older SpaceTerm can't connect to This Computer until they update.
+Restart Core… | Warning | SpaceTerm Core 0.11.4 is downloaded on This Mac. No Terminal Session is open. Devices with an older SpaceTerm can't connect to This Mac until they update.
+Restart Core… | Warning | SpaceTerm Core 0.11.4 is downloaded on This Mac. Restarting into it ends 1 Terminal Session.
+Restart Core… | Warning | SpaceTerm Core 0.11.4 is downloaded on This Mac. Restarting into it ends 1 Terminal Session. Devices with an older SpaceTerm can't connect to This Mac until they update.
+Restart Core… | Warning | SpaceTerm Core 0.11.4 is downloaded on This Mac. Restarting into it ends 2 Terminal Sessions.
+Restart Core… | Warning | SpaceTerm Core 0.11.4 is downloaded on This Mac. Restarting into it ends 3 Terminal Sessions.
+Restart Core… | Warning | SpaceTerm Core 0.11.4 is downloaded on This Mac. Restarting into it ends 3 Terminal Sessions. Devices with an older SpaceTerm can't connect to This Mac until they update.
+Restart Core… | Warning | SpaceTerm Core 0.11.4 is downloaded on penguin. No Terminal Session is open. Devices with an older SpaceTerm can't connect to penguin until they update.
+Restart Core… | Warning | SpaceTerm Core 0.11.4 is downloaded on penguin. Restarting into it ends 1 Terminal Session.
+Restart Core… | Warning | SpaceTerm Core 0.11.4 is downloaded on penguin. Restarting into it ends 1 Terminal Session. Devices with an older SpaceTerm can't connect to penguin until they update.
+Restart Core… | Warning | SpaceTerm Core 0.11.4 is downloaded on penguin. Restarting into it ends 2 Terminal Sessions.
+Restart Core… | Warning | SpaceTerm Core 0.11.4 is downloaded on penguin. Restarting into it ends 3 Terminal Sessions.
+Restart Core… | Warning | SpaceTerm Core 0.11.4 is downloaded on penguin. Restarting into it ends 3 Terminal Sessions. Devices with an older SpaceTerm can't connect to penguin until they update.
+Restart Core… | Warning | This Computer's Workspaces can't open until SpaceTerm Core restarts into 0.11.4. No Terminal Session is open.
+Restart Core… | Warning | This Computer's Workspaces can't open until SpaceTerm Core restarts into 0.11.4. This ends 1 Terminal Session.
+Restart Core… | Warning | This Computer's Workspaces can't open until SpaceTerm Core restarts into 0.11.4. This ends 3 Terminal Sessions.
+Restart Core… | Warning | This Mac's Workspaces can't open until SpaceTerm Core restarts into 0.11.4. No Terminal Session is open.
+Restart Core… | Warning | This Mac's Workspaces can't open until SpaceTerm Core restarts into 0.11.4. This ends 1 Terminal Session.
+Restart Core… | Warning | This Mac's Workspaces can't open until SpaceTerm Core restarts into 0.11.4. This ends 3 Terminal Sessions.
+Restart Core… | Warning | penguin's Workspaces can't open until SpaceTerm Core restarts into 0.11.4. No Terminal Session is open.
+Restart Core… | Warning | penguin's Workspaces can't open until SpaceTerm Core restarts into 0.11.4. This ends 1 Terminal Session.
+Restart Core… | Warning | penguin's Workspaces can't open until SpaceTerm Core restarts into 0.11.4. This ends 3 Terminal Sessions.
 Restart Not Confirmed | Warning | This Computer stopped responding while SpaceTerm Core restarted.
 Restart Not Confirmed | Warning | This Mac stopped responding while SpaceTerm Core restarted.
 Restart Not Confirmed | Warning | penguin stopped responding while SpaceTerm Core restarted.
