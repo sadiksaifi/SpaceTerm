@@ -359,21 +359,21 @@ fn each_machine_row_shows_and_performs_its_shared_row(cx: &mut TestAppContext) {
             .expect("a waiting Machine with sessions has an action");
         assert!(
             tree.find(&action.label).is_some(),
-            "{name}'s button reads {}",
+            "{name}\u{2019}s button reads {}",
             action.label
         );
     }
     click("settings-row-core-update-1-action", cx);
     assert!(
         adapter.asked().contains(&(PENGUIN, MachineAction::Restart)),
-        "penguin's button asks penguin's Core for a restart preview: {:?}",
+        "penguin\u{2019}s button asks penguin\u{2019}s Core for a restart preview: {:?}",
         adapter.asked()
     );
     click("modal-action-settings-server-update-cancel", cx);
     click("settings-row-core-updates-action", cx);
     assert!(
         adapter.asked().contains(&(LOCAL, MachineAction::Restart)),
-        "This Mac's button asks This Mac's Core: {:?}",
+        "This Mac\u{2019}s button asks This Mac\u{2019}s Core: {:?}",
         adapter.asked()
     );
     assert!(

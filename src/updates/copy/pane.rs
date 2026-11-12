@@ -33,7 +33,7 @@ pub(crate) fn with_typed_input(detail: &str, not_sent: bool) -> String {
 }
 
 /// The Core refused what the person typed during the restart, or it never left this desktop.
-pub(crate) const TYPED_NOT_SENT: &str = "What you typed during the restart wasn't sent.";
+pub(crate) const TYPED_NOT_SENT: &str = "What you typed during the restart wasn\u{2019}t sent.";
 
 /// Some of what the person typed during the restart left this desktop unconfirmed.
 pub(crate) const TYPED_UNCONFIRMED: &str =
@@ -44,7 +44,7 @@ pub(crate) const TYPED_UNCONFIRMED: &str =
 /// `not_sent` says the Core received none of it, which a lost connection never proves.
 pub(crate) fn reattached_input(after_restart: bool, not_sent: bool) -> &'static str {
     match (after_restart, not_sent) {
-        (true, true) => "What you typed wasn't sent. SpaceTerm Core was about to restart.",
+        (true, true) => "What you typed wasn\u{2019}t sent. SpaceTerm Core was about to restart.",
         (true, false) => {
             "What you typed may not have been sent. SpaceTerm Core was about to restart."
         }
@@ -61,7 +61,7 @@ pub(crate) const COPY_TYPED_TEXT_DESCRIPTION: &str =
 
 /// After `version` failed to start and the Core went back to its running version.
 pub(crate) fn could_not_restart_into(version: &Version) -> String {
-    format!("SpaceTerm Core couldn't restart into {version}.")
+    format!("SpaceTerm Core couldn\u{2019}t restart into {version}.")
 }
 
 /// The launch screen's title when this SpaceTerm was replaced on disk while it ran.

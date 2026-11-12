@@ -443,8 +443,10 @@ pub(crate) fn lint(text: &str, role: Role, machines: &[String]) -> Option<&'stat
             return Some("an \"Update {Machine}\" form");
         }
     }
-    if text.contains('\u{2019}') || text.contains('\u{2018}') {
-        return Some("a curly apostrophe: update text uses straight ones");
+    if text.contains('\'') {
+        return Some(
+            "a straight apostrophe: update text uses \u{2019}, as the rest of the app does",
+        );
     }
     if text
         .split(|c: char| !c.is_alphanumeric())
@@ -493,7 +495,8 @@ fn the_lint_refuses_the_banned_forms() {
         ("Update This Mac\u{2026}", Role::Label, true),
         ("Update studio\u{2026}", Role::Label, true),
         ("Nothing Idle", Role::Text, true),
-        ("It can\u{2019}t", Role::Text, true),
+        ("It can't", Role::Text, true),
+        ("It can\u{2019}t", Role::Text, false),
         ("Core restarts", Role::Text, true),
         ("Restart Core failed.", Role::Text, true),
         ("Restart Core failed.", Role::Label, true),
@@ -504,7 +507,7 @@ fn the_lint_refuses_the_banned_forms() {
         ("Restarting Core\u{2026}", Role::Label, false),
         ("Restart Core", Role::Label, false),
         (
-            "SpaceTerm Core on penguin can't restart.",
+            "SpaceTerm Core on penguin can\u{2019}t restart.",
             Role::Text,
             false,
         ),
@@ -589,11 +592,11 @@ fn literals(root: &Path, file: &str) -> Vec<(usize, String)> {
     out
 }
 
-/// Update text uses straight apostrophes on every surface, including the updater's own error
-/// messages, which no copy deck field renders. The Machine card's reachability guidance is
-/// Machines text, not update text.
+/// Update text uses the curly apostrophe U+2019 on every surface, as the rest of the app and
+/// Apple's own copy do, including the updater's own error messages, which no copy deck field
+/// renders. The CLI keeps its own rule (ADR 0055).
 #[test]
-fn update_text_uses_straight_apostrophes() {
+fn update_text_uses_curly_apostrophes() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let copy = std::fs::read_dir(root.join("src/updates/copy"))
         .unwrap()
@@ -610,24 +613,18 @@ fn update_text_uses_straight_apostrophes() {
     let mut found = Vec::new();
     for file in UPDATE_UI_MODULES
         .iter()
-        .filter(|file| !file.ends_with("machine_card.rs"))
         .copied()
-        .chain(["src/updates.rs"])
+        .chain(["src/updates.rs", "src/ui/updates/whats_new.rs"])
         .chain(copy.iter().map(String::as_str))
     {
         for (number, literal) in literals(root, file) {
-            let curly = ['\u{2018}', '\u{2019}']
-                .iter()
-                .any(|mark| literal.contains(*mark))
-                || literal.contains("\\u{2018}")
-                || literal.contains("\\u{2019}");
-            if curly {
+            if literal.contains('\'') {
                 found.push(format!("{file}:{number}: {literal}"));
             }
         }
     }
     assert!(
         found.is_empty(),
-        "curly apostrophes in update text: {found:#?}"
+        "straight apostrophes in update text: {found:#?}"
     );
 }

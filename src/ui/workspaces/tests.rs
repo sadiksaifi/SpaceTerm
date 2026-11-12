@@ -746,7 +746,7 @@ fn an_ended_pane_offers_what_the_person_typed_during_the_restart_to_copy(cx: &mu
     assert!(
         tree.find(
             "Terminal Session Ended. SpaceTerm Core restarted. What you typed during the restart \
-             wasn't sent."
+             wasn\u{2019}t sent."
         )
         .is_some(),
         "the screen says the typed text wasn't sent"

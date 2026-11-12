@@ -69,14 +69,16 @@ pub(crate) fn restart(described: &[Previewed]) -> (SharedString, SharedString, S
 pub(crate) fn stranded(machine: &str, devices: &[String]) -> String {
     match devices {
         [] => {
-            format!("Devices with an older SpaceTerm can't connect to {machine} until they update.")
+            format!(
+                "Devices with an older SpaceTerm can\u{2019}t connect to {machine} until they update."
+            )
         }
         [_] => format!(
-            "SpaceTerm on {} can't connect to {machine} until it updates.",
+            "SpaceTerm on {} can\u{2019}t connect to {machine} until it updates.",
             list_and(devices)
         ),
         _ => format!(
-            "SpaceTerm on {} can't connect to {machine} until they update.",
+            "SpaceTerm on {} can\u{2019}t connect to {machine} until they update.",
             list_and(devices)
         ),
     }
@@ -109,10 +111,12 @@ pub(crate) fn app_failure(app: &AppRow) -> Option<Explanation> {
     };
     Some(match &app.stage {
         AppStage::DownloadFailed { version, error, .. } => Explanation {
-            title: format!("Couldn't Download {}", release(version)).into(),
+            title: format!("Couldn\u{2019}t Download {}", release(version)).into(),
             message: match error {
                 UpdateError::DiskFull => "Free some disk space, then try again.",
-                UpdateError::Verification => "The download didn't pass verification. Try again.",
+                UpdateError::Verification => {
+                    "The download didn\u{2019}t pass verification. Try again."
+                }
                 _ => "Check your network, then try again.",
             }
             .into(),
@@ -139,9 +143,9 @@ pub(crate) fn app_failure(app: &AppRow) -> Option<Explanation> {
 pub(crate) fn relaunch_failure(version: Option<&str>, unsaved: bool) -> Explanation {
     let release = version.map_or_else(|| "SpaceTerm".to_owned(), |v| format!("SpaceTerm {v}"));
     Explanation {
-        title: "Couldn't Relaunch SpaceTerm".into(),
+        title: "Couldn\u{2019}t Relaunch SpaceTerm".into(),
         message: if unsaved {
-            "SpaceTerm couldn't save Settings, so it didn't relaunch. Terminal Sessions keep running.".to_owned()
+            "SpaceTerm couldn\u{2019}t save Settings, so it didn\u{2019}t relaunch. Terminal Sessions keep running.".to_owned()
         } else {
             format!("{release} is downloaded. Terminal Sessions keep running.")
         }
@@ -163,7 +167,7 @@ pub(crate) fn cant_replace_title(platform: Platform) -> &'static str {
 /// D8's body.
 pub(crate) fn cant_replace_message(platform: Platform) -> &'static str {
     match platform {
-        Platform::Mac => "SpaceTerm can't replace itself where it is.",
+        Platform::Mac => "SpaceTerm can\u{2019}t replace itself where it is.",
         Platform::Linux => "Run the SpaceTerm install script to update.",
     }
 }
@@ -182,13 +186,13 @@ pub(crate) fn machine_failure(row: &MachineRow) -> Option<Explanation> {
             MachineAction::DismissFailure(failure),
         )))
     };
-    let restart_title = format!("Couldn't Restart SpaceTerm Core on {name}");
+    let restart_title = format!("Couldn\u{2019}t Restart SpaceTerm Core on {name}");
     Some(match &row.stage {
         MachineStage::StartFailed { version, cause, id: failure, .. } => {
             let (message, retry) = match cause {
-                StartFailure::NotReady => (format!("SpaceTerm Core {version} didn't start, so it went back to {running}. The Terminal Sessions that ended don't come back. SpaceTerm waits for the next update."), false),
-                StartFailure::PortInUse => (format!("SpaceTerm Core {version} couldn't start because another app is using {name}'s Network Access port, so it went back to {running}. Close that app or change the port, then try again."), true),
-                StartFailure::DiskFull => (format!("SpaceTerm Core {version} couldn't start because {name} is out of disk space, so it went back to {running}. Free some space, then try again."), true),
+                StartFailure::NotReady => (format!("SpaceTerm Core {version} didn\u{2019}t start, so it went back to {running}. The Terminal Sessions that ended don\u{2019}t come back. SpaceTerm waits for the next update."), false),
+                StartFailure::PortInUse => (format!("SpaceTerm Core {version} couldn\u{2019}t start because another app is using {name}\u{2019}s Network Access port, so it went back to {running}. Close that app or change the port, then try again."), true),
+                StartFailure::DiskFull => (format!("SpaceTerm Core {version} couldn\u{2019}t start because {name} is out of disk space, so it went back to {running}. Free some space, then try again."), true),
                 StartFailure::Interrupted => (format!("The restart into SpaceTerm Core {version} was interrupted, so it went back to {running}."), true),
             };
             Explanation {
@@ -200,7 +204,7 @@ pub(crate) fn machine_failure(row: &MachineRow) -> Option<Explanation> {
             }
         }
         MachineStage::DownloadFailed { version, cause, retries: false, .. } => {
-            let title = format!("Couldn't Download SpaceTerm Core {version} to {name}");
+            let title = format!("Couldn\u{2019}t Download SpaceTerm Core {version} to {name}");
             if *cause == DownloadCause::RelaunchRequired {
                 return Some(Explanation {
                     title: title.into(),
@@ -225,8 +229,8 @@ pub(crate) fn machine_failure(row: &MachineRow) -> Option<Explanation> {
             }
         }
         MachineStage::NeedsFloor { version, floor, .. } => Explanation {
-            title: format!("Couldn't Download SpaceTerm Core {version} to {name}").into(),
-            message: format!("{name} needs SpaceTerm Core {floor} first and couldn't get it. Its Terminal Sessions keep running.").into(),
+            title: format!("Couldn\u{2019}t Download SpaceTerm Core {version} to {name}").into(),
+            message: format!("{name} needs SpaceTerm Core {floor} first and couldn\u{2019}t get it. Its Terminal Sessions keep running.").into(),
             then: Some(Box::new(Command::Machine(id, MachineAction::Install))),
             proceed: Some(TRY_AGAIN.into()),
             dismiss: dismiss(PUSH_FAILURE),
@@ -246,7 +250,7 @@ pub(crate) fn how_to_update(row: &MachineRow) -> Explanation {
             MachineAction::DismissFailure(STEPPING_STONE),
         ))),
         ..Explanation::ok(
-            format!("SpaceTerm Core on {name} Can't Update by Itself"),
+            format!("SpaceTerm Core on {name} Can\u{2019}t Update by Itself"),
             format!(
                 "On {name}, install a newer compatible SpaceTerm Core archive with spaceterm update --archive, or wait for a newer release."
             ),
@@ -262,7 +266,7 @@ pub(crate) fn not_confirmed(row: &MachineRow) -> Explanation {
         _ => String::new(),
     };
     Explanation {
-        title: format!("SpaceTerm Can't Confirm the Restart on {name}").into(),
+        title: format!("SpaceTerm Can\u{2019}t Confirm the Restart on {name}").into(),
         message: format!(
             "{name} stopped responding while SpaceTerm Core restarted into {version}."
         )
@@ -284,11 +288,11 @@ pub(crate) fn action_failure(
     failure: ActionFailure,
 ) -> Option<(SharedString, SharedString)> {
     let title = match action {
-        MachineAction::Install => format!("Couldn't Download SpaceTerm Core to {name}"),
-        MachineAction::Restart => format!("Couldn't Restart SpaceTerm Core on {name}"),
-        MachineAction::CheckAgain => format!("Couldn't Check for Updates on {name}"),
-        MachineAction::Start => format!("Couldn't Start SpaceTerm Core on {name}"),
-        MachineAction::Stop => format!("Couldn't Stop SpaceTerm Core on {name}"),
+        MachineAction::Install => format!("Couldn\u{2019}t Download SpaceTerm Core to {name}"),
+        MachineAction::Restart => format!("Couldn\u{2019}t Restart SpaceTerm Core on {name}"),
+        MachineAction::CheckAgain => format!("Couldn\u{2019}t Check for Updates on {name}"),
+        MachineAction::Start => format!("Couldn\u{2019}t Start SpaceTerm Core on {name}"),
+        MachineAction::Stop => format!("Couldn\u{2019}t Stop SpaceTerm Core on {name}"),
         MachineAction::DismissFailure(_) => return None,
     };
     let message = match failure {
@@ -300,17 +304,17 @@ pub(crate) fn action_failure(
             format!("This SpaceTerm is too old for SpaceTerm Core on {name}.")
         }
         ActionFailure::Unavailable(Unavailable::NotConnected) | ActionFailure::Unreachable => {
-            format!("SpaceTerm can't reach {name}. Try again when it's connected.")
+            format!("SpaceTerm can\u{2019}t reach {name}. Try again when it\u{2019}s connected.")
         }
         ActionFailure::Busy => format!(
             "SpaceTerm Core on {name} is busy with another update. Try again when it finishes."
         ),
         ActionFailure::DiskFull => format!("{name} is out of disk space. Free some space, then try again."),
         ActionFailure::RelaunchRequired => "SpaceTerm was replaced on disk while it was running. Relaunch SpaceTerm, then try again.".to_owned(),
-        ActionFailure::ClockBehind => format!("{name}'s clock is more than five minutes behind. Set the correct date and time on {name}, then try again."),
+        ActionFailure::ClockBehind => format!("{name}\u{2019}s clock is more than five minutes behind. Set the correct date and time on {name}, then try again."),
         ActionFailure::SteppingStoneSkipped(_) => format!("On {name}, install a newer compatible SpaceTerm Core archive with spaceterm update --archive, or wait for a newer release."),
-        ActionFailure::NeedsFloor(floor) => format!("{name} needs SpaceTerm Core {floor} first and couldn't get it."),
-        ActionFailure::Failed => format!("SpaceTerm Core on {name} didn't finish. Try again."),
+        ActionFailure::NeedsFloor(floor) => format!("{name} needs SpaceTerm Core {floor} first and couldn\u{2019}t get it."),
+        ActionFailure::Failed => format!("SpaceTerm Core on {name} didn\u{2019}t finish. Try again."),
     };
     Some((title.into(), message.into()))
 }

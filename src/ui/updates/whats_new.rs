@@ -28,7 +28,7 @@ actions!(spaceterm, [OpenWhatsNew]);
     not(target_os = "macos"),
     allow(dead_code, reason = "only the native application menu names it")
 )]
-pub(crate) const WHATS_NEW_TITLE: &str = "What's New in SpaceTerm";
+pub(crate) const WHATS_NEW_TITLE: &str = "What\u{2019}s New in SpaceTerm";
 const MODAL_ID: &str = "whats-new";
 /// The link below the notes that opens this version's release on GitHub.
 const RELEASE_LINK: &str = "View release on GitHub";
@@ -51,7 +51,7 @@ pub(super) fn init(cx: &mut App) {
 /// build without release notes.
 #[expect(
     dead_code,
-    reason = "the menu-bar menu names its What's new command with this"
+    reason = "the menu-bar menu names its What\u{2019}s new command with this"
 )]
 pub(crate) fn whats_new_menu_title() -> Option<String> {
     release_notes::embedded().map(ReleaseNotes::menu_title)
@@ -145,7 +145,7 @@ fn present<T: 'static>(
     if presented {
         cx.set_global(OpenSheet);
     } else {
-        eprintln!("failed to present the What's new sheet");
+        eprintln!("failed to present the What\u{2019}s new sheet");
     }
     presented
 }

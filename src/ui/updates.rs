@@ -506,7 +506,11 @@ fn failure_alert(error: UpdateError) -> Alert<PromptAction> {
             false,
             AlertIntent::Informational,
         ),
-        _ => ("Couldn't Check for Updates", true, AlertIntent::Warning),
+        _ => (
+            "Couldn\u{2019}t Check for Updates",
+            true,
+            AlertIntent::Warning,
+        ),
     };
     let mut actions = Vec::with_capacity(2);
     if retry {

@@ -645,7 +645,7 @@ mod tests {
         assert_eq!(
             fixture.shown(),
             1,
-            "an offline Machine's last facts remind of nothing"
+            "an offline Machine\u{2019}s last facts remind of nothing"
         );
 
         let mut newer = waiting_penguin(3);

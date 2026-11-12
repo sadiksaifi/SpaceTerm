@@ -307,7 +307,7 @@ fn ok_on_how_to_update_in_settings_dismisses_the_step(cx: &mut TestAppContext) {
         cx.update(|_, cx| crate::updates::state::current(cx).step),
         None
     );
-    A11yTree::read(cx).text("1.4.0 \u{b7} Can't update by itself");
+    A11yTree::read(cx).text("1.4.0 \u{b7} Can\u{2019}t update by itself");
 }
 
 /// I7 for the Machine card: its subtitle is the row's version and status, and its one button is

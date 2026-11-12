@@ -20,7 +20,7 @@ pub(crate) const RELAUNCHING: &str = "Relaunching\u{2026}";
 pub(crate) const RELAUNCH_TO_UPDATE: &str = "Relaunch to Update";
 pub(crate) const RESTART_CORE: &str = "Restart Core\u{2026}";
 pub(crate) const DOWNLOAD_UPDATE: &str = "Download Update";
-pub(crate) const WHATS_NEW: &str = "What's New";
+pub(crate) const WHATS_NEW: &str = "What\u{2019}s New";
 
 /// Every main-area label.
 #[cfg(test)]
@@ -171,7 +171,7 @@ pub(crate) fn pill(view: &UpdateView) -> Option<PillView> {
             Step::WhatsNew => (
                 WHATS_NEW,
                 Glyph::WhatsNew,
-                format!("See what's new in SpaceTerm {}.", view.app.running),
+                format!("See what\u{2019}s new in SpaceTerm {}.", view.app.running),
                 Command::Desktop(DesktopAction::WhatsNew),
                 None,
             ),
@@ -204,7 +204,7 @@ fn restart_tooltip(row: &MachineRow) -> String {
     };
     if row.blocked == Some(Blocked::CoreTooOld) {
         return format!(
-            "{name}'s Workspaces can't open until SpaceTerm Core restarts into {version}. {}",
+            "{name}\u{2019}s Workspaces can\u{2019}t open until SpaceTerm Core restarts into {version}. {}",
             this_ends(n)
         );
     }
@@ -246,21 +246,24 @@ fn app_failed(app: &AppRow) -> String {
         AppStage::DownloadFailed { version, error, .. } => {
             let why = match error {
                 UpdateError::DiskFull => "Free some disk space, then try again.",
-                UpdateError::Verification => "The download didn't pass verification.",
+                UpdateError::Verification => "The download didn\u{2019}t pass verification.",
                 _ => "Check your network, then try again.",
             };
-            format!("Couldn't download {}. {why}", release(version))
+            format!("Couldn\u{2019}t download {}. {why}", release(version))
         }
         AppStage::RelaunchFailed {
             error: UpdateError::SettingsUnsaved,
             ..
-        } => "Couldn't relaunch SpaceTerm because it couldn't save Settings.".to_owned(),
+        } => "Couldn\u{2019}t relaunch SpaceTerm because it couldn\u{2019}t save Settings."
+            .to_owned(),
         AppStage::RelaunchFailed {
             version: Some(version),
             ..
-        } => format!("Couldn't relaunch into SpaceTerm {version}."),
-        AppStage::RelaunchFailed { version: None, .. } => "Couldn't relaunch SpaceTerm.".to_owned(),
-        _ => "SpaceTerm can't update itself where it is.".to_owned(),
+        } => format!("Couldn\u{2019}t relaunch into SpaceTerm {version}."),
+        AppStage::RelaunchFailed { version: None, .. } => {
+            "Couldn\u{2019}t relaunch SpaceTerm.".to_owned()
+        }
+        _ => "SpaceTerm can\u{2019}t update itself where it is.".to_owned(),
     }
 }
 
@@ -271,17 +274,17 @@ fn machine_failed(row: &MachineRow) -> String {
     match &row.stage {
         MachineStage::StartFailed { version, cause, .. } => {
             let why = match cause {
-                StartFailure::NotReady => format!("SpaceTerm Core {version} didn't start."),
+                StartFailure::NotReady => format!("SpaceTerm Core {version} didn\u{2019}t start."),
                 StartFailure::PortInUse => {
-                    format!("Another app is using {name}'s Network Access port.")
+                    format!("Another app is using {name}\u{2019}s Network Access port.")
                 }
                 StartFailure::DiskFull => format!("{name} is out of disk space."),
                 StartFailure::Interrupted => "The restart was interrupted.".to_owned(),
             };
-            format!("Couldn't restart SpaceTerm Core on {name}. {why}")
+            format!("Couldn\u{2019}t restart SpaceTerm Core on {name}. {why}")
         }
         MachineStage::DownloadFailed { version, cause, .. } => {
-            let failed = format!("Couldn't download SpaceTerm Core {version} to {name}.");
+            let failed = format!("Couldn\u{2019}t download SpaceTerm Core {version} to {name}.");
             let why = match cause {
                 DownloadCause::DiskFull => format!("{name} is out of disk space."),
                 DownloadCause::Unreachable => format!("{name} stopped answering."),
@@ -296,10 +299,10 @@ fn machine_failed(row: &MachineRow) -> String {
             format!("{failed} {why}")
         }
         MachineStage::NeedsFloor { version, floor, .. } => format!(
-            "Couldn't download SpaceTerm Core {version} to {name}. {name} needs SpaceTerm Core \
+            "Couldn\u{2019}t download SpaceTerm Core {version} to {name}. {name} needs SpaceTerm Core \
              {floor} first."
         ),
-        _ => format!("SpaceTerm Core on {name} can't update by itself."),
+        _ => format!("SpaceTerm Core on {name} can\u{2019}t update by itself."),
     }
 }
 
@@ -330,27 +333,27 @@ mod tests {
         let cases = [
             (
                 UpdateError::Download,
-                "Couldn't download SpaceTerm 0.11.5. Check your network, then try again.",
+                "Couldn\u{2019}t download SpaceTerm 0.11.5. Check your network, then try again.",
             ),
             (
                 UpdateError::DiskFull,
-                "Couldn't download SpaceTerm 0.11.5. Free some disk space, then try again.",
+                "Couldn\u{2019}t download SpaceTerm 0.11.5. Free some disk space, then try again.",
             ),
             (
                 UpdateError::Verification,
-                "Couldn't download SpaceTerm 0.11.5. The download didn't pass verification.",
+                "Couldn\u{2019}t download SpaceTerm 0.11.5. The download didn\u{2019}t pass verification.",
             ),
             (
                 UpdateError::Relaunch,
-                "Couldn't relaunch into SpaceTerm 0.11.5.",
+                "Couldn\u{2019}t relaunch into SpaceTerm 0.11.5.",
             ),
             (
                 UpdateError::SettingsUnsaved,
-                "Couldn't relaunch SpaceTerm because it couldn't save Settings.",
+                "Couldn\u{2019}t relaunch SpaceTerm because it couldn\u{2019}t save Settings.",
             ),
             (
                 UpdateError::ReadOnly,
-                "SpaceTerm can't update itself where it is.",
+                "SpaceTerm can\u{2019}t update itself where it is.",
             ),
         ];
         for (error, expected) in cases {

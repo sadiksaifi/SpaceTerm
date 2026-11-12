@@ -54,7 +54,7 @@ fn pill(label: &str, glyph: Glyph, emphasis: Emphasis, main: Command) -> PillVie
 
 fn whats_new() -> PillView {
     pill(
-        "What's New",
+        "What\u{2019}s New",
         Glyph::WhatsNew,
         Emphasis::Plain,
         Command::Desktop(DesktopAction::WhatsNew),
@@ -81,7 +81,10 @@ fn recording() -> Shown {
         app: row(
             "SpaceTerm",
             "0.11.4",
-            Some(("What's New", Command::Desktop(DesktopAction::WhatsNew))),
+            Some((
+                "What\u{2019}s New",
+                Command::Desktop(DesktopAction::WhatsNew),
+            )),
         ),
         machines: vec![
             (
@@ -238,7 +241,7 @@ fn nothing_owed_hides_the_pill(cx: &mut gpui::TestAppContext) {
 fn the_pill_keeps_two_segments_and_its_chevron_through_every_state(cx: &mut gpui::TestAppContext) {
     let _ = services(cx);
     let failed = Command::Explain(Explanation::ok(
-        "Couldn't Restart SpaceTerm Core on penguin",
+        "Couldn\u{2019}t Restart SpaceTerm Core on penguin",
         "The restart into SpaceTerm Core 0.11.4 was interrupted, so it went back to 0.11.3.",
     ));
     let states = [
@@ -539,7 +542,7 @@ fn while_the_list_is_open_only_text_changes_and_the_pill_waits_for_it_to_close(
     assert_eq!(
         description("penguin", visual),
         "penguin: 0.11.4",
-        "the row's text changes in place"
+        "the row\u{2019}s text changes in place"
     );
     assert!(A11yTree::read(visual).find("build-box").is_none());
     assert!(
@@ -666,7 +669,7 @@ fn a_new_step_while_the_list_is_open_keeps_the_list_open(cx: &mut gpui::TestAppC
 
     visual.simulate_keystrokes("escape");
     visual.run_until_parked();
-    A11yTree::read(visual).node("What's New");
+    A11yTree::read(visual).node("What\u{2019}s New");
     assert!(shows("update-pill-menu", visual));
 }
 
@@ -683,7 +686,7 @@ fn the_main_area_performs_the_step_and_a_row_performs_its_action(cx: &mut gpui::
         PENGUIN,
         row(
             "penguin",
-            "Can't check for updates",
+            "Can\u{2019}t check for updates",
             Some((
                 "Check Again",
                 Command::Machine(PENGUIN, MachineAction::CheckAgain),
@@ -726,10 +729,11 @@ fn progress_opens_the_list_from_the_main_area(cx: &mut gpui::TestAppContext) {
 fn a_failure_opens_its_alert_and_cancel_dismisses_its_step(cx: &mut gpui::TestAppContext) {
     let (_, _, machines) = services(cx);
     let failed = Command::Explain(Explanation {
-        title: "Couldn't Restart SpaceTerm Core on penguin".into(),
-        message: "SpaceTerm Core 0.11.4 couldn't start because penguin is out of disk space, so \
+        title: "Couldn\u{2019}t Restart SpaceTerm Core on penguin".into(),
+        message:
+            "SpaceTerm Core 0.11.4 couldn\u{2019}t start because penguin is out of disk space, so \
                   it went back to 0.11.3. Free some space, then try again."
-            .into(),
+                .into(),
         then: Some(Box::new(restart_core(PENGUIN))),
         proceed: Some("Try Again".into()),
         dismiss: Some(Box::new(Command::Machine(
@@ -865,11 +869,11 @@ fn only_a_restart_refused_at_its_preview_has_an_alert() {
         .expect("an unreachable Machine explains itself");
     assert_eq!(
         unreachable.title,
-        "Couldn't Restart SpaceTerm Core on penguin"
+        "Couldn\u{2019}t Restart SpaceTerm Core on penguin"
     );
     assert_eq!(
         unreachable.message,
-        "SpaceTerm can't reach penguin. Try again when it's connected."
+        "SpaceTerm can\u{2019}t reach penguin. Try again when it\u{2019}s connected."
     );
     let busy =
         commands::refusal(&notice(ActionFailure::Busy, true)).expect("a busy Core explains itself");
@@ -950,7 +954,8 @@ fn a_restart_that_ran_opens_no_alert_and_a_refused_preview_does(cx: &mut gpui::T
         alert_open(visual),
         "a refused preview explains itself at once"
     );
-    A11yTree::read(visual).text("SpaceTerm can't reach penguin. Try again when it's connected.");
+    A11yTree::read(visual)
+        .text("SpaceTerm can\u{2019}t reach penguin. Try again when it\u{2019}s connected.");
 }
 
 /// Check for Updates during a download the person already started answers as a check does:
@@ -1007,7 +1012,7 @@ fn failed_relaunch(
     assert!(relaunch_failed(&updates, visual));
     visual.update(|_, cx| cx.defer(crate::ui::updates::check_for_updates));
     visual.run_until_parked();
-    A11yTree::read(visual).text("Couldn't Relaunch SpaceTerm");
+    A11yTree::read(visual).text("Couldn\u{2019}t Relaunch SpaceTerm");
     (adapter, updates, visual)
 }
 
@@ -1046,12 +1051,12 @@ fn cancel_on_a_failed_relaunch_dismisses_only_its_step(cx: &mut gpui::TestAppCon
     let (adapter, updates, visual) = failed_relaunch(cx);
     assert_eq!(
         app_shown(visual),
-        failed_step("Couldn't relaunch", Some("Try Again"))
+        failed_step("Couldn\u{2019}t relaunch", Some("Try Again"))
     );
     click("modal-action-update-explain-cancel", visual);
     assert_eq!(
         app_shown(visual),
-        dismissed_step("Couldn't relaunch", Some("Try Again")),
+        dismissed_step("Couldn\u{2019}t relaunch", Some("Try Again")),
         "the row keeps the failure"
     );
     assert!(relaunch_failed(&updates, visual), "the updater keeps it");
@@ -1066,7 +1071,7 @@ fn escape_on_a_failed_relaunch_dismisses_only_its_step(cx: &mut gpui::TestAppCon
     assert!(!alert_open(visual));
     assert_eq!(
         app_shown(visual),
-        dismissed_step("Couldn't relaunch", Some("Try Again"))
+        dismissed_step("Couldn\u{2019}t relaunch", Some("Try Again"))
     );
     assert!(relaunch_failed(&updates, visual));
     assert_eq!(adapter.installations.get(), 1, "Escape relaunches nothing");
@@ -1117,14 +1122,14 @@ fn failed_check_beside(
 fn a_failed_download_from_check_for_updates_opens_d6(cx: &mut gpui::TestAppContext) {
     let (adapter, _, visual) = failed_check(UpdateError::Download, cx);
     let tree = A11yTree::read(visual);
-    tree.text("Couldn't Download SpaceTerm 0.4.2");
+    tree.text("Couldn\u{2019}t Download SpaceTerm 0.4.2");
     tree.text("Check your network, then try again.");
     tree.node("Try Again");
     tree.node("Cancel");
-    assert!(tree.find("Couldn't Check for Updates").is_none());
+    assert!(tree.find("Couldn\u{2019}t Check for Updates").is_none());
     assert_eq!(
         app_shown(visual),
-        failed_step("Couldn't download 0.4.2", Some("Try Again"))
+        failed_step("Couldn\u{2019}t download 0.4.2", Some("Try Again"))
     );
 
     let downloads = adapter.downloads.get();
@@ -1134,7 +1139,7 @@ fn a_failed_download_from_check_for_updates_opens_d6(cx: &mut gpui::TestAppConte
         app_shown(visual),
         (
             Some(crate::updates::copy::title_bar::DOWNLOAD_UPDATE.to_owned()),
-            "Couldn't download 0.4.2".to_owned(),
+            "Couldn\u{2019}t download 0.4.2".to_owned(),
             Some("Try Again".to_owned())
         ),
         "the release keeps its step; the row keeps the failure"
@@ -1167,7 +1172,7 @@ fn a_failed_download_from_check_for_updates_opens_d6(cx: &mut gpui::TestAppConte
     visual.run_until_parked();
     assert_eq!(
         app_shown(visual),
-        failed_step("Couldn't download 0.4.2", Some("Try Again")),
+        failed_step("Couldn\u{2019}t download 0.4.2", Some("Try Again")),
         "a newer failure shows again"
     );
 }
@@ -1185,7 +1190,7 @@ fn check_for_updates_after_a_failed_download_opens_its_d6(cx: &mut gpui::TestApp
     visual.update(|_, cx| cx.defer(crate::ui::updates::check_for_updates));
     visual.run_until_parked();
     let tree = A11yTree::read(visual);
-    tree.text("Couldn't Download SpaceTerm 0.4.2");
+    tree.text("Couldn\u{2019}t Download SpaceTerm 0.4.2");
     tree.text("Check your network, then try again.");
     assert!(tree.find("SpaceTerm 0.4.2 Is Downloading").is_none());
     assert_eq!(adapter.checks.get(), checks, "the alert answers by itself");
@@ -1211,14 +1216,14 @@ fn cancel_on_d6_under_a_hard_stop_keeps_download_update(cx: &mut gpui::TestAppCo
     let (_, _, visual) = failed_check_beside(UpdateError::Download, vec![too_new], cx);
     assert_eq!(
         app_shown(visual),
-        failed_step("Couldn't download 0.4.2", Some("Try Again"))
+        failed_step("Couldn\u{2019}t download 0.4.2", Some("Try Again"))
     );
     click("modal-action-update-explain-cancel", visual);
     assert_eq!(
         app_shown(visual),
         (
             Some(crate::updates::copy::title_bar::DOWNLOAD_UPDATE.to_owned()),
-            "Couldn't download 0.4.2".to_owned(),
+            "Couldn\u{2019}t download 0.4.2".to_owned(),
             Some("Try Again".to_owned())
         ),
         "the hard stop keeps its step; the row keeps the failure"
@@ -1246,17 +1251,17 @@ fn cancel_on_d7_with_a_held_installer_keeps_relaunch_to_update(cx: &mut gpui::Te
     assert!(visual.update(|_, cx| updates.read(cx).holds_failed_relaunch()));
     visual.update(|_, cx| cx.defer(crate::ui::updates::check_for_updates));
     visual.run_until_parked();
-    A11yTree::read(visual).text("Couldn't Relaunch SpaceTerm");
+    A11yTree::read(visual).text("Couldn\u{2019}t Relaunch SpaceTerm");
     assert_eq!(
         app_shown(visual),
-        failed_step("Couldn't relaunch", Some("Try Again"))
+        failed_step("Couldn\u{2019}t relaunch", Some("Try Again"))
     );
     click("modal-action-update-explain-cancel", visual);
     assert_eq!(
         app_shown(visual),
         (
             Some(crate::updates::copy::title_bar::RELAUNCH_TO_UPDATE.to_owned()),
-            "Couldn't relaunch".to_owned(),
+            "Couldn\u{2019}t relaunch".to_owned(),
             Some("Try Again".to_owned())
         ),
         "the held update keeps its step; the row keeps the failure"

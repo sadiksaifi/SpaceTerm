@@ -524,7 +524,7 @@ fn i5_each_action_has_one_command_and_download_never_relaunches() {
                         Command::Machine(_, MachineAction::Restart)
                     ))
                 }
-                "What's New" => {
+                "What\u{2019}s New" => {
                     assert_eq!(action.command, Command::Desktop(DesktopAction::WhatsNew))
                 }
                 _ => {}
@@ -563,7 +563,7 @@ fn i6_no_text_counts_zero_or_uses_a_banned_word() {
                 "idle",
                 "Update This",
                 "Update penguin",
-                "\u{2019}",
+                "'",
             ] {
                 assert!(!text.contains(banned), "{banned}: {text}");
             }
@@ -792,7 +792,7 @@ fn the_step_follows_the_priority_table() {
     assert_eq!(pill.label.as_ref(), "Update Failed");
     assert_eq!(
         pill.tooltip.as_ref(),
-        "Couldn't download SpaceTerm Core 0.11.5 to penguin. penguin is out of disk space."
+        "Couldn\u{2019}t download SpaceTerm Core 0.11.5 to penguin. penguin is out of disk space."
     );
     let mut whats_new = app(&UpdateState::UpToDate);
     whats_new.whats_new = true;
@@ -834,7 +834,7 @@ fn the_rows_and_the_confirmation_name_the_software_and_the_consequence() {
     assert_eq!(
         pill.tooltip.as_ref(),
         "SpaceTerm Core 0.11.4 is downloaded on This Mac. Restarting into it ends 2 Terminal Sessions.",
-        "a stage changes emphasis, never the tooltip's words"
+        "a stage changes emphasis, never the tooltip\u{2019}s words"
     );
     assert_eq!(
         view.machine_rows()[0].description.as_deref(),
@@ -910,7 +910,7 @@ fn the_rows_and_the_confirmation_name_the_software_and_the_consequence() {
     let confirmation = super::super::confirm::previewed(&[breaking], &[none], false, NOW).unwrap();
     assert_eq!(
         confirmation.message.as_ref(),
-        "SpaceTerm Core restarts from 0.11.3 to 0.11.4. No Terminal Session is open. Workspaces, Tabs and Panes stay. SpaceTerm on iPad can't connect to This Mac until it updates."
+        "SpaceTerm Core restarts from 0.11.3 to 0.11.4. No Terminal Session is open. Workspaces, Tabs and Panes stay. SpaceTerm on iPad can\u{2019}t connect to This Mac until it updates."
     );
 }
 
@@ -961,8 +961,11 @@ fn r1_the_recorded_journey_shows_whats_new_for_every_frame(cx: &mut gpui::TestAp
         cx.run_until_parked();
         let (view, rows) = store_view(cx, &facts);
         let pill = view.pill().expect("the pill stays visible");
-        assert_eq!(pill.label.as_ref(), "What's New");
-        assert_eq!(pill.tooltip.as_ref(), "See what's new in SpaceTerm 0.11.4.");
+        assert_eq!(pill.label.as_ref(), "What\u{2019}s New");
+        assert_eq!(
+            pill.tooltip.as_ref(),
+            "See what\u{2019}s new in SpaceTerm 0.11.4."
+        );
         assert_eq!(rows, 2);
         let rows = view.machine_rows();
         assert_eq!(rows[0].name.as_ref(), "This Mac");
@@ -1010,7 +1013,7 @@ fn r5_only_a_restart_approved_here_shows_restart_progress(cx: &mut gpui::TestApp
     assert_eq!(
         store_view(cx, &facts).0.step,
         None,
-        "another device's restart"
+        "another device\u{2019}s restart"
     );
 
     adapter.emit(MachineUpdatesEvent::Changed(Box::new(this_mac)));
@@ -1152,7 +1155,7 @@ fn a_restart_approved_here_is_not_confirmed_after_the_deadline(cx: &mut gpui::Te
         assert_eq!(
             step_now(cx),
             Some(Step::NotConfirmed(LOCAL)),
-            "it stays this desktop's"
+            "it stays this desktop\u{2019}s"
         );
         let state = UpdateState::UpToDate;
         let pill = store_view(cx, &app(&state)).0.pill().unwrap();
@@ -1245,7 +1248,7 @@ fn the_installed_view_reads_the_apps_ladder_clock(cx: &mut gpui::TestAppContext)
     cx.update(|cx| ApplicationUpdates::install(later.clone(), cx));
     let view = cx.update(|cx| current(cx));
     assert_eq!(view.app.stage, AppStage::Current { whats_new: false });
-    assert_eq!(view.step, None, "a later launch owes no What's New");
+    assert_eq!(view.step, None, "a later launch owes no What\u{2019}s New");
 }
 
 /// D3f dismisses the title-bar step from the row's `How to Update…` as from the pill, and the
@@ -1279,10 +1282,10 @@ fn failure_alerts_dismiss_the_step_and_keep_the_row(cx: &mut gpui::TestAppContex
     });
     assert_eq!(step_now(cx), None);
     let row = store_view(cx, &app(&state)).0.machine_row(PENGUIN).unwrap();
-    assert_eq!(row.status.as_deref(), Some("Can't update by itself"));
+    assert_eq!(row.status.as_deref(), Some("Can\u{2019}t update by itself"));
     assert!(
         adapter.performed().is_empty(),
-        "the Core's facts stay as they are"
+        "the Core\u{2019}s facts stay as they are"
     );
 }
 
@@ -1391,11 +1394,11 @@ fn a_failed_stepping_stone_fetch_shows_once_and_keeps_the_download(cx: &mut gpui
     };
     assert_eq!(
         alert.title.as_ref(),
-        "Couldn't Download SpaceTerm Core 0.14.0 to penguin"
+        "Couldn\u{2019}t Download SpaceTerm Core 0.14.0 to penguin"
     );
     assert_eq!(
         alert.message.as_ref(),
-        "penguin needs SpaceTerm Core 0.12.0 first and couldn't get it. Its Terminal Sessions keep running."
+        "penguin needs SpaceTerm Core 0.12.0 first and couldn\u{2019}t get it. Its Terminal Sessions keep running."
     );
     let Some(Command::Machine(id, dismiss)) = alert.dismiss.map(|dismiss| *dismiss) else {
         panic!("Cancel dismisses the step");

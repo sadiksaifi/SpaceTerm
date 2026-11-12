@@ -89,15 +89,15 @@ pub(crate) enum UpdateError {
     )]
     SystemTooOld,
     /// Desktop wording names the remedy, which differs by platform.
-    #[error("SpaceTerm can't replace its installation.")]
+    #[error("SpaceTerm can\u{2019}t replace its installation.")]
     ReadOnly,
     /// SpaceTerm was still running when its approved relaunch ended or ran out of time. The update
     /// stays downloaded and Try Again relaunches into it.
-    #[error("SpaceTerm couldn't quit to install the update.")]
+    #[error("SpaceTerm couldn\u{2019}t quit to install the update.")]
     Relaunch,
     /// Settings couldn't be saved when the approved relaunch began, so SpaceTerm kept running.
     /// The update stays downloaded and Try Again relaunches into it.
-    #[error("SpaceTerm couldn't save Settings, so it didn't relaunch.")]
+    #[error("SpaceTerm couldn\u{2019}t save Settings, so it didn\u{2019}t relaunch.")]
     SettingsUnsaved,
 }
 

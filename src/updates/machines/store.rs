@@ -1345,7 +1345,10 @@ mod tests {
             cx.run_until_parked();
             let view = cx.update(|cx| state::current(cx));
             let row = view.machine_row(penguin).unwrap();
-            assert_eq!(row.status.as_deref(), Some("Couldn't download 0.9.0"));
+            assert_eq!(
+                row.status.as_deref(),
+                Some("Couldn\u{2019}t download 0.9.0")
+            );
             let action = row.action.expect("the row offers Try Again");
             assert_eq!(action.label.as_ref(), "Try Again");
             assert_eq!(action.command, Command::Machine(penguin, install.clone()));
@@ -1416,7 +1419,10 @@ mod tests {
         cx.run_until_parked();
         let view = cx.update(|cx| state::current(cx));
         let row = view.machine_row(penguin).unwrap();
-        assert_eq!(row.status.as_deref(), Some("Couldn't download 0.9.0"));
+        assert_eq!(
+            row.status.as_deref(),
+            Some("Couldn\u{2019}t download 0.9.0")
+        );
         let action = row.action.expect("the row offers Try Again");
         assert_eq!(action.label.as_ref(), "Try Again");
         assert_eq!(action.command, Command::Machine(penguin, install.clone()));
@@ -1515,7 +1521,7 @@ mod tests {
         cx.run_until_parked();
         assert!(
             adapter.performed().is_empty(),
-            "wait for the desktop's startup check"
+            "wait for the desktop\u{2019}s startup check"
         );
         updater.emit(crate::updates::UpdateEvent::Available("0.10.0".into()));
         cx.run_until_parked();

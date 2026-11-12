@@ -627,7 +627,7 @@ fn each_machine_row_says_what_the_update_view_says(cx: &mut TestAppContext) {
         let first = shown.items.first();
         match expected.action {
             Some(action) => {
-                let first = first.expect("the row's action leads the submenu");
+                let first = first.expect("the row\u{2019}s action leads the submenu");
                 assert_eq!(first.title, action.label);
                 assert_eq!(first.subtitle, action.subtitle);
                 assert_eq!(first.command, Command::Update(action.command));
@@ -710,7 +710,7 @@ fn the_menu_is_spaceterm_then_its_cores_then_settings_and_quit(cx: &mut TestAppC
     for removed in [
         "Recent",
         "Update All",
-        "What's New",
+        "What\u{2019}s New",
         "Relaunch to Update SpaceTerm",
         "Retry",
         "Open",
@@ -798,7 +798,7 @@ fn relaunch_to_update_relaunches_without_asking(cx: &mut TestAppContext) {
         view.app_row()
             .action
             .map(|action| Command::Update(action.command)),
-        "the step is the SpaceTerm row's action"
+        "the step is the SpaceTerm row\u{2019}s action"
     );
 
     cx.update(|cx| fixture.menu.perform(step.command, None, cx));
@@ -927,7 +927,10 @@ fn a_refused_approved_restart_opens_d5_once_and_a_later_failure_none(cx: &mut Te
             .collect();
         assert_eq!(titles.len(), alerts, "{failure:?}: {titles:?}");
         if alerts == 2 {
-            assert_eq!(titles[1], "Couldn't Restart SpaceTerm Core on penguin");
+            assert_eq!(
+                titles[1],
+                "Couldn\u{2019}t Restart SpaceTerm Core on penguin"
+            );
         }
         assert_eq!(
             fixture.machines.executed_actions().len(),
@@ -956,7 +959,8 @@ fn ok_on_how_to_update_dismisses_the_step_and_keeps_the_row(cx: &mut TestAppCont
     assert_eq!(fixture.host.alerts.borrow().len(), 1, "D3f opened");
     assert_eq!(cx.update(|cx| state::current(cx).step), None);
     assert!(
-        row(&fixture.host.menu(), PENGUIN).status.as_deref() == Some("Can't update by itself"),
+        row(&fixture.host.menu(), PENGUIN).status.as_deref()
+            == Some("Can\u{2019}t update by itself"),
         "the row keeps the failure"
     );
 }
@@ -970,7 +974,7 @@ fn a_failures_follow_up_is_an_ordinary_action() {
     use crate::updates::state::DesktopAction;
 
     let failure = |then: Option<state::Command>, proceed: Option<&str>| Explanation {
-        title: "Couldn't Download SpaceTerm Core 0.9.0 to penguin".into(),
+        title: "Couldn\u{2019}t Download SpaceTerm Core 0.9.0 to penguin".into(),
         message: "penguin is out of disk space. Its Terminal Sessions keep running.".into(),
         then: then.map(Box::new),
         proceed: proceed.map(Into::into),

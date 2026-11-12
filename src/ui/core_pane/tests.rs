@@ -526,7 +526,7 @@ fn a_pane_whose_session_a_restart_ended_names_how_the_restart_went() {
     view.sync();
     assert_eq!(
         ended_detail(&view).as_deref(),
-        Some("SpaceTerm Core couldn't restart into 0.11.1.")
+        Some("SpaceTerm Core couldn\u{2019}t restart into 0.11.1.")
     );
     assert_eq!(
         view.dormant_copy(Some(SessionEnd::Signaled))
@@ -586,7 +586,7 @@ fn an_idle_restart_says_what_typed_text_it_refused() {
         let (detail, typed) = match kept {
             None => (restarted.to_owned(), None),
             Some(Delivery::NotSent) => (
-                format!("{restarted} What you typed during the restart wasn't sent."),
+                format!("{restarted} What you typed during the restart wasn\u{2019}t sent."),
                 Some("make deploy\n"),
             ),
             Some(Delivery::Unknown) => (
@@ -681,7 +681,7 @@ fn a_start_failure_published_after_the_pane_returned_repaints_it() {
     assert!(view.sync().changed, "the late failure repaints the Pane");
     assert_eq!(
         ended_detail(&view).as_deref(),
-        Some("SpaceTerm Core couldn't restart into 0.11.1.")
+        Some("SpaceTerm Core couldn\u{2019}t restart into 0.11.1.")
     );
 }
 

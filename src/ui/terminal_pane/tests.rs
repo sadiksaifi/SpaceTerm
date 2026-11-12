@@ -2378,7 +2378,7 @@ fn core_pane_refused_input_offers_its_text_to_copy_without_sending_it(cx: &mut T
     assert_eq!(tree.node("Terminal status")["aria"]["value"], "Warning");
     assert_eq!(
         tree.node("Terminal status")["aria"]["description"],
-        "What you typed wasn't sent. SpaceTerm Core was about to restart."
+        "What you typed wasn\u{2019}t sent. SpaceTerm Core was about to restart."
     );
     let bounds = cx
         .debug_bounds("copy-typed-text")

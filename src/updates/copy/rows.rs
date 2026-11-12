@@ -15,7 +15,7 @@ pub(crate) const APP_NAME: &str = "SpaceTerm";
 pub(crate) const CORE_HEADING: &str = "SpaceTerm Core";
 /// The list's last entry, which opens Settings > Updates.
 pub(crate) const UPDATE_SETTINGS: &str = "Update Settings\u{2026}";
-pub(crate) const WHATS_NEW: &str = "What's New";
+pub(crate) const WHATS_NEW: &str = "What\u{2019}s New";
 pub(crate) const DOWNLOAD: &str = "Download";
 pub(crate) const RELAUNCH_TO_UPDATE: &str = "Relaunch to Update";
 pub(crate) const RESTART_CORE: &str = "Restart Core\u{2026}";
@@ -81,12 +81,12 @@ pub(crate) fn app_row(app: &AppRow) -> RowView {
             version, retries, ..
         } => {
             let status = version.as_ref().map_or_else(
-                || "Couldn't download the update".to_owned(),
-                |v| format!("Couldn't download {v}"),
+                || "Couldn\u{2019}t download the update".to_owned(),
+                |v| format!("Couldn\u{2019}t download {v}"),
             );
             let sentence = version.as_ref().map_or_else(
-                || "SpaceTerm couldn't download the update.".to_owned(),
-                |v| format!("SpaceTerm couldn't download {v}."),
+                || "SpaceTerm couldn\u{2019}t download the update.".to_owned(),
+                |v| format!("SpaceTerm couldn\u{2019}t download {v}."),
             );
             if *retries {
                 (
@@ -105,10 +105,10 @@ pub(crate) fn app_row(app: &AppRow) -> RowView {
             }
         }
         AppStage::RelaunchFailed { .. } => (
-            "Couldn't relaunch".to_owned(),
+            "Couldn\u{2019}t relaunch".to_owned(),
             action(TRY_AGAIN, None, Command::Desktop(DesktopAction::Update)),
             None,
-            "SpaceTerm couldn't relaunch. Terminal Sessions keep running.".to_owned(),
+            "SpaceTerm couldn\u{2019}t relaunch. Terminal Sessions keep running.".to_owned(),
         ),
         AppStage::CantReplace => {
             let status = cant_replace(Platform::HOST).to_owned();
@@ -298,14 +298,14 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
                         ),
                     ),
                     Continuation::StartFailed => (
-                        format!("Couldn't restart into {version}"),
+                        format!("Couldn\u{2019}t restart into {version}"),
                         action(
                             TRY_AGAIN_ASKS,
                             None,
                             Command::Machine(id, MachineAction::Restart),
                         ),
                         None,
-                        format!("{subject} couldn't restart into {version}."),
+                        format!("{subject} couldn\u{2019}t restart into {version}."),
                     ),
                     Continuation::NeedsConfirmation | Continuation::Unknown => (
                         format!("{version} downloaded"),
@@ -329,7 +329,7 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
             format!("{subject} is restarting."),
         ),
         MachineStage::StartFailed { version, kept, .. } => (
-            format!("Couldn't restart into {version}"),
+            format!("Couldn\u{2019}t restart into {version}"),
             kept.then(|| {
                 action(
                     TRY_AGAIN_ASKS,
@@ -339,12 +339,12 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
             })
             .flatten(),
             (!kept).then(|| "SpaceTerm waits for the next update.".to_owned()),
-            format!("{subject} couldn't restart into {version}."),
+            format!("{subject} couldn\u{2019}t restart into {version}."),
         ),
         MachineStage::DownloadFailed {
             version, retries, ..
         } => (
-            format!("Couldn't download {version}"),
+            format!("Couldn\u{2019}t download {version}"),
             (!retries)
                 .then(|| {
                     action(
@@ -355,7 +355,7 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
                 })
                 .flatten(),
             retries.then(|| "SpaceTerm Core tries again later.".to_owned()),
-            format!("SpaceTerm couldn't download SpaceTerm Core {version} to {name}."),
+            format!("SpaceTerm couldn\u{2019}t download SpaceTerm Core {version} to {name}."),
         ),
         MachineStage::NotConfirmed { .. } => (
             "Not responding".to_owned(),
@@ -368,14 +368,14 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
             format!("{name} stopped responding while SpaceTerm Core restarted."),
         ),
         MachineStage::CantCheck => (
-            "Can't check for updates".to_owned(),
+            "Can\u{2019}t check for updates".to_owned(),
             action(
                 CHECK_AGAIN,
                 None,
                 Command::Machine(id, MachineAction::CheckAgain),
             ),
             None,
-            format!("{subject} can't check for updates."),
+            format!("{subject} can\u{2019}t check for updates."),
         ),
         // Download asks the Core to fetch the Stepping Stone at the floor from its own feed.
         MachineStage::NeedsFloor { version, floor, .. } => (
@@ -391,14 +391,14 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
             },
         ),
         MachineStage::SteppingStoneSkipped => (
-            "Can't update by itself".to_owned(),
+            "Can\u{2019}t update by itself".to_owned(),
             action(
                 HOW_TO_UPDATE,
                 None,
                 Command::Explain(dialogs::how_to_update(row)),
             ),
             None,
-            format!("{subject} can't update by itself."),
+            format!("{subject} can\u{2019}t update by itself."),
         ),
     };
     // From Ask, a waiting row adds how long the update waited, after its own description.
