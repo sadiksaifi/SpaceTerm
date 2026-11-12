@@ -508,7 +508,7 @@ struct ShellSession {
     foreground: std::sync::Weak<OwnedFd>,
     activity: Arc<Mutex<Option<spaceterm_core::idle_restart::Activity>>>,
     slave: Option<std::path::PathBuf>,
-    frozen: Mutex<Vec<std::sync::Weak<dyn ProcessControl>>>,
+    frozen: Mutex<Option<freeze::Teardown>>,
     checkpoint: Mutex<Option<freeze::Checkpoint>>,
     image: Option<std::path::PathBuf>,
 }
@@ -560,7 +560,7 @@ impl SessionProbe for ShellSession {
                 .clone()
                 .ok_or_else(|| io::Error::other("no idle CPU checkpoint"))?,
         )?;
-        *self.frozen.lock().unwrap_or_else(|e| e.into_inner()) = population.controls();
+        *self.frozen.lock().unwrap_or_else(|e| e.into_inner()) = Some(population.teardown());
         Ok(Box::new(population))
     }
     fn activity(&self) -> Option<spaceterm_core::idle_restart::Activity> {
@@ -687,7 +687,7 @@ mod ownership_tests {
             foreground: std::sync::Weak::new(),
             activity: Arc::default(),
             slave: None,
-            frozen: Mutex::new(Vec::new()),
+            frozen: Mutex::new(None),
             checkpoint: Mutex::new(None),
             image: None,
             session: ProcessSessionIdentity {
@@ -732,7 +732,7 @@ mod ownership_tests {
                 foreground: std::sync::Weak::new(),
                 activity: Arc::default(),
                 slave: None,
-                frozen: Mutex::new(Vec::new()),
+                frozen: Mutex::new(None),
                 checkpoint: Mutex::new(None),
                 image: None,
                 session: ProcessSessionIdentity {
@@ -922,22 +922,14 @@ impl Drop for SpawnedPty {
     fn drop(&mut self) {
         // Terminal teardown is the destructive Stop boundary. Kill the exact frozen processes
         // before closing masters: kernel hangup can send SIGCONT along with SIGHUP.
-        for process in self
+        if let Some(frozen) = self
             .probe
             .frozen
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .drain(..)
-            .filter_map(|process| process.upgrade())
+            .take()
         {
-            if let Err(error) = process.signal(libc::SIGKILL)
-                && error.raw_os_error() != Some(libc::ESRCH)
-            {
-                eprintln!(
-                    "failed to end a frozen terminal process: {:?}",
-                    error.kind()
-                );
-            }
+            frozen.end_if_frozen();
         }
         // Let ordinary close traps finish their bounded grace before reader cancellation.
         self.process.wait_before_master_close();
@@ -1468,7 +1460,7 @@ fn spawn_command_in_pty(
         foreground: foreground.as_ref().map(Arc::downgrade).unwrap_or_default(),
         activity,
         slave: pair.master.tty_name(),
-        frozen: Mutex::new(Vec::new()),
+        frozen: Mutex::new(None),
         checkpoint: Mutex::new(None),
         image,
     });
@@ -1763,9 +1755,39 @@ mod tests {
             CommandBuilder::new("/bin/sh")
         }
     }
+    type HolderInspection = (mpsc::Sender<()>, mpsc::Receiver<()>);
+    type NativeSignals = Arc<Mutex<Vec<(ProcessIdentity, i32)>>>;
     struct KnownProcesses {
         real: Arc<dyn UnixPtyHost>,
         known: Mutex<std::collections::BTreeSet<i32>>,
+        inspection: Mutex<Option<HolderInspection>>,
+        signals: NativeSignals,
+    }
+    impl KnownProcesses {
+        fn new() -> Self {
+            Self {
+                real: test_host(),
+                known: Mutex::new([std::process::id() as i32].into_iter().collect()),
+                inspection: Mutex::new(None),
+                signals: Arc::default(),
+            }
+        }
+    }
+    struct RecordedControl {
+        inner: Box<dyn ProcessControl>,
+        signals: NativeSignals,
+    }
+    impl ProcessControl for RecordedControl {
+        fn identity(&self) -> ProcessIdentity {
+            self.inner.identity()
+        }
+        fn stopped(&self) -> io::Result<bool> {
+            self.inner.stopped()
+        }
+        fn signal(&self, signal: i32) -> io::Result<()> {
+            self.signals.lock().unwrap().push((self.identity(), signal));
+            self.inner.signal(signal)
+        }
     }
     impl UnixPtyHost for KnownProcesses {
         fn process_image(&self, identity: ProcessIdentity) -> io::Result<std::path::PathBuf> {
@@ -1803,20 +1825,25 @@ mod tests {
             Ok(self.known.lock().unwrap().iter().copied().collect())
         }
         fn holds_slave(&self, pid: i32, slave: &std::path::Path) -> io::Result<bool> {
+            let pause = self.inspection.lock().unwrap().take();
+            if let Some((entered, resume)) = pause {
+                entered.send(()).unwrap();
+                resume.recv().unwrap();
+            }
             self.real.holds_slave(pid, slave)
         }
         fn pin_process(&self, identity: ProcessIdentity) -> io::Result<Box<dyn ProcessControl>> {
-            self.real.pin_process(identity)
+            Ok(Box::new(RecordedControl {
+                inner: self.real.pin_process(identity)?,
+                signals: self.signals.clone(),
+            }))
         }
         fn master_read_error(&self, error: &io::Error) -> MasterReadError {
             self.real.master_read_error(error)
         }
     }
     pub(super) fn freeze_test_host() -> Arc<dyn UnixPtyHost> {
-        Arc::new(KnownProcesses {
-            real: test_host(),
-            known: Mutex::new([std::process::id() as i32].into_iter().collect()),
-        })
+        Arc::new(KnownProcesses::new())
     }
     struct RealIdle {
         activity: spaceterm_core::idle_restart::Activity,
@@ -2030,10 +2057,7 @@ mod tests {
         }
         let _isolation = lock_real_pty_test();
         let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-        let host = Arc::new(KnownProcesses {
-            real: test_host(),
-            known: Mutex::new([std::process::id() as i32].into_iter().collect()),
-        });
+        let host = Arc::new(KnownProcesses::new());
         let mut command = idle_shell_command();
         command.args(["-c", "\"$1\" --exact platform::unix_pty::tests::detached_dev_tty_holder_child --ignored --nocapture & printf READY; read line", "alias-parent"]);
         command.arg(std::env::current_exe().unwrap());
@@ -2160,6 +2184,70 @@ mod tests {
             after.mode() & 0o7777,
             replacement_mode,
             "restoration must target only the original device instance"
+        );
+    }
+
+    #[test]
+    fn a_refused_final_inspection_cannot_force_kill_a_later_ordinary_close() {
+        use spaceterm_core::idle_restart::{Activity, Restarting};
+        const NAME: &str = "platform::unix_pty::tests::a_refused_final_inspection_cannot_force_kill_a_later_ordinary_close";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _isolation = lock_real_pty_test();
+        let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+        let marker = fixture.path().join("ordinary-close-trap");
+        let host = Arc::new(KnownProcesses::new());
+        let mut command = idle_shell_command();
+        command.args([
+            "-c",
+            "trap 'printf done > \"$1\"; exit' HUP TERM; printf READY; while :; do read line; done",
+            "ordinary-close",
+        ]);
+        command.arg(&marker);
+        let (mut pty, _terminator) =
+            spawn_command_in_pty(host.clone(), PtySize::default(), command, Arc::default())
+                .unwrap();
+        let mut reader = pty.take_reader().unwrap();
+        read_output_marker(&mut reader, b"READY");
+        let activity = Activity::new(Instant::now() - Duration::from_secs(7200));
+        let lease = Arc::new(raw_idle_lease(&pty, activity.clone()));
+        lease.freeze_and_grant().unwrap();
+        lease.verify_frozen().unwrap();
+        assert!(activity.input(Instant::now()).is_err());
+        let (entered, paused) = mpsc::channel();
+        let (resume, inspection) = mpsc::channel();
+        *host.inspection.lock().unwrap() = Some((entered, inspection));
+        let checking = lease.clone();
+        let worker = thread::spawn(move || checking.verify_frozen());
+        paused.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(worker.join().unwrap(), Err(Restarting));
+        assert!(!lease.granted());
+        drop(
+            activity
+                .input(Instant::now())
+                .expect("refusal must restore input"),
+        );
+        drop(lease);
+        // The inspector is still paused with its strong snapshot of the exact process
+        // controls. An ordinary close must not inherit authority from those stale handles.
+        drop(reader);
+        drop(pty);
+        let trap_finished = marker.exists();
+        let forced = host
+            .signals
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, signal)| *signal == libc::SIGKILL);
+        resume.send(()).unwrap();
+        assert!(
+            trap_finished,
+            "an ordinary close must let its HUP/TERM trap finish after refusal"
+        );
+        assert!(
+            !forced,
+            "a retained final inspector cannot authorize destructive teardown"
         );
     }
 
@@ -4102,7 +4190,7 @@ mod tests {
                     foreground: std::sync::Weak::new(),
                     activity: Arc::default(),
                     slave: None,
-                    frozen: Mutex::new(Vec::new()),
+                    frozen: Mutex::new(None),
                     checkpoint: Mutex::new(None),
                     image: None,
                     host: test_host(),

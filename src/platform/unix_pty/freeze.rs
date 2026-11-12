@@ -289,8 +289,34 @@ impl Population {
         })?;
         Ok(Self { facts, cleanup })
     }
-    pub(super) fn controls(&self) -> Vec<std::sync::Weak<dyn ProcessControl>> {
-        self.cleanup.stopped().iter().map(Arc::downgrade).collect()
+    pub(super) fn teardown(&self) -> Teardown {
+        Teardown(Arc::downgrade(&self.cleanup))
+    }
+}
+/// Destructive teardown borrows current ownership, never an inspector's process handles.
+/// Thaw invalidates that ownership under the same lock before sending CONT or reopening input.
+pub(super) struct Teardown(std::sync::Weak<Cleanup>);
+impl Teardown {
+    pub(super) fn end_if_frozen(&self) {
+        let Some(cleanup) = self.0.upgrade() else {
+            return;
+        };
+        let state = cleanup.0.lock().unwrap_or_else(|e| e.into_inner());
+        if state.thawed {
+            return;
+        }
+        // Exact, nonblocking signals are serialized with ownership retirement. No native
+        // inspection runs under this lock, so a stalled inspector cannot block thaw.
+        for process in &state.stopped {
+            if let Err(error) = process.signal(libc::SIGKILL)
+                && error.raw_os_error() != Some(libc::ESRCH)
+            {
+                eprintln!(
+                    "failed to end a frozen terminal process: {:?}",
+                    error.kind()
+                );
+            }
+        }
     }
 }
 impl Facts {
@@ -919,6 +945,37 @@ mod tests {
             assert_eq!(
                 *facts.0.signals.lock().unwrap(),
                 vec![(100, libc::SIGSTOP), (100, libc::SIGCONT)]
+            );
+        }
+    }
+    #[test]
+    fn destructive_teardown_requires_current_freeze_ownership() {
+        for released in [false, true] {
+            let facts = Facts::new(Fault::None);
+            let master = master();
+            let mut population = Some(capture(&facts, &master).unwrap());
+            let teardown = population.as_ref().unwrap().teardown();
+            if released {
+                drop(population.take());
+            }
+            teardown.end_if_frozen();
+            let kills = || {
+                facts
+                    .0
+                    .signals
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(_, signal)| *signal == libc::SIGKILL)
+                    .count()
+            };
+            assert_eq!(kills(), usize::from(!released));
+            drop(population);
+            teardown.end_if_frozen();
+            assert_eq!(
+                kills(),
+                usize::from(!released),
+                "released ownership cannot authorize a later kill"
             );
         }
     }
