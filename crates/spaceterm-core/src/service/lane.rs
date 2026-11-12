@@ -416,6 +416,11 @@ pub trait LaneHost: Send + Sync {
     fn working(&self) -> u32 {
         u32::try_from(self.sessions().len()).unwrap_or(u32::MAX)
     }
+    /// Thaw a proven abandoned native grant without claiming ledger settlement or clearing
+    /// its membership fence. Hosts without separate native ownership may release their fence.
+    fn thaw_idle_grant(&self) {
+        self.release_fence();
+    }
     /// Clears the membership fence.
     fn release_fence(&self);
     /// The live Terminal Session IDs.
@@ -1311,20 +1316,17 @@ impl LaneCore {
     /// the release. An operation admitted after the release finds no watcher and starts one.
     fn release_if_settled(&self) -> bool {
         let _executing = self.executing.lock().unwrap_or_else(|e| e.into_inner());
-        if !self.settled().unwrap_or(false) {
+        let granted = self.host.idle_granted();
+        let thawed = granted
+            && self
+                .service
+                .release_idle_grant_if_safe(|| self.host.thaw_idle_grant())
+                .unwrap_or(false);
+        // Native ownership cannot depend on a successful write to settle the operation.
+        if !self.settled().unwrap_or(false) || (granted && !thawed) {
             return false;
         }
-        if self.host.idle_granted() {
-            if !self
-                .service
-                .release_idle_grant_if_safe(|| self.host.release_fence())
-                .unwrap_or(false)
-            {
-                return false;
-            }
-        } else {
-            self.host.release_fence();
-        }
+        self.host.release_fence();
         self.watching.store(false, Ordering::SeqCst);
         if let Ok(updates) = self.updates() {
             updates.operations_settled();

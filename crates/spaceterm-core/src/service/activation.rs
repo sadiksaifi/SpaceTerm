@@ -333,16 +333,18 @@ impl Service {
         &self,
         release: impl FnOnce(),
     ) -> Result<bool, CoreError> {
-        let Some((data, _)) = self.read()? else {
-            return Err(CoreError::NotInstalled);
-        };
-        let Some(_helper) = data.try_lock(super::operations::HELPER_LOCK)? else {
+        let data = Directory::open(&self.paths.data, false)?;
+        let Some(_helper) = data.try_observation_lock(super::operations::HELPER_LOCK)? else {
             return Ok(false);
         };
-        let Some(_operation) = data.try_lock("service.lock")? else {
+        let Some(_operation) = data.try_observation_lock("service.lock")? else {
             return Ok(false);
         };
-        let state = Self::state(&data)?.ok_or(CoreError::NotInstalled)?;
+        data.verify_path(&self.paths.data)?;
+        let state: super::State = data
+            .observe_json("service.json")?
+            .ok_or(CoreError::NotInstalled)?;
+        Self::validate_state(&state)?;
         if state
             .activation
             .as_ref()

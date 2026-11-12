@@ -331,6 +331,61 @@ impl Directory {
         }
         Ok(Lock(file))
     }
+    /// Observe an existing private record without opening it for writing or syncing it.
+    /// The caller holds the writer's locks when using the bytes as lifecycle evidence.
+    pub(crate) fn observe_json<T: serde::de::DeserializeOwned>(
+        &self,
+        name: &str,
+    ) -> Result<Option<T>, CoreError> {
+        let file = match self.observation_file(name) {
+            Ok(file) => file,
+            Err(CoreError::NotSetUp) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let mut bytes = Vec::new();
+        (&file)
+            .take(MAX_RECORD as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| CoreError::StorageUnavailable)?;
+        if bytes.len() > MAX_RECORD {
+            return Err(CoreError::UnsafeStorage);
+        }
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|_| CoreError::UnsafeStorage)
+    }
+    /// Take an existing ownership lock through a read-only descriptor. This never creates a
+    /// record and works on read-only local volumes, where write-open would hide the evidence.
+    pub(crate) fn try_observation_lock(&self, name: &str) -> Result<Option<Lock>, CoreError> {
+        let file = self.observation_file(name)?;
+        // SAFETY: this nonblocking advisory lock acts only on the retained private descriptor.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(Some(Lock(file)));
+        }
+        if std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock {
+            Ok(None)
+        } else {
+            Err(CoreError::StorageUnavailable)
+        }
+    }
+    fn observation_file(&self, name: &str) -> Result<File, CoreError> {
+        let name = CString::new(name).map_err(|_| CoreError::UnsafeStorage)?;
+        // SAFETY: the terminated leaf and retained directory remain live. No file is created.
+        let descriptor = unsafe {
+            libc::openat(
+                self.0.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+            )
+        };
+        if descriptor < 0 {
+            return Err(classify_open());
+        }
+        // SAFETY: successful openat transferred a new owned descriptor.
+        let file = unsafe { File::from_raw_fd(descriptor) };
+        private(&file, false)?;
+        Ok(file)
+    }
     /// Attempt an exclusive lock, distinguishing contention from unavailable storage.
     pub fn try_lock(&self, name: &str) -> Result<Option<Lock>, CoreError> {
         self.try_flock(name, libc::LOCK_EX)

@@ -862,18 +862,19 @@ impl Service {
     }
     fn state(data: &Directory) -> Result<Option<State>, CoreError> {
         let state: Option<State> = data.read_json("service.json")?;
-        if state
-            .as_ref()
-            .is_some_and(|v| !runtime::digest_valid(&v.installation))
-        {
-            return Err(CoreError::UnsafeStorage);
-        }
-        if let Some(state) = &state
-            && let Some(operation) = &state.activation
-        {
-            operation.validate(state)?;
+        if let Some(state) = &state {
+            Self::validate_state(state)?;
         }
         Ok(state)
+    }
+    fn validate_state(state: &State) -> Result<(), CoreError> {
+        if !runtime::digest_valid(&state.installation) {
+            return Err(CoreError::UnsafeStorage);
+        }
+        if let Some(operation) = &state.activation {
+            operation.validate(state)?;
+        }
+        Ok(())
     }
     fn snapshot(&self, state: &State) -> Result<ServiceStatus, CoreError> {
         if state.removing {

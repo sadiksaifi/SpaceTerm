@@ -669,7 +669,7 @@ impl crate::service::lane::LaneHost for HostLane {
         }
         panes.working()
     }
-    fn release_fence(&self) {
+    fn thaw_idle_grant(&self) {
         let _panes = self.panes.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(operation) = self
             .idle
@@ -680,6 +680,9 @@ impl crate::service::lane::LaneHost for HostLane {
         {
             operation.lease.release();
         }
+    }
+    fn release_fence(&self) {
+        self.thaw_idle_grant();
         self.fence.store(false, Ordering::Release);
     }
     fn stopping(&self) -> bool {

@@ -90,12 +90,15 @@ impl LaneHost for Host {
                 .as_ref()
                 .is_some_and(|lease| lease.granted())
     }
-    fn release_fence(&self) {
+    fn thaw_idle_grant(&self) {
         self.native_lease
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take();
         self.idle_granted.store(false, Ordering::SeqCst);
+    }
+    fn release_fence(&self) {
+        self.thaw_idle_grant();
         let releasing = self.releasing.lock().unwrap().take();
         if let Some(releasing) = releasing {
             releasing();
@@ -2977,4 +2980,228 @@ fn an_abandoned_helper_thaws_its_real_lease_at_every_dispatch_boundary() {
             assert_eq!(stopped.load(Ordering::SeqCst), 0);
         });
     }
+}
+
+#[test]
+fn a_settlement_write_failure_thaws_abandoned_sessions_without_repairing_storage() {
+    const NAME: &str = "service::lane::tests::a_settlement_write_failure_thaws_abandoned_sessions_without_repairing_storage";
+    const CHILD: &str = "SPACETERM_SETTLEMENT_LIMIT_CHILD";
+    if std::env::var(CHILD).as_deref() != Ok("1") {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("SETTLEMENT_LIMIT_ENTERED"));
+        return;
+    }
+    eprintln!("SETTLEMENT_LIMIT_ENTERED");
+    use crate::idle_restart::{Activity, Frozen, Lease, Restarting, Session};
+    struct Guard(Arc<AtomicUsize>);
+    impl Frozen for Guard {
+        fn verify(&self) -> Result<(), Restarting> {
+            Ok(())
+        }
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    struct Idle(Activity, Arc<AtomicUsize>);
+    impl Session for Idle {
+        fn activity(&self) -> Activity {
+            self.0.clone()
+        }
+        fn working(&self, _: Instant) -> bool {
+            false
+        }
+        fn freeze(&self, _: Instant) -> Result<Box<dyn Frozen>, Restarting> {
+            self.1.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(Guard(self.1.clone())))
+        }
+    }
+    struct WriteLimit(libc::rlimit, libc::sighandler_t);
+    impl Drop for WriteLimit {
+        fn drop(&mut self) {
+            // SAFETY: this isolated process restores exactly its previous soft limit and handler.
+            unsafe {
+                assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &self.0), 0);
+                libc::signal(libc::SIGXFSZ, self.1);
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    struct ReadOnlyJournal(Vec<(std::ffi::CString, u32)>);
+    #[cfg(target_os = "macos")]
+    impl ReadOnlyJournal {
+        fn protect(directory: &std::path::Path) -> Self {
+            use std::os::unix::ffi::OsStrExt;
+            let mut saved = Self(Vec::new());
+            for name in ["service.json", HELPER_LOCK, "service.lock"] {
+                let path =
+                    std::ffi::CString::new(directory.join(name).as_os_str().as_bytes()).unwrap();
+                let mut metadata = std::mem::MaybeUninit::<libc::stat>::zeroed();
+                // SAFETY: these are this fixture's owned records. Immutable flags preserve
+                // mode and readability while rejecting write-open, as a read-only mount does.
+                unsafe {
+                    assert_eq!(libc::stat(path.as_ptr(), metadata.as_mut_ptr()), 0);
+                    let flags = metadata.assume_init().st_flags;
+                    saved.0.push((path, flags));
+                    assert_eq!(
+                        libc::chflags(
+                            saved.0.last().unwrap().0.as_ptr(),
+                            flags | libc::UF_IMMUTABLE
+                        ),
+                        0
+                    );
+                }
+            }
+            saved
+        }
+    }
+    #[cfg(target_os = "macos")]
+    impl Drop for ReadOnlyJournal {
+        fn drop(&mut self) {
+            for (path, flags) in &self.0 {
+                // SAFETY: restore this isolated fixture's exact original flags on every exit.
+                unsafe {
+                    assert_eq!(libc::chflags(path.as_ptr(), *flags), 0);
+                }
+            }
+        }
+    }
+    with_lane(|lane| {
+        let digest = install_pending(&lane, "1.0.0");
+        let directory = lane.service.paths.data.join("installations").join(&digest);
+        let (version, commit) = runtime::describe(&directory, &lane.service.identity).unwrap();
+        let candidate = RetainedInstallation {
+            directory,
+            version,
+            commit,
+        };
+        let now = Instant::now();
+        let activity = Activity::new(now);
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let sessions: Vec<Arc<dyn Session>> =
+            vec![Arc::new(Idle(activity.clone(), stopped.clone()))];
+        *lane.host.native_lease.lock().unwrap() = Some(
+            Lease::scan(
+                &sessions,
+                now + Duration::from_secs(7200),
+                Duration::from_secs(3600),
+            )
+            .unwrap(),
+        );
+        lane.host.fenced.store(true, Ordering::SeqCst);
+        lane.lane.watching.store(true, Ordering::SeqCst);
+        let mut record = Record {
+            id: OperationId([42; 16]),
+            actor: Actor::CORE,
+            core: lane.lane.core,
+            boot: lane.lane.boot,
+            action: Action::Update,
+            observation_digest: [0; 32],
+            candidate: Some(digest_bytes(&digest).unwrap()),
+            state: State::Admitted,
+            updated_at: 0,
+            orphaned: false,
+        };
+        let data = Directory::open(&lane.service.paths.data, false).unwrap();
+        let helper = data.lock(HELPER_LOCK, false).unwrap();
+        lane.lane.ledger().unwrap().admit(record.clone()).unwrap();
+        record = lane
+            .lane
+            .ledger()
+            .unwrap()
+            .claim(&record.id)
+            .unwrap()
+            .unwrap();
+        let calls = std::cell::Cell::new(0);
+        let abandoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::super::helper::activate_pending(&lane.service, &candidate, &record, |_| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 2 {
+                    panic!("helper abandoned its dispatch marker");
+                }
+                lane.host
+                    .native_lease
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .freeze_and_grant()
+                    .unwrap();
+                Ok(())
+            })
+        }));
+        assert!(abandoned.is_err());
+        drop(helper);
+        let retained =
+            std::fs::read(lane.service.paths.data.join("service-operations.json")).unwrap();
+        let mut previous = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: only this isolated child changes its file-size limit; existing records remain
+        // readable, but an atomic settlement write exceeds one byte and fails with EFBIG.
+        unsafe {
+            assert_eq!(libc::getrlimit(libc::RLIMIT_FSIZE, &mut previous), 0);
+            let handler = libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+            assert_ne!(handler, libc::SIG_ERR);
+            let _limit = WriteLimit(previous, handler);
+            let limited = libc::rlimit {
+                rlim_cur: 1,
+                rlim_max: previous.rlim_max,
+            };
+            assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limited), 0);
+            assert_eq!(lane.lane.settled(), Err(CoreError::StorageUnavailable));
+            #[cfg(target_os = "macos")]
+            let _read_only = ReadOnlyJournal::protect(&lane.service.paths.data);
+            #[cfg(target_os = "macos")]
+            assert!(
+                data.read_json::<serde_json::Value>("service.json").is_err(),
+                "the fixture must reject write-open"
+            );
+
+            assert!(
+                !lane.lane.release_if_settled(),
+                "the operation stays unresolved"
+            );
+            assert_eq!(
+                stopped.load(Ordering::SeqCst),
+                0,
+                "storage failure cannot retain the native freeze"
+            );
+            assert!(
+                activity.input(Instant::now()).is_ok(),
+                "input resumes while writes still fail"
+            );
+            assert!(
+                lane.host.fenced.load(Ordering::SeqCst),
+                "membership stays fenced for the unresolved operation"
+            );
+            assert!(lane.lane.watching.load(Ordering::SeqCst));
+            assert_eq!(
+                lane.lane.settled(),
+                Err(CoreError::StorageUnavailable),
+                "storage has not been repaired"
+            );
+            assert_eq!(
+                std::fs::read(lane.service.paths.data.join("service-operations.json")).unwrap(),
+                retained
+            );
+            assert!(
+                data.observe_json::<serde_json::Value>("service.json")
+                    .unwrap()
+                    .is_some()
+            );
+        }
+    });
 }
