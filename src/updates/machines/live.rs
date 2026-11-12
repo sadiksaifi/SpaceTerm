@@ -434,7 +434,7 @@ fn act(target: &Target, action: &MachineAction) -> Result<(), ActionFailure> {
         // Below the floor, Install asks the Core to fetch the Stepping Stone. The Core has it
         // when its answer shows it downloaded, whether this fetch or its own check fetched it.
         MachineAction::Install => match (lane.install(target.push.as_deref()), target.floor) {
-            (Ok(facts), Some(floor)) if !super::reaches(floor, &facts) => {
+            (Ok(facts), Some(floor)) if !super::has_floor_progress(floor, &facts) => {
                 Err(ActionFailure::NeedsFloor(floor))
             }
             (Err(ActionFailure::Failed | ActionFailure::Unreachable), Some(floor)) => {

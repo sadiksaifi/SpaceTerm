@@ -1053,6 +1053,29 @@ fn a_core_below_the_embedded_floor_gets_no_push_and_installs_from_its_feed() {
 }
 
 #[test]
+fn a_core_can_download_an_intermediate_stepping_stone_below_the_embedded_floor() {
+    // ADR 0064's feed chain: 1.2.2 needs 1.2.0, which needs 1.1.0, which admits 1.0.0.
+    let catalog = Catalog::floored("spaceterm-development", "1.2.2", "1.2.0");
+    let mut observed = facts(1, 2, None);
+    observed.facts.running = version("1.0.0");
+    let lane = ScriptedLane::new([Ok(observed.clone())]);
+    let machine = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
+    let sources = ScriptedSources::with(vec![known(PENGUIN, "penguin", false, &machine)]);
+    let adapter = LiveMachines::new(sources, catalog.embedded("spaceterm-development"));
+    let (sent, events) = async_channel::unbounded();
+    adapter.start(sent).unwrap();
+    let update = changed(&events, "the Core facts", |update| update.facts.is_some());
+    assert_eq!(update.push, None);
+
+    let mut fetched = observed.facts;
+    fetched.pending = facts(2, 2, Some("1.1.0")).facts.pending;
+    *lane.install_result.lock().unwrap() = Ok(fetched);
+    adapter.perform(PENGUIN, MachineAction::Install);
+    assert_eq!(finished(&events, &MachineAction::Install), Ok(()));
+    assert_eq!(lane.actions(), vec!["install"]);
+}
+
+#[test]
 fn install_delivers_the_offered_build_to_local_and_paired_cores() {
     for (id, local) in [(LOCAL, true), (PENGUIN, false)] {
         let catalog = Catalog::new("spaceterm-development");

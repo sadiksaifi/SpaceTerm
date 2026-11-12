@@ -83,22 +83,29 @@ pub(crate) struct FailedPush {
 
 impl FailedPush {
     /// Whether `facts` settle this failure. A Stepping Stone the Core couldn't fetch is settled
-    /// once the Core runs or has downloaded a version at or above the floor.
+    /// once the Core meets the floor or has downloaded a newer Stepping Stone toward it.
     pub(crate) fn settled_by(&self, facts: &UpdateFacts) -> bool {
         match self.failure {
-            ActionFailure::NeedsFloor(floor) => reaches(floor, facts),
+            ActionFailure::NeedsFloor(floor) => has_floor_progress(floor, facts),
             _ => false,
         }
     }
 }
 
-/// Whether the Core with `facts` runs or has downloaded a version `floor` admits.
-pub(crate) fn reaches(floor: spaceterm_core::update::ordering::Floor, facts: &UpdateFacts) -> bool {
+/// Whether the Core meets `floor` or has a newer Pending Version to restart into on the way.
+pub(crate) fn has_floor_progress(
+    floor: spaceterm_core::update::ordering::Floor,
+    facts: &UpdateFacts,
+) -> bool {
     floor.admits(&facts.running)
-        || facts
-            .pending
-            .as_ref()
-            .is_some_and(|pending| floor.admits(&pending.version))
+        || facts.pending.as_ref().is_some_and(|pending| {
+            floor.admits(&pending.version)
+                || pending
+                    .version
+                    .release()
+                    .zip(facts.running.release())
+                    .is_some_and(|(pending, running)| pending > running)
+        })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
