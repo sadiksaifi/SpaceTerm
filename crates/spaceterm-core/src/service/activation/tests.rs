@@ -1777,6 +1777,79 @@ pub(crate) fn quiet(updates: &runtime::updates::Updates) {
 }
 
 #[test]
+fn a_refused_final_recheck_never_stops_or_leaves_a_recoverable_stop() {
+    with_service(|service, previous, candidate, supervisor| {
+        set_running(&service, &supervisor);
+        let record = crate::service::operations::Record {
+            id: crate::service::operations::OperationId([1; 16]),
+            actor: crate::service::operations::Actor::CORE,
+            core: service.passive_machine_id().unwrap().unwrap(),
+            boot: [2; 32],
+            action: crate::service::operations::Action::Update,
+            observation_digest: [0; 32],
+            candidate: Some([3; 32]),
+            state: crate::service::operations::State::Running,
+            updated_at: 0,
+            orphaned: false,
+        };
+        let calls = std::cell::Cell::new(0);
+        let result =
+            crate::service::helper::activate_pending(&service, &candidate, &record, |_| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 1 {
+                    Ok(())
+                } else {
+                    Err(CoreError::Changed)
+                }
+            });
+        assert_eq!(supervisor.stops.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.get(), 2);
+        assert_eq!(result, Err(CoreError::Changed));
+        assert_eq!(*supervisor.approved.lock().unwrap(), previous.directory);
+        let data = Directory::open(&service.paths.data, false).unwrap();
+        assert!(Service::state(&data).unwrap().unwrap().activation.is_none());
+        assert_eq!(service.recover_activation().unwrap(), None);
+        assert_eq!(supervisor.stops.load(Ordering::SeqCst), 0);
+    });
+}
+
+#[test]
+fn an_interrupted_final_recheck_cannot_be_bypassed_by_journal_recovery() {
+    with_service(|service, previous, candidate, supervisor| {
+        set_running(&service, &supervisor);
+        let record = crate::service::operations::Record {
+            id: crate::service::operations::OperationId([1; 16]),
+            actor: crate::service::operations::Actor::CORE,
+            core: service.passive_machine_id().unwrap().unwrap(),
+            boot: [2; 32],
+            action: crate::service::operations::Action::Update,
+            observation_digest: [0; 32],
+            candidate: Some([3; 32]),
+            state: crate::service::operations::State::Running,
+            updated_at: 0,
+            orphaned: false,
+        };
+        let calls = std::cell::Cell::new(0);
+        let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::service::helper::activate_pending(&service, &candidate, &record, |_| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 1 {
+                    Ok(())
+                } else {
+                    panic!("helper interrupted before final check")
+                }
+            })
+        }));
+        assert!(interrupted.is_err());
+        assert_eq!(supervisor.stops.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.get(), 2);
+        assert_eq!(*supervisor.approved.lock().unwrap(), previous.directory);
+        assert!(service.recover_activation().is_err());
+        assert_eq!(supervisor.stops.load(Ordering::SeqCst), 0);
+    });
+}
+
+#[test]
 fn a_helper_refused_its_idle_stop_grant_creates_no_recoverable_stop() {
     with_service(|service, previous, candidate, supervisor| {
         set_running(&service, &supervisor);

@@ -137,24 +137,27 @@ pub(super) fn activate_pending(
     service: &Service,
     candidate: &super::RetainedInstallation,
     record: &Record,
-    grant: impl FnOnce(&Record) -> Result<(), CoreError>,
+    grant: impl FnMut(&Record) -> Result<(), CoreError>,
 ) -> Result<super::activation::ActivationPhase, CoreError> {
     let Some(approval) = service.prepare_activation(candidate)? else {
         return Ok(super::activation::ActivationPhase::Completed {
             running: service.status()?.running,
         });
     };
-    service
-        .activate_after_grant(approval, || {
-            if record.actor == super::operations::Actor::CORE {
-                grant(record)?;
-            }
-            Ok(())
-        })
-        .map(|status| status.phase)
+    let status = if record.actor == super::operations::Actor::CORE {
+        let grant = std::cell::RefCell::new(grant);
+        service.activate_after_grant(
+            approval,
+            || grant.borrow_mut()(record),
+            || grant.borrow_mut()(record),
+        )?
+    } else {
+        service.activate(approval)?
+    };
+    Ok(status.phase)
 }
 
-/// A failed or uncertain grant never creates an activation journal and never dispatches Stop.
+/// The first request freezes and grants; the second verifies that same grant before Stop.
 fn grant_stop(identity: &str, record: &Record) -> Result<(), CoreError> {
     let paths = crate::host::Paths::for_identity(identity)?;
     let mut stream = crate::host::connect(&paths)?;
