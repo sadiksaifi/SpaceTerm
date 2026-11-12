@@ -932,6 +932,8 @@ impl Drop for SpawnedPty {
                 );
             }
         }
+        // Let ordinary close traps finish their bounded grace before reader cancellation.
+        self.process.wait_before_master_close();
         self.closing.store(true, Ordering::Release);
         drop(self.reader_stop.take());
     }
@@ -967,6 +969,27 @@ impl SpawnedPty {
 }
 
 impl SpawnedChild {
+    fn wait_before_master_close(&mut self) {
+        if !self
+            .termination
+            .lock_target()
+            .as_ref()
+            .is_some_and(TerminationTarget::owns_process_group)
+        {
+            return;
+        }
+        let Some(child) = self.child.as_mut() else {
+            return;
+        };
+        if !self.termination.requested() {
+            let _ = self.termination.signal();
+        }
+        // No final wait or force-reap here: a draining child may need master closure first.
+        if Self::poll_child_until(child.as_mut(), Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT) {
+            self.child.take();
+        }
+    }
+
     fn wait_for_child(&mut self, timeout: Duration) -> io::Result<ShellExit> {
         let deadline = Instant::now() + timeout;
         loop {
