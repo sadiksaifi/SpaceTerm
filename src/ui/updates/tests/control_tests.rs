@@ -340,6 +340,57 @@ fn the_chevron_opens_spaceterm_then_every_machine_then_update_settings(
     assert!(machines.performed().is_empty());
 }
 
+/// The open list keeps its width while a row's text changes, so it never moves under the
+/// pointer. It fits its rows again the next time it opens.
+#[gpui::test]
+fn the_open_list_keeps_its_width_while_rows_change_text(cx: &mut gpui::TestAppContext) {
+    let _ = services(cx);
+    let script = Script::new(recording());
+    let (control, visual) = hosted(&script, cx);
+    visual.simulate_resize(gpui::size(gpui::px(900.0), gpui::px(580.0)));
+    visual.run_until_parked();
+    click("update-pill-menu", visual);
+    let width = |visual: &mut gpui::VisualTestContext| {
+        visual
+            .debug_bounds("update-row-app")
+            .expect("the list is open")
+            .size
+            .width
+    };
+    let opened = width(visual);
+    script.set(
+        |shown| {
+            shown.app = row(
+                "SpaceTerm",
+                "0.11.5 downloaded",
+                Some((
+                    "Relaunch to Update",
+                    Command::Desktop(DesktopAction::Update),
+                )),
+            );
+            shown.machines[0].1 = row(
+                "This Mac",
+                "Restarts into 0.11.4 after an hour with nothing running",
+                Some(("Restart Core\u{2026}", restart_core(THIS_MAC))),
+            );
+        },
+        &control,
+        visual,
+    );
+    assert_eq!(
+        width(visual),
+        opened,
+        "a longer row does not widen the open list"
+    );
+    visual.simulate_keystrokes("escape");
+    visual.run_until_parked();
+    click("update-pill-menu", visual);
+    assert!(
+        width(visual) > opened,
+        "the next opening fits the longer row"
+    );
+}
+
 /// At the default 900 x 580 window every row shows its name and its whole detail: the status
 /// with its Terminal Session count, then the action. The list stays inside the window, and
 /// assistive technology reads the detail and the heading.

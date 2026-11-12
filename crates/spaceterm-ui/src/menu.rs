@@ -898,7 +898,8 @@ impl<A: Clone + 'static> Menu<A> {
     }
 
     /// Widens the panel past its size's width so every row shows its label, detail and shortcut
-    /// in full. The window still bounds the panel.
+    /// in full when it opens. The window still bounds the panel, and an open panel keeps its
+    /// width while its rows change text.
     pub fn fit_rows(mut self) -> Self {
         self.core.fit_rows = true;
         self
@@ -1852,13 +1853,21 @@ impl<A: Clone + 'static> MenuControl<A> {
         );
         let mut panel_style = style;
         if self.fit_rows {
-            let typography = crate::control_typography(cx);
-            panel_style.metrics.panel_width = style.metrics.panel_width.max(fitted_width(
-                &entries,
-                style.metrics,
-                &typography,
-                window,
-            ));
+            // An open panel keeps the width it opened with, so a row whose text changes while
+            // the menu is open never moves the panel under the pointer.
+            let held = {
+                let state = state.read(cx);
+                state.open.then_some(state.style.metrics.panel_width)
+            };
+            panel_style.metrics.panel_width = held.unwrap_or_else(|| {
+                let typography = crate::control_typography(cx);
+                style.metrics.panel_width.max(fitted_width(
+                    &entries,
+                    style.metrics,
+                    &typography,
+                    window,
+                ))
+            });
         }
         let closed_reservation = state.update(cx, |state, cx| {
             let should_close = state.open && !enabled;
