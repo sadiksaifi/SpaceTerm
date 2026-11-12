@@ -103,13 +103,9 @@ impl UpdateControl {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut subscriptions = vec![cx.observe_window_activation(window, |_, window, cx| {
-            // A due desktop reminder waits for an active window.
-            if window.is_window_active()
-                && let Some(updates) = service(cx)
-            {
-                updates.read(cx).window_activated();
-            }
+        let mut subscriptions = vec![cx.observe_window_activation(window, |_, _, cx| {
+            // A due reminder waits until the person leaves SpaceTerm.
+            crate::updates::reminders::UpdateReminders::activation_changed(cx);
         })];
         subscriptions
             .extend(service(cx).map(|updates| cx.observe(&updates, |_, _, cx| cx.notify())));

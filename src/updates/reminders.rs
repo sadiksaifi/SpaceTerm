@@ -1,9 +1,11 @@
 //! Update Reminders: operating-system notifications about a waiting update. SpaceTerm and every
 //! SpaceTerm Core follow one cadence by ladder stage: none at Offer, one a day at Ask, one every
-//! four hours at Insist, for any waiting Pending Version, breaking or not. Reminders post only
-//! while a SpaceTerm window is active, and each one replaces the previous one for the same
-//! update. SpaceTerm's own cadence stays with its update history; a Machine's lives in memory for
-//! this run.
+//! four hours at Insist, for any waiting Pending Version, breaking or not. A reminder posts only
+//! while no SpaceTerm window is active: while one is, the title-bar pill already shows the step,
+//! so a reminder that comes due then posts once the person leaves SpaceTerm. A Machine's reminder
+//! also waits while its 24-hour Ask deferral holds. Each reminder replaces the previous one for
+//! the same update. SpaceTerm's own cadence stays with its update history; a Machine's lives in
+//! memory for this run.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -19,6 +21,10 @@ use spaceterm_core::update::facts::PendingVersion;
 
 /// The longest the schedule waits before it reads the clock again, so a changed clock is noticed.
 const RECHECK: Duration = Duration::from_secs(60 * 60);
+
+/// How long SpaceTerm must stay without an active window before a due reminder posts. Moving
+/// between two SpaceTerm windows deactivates one before the other activates.
+pub(crate) const LEFT_SPACETERM: Duration = Duration::from_millis(500);
 
 /// A clicked notification's key, with the activation token the notification server passed for
 /// the click, if any.
@@ -53,6 +59,8 @@ pub(crate) struct UpdateReminders {
     named: HashMap<MachineId, u64>,
     _subscriptions: Vec<Subscription>,
     _schedule: Task<()>,
+    /// Waits out [`LEFT_SPACETERM`] after a window lost focus.
+    leaving: Option<Task<()>>,
 }
 
 /// Keeps the scheduler alive for the application's life.
@@ -143,6 +151,7 @@ impl UpdateReminders {
                 named: HashMap::new(),
                 _subscriptions: subscriptions,
                 _schedule: schedule,
+                leaving: None,
             }
         });
         cx.set_global(InstalledReminders { scheduler: entity });
@@ -153,10 +162,37 @@ impl UpdateReminders {
             .map(|installed| installed.scheduler.clone())
     }
 
+    /// A SpaceTerm window gained or lost focus. Once SpaceTerm has had no active window for
+    /// [`LEFT_SPACETERM`], the reminders that came due while it was in front post.
+    pub(crate) fn activation_changed(cx: &mut App) {
+        let Some(reminders) = Self::global(cx) else {
+            return;
+        };
+        reminders.update(cx, |this, cx| {
+            if cx.active_window().is_some() {
+                this.leaving = None;
+                return;
+            }
+            this.leaving = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(LEFT_SPACETERM).await;
+                let _ = this.update(cx, |this, cx| {
+                    if cx.active_window().is_some() {
+                        return;
+                    }
+                    // SpaceTerm's own reminder comes due through its update service.
+                    if let Some(service) = cx.try_global::<UpdateService>().cloned() {
+                        service.0.read(cx).left_spaceterm();
+                    }
+                    this.deliver(cx);
+                });
+            }));
+        });
+    }
+
     fn deliver(&mut self, cx: &mut Context<Self>) {
         self.forget_resolved(cx);
-        // Reminders post only while the person is looking at SpaceTerm.
-        if cx.active_window().is_none() {
+        // While a SpaceTerm window is active, the title-bar pill is the reminder.
+        if cx.active_window().is_some() {
             return;
         }
         self.deliver_app(cx);
@@ -164,15 +200,19 @@ impl UpdateReminders {
         let Some(store) = MachineUpdates::global(cx) else {
             return;
         };
+        let store = store.read(cx);
         let due: Vec<(MachineId, String, String)> = store
-            .read(cx)
             .machines()
             .iter()
             .filter_map(|update| {
                 let pending = waiting(update)?;
                 let stage = ladder::stage(pending.installed_at, now);
                 let last = self.named.get(&update.machine).copied();
-                if !ladder::reminder_due(stage, last, now) {
+                let deferred = store.deferred().get(&update.machine).copied();
+                // Remind Me Tomorrow holds the reminder as it holds the title-bar step.
+                if !ladder::reminder_due(stage, last, now)
+                    || ladder::deferral_hides(stage, deferred, now)
+                {
                     return None;
                 }
                 let sessions = update.facts.as_ref().map_or(0, |facts| facts.sessions);
@@ -222,8 +262,8 @@ impl UpdateReminders {
     /// reaching Ask or Insist, or its stage's cadence passing since it was last named.
     fn next_due(&self, now: u64, cx: &App) -> Option<u64> {
         let store = MachineUpdates::global(cx)?;
+        let store = store.read(cx);
         store
-            .read(cx)
             .machines()
             .iter()
             .filter_map(|update| {
@@ -235,10 +275,15 @@ impl UpdateReminders {
                     .get(&update.machine)
                     .zip(ladder::cadence(stage))
                     .map(|(last, cadence)| last.saturating_add(cadence));
+                let deferral_ends = store
+                    .deferred()
+                    .get(&update.machine)
+                    .map(|at| at.saturating_add(ladder::ASK_DEFERRAL));
                 [
                     Some(since.saturating_add(ladder::ASK_AFTER)),
                     Some(since.saturating_add(ladder::INSIST_AFTER)),
                     reminder,
+                    deferral_ends,
                 ]
                 .into_iter()
                 .flatten()
@@ -374,10 +419,9 @@ mod tests {
             let machines = Rc::new(ScriptedMachines::default());
             let reminders = Rc::new(RecordingReminders::default());
             reminders.clock.set(Some(DOWNLOADED));
+            // SpaceTerm runs in the background unless a test brings it to the front.
             let window = cx.add_window(|_, _| gpui::EmptyView);
-            window
-                .update(cx, |_, window, _| window.activate_window())
-                .unwrap();
+            gpui::VisualTestContext::from_window(window.into(), cx).deactivate_window();
             cx.update(|cx| {
                 MachineUpdates::install(machines.clone(), cx);
                 UpdateReminders::install(reminders.clone(), cx);
@@ -514,22 +558,67 @@ mod tests {
         );
     }
 
+    /// While a SpaceTerm window is active the title-bar pill shows the step, so a reminder that
+    /// comes due then waits until the person leaves SpaceTerm.
     #[gpui::test]
-    fn reminders_wait_for_an_active_window(cx: &mut gpui::TestAppContext) {
+    fn a_reminder_never_repeats_the_pill_while_spaceterm_is_in_front(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let fixture = Fixture::new(cx);
-        gpui::VisualTestContext::from_window(fixture.window.into(), cx).deactivate_window();
+        fixture
+            .window
+            .update(cx, |_, window, _| window.activate_window())
+            .unwrap();
         fixture
             .machines
             .emit(MachineUpdatesEvent::Machines(vec![waiting_penguin(3)]));
         cx.run_until_parked();
         fixture.at(DOWNLOADED + ASK_AFTER, waiting_penguin(3), cx);
-        assert_eq!(fixture.shown(), 0);
+        assert_eq!(fixture.shown(), 0, "the pill already shows the step");
+
+        let visual = &mut gpui::VisualTestContext::from_window(fixture.window.into(), cx);
+        visual.deactivate_window();
+        cx.update(UpdateReminders::activation_changed);
+        cx.executor().advance_clock(LEFT_SPACETERM / 2);
+        cx.run_until_parked();
+        assert_eq!(fixture.shown(), 0, "moving between windows posts nothing");
+        cx.executor().advance_clock(LEFT_SPACETERM);
+        cx.run_until_parked();
+        assert_eq!(
+            fixture.shown(),
+            1,
+            "it posts once the person left SpaceTerm"
+        );
+    }
+
+    /// Remind Me Tomorrow holds a Machine's reminder for 24 hours, as it holds the title-bar step.
+    #[gpui::test]
+    fn remind_me_tomorrow_holds_the_reminder_for_a_day(cx: &mut gpui::TestAppContext) {
+        let fixture = Fixture::new(cx);
         fixture
-            .window
-            .update(cx, |_, window, _| window.activate_window())
-            .unwrap();
-        fixture.at(DOWNLOADED + ASK_AFTER + 60, waiting_penguin(3), cx);
-        assert_eq!(fixture.shown(), 1);
+            .machines
+            .emit(MachineUpdatesEvent::Machines(vec![waiting_penguin(3)]));
+        cx.run_until_parked();
+        let ask = DOWNLOADED + ASK_AFTER;
+        cx.update(|cx| {
+            MachineUpdates::global(cx)
+                .unwrap()
+                .update(cx, |store, cx| store.defer([2; 32], ask, cx));
+        });
+        fixture.at(ask, waiting_penguin(3), cx);
+        assert_eq!(fixture.shown(), 0, "the deferral holds the reminder");
+        fixture.at(
+            ask + crate::updates::ladder::ASK_DEFERRAL - 1,
+            waiting_penguin(3),
+            cx,
+        );
+        assert_eq!(fixture.shown(), 0);
+        fixture.at(
+            ask + crate::updates::ladder::ASK_DEFERRAL,
+            waiting_penguin(3),
+            cx,
+        );
+        assert_eq!(fixture.shown(), 1, "a day later it reminds again");
     }
 
     #[gpui::test]

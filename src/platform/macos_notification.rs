@@ -222,8 +222,9 @@ define_class!(
     unsafe impl NSObjectProtocol for ReminderDelegate {}
 
     unsafe impl UNUserNotificationCenterDelegate for ReminderDelegate {
-        /// An overdue reminder shows even while SpaceTerm is in front, because it is due only
-        /// while a window is active. Other notifications keep the default of showing nothing.
+        /// A reminder posts only while no SpaceTerm window is active, so nothing on screen shows
+        /// its step. It shows even when SpaceTerm is the frontmost app with no window. Other
+        /// notifications keep the default of showing nothing.
         #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
         fn will_present(
             &self,

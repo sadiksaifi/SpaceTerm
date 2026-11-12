@@ -762,8 +762,9 @@ impl ApplicationUpdates {
         self.reschedule();
     }
 
-    /// A window became active, which may let a due reminder appear.
-    pub(crate) fn window_activated(&self) {
+    /// SpaceTerm has no active window, which lets a due reminder appear. While a window is
+    /// active the title-bar pill shows the step instead.
+    pub(crate) fn left_spaceterm(&self) {
         self.reschedule();
     }
 
@@ -913,7 +914,7 @@ impl ApplicationUpdates {
                 self.model.state,
                 UpdateState::UpToDate | UpdateState::Installing { .. }
             );
-        if outstanding && cx.active_window().is_some() && self.history.reminder_due(time) {
+        if outstanding && cx.active_window().is_none() && self.history.reminder_due(time) {
             self.reminder = Some(self.stage);
             self.history.reminded(time);
         }
@@ -1835,10 +1836,9 @@ mod tests {
             }));
         }
         let wall = |adapter: &RecordingAdapter| adapter.now();
+        // SpaceTerm runs in the background, where reminders appear.
         let window = cx.add_window(|_, _| gpui::EmptyView);
-        window
-            .update(cx, |_, window, _| window.activate_window())
-            .unwrap();
+        gpui::VisualTestContext::from_window(window.into(), cx).deactivate_window();
         let document = crate::settings::SettingsDocument {
             updates: UpdatePreferences {
                 automatic_downloads: false,
@@ -1888,7 +1888,7 @@ mod tests {
             "the reminder appears when the update has waited two days"
         );
         assert_eq!(adapter.saves.get(), saves + 1, "one write at the due time");
-        service.read_with(cx, |updates, _| updates.window_activated());
+        service.read_with(cx, |updates, _| updates.left_spaceterm());
         cx.run_until_parked();
         assert_eq!(
             adapter.saves.get(),
@@ -1928,8 +1928,11 @@ mod tests {
         );
         found(&adapter, cx);
 
-        // The next daily reminder waits for an active window, then appears when one activates.
-        gpui::VisualTestContext::from_window(window.into(), cx).deactivate_window();
+        // While a window is active the pill shows the step, so the next daily reminder waits,
+        // then appears once SpaceTerm has no active window.
+        window
+            .update(cx, |_, window, _| window.activate_window())
+            .unwrap();
         let mut checks = adapter.checks.get();
         while wall(&adapter) < START + 2 * DAY {
             step(cx);
@@ -1941,12 +1944,10 @@ mod tests {
         assert_eq!(
             service.read_with(cx, |updates, _| updates.reminder()),
             None,
-            "a due reminder waits for an active window"
+            "a due reminder waits while a window is active"
         );
-        window
-            .update(cx, |_, window, _| window.activate_window())
-            .unwrap();
-        service.read_with(cx, |updates, _| updates.window_activated());
+        gpui::VisualTestContext::from_window(window.into(), cx).deactivate_window();
+        service.read_with(cx, |updates, _| updates.left_spaceterm());
         cx.run_until_parked();
         assert_eq!(
             service.read_with(cx, |updates, _| updates.reminder()),
@@ -1971,10 +1972,9 @@ mod tests {
                 START + slept.get() + (executor.now() - began).as_secs()
             }));
         }
+        // SpaceTerm runs in the background, where reminders appear.
         let window = cx.add_window(|_, _| gpui::EmptyView);
-        window
-            .update(cx, |_, window, _| window.activate_window())
-            .unwrap();
+        gpui::VisualTestContext::from_window(window.into(), cx).deactivate_window();
         let document = crate::settings::SettingsDocument {
             updates: UpdatePreferences {
                 automatic_downloads: false,

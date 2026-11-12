@@ -1269,7 +1269,7 @@ fn waiting(machine: MachineId, sessions: u32) -> MachineUpdate {
 }
 
 /// A reminder's click performs the step: a Core's opens its confirmation from a fresh preview
-/// and restarts nothing by itself. Reminders post only while a window is active.
+/// and restarts nothing by itself. Reminders post only once the person left SpaceTerm.
 #[gpui::test]
 fn a_reminder_click_performs_the_step_and_asks_first(cx: &mut gpui::TestAppContext) {
     use crate::updates::reminders::UpdateReminders;
@@ -1290,6 +1290,16 @@ fn a_reminder_click_performs_the_step_and_asks_first(cx: &mut gpui::TestAppConte
     // A breaking update reminds under every cadence; the reminder's words are the ladder's.
     pending.breaking = true;
     machines.emit(MachineUpdatesEvent::Machines(vec![asking]));
+    visual.run_until_parked();
+    assert!(
+        reminders.shown.borrow().is_empty(),
+        "the pill is the reminder while the window is active"
+    );
+    visual.deactivate_window();
+    visual.update(|_, cx| UpdateReminders::activation_changed(cx));
+    visual
+        .executor()
+        .advance_clock(crate::updates::reminders::LEFT_SPACETERM);
     visual.run_until_parked();
 
     let shown = reminders.shown.borrow().clone();

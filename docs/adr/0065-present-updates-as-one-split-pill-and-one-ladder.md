@@ -74,7 +74,7 @@ Two hard stops sit above the ladder, with no clock:
 
 ### Update Reminders
 
-[ADR 0063](0063-own-notification-authorization-in-the-desktop.md) owns who posts. An Update Reminder posts only while a SpaceTerm window is active, for SpaceTerm and every SpaceTerm Core alike, at its stage's cadence: daily from Ask, every four hours from Insist. Each new reminder replaces the previous one for the same update. A click performs the step: SpaceTerm relaunches, and a SpaceTerm Core reminder opens the Restart Core confirmation.
+[ADR 0063](0063-own-notification-authorization-in-the-desktop.md) owns who posts. An Update Reminder posts at its stage's cadence, for SpaceTerm and every SpaceTerm Core alike: daily from Ask, every four hours from Insist. It posts only while no SpaceTerm window is active, because an active window's title bar already shows the step. A reminder that comes due while a window is active posts once SpaceTerm has had no active window for a moment. A SpaceTerm Core reminder also waits while that Machine's 24-hour deferral holds. Each new reminder replaces the previous one for the same update. A click performs the step: SpaceTerm relaunches, and a SpaceTerm Core reminder opens the Restart Core confirmation.
 
 ### Parameters
 
