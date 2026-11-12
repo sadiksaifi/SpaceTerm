@@ -773,6 +773,8 @@ struct SpawnedPty {
     master: Box<dyn MasterPty + Send>,
     reader: Option<Box<dyn Read + Send>>,
     writer: Box<dyn Write + Send>,
+    reader_stop: Option<OwnedFd>,
+    closing: Arc<AtomicBool>,
     /// The shell's process group, which leads its own session.
     shell_process_group: libc::pid_t,
     probe: Arc<ShellSession>,
@@ -793,6 +795,8 @@ struct PtyReader {
     activity: Arc<Mutex<Option<spaceterm_core::idle_restart::Activity>>>,
     reader: MasterReader,
     readiness: OwnedFd,
+    stop: OwnedFd,
+    closing: Arc<AtomicBool>,
     /// Counts every native read, including each one retried after it would block.
     counters: Arc<TerminalCounters>,
 }
@@ -800,29 +804,45 @@ struct PtyReader {
 impl Read for PtyReader {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         loop {
+            if self.closing.load(Ordering::Acquire) {
+                return Ok(0);
+            }
             let activity = self
                 .activity
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
-            let read = match activity {
-                Some(activity) => activity.read(|| self.reader.read(buffer)),
-                None => self.reader.read(buffer),
+            let mut read = || {
+                let result = self.reader.read(buffer);
+                self.counters.record_pty_read(&result);
+                result
             };
-            self.counters.record_pty_read(&read);
-            match read {
+            let result = match activity {
+                Some(activity) => activity.read(read),
+                None => read(),
+            };
+            match result {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    let mut poll = libc::pollfd {
-                        fd: self.readiness.as_raw_fd(),
-                        events: libc::POLLIN,
-                        revents: 0,
-                    };
-                    // SAFETY: readiness owns a live descriptor and poll points to one initialized entry.
-                    if unsafe { libc::poll(&mut poll, 1, -1) } == -1 {
+                    let mut descriptors = [
+                        libc::pollfd {
+                            fd: self.readiness.as_raw_fd(),
+                            events: libc::POLLIN,
+                            revents: 0,
+                        },
+                        libc::pollfd {
+                            fd: self.stop.as_raw_fd(),
+                            events: libc::POLLIN,
+                            revents: 0,
+                        },
+                    ];
+                    // SAFETY: both descriptors are owned and the result array is writable.
+                    if unsafe { libc::poll(descriptors.as_mut_ptr(), 2, -1) } < 0 {
                         let error = io::Error::last_os_error();
                         if error.kind() != io::ErrorKind::Interrupted {
                             return Err(error);
                         }
+                    } else if descriptors[1].revents != 0 {
+                        return Ok(0);
                     }
                 }
                 result => return result,
@@ -852,13 +872,10 @@ impl Drop for SpawnedPty {
                 );
             }
         }
-        // The processes can no longer write. Release the reader's receipt gate so it can read
-        // hangup and exit; NativePtyOwner joins it after this adapter drops.
-        *self
-            .probe
-            .activity
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
+        // An outside slave holder can suppress master EOF on Linux. Wake the reader through
+        // a separate descriptor so it closes its masters without reading past the grant.
+        self.closing.store(true, Ordering::Release);
+        drop(self.reader_stop.take());
     }
 }
 
@@ -1284,6 +1301,9 @@ fn spawn_command_in_pty(
         .try_clone_to_owned()
         .map_err(|error| PtyError::CloneReader(error.into()))?;
 
+    let (reader_stop, owner_stop) = std::os::unix::net::UnixStream::pair()
+        .map_err(|error| PtyError::CloneReader(error.into()))?;
+    let closing = Arc::new(AtomicBool::new(false));
     let mut child = pair
         .slave
         .spawn_command(command)
@@ -1316,6 +1336,8 @@ fn spawn_command_in_pty(
         activity: Arc::clone(&activity),
         reader,
         readiness,
+        stop: reader_stop.into(),
+        closing: closing.clone(),
         counters,
     });
 
@@ -1369,6 +1391,8 @@ fn spawn_command_in_pty(
             master: pair.master,
             reader: Some(Box::new(reader)),
             writer,
+            reader_stop: Some(owner_stop.into()),
+            closing,
             shell_process_group: process_group,
             probe,
             _foreground: foreground,
@@ -1506,12 +1530,63 @@ mod reader_tests {
     }
 
     #[test]
+    fn closing_the_owner_wakes_a_reader_even_while_an_outside_holder_suppresses_eof() {
+        struct NoOutput(Option<std::sync::mpsc::Sender<()>>);
+        impl Read for NoOutput {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                if let Some(attempted) = self.0.take() {
+                    attempted.send(()).unwrap();
+                    Err(io::ErrorKind::WouldBlock.into())
+                } else {
+                    Ok(0)
+                }
+            }
+        }
+
+        let (attempted, first_read) = std::sync::mpsc::channel();
+        let (finished, result) = std::sync::mpsc::channel();
+        let (readiness, mut outside_holder) = UnixStream::pair().unwrap();
+        let (stop, owner_stop) = UnixStream::pair().unwrap();
+        let counters = Arc::new(TerminalCounters::default());
+        let mut reader = PtyReader {
+            activity: Arc::default(),
+            reader: MasterReader {
+                inner: Box::new(NoOutput(Some(attempted))),
+                host: Arc::new(HangupOnIo),
+            },
+            readiness: readiness.into(),
+            stop: stop.into(),
+            closing: Arc::new(AtomicBool::new(false)),
+            counters: counters.clone(),
+        };
+        let worker = std::thread::spawn(move || {
+            finished.send(reader.read(&mut [0; 16])).unwrap();
+        });
+        first_read
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap();
+        drop(owner_stop);
+        let stopped = result.recv_timeout(std::time::Duration::from_secs(3));
+        // Also join the worker if a regression leaves it waiting for master readiness.
+        outside_holder.write_all(&[1]).unwrap();
+        worker.join().unwrap();
+        assert_eq!(
+            stopped
+                .expect("owner closure must wake the reader")
+                .unwrap(),
+            0
+        );
+        assert_eq!(counters.snapshot().pty_read_attempts, 1);
+    }
+
+    #[test]
     fn every_native_read_counts_as_an_attempt_and_only_data_counts_bytes() {
         let counters = Arc::new(TerminalCounters::default());
         // The readiness descriptor always polls readable, so a read that would block retries
         // at once.
         let (readiness, mut ready) = UnixStream::pair().unwrap();
         ready.write_all(&[1]).unwrap();
+        let (stop, _keep_stop_open) = UnixStream::pair().unwrap();
         let mut reader = PtyReader {
             activity: Arc::default(),
             reader: MasterReader {
@@ -1525,6 +1600,8 @@ mod reader_tests {
                 host: Arc::new(HangupOnIo),
             },
             readiness: readiness.into(),
+            stop: stop.into(),
+            closing: Arc::new(AtomicBool::new(false)),
             counters: Arc::clone(&counters),
         };
         let mut buffer = [0; 16];
@@ -3592,6 +3669,8 @@ mod tests {
                 master: Box::new(TestMasterPty::default()),
                 reader: Some(Box::new(io::empty())),
                 writer: Box::new(io::sink()),
+                reader_stop: None,
+                closing: Arc::new(AtomicBool::new(false)),
                 shell_process_group: 0,
                 _foreground: None,
                 probe: Arc::new(ShellSession {
