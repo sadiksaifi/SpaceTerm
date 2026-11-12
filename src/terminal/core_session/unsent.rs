@@ -16,12 +16,22 @@ const MAX_TEXT_BYTES: usize = 64 * 1024;
 #[derive(Debug, Default)]
 pub(crate) struct HiddenSerials {
     serials: std::collections::BTreeSet<u32>,
+    /// Input typed at a hidden prompt is being handed to the link, which numbers it. The link
+    /// can fail or refuse it before its serial is recorded, so it already counts as hidden.
+    sending: bool,
 }
 
 impl HiddenSerials {
-    /// The worker sent `serial`, typed at a hidden prompt when `hidden`.
-    pub(super) fn sent(&mut self, serial: u32, hidden: bool) {
-        if hidden {
+    /// The worker hands the link input typed at a hidden prompt when `hidden`.
+    pub(super) fn sending(&mut self, hidden: bool) {
+        self.sending = hidden;
+    }
+
+    /// The link numbered the input being handed to it `serial`, or refused it when `None`.
+    pub(super) fn sent(&mut self, serial: Option<u32>) {
+        if std::mem::take(&mut self.sending)
+            && let Some(serial) = serial
+        {
             self.serials.insert(serial);
         }
     }
@@ -33,18 +43,19 @@ impl HiddenSerials {
 
     /// Whether `serial` was typed at a hidden prompt.
     pub(super) fn hidden(&self, serial: u32) -> bool {
-        self.serials.contains(&serial)
+        self.sending || self.serials.contains(&serial)
     }
 
     /// Whether any input the Core has not confirmed was typed at a hidden prompt. Unconfirmed
     /// input comes back as one list, so one hidden serial hides all of it.
     pub(super) fn any(&self) -> bool {
-        !self.serials.is_empty()
+        self.sending || !self.serials.is_empty()
     }
 
     /// A new channel numbers its Input from 1.
     pub(super) fn clear(&mut self) {
         self.serials.clear();
+        self.sending = false;
     }
 }
 

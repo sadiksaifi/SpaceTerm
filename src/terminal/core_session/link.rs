@@ -757,13 +757,24 @@ impl PaneLink {
         self.pushed.as_ref().and_then(|pushed| pushed.due())
     }
 
-    fn sent(&self, serial: u32) -> u32 {
-        self.last_input.set(self.last_input.get().max(serial));
+    /// Hands input to the link through `send`. Whether it was typed at a hidden prompt is
+    /// recorded before the link holds it, so a failure or refusal on the link's thread before
+    /// its serial is known never keeps its text.
+    fn hand_off(&self, send: impl FnOnce() -> Result<u32, LinkError>) -> Result<u32, LinkError> {
+        let hidden = self.sending_hidden.load(Ordering::Acquire);
         self.hidden_serials
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .sent(serial, self.sending_hidden.load(Ordering::Acquire));
-        serial
+            .sending(hidden);
+        let result = send();
+        self.hidden_serials
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .sent(result.as_ref().ok().copied());
+        if let Ok(serial) = result {
+            self.last_input.set(self.last_input.get().max(serial));
+        }
+        result
     }
 
     /// Input outcomes and the link's end settle here. Frames and every other Pane event queue in
@@ -924,17 +935,16 @@ impl PaneLink {
         generation: u64,
         events: Vec<InputEvent>,
     ) -> Result<u32, CoreError> {
-        Ok(self.sent(self.bound(lease)?.input(generation, events)?))
+        let channel = self.bound(lease)?;
+        Ok(self.hand_off(|| channel.input(generation, events))?)
     }
 
     /// Sends pointer or wheel input. While the link's urgent queue is full the event is dropped:
     /// later motion replaces it, and a stall must not end the Pane's connection.
     fn pointer(&self, lease: Lease, generation: u64, event: InputEvent) -> Result<(), CoreError> {
-        match self.bound(lease)?.input(generation, vec![event]) {
-            Ok(serial) => {
-                self.sent(serial);
-                Ok(())
-            }
+        let channel = self.bound(lease)?;
+        match self.hand_off(|| channel.input(generation, vec![event])) {
+            Ok(_) => Ok(()),
             Err(LinkError::Busy) => Ok(()),
             Err(error) => Err(error.into()),
         }
@@ -977,7 +987,7 @@ impl PaneLink {
     ) -> Result<Reply, CoreError> {
         let channel = self.bound(lease)?;
         let mut received = self.inbox.state.lock().unwrap_or_else(|e| e.into_inner());
-        let serial = self.sent(send(channel)?);
+        let serial = self.hand_off(|| send(channel))?;
         // The sink waits for this lock, so the outcome cannot arrive before its registration.
         received.awaited.insert(serial);
         drop(received);
@@ -2213,6 +2223,59 @@ mod tests {
             _ => {}
         }
         Ok(Reply::Unchanged)
+    }
+
+    /// The link fails right after it takes the first key typed at a hidden prompt, before the
+    /// worker learns its serial. The password is never kept; the loss still is.
+    #[test]
+    fn a_link_that_fails_during_a_hidden_send_keeps_no_text() {
+        use spaceterm_core::connection::link::{LinkError, LinkEvent};
+        let now = std::time::Instant::now();
+        let link = CoreLink::new(Arc::new(|_: LinkEvent| {}), Arc::new(|| {}), now);
+        let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+        let client = PaneLink::new(link.clone(), None, Arc::clone(&notify));
+        let channel = link
+            .open_channel(client.sink(super::super::inbox::Inbox::new(notify)))
+            .unwrap();
+        let _claim = channel
+            .claim(
+                spaceterm_core::attachments::Attachment {
+                    workspace: [1; 32],
+                    generation: 1,
+                },
+                [2; 32],
+                pane::AttachmentClaim::Select { explicit: true },
+                pane::PaneSize {
+                    columns: 80,
+                    rows: 24,
+                    cell_width: 8,
+                    cell_height: 16,
+                },
+                None,
+            )
+            .unwrap();
+        client
+            .bound_channel
+            .store(channel.channel().unwrap().0, Ordering::Release);
+        client.sending_hidden.store(true, Ordering::Release);
+        let _ = client.hand_off(|| {
+            let serial = channel.input(
+                1,
+                vec![InputEvent::Paste {
+                    text: "hunter2".into(),
+                    last: true,
+                }],
+            );
+            link.fail(LinkError::Closed);
+            serial
+        });
+        assert_eq!(
+            client.unsent.lock().unwrap().input(),
+            Some(unsent::UnsentInput {
+                delivery: unsent::Delivery::Unknown,
+                text: String::new(),
+            })
+        );
     }
 
     /// A lost connection keeps only the input the Core never confirmed, as delivery unknown.
