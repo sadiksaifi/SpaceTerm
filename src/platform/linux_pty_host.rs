@@ -102,6 +102,14 @@ impl UnixPtyHost for LinuxPtyHost {
         for entry in std::fs::read_dir(&directory)? {
             let path = entry?.path();
             let target = std::fs::read_link(&path)?;
+            // An open /dev/tty keeps its original terminal after setsid. Its symlink
+            // names the alias, so it cannot prove which slave it addresses without
+            // following a target. An unresolved alias counts as work.
+            if target == std::path::Path::new("/dev/tty")
+                || target == std::path::Path::new("/dev/tty (deleted)")
+            {
+                return Err(io::Error::other("an alias terminal holder is unresolved"));
+            }
             if target == slave {
                 found = true;
             }

@@ -1956,6 +1956,123 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "child of a_detached_dev_tty_holder_refuses_stop_and_keeps_running"]
+    fn detached_dev_tty_holder_child() {
+        let Some(directory) = env::var_os("SPACETERM_TEST_TTY_ALIAS") else {
+            return;
+        };
+        let directory = std::path::PathBuf::from(directory);
+        let mut terminal = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+            .open("/dev/tty")
+            .unwrap();
+        // SAFETY: this child is not its process group's leader. Keep only the self-opened
+        // alias descriptor; setsid removes it from the original session without closing it.
+        assert!(unsafe { libc::setsid() } > 0);
+        for descriptor in 0..=2 {
+            // SAFETY: these are the child's inherited standard descriptors.
+            unsafe { libc::close(descriptor) };
+        }
+        std::fs::write(directory.join("ready"), std::process::id().to_string()).unwrap();
+        while !directory.join("write").exists() {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let result = terminal.write_all(b"ALIAS_ALIVE");
+        std::fs::write(
+            directory.join("result"),
+            if result.is_ok() { "ok" } else { "error" },
+        )
+        .unwrap();
+        while !directory.join("finish").exists() {
+            thread::sleep(Duration::from_millis(1));
+        }
+        std::process::exit(0);
+    }
+
+    #[test]
+    fn a_detached_dev_tty_holder_refuses_stop_and_keeps_running() {
+        const NAME: &str =
+            "platform::unix_pty::tests::a_detached_dev_tty_holder_refuses_stop_and_keeps_running";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _isolation = lock_real_pty_test();
+        let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+        let host = Arc::new(KnownProcesses {
+            real: test_host(),
+            known: Mutex::new([std::process::id() as i32].into_iter().collect()),
+        });
+        let mut command = idle_shell_command();
+        command.args(["-c", "\"$1\" --exact platform::unix_pty::tests::detached_dev_tty_holder_child --ignored --nocapture & printf READY; read line", "alias-parent"]);
+        command.arg(std::env::current_exe().unwrap());
+        command.env("SPACETERM_TEST_TTY_ALIAS", fixture.path());
+        let (mut pty, terminator) =
+            spawn_command_in_pty(host.clone(), PtySize::default(), command, Arc::default())
+                .unwrap();
+        let mut reader = pty.take_reader().unwrap();
+        read_output_marker(&mut reader, b"READY");
+        let wait = |name: &str| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let path = fixture.path().join(name);
+            while !path.exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "the alias holder did not reach {name}"
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+            std::fs::read_to_string(path).unwrap()
+        };
+        let pid = wait("ready").parse::<i32>().unwrap();
+        let identity = test_host().observe_exactly(pid).unwrap().unwrap().identity;
+        assert_ne!(
+            test_host().observe_exactly(pid).unwrap().unwrap().session,
+            pty.probe.session.leader.process
+        );
+        struct Holder(Box<dyn ProcessControl>);
+        impl Drop for Holder {
+            fn drop(&mut self) {
+                let _ = self.0.signal(libc::SIGKILL);
+            }
+        }
+        let holder = Holder(test_host().pin_process(identity).unwrap());
+        host.known.lock().unwrap().insert(pid);
+        // The helper closed inherited terminal FDs before ready. Drain its harness startup
+        // output so an unread kernel byte cannot independently mask the holder regression.
+        while test_host()
+            .pending_output(pty.probe.foreground.upgrade().unwrap().as_raw_fd())
+            .unwrap()
+        {
+            let mut bytes = [0_u8; 4096];
+            assert!(reader.read(&mut bytes).unwrap() > 0);
+        }
+        await_native_checkpoint(pty.probe.as_ref());
+        let grant = pty.probe.freeze();
+        let refused = grant.is_err();
+        drop(grant);
+        assert!(
+            !holder.0.stopped().unwrap(),
+            "the outside holder must never be stopped"
+        );
+        std::fs::write(fixture.path().join("write"), b"now").unwrap();
+        let result = wait("result");
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            result, "ok",
+            "the pre-existing alias still addresses the old terminal"
+        );
+        #[cfg(target_os = "macos")]
+        let _ = result; // Darwin may resolve /dev/tty again at I/O rather than at open.
+        std::fs::write(fixture.path().join("finish"), b"now").unwrap();
+        terminator.terminate().unwrap();
+        drop(reader);
+        drop(pty);
+        assert!(refused, "a detached /dev/tty holder must refuse the grant");
+    }
+
+    #[test]
     fn an_outside_slave_holder_refuses_the_grant_without_stopping_the_holder() {
         const NAME: &str = "platform::unix_pty::tests::an_outside_slave_holder_refuses_the_grant_without_stopping_the_holder";
         if isolate_real_pty_test(NAME) {

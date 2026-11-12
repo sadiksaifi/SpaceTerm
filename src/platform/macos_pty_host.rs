@@ -158,6 +158,11 @@ impl UnixPtyHost for MacosPtyHost {
             let info = unsafe { info.assume_init() };
             let path = std::ffi::CStr::from_bytes_until_nul(&info.path)
                 .map_err(|_| io::Error::other("unreadable vnode path"))?;
+            // A generic controlling-terminal alias does not establish its original slave
+            // after the process leaves the session. Refuse instead of assuming it is unrelated.
+            if path.to_bytes() == b"/dev/tty" {
+                return Err(io::Error::other("an alias terminal holder is unresolved"));
+            }
             if path.to_bytes() == slave.as_os_str().as_bytes()
                 || (u32::from(info.vnode.stat.mode) & u32::from(libc::S_IFMT)
                     == u32::from(libc::S_IFCHR)
