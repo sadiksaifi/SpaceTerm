@@ -306,10 +306,11 @@ fn build() -> Deck {
                             std::slice::from_ref(&update),
                             std::slice::from_ref(&preview),
                             true,
-                            now,
                         ) else {
                             continue;
                         };
+                        let confirmation = confirmation
+                            .defers(|_| crate::updates::state::cancel_defers(&update, marks, now));
                         deck.field(Role::Text, &confirmation.title);
                         deck.field(Role::Text, &confirmation.message);
                         deck.field(Role::Label, &confirmation.button);

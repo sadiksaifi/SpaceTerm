@@ -637,6 +637,14 @@ impl AppRow {
     }
 }
 
+/// Whether Cancel in `update`'s restart confirmation hides its step for a day: its row waits on
+/// a downloaded version at the Ask stage and is no hard stop. The confirmation's button text and
+/// the recorded deferral both read this one check.
+pub(crate) fn cancel_defers(update: &MachineUpdate, marks: Marks<'_>, now: u64) -> bool {
+    let row = MachineRow::new(update, marks, now);
+    row.ladder == Some(Stage::Ask) && row.blocked.is_none()
+}
+
 impl MachineRow {
     pub(crate) fn new(update: &MachineUpdate, marks: Marks<'_>, now: u64) -> Self {
         let facts = update

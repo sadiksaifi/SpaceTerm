@@ -853,7 +853,6 @@ fn the_rows_and_the_confirmation_name_the_software_and_the_consequence() {
         std::slice::from_ref(&this_mac),
         std::slice::from_ref(&preview),
         false,
-        NOW,
     )
     .unwrap();
     assert_eq!(
@@ -865,36 +864,7 @@ fn the_rows_and_the_confirmation_name_the_software_and_the_consequence() {
         "SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 2 Terminal Sessions. Workspaces, Tabs and Panes stay."
     );
     assert_eq!(confirmation.button.as_ref(), "Restart Core");
-    assert_eq!(
-        confirmation.cancel.as_ref(),
-        "Remind Me Tomorrow",
-        "at Ask the other button hides the step for a day, and says so"
-    );
     assert!(confirmation.approval.holds(&[this_mac.clone()]));
-    for days in [1, 8] {
-        let mut staged = this_mac.clone();
-        staged
-            .facts
-            .as_mut()
-            .unwrap()
-            .pending
-            .as_mut()
-            .unwrap()
-            .installed_at = NOW - days * DAY;
-        let cancel = super::super::confirm::previewed(
-            std::slice::from_ref(&staged),
-            std::slice::from_ref(&preview),
-            false,
-            NOW,
-        )
-        .unwrap()
-        .cancel;
-        assert_eq!(
-            cancel.as_ref(),
-            "Cancel",
-            "at Offer and Insist it changes nothing: {days} days"
-        );
-    }
 
     let mut breaking = this_mac.clone();
     let pending = breaking.facts.as_mut().unwrap().pending.as_mut().unwrap();
@@ -907,7 +877,7 @@ fn the_rows_and_the_confirmation_name_the_software_and_the_consequence() {
         sessions: 0,
         ..preview
     };
-    let confirmation = super::super::confirm::previewed(&[breaking], &[none], false, NOW).unwrap();
+    let confirmation = super::super::confirm::previewed(&[breaking], &[none], false).unwrap();
     assert_eq!(
         confirmation.message.as_ref(),
         "SpaceTerm Core restarts from 0.11.3 to 0.11.4. No Terminal Session is open. Workspaces, Tabs and Panes stay. SpaceTerm on iPad can\u{2019}t connect to This Mac until it updates."
@@ -1566,7 +1536,6 @@ fn a_confirmation_follows_the_fresh_preview_and_its_approval_the_described_work(
         std::slice::from_ref(&cached),
         std::slice::from_ref(&fresh),
         false,
-        NOW,
     )
     .unwrap();
     assert_eq!(
@@ -1587,8 +1556,7 @@ fn a_confirmation_follows_the_fresh_preview_and_its_approval_the_described_work(
         previewed(
             std::slice::from_ref(&observed),
             std::slice::from_ref(&nothing_open),
-            false,
-            NOW
+            false
         ),
         None,
         "nothing ends and nothing breaks: no question"
@@ -1598,7 +1566,6 @@ fn a_confirmation_follows_the_fresh_preview_and_its_approval_the_described_work(
         std::slice::from_ref(&unobserved),
         std::slice::from_ref(&nothing_open),
         false,
-        NOW,
     )
     .expect("an unobserved target may be breaking, so it asks");
     assert!(!asked.approval.holds(std::slice::from_ref(&unobserved)));
@@ -1608,7 +1575,6 @@ fn a_confirmation_follows_the_fresh_preview_and_its_approval_the_described_work(
         std::slice::from_ref(&two),
         std::slice::from_ref(&fresh),
         false,
-        NOW,
     )
     .unwrap()
     .approval;
@@ -1641,36 +1607,43 @@ fn a_confirmation_follows_the_fresh_preview_and_its_approval_the_described_work(
 }
 
 /// Through the store: a restart that ends sessions asks, and approving executes exactly the
-/// previewed work. Cancel records a deferral only at the Ask stage: Cancel at Offer leaves the
-/// first Ask step to show, and an Insist step never hides (L3).
+/// previewed work. Cancel records a deferral only where the update waits at the Ask stage on a
+/// downloaded version: Cancel at Offer leaves the first Ask step to show, an Insist step never
+/// hides (L3), and Try Again after a failed start at Ask hides nothing. The button reads "Remind
+/// Me Tomorrow" exactly where it defers.
 #[gpui::test]
 fn a_requested_restart_asks_then_runs_or_defers_only_at_ask(cx: &mut gpui::TestAppContext) {
     use crate::updates::machines::store::{Ask, request};
     let now = crate::updates::now();
+    let failed_start = |mut update: MachineUpdate| {
+        update.facts.as_mut().unwrap().last_failure = Some(UpdateFailure {
+            id: 7,
+            at: now,
+            version: version("0.11.4"),
+            kind: FailureKind::Start(StartFailure::PortInUse),
+        });
+        update
+    };
+    let at = |installed_at| waiting(LOCAL, "This Mac", 2, false, installed_at);
     let cases = [
-        (true, now - 3 * DAY, false),
-        (false, now - ladder::ASK_AFTER + 60, false),
-        (false, now - 3 * DAY, true),
-        (false, now - 8 * DAY, false),
+        (true, at(now - 3 * DAY), true),
+        (false, at(now - ladder::ASK_AFTER + 60), false),
+        (false, at(now - 3 * DAY), true),
+        (false, at(now - 8 * DAY), false),
+        (false, failed_start(at(now - 3 * DAY)), false),
     ];
-    for (approve, installed_at, defers) in cases {
+    for (approve, update, defers) in cases {
         let (adapter, store) = installed_store(cx);
-        adapter.emit(MachineUpdatesEvent::Machines(vec![waiting(
-            LOCAL,
-            "This Mac",
-            2,
-            false,
-            installed_at,
-        )]));
+        adapter.emit(MachineUpdatesEvent::Machines(vec![update.clone()]));
         cx.run_until_parked();
-        let asked = Rc::new(std::cell::Cell::new(0));
+        let asked = Rc::new(std::cell::RefCell::new(Vec::new()));
         let counted = asked.clone();
         let ask: Ask = Rc::new(move |confirmation, answered, cx| {
             assert_eq!(
                 confirmation.title.as_ref(),
                 "Restart SpaceTerm Core on This Mac?"
             );
-            counted.set(counted.get() + 1);
+            counted.borrow_mut().push(confirmation.cancel.to_string());
             answered(approve, cx);
         });
         cx.update(|cx| {
@@ -1683,7 +1656,12 @@ fn a_requested_restart_asks_then_runs_or_defers_only_at_ask(cx: &mut gpui::TestA
             )
         });
         cx.run_until_parked();
-        assert_eq!(asked.get(), 1);
+        let label = if defers {
+            "Remind Me Tomorrow"
+        } else {
+            "Cancel"
+        };
+        assert_eq!(*asked.borrow(), [label], "{update:?}");
         assert_eq!(
             adapter.executed_actions(),
             if approve {
@@ -1694,9 +1672,8 @@ fn a_requested_restart_asks_then_runs_or_defers_only_at_ask(cx: &mut gpui::TestA
         );
         assert_eq!(
             store.read_with(cx, |store, _| store.deferred().contains_key(&LOCAL)),
-            defers,
-            "installed {} seconds ago",
-            now - installed_at
+            defers && !approve,
+            "{update:?}"
         );
     }
 }
