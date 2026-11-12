@@ -20,6 +20,8 @@ use std::time::Instant;
 struct StartReplyLoss {
     /// The server's end drops every Input message while set, so input stays unconfirmed.
     hold_input: AtomicBool,
+    /// The channel and serial of each held Input message that carried a key.
+    held_keys: Mutex<Vec<(protocol::Channel, u32)>>,
     armed: AtomicBool,
     starts: AtomicUsize,
     accepted: Mutex<Option<[u8; 32]>>,
@@ -107,6 +109,19 @@ impl Carrier for Counting {
             && self.start_loss.hold_input.load(Ordering::Acquire)
             && held.kind == protocol::frame::Kind::Input as u8
         {
+            if let Some(protocol::ClientMessage::Input(input)) =
+                self.requests.client(held.clone())?
+                && input
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, protocol::InputEvent::Key(_)))
+            {
+                self.start_loss
+                    .held_keys
+                    .lock()
+                    .unwrap()
+                    .push((input.channel, input.serial));
+            }
             self.traffic.client_frames.fetch_add(1, Ordering::SeqCst);
             frame = self.inner.receive()?;
         }
@@ -525,6 +540,56 @@ fn a_reattached_session_offers_what_a_lost_connection_left_unconfirmed() {
         Default::default(),
         "it says so once"
     );
+    drop(started);
+}
+
+/// Types `text` while the server end holds input, and waits until its key left this client.
+fn type_held_key(
+    core: &ConnectedPane,
+    started: &crate::terminal::StartedTerminalSession,
+    text: &str,
+) -> (protocol::Channel, u32) {
+    core.start_loss.hold_input.store(true, Ordering::Release);
+    let before = core.start_loss.held_keys.lock().unwrap().len();
+    started.handle.key(KeyInput::text_input(text));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(held) = core.start_loss.held_keys.lock().unwrap().get(before) {
+            return *held;
+        }
+        assert!(Instant::now() < deadline, "the key never left the client");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// The Core refuses the first of two keys in flight for an idle restart grant, and the worker
+/// sees the refusal while nothing else is queued. Both keys are kept, and the reattached
+/// Session offers all of what was typed.
+#[test]
+fn a_refusal_seen_while_idle_keeps_every_key_in_flight() {
+    use protocol::{CoreMessage, PaneMessage, frame::encode_core};
+    let (core, started) = typing_pane();
+    let state = Arc::clone(&core.factory.state);
+    let (channel, refused) = type_held_key(&core, &started, "git ");
+    type_held_key(&core, &started, "push");
+    let wire = encode_core(&CoreMessage::Pane(PaneMessage {
+        channel,
+        event: protocol::PaneEvent::InputRestarting {
+            channel,
+            serial: refused,
+        },
+    }))
+    .unwrap();
+    let link = core.factory.core.link().unwrap();
+    for bytes in &wire.frames {
+        link.receive(RawFrame::parse(bytes).unwrap(), Instant::now())
+            .unwrap();
+    }
+    core.start_loss.hold_input.store(false, Ordering::Release);
+    let notice = reattach_notice(&started).expect("the reattached Session says what was kept");
+    assert_eq!(notice.interruption, unsent::Interruption::Restart);
+    assert_eq!(notice.input.text, "git push", "no key in flight is lost");
+    drop(state);
     drop(started);
 }
 

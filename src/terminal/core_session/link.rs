@@ -892,15 +892,22 @@ impl PaneLink {
     }
 
     /// A failure the server reported since the last command.
+    /// The link's end or the server's refusal, once. Either one ends the bound channel, so what
+    /// the link still holds of its input is kept when the channel retires.
     fn reported(&self) -> Result<(), CoreError> {
         let mut received = self.inbox.state.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(error) = received.closed {
-            return Err(error);
+        let result = if let Some(error) = received.closed {
+            Err(error)
+        } else {
+            match received.discarded.take() {
+                Some(refusal) => Err(refusal.into()),
+                None => Ok(()),
+            }
+        };
+        if result.is_err() {
+            self.failed.set(true);
         }
-        match received.discarded.take() {
-            Some(refusal) => Err(refusal.into()),
-            None => Ok(()),
-        }
+        result
     }
 
     fn wait(pending: PendingReply) -> Result<ReplyBody, CoreError> {
@@ -1364,7 +1371,8 @@ impl PaneLink {
 
 impl Drop for PaneLink {
     /// A dismissed presentation keeps its Pane's control, so the channel is detached, not
-    /// released. What the link still held of its input is kept for the person.
+    /// released. What the link still held of its input is kept only when an error or refusal
+    /// ended the channel; a dismissal keeps nothing.
     fn drop(&mut self) {
         self.retire_channel(true);
     }
