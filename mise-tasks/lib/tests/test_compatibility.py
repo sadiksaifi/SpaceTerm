@@ -2,15 +2,15 @@
 
 import tempfile
 import unittest
-from unittest.mock import patch
 from pathlib import Path
+from unittest.mock import patch
 
 from spaceterm_tasks import TaskError
 from spaceterm_tasks.compatibility import (
     PROTOCOLS,
     candidate_tag,
-    expected,
     exercise,
+    expected,
     plan,
     restart_into,
     verdict,
