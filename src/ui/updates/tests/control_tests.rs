@@ -343,54 +343,71 @@ fn the_chevron_opens_spaceterm_then_every_machine_then_update_settings(
     assert!(machines.performed().is_empty());
 }
 
-/// The open list keeps its width while a row's text changes, so it never moves under the
-/// pointer. It fits its rows again the next time it opens.
+/// While open, the list grows to show a row whose text grows, so no action is cut off, and never
+/// shrinks under the pointer when a row's text shrinks. It fits its rows again when it next opens.
 #[gpui::test]
-fn the_open_list_keeps_its_width_while_rows_change_text(cx: &mut gpui::TestAppContext) {
+fn the_open_list_grows_to_fit_and_never_shrinks_until_it_closes(cx: &mut gpui::TestAppContext) {
+    const LONGER: &str = "Restarts into 0.11.4 after an hour with nothing running";
     let _ = services(cx);
     let script = Script::new(recording());
     let (control, visual) = hosted(&script, cx);
     visual.simulate_resize(gpui::size(gpui::px(900.0), gpui::px(580.0)));
     visual.run_until_parked();
     click("update-pill-menu", visual);
-    let width = |visual: &mut gpui::VisualTestContext| {
+    let width = |selector: &'static str, visual: &mut gpui::VisualTestContext| {
         visual
-            .debug_bounds("update-row-app")
-            .expect("the list is open")
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} renders"))
             .size
             .width
     };
-    let opened = width(visual);
-    script.set(
-        |shown| {
-            shown.app = row(
-                "SpaceTerm",
-                "0.11.5 downloaded",
-                Some((
-                    "Relaunch to Update",
-                    Command::Desktop(DesktopAction::Update),
-                )),
-            );
+    let opened = width("update-row-app", visual);
+    let with_this_mac = |status: &str| {
+        let status = status.to_owned();
+        move |shown: &mut Shown| {
             shown.machines[0].1 = row(
                 "This Mac",
-                "Restarts into 0.11.4 after an hour with nothing running",
+                &status,
                 Some(("Restart Core\u{2026}", restart_core(THIS_MAC))),
             );
-        },
-        &control,
-        visual,
+        }
+    };
+    script.set(with_this_mac(LONGER), &control, visual);
+    let grown = width("update-row-app", visual);
+    assert!(grown > opened, "the list grows to show the longer row");
+    let detail = format!("{LONGER} \u{b7} Restart Core\u{2026}");
+    let needed = visual.update(|window, _| {
+        let font = spaceterm_ui::ControlTypography::default().regular().clone();
+        let run = gpui::TextRun {
+            len: detail.len(),
+            font,
+            color: window.text_style().color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        window
+            .text_system()
+            .shape_line(detail.clone().into(), gpui::px(12.0), &[run], None)
+            .width
+    });
+    assert!(
+        width("update-row-0-detail", visual) >= needed,
+        "no action is cut off"
     );
+
+    script.set(with_this_mac("0.11.4"), &control, visual);
     assert_eq!(
-        width(visual),
-        opened,
-        "a longer row does not widen the open list"
+        width("update-row-app", visual),
+        grown,
+        "a shorter row does not shrink the open list"
     );
     visual.simulate_keystrokes("escape");
     visual.run_until_parked();
     click("update-pill-menu", visual);
     assert!(
-        width(visual) > opened,
-        "the next opening fits the longer row"
+        width("update-row-app", visual) < grown,
+        "the next opening fits the shorter rows"
     );
 }
 

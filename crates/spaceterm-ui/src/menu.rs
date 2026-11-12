@@ -898,8 +898,8 @@ impl<A: Clone + 'static> Menu<A> {
     }
 
     /// Widens the panel past its size's width so every row shows its label, detail and shortcut
-    /// in full when it opens. The window still bounds the panel, and an open panel keeps its
-    /// width while its rows change text.
+    /// in full. The window still bounds the panel. While open it grows when a row's text grows
+    /// and never shrinks; it fits its rows again when it next opens.
     pub fn fit_rows(mut self) -> Self {
         self.core.fit_rows = true;
         self
@@ -1853,21 +1853,20 @@ impl<A: Clone + 'static> MenuControl<A> {
         );
         let mut panel_style = style;
         if self.fit_rows {
-            // An open panel keeps the width it opened with, so a row whose text changes while
-            // the menu is open never moves the panel under the pointer.
+            // An open panel grows to fit a row whose text grows, so nothing is cut off, and
+            // never shrinks until it closes, so it never pulls away from the pointer.
+            let typography = crate::control_typography(cx);
+            let fitted = style.metrics.panel_width.max(fitted_width(
+                &entries,
+                style.metrics,
+                &typography,
+                window,
+            ));
             let held = {
                 let state = state.read(cx);
                 state.open.then_some(state.style.metrics.panel_width)
             };
-            panel_style.metrics.panel_width = held.unwrap_or_else(|| {
-                let typography = crate::control_typography(cx);
-                style.metrics.panel_width.max(fitted_width(
-                    &entries,
-                    style.metrics,
-                    &typography,
-                    window,
-                ))
-            });
+            panel_style.metrics.panel_width = held.map_or(fitted, |held| held.max(fitted));
         }
         let closed_reservation = state.update(cx, |state, cx| {
             let should_close = state.open && !enabled;
