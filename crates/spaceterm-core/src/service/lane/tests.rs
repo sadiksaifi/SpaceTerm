@@ -45,6 +45,7 @@ struct Host {
     sessions: Mutex<Vec<Id>>,
     fenced: AtomicBool,
     idle_granted: AtomicBool,
+    native_lease: Mutex<Option<crate::idle_restart::Lease>>,
     grant_target: Mutex<Option<(OperationId, Id, Id)>>,
     stopping: AtomicBool,
     /// Runs once inside the next fence release, before the fence clears.
@@ -82,8 +83,19 @@ impl LaneHost for Host {
     }
     fn idle_granted(&self) -> bool {
         self.idle_granted.load(Ordering::SeqCst)
+            || self
+                .native_lease
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .is_some_and(|lease| lease.granted())
     }
     fn release_fence(&self) {
+        self.native_lease
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        self.idle_granted.store(false, Ordering::SeqCst);
         let releasing = self.releasing.lock().unwrap().take();
         if let Some(releasing) = releasing {
             releasing();
@@ -2839,4 +2851,130 @@ fn a_service_1_2_helper_sends_no_stop_grant_request_bytes() {
             "an older service received grant request bytes"
         );
     });
+}
+
+#[test]
+fn an_abandoned_helper_thaws_its_real_lease_at_every_dispatch_boundary() {
+    use crate::idle_restart::{Activity, Frozen, Lease, Restarting, Session};
+    struct Guard(Arc<AtomicUsize>);
+    impl Frozen for Guard {
+        fn verify(&self) -> Result<(), Restarting> {
+            Ok(())
+        }
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    struct Idle(Activity, Arc<AtomicUsize>);
+    impl Session for Idle {
+        fn activity(&self) -> Activity {
+            self.0.clone()
+        }
+        fn working(&self, _: Instant) -> bool {
+            false
+        }
+        fn freeze(&self, _: Instant) -> Result<Box<dyn Frozen>, Restarting> {
+            self.1.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(Guard(self.1.clone())))
+        }
+    }
+    for crash in 0..4 {
+        with_lane(|lane| {
+            let digest = install_pending(&lane, "1.0.0");
+            let directory = lane.service.paths.data.join("installations").join(&digest);
+            let (version, commit) = runtime::describe(&directory, &lane.service.identity).unwrap();
+            let candidate = RetainedInstallation {
+                directory,
+                version,
+                commit,
+            };
+            let now = Instant::now();
+            let activity = Activity::new(now);
+            let stopped = Arc::new(AtomicUsize::new(0));
+            let sessions: Vec<Arc<dyn Session>> =
+                vec![Arc::new(Idle(activity.clone(), stopped.clone()))];
+            *lane.host.native_lease.lock().unwrap() = Some(
+                Lease::scan(
+                    &sessions,
+                    now + Duration::from_secs(7200),
+                    Duration::from_secs(3600),
+                )
+                .unwrap(),
+            );
+            let mut record = Record {
+                id: OperationId([41; 16]),
+                actor: Actor::CORE,
+                core: lane.lane.core,
+                boot: lane.lane.boot,
+                action: Action::Update,
+                observation_digest: [0; 32],
+                candidate: Some(digest_bytes(&digest).unwrap()),
+                state: State::Admitted,
+                updated_at: 0,
+                orphaned: false,
+            };
+            let data = Directory::open(&lane.service.paths.data, false).unwrap();
+            let helper = data.lock(HELPER_LOCK, false).unwrap();
+            lane.lane.ledger().unwrap().admit(record.clone()).unwrap();
+            record = lane
+                .lane
+                .ledger()
+                .unwrap()
+                .claim(&record.id)
+                .unwrap()
+                .unwrap();
+            let calls = std::cell::Cell::new(0);
+            let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::super::helper::activate_pending(&lane.service, &candidate, &record, |_| {
+                    calls.set(calls.get() + 1);
+                    if calls.get() == 2 && crash == 1 {
+                        panic!("before final grant")
+                    }
+                    let held = lane
+                        .host
+                        .native_lease
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    held.as_ref().unwrap().freeze_and_grant().unwrap();
+                    if (calls.get() == 1 && crash == 0) || (calls.get() == 2 && crash == 2) {
+                        panic!("after grant")
+                    }
+                    Ok(())
+                })
+            }));
+            assert!(crashed.is_err());
+            assert_eq!(stopped.load(Ordering::SeqCst), 1);
+            assert!(activity.input(Instant::now()).is_err());
+            assert!(
+                !lane.lane.release_if_settled(),
+                "the live helper still owns Stop"
+            );
+            if crash == 2 {
+                lane.lane
+                    .ledger()
+                    .unwrap()
+                    .mark(&record.id, State::Unresolved)
+                    .unwrap();
+                assert!(
+                    !lane.lane.release_if_settled(),
+                    "a terminal ledger cannot override live helper ownership"
+                );
+                assert_eq!(stopped.load(Ordering::SeqCst), 1);
+            }
+            drop(helper);
+            assert!(
+                lane.lane.release_if_settled(),
+                "crash {crash}: dead helper cannot retain the freeze"
+            );
+            assert_eq!(stopped.load(Ordering::SeqCst), 0, "crash {crash}");
+            assert!(activity.input(Instant::now()).is_ok());
+            // Running::stop panics if recovery ever tries to dispatch another Stop.
+            if crash != 0 {
+                assert!(lane.service.recover_activation().is_err());
+            }
+            assert_eq!(stopped.load(Ordering::SeqCst), 0);
+        });
+    }
 }

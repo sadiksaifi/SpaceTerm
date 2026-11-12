@@ -1315,26 +1315,16 @@ impl LaneCore {
             return false;
         }
         if self.host.idle_granted() {
-            // An authorized Admitted journal may still dispatch Stop during recovery. The
-            // input barrier remains until that journal settles, even if its ledger settled.
-            match self
+            if !self
                 .service
-                .activation_status_with(super::Contention::Refuse)
+                .release_idle_grant_if_safe(|| self.host.release_fence())
+                .unwrap_or(false)
             {
-                Ok(Some(status))
-                    if matches!(
-                        status.phase,
-                        super::activation::ActivationPhase::Activating
-                            | super::activation::ActivationPhase::Uncertain
-                    ) =>
-                {
-                    return false;
-                }
-                Err(_) => return false,
-                _ => {}
+                return false;
             }
+        } else {
+            self.host.release_fence();
         }
-        self.host.release_fence();
         self.watching.store(false, Ordering::SeqCst);
         if let Ok(updates) = self.updates() {
             updates.operations_settled();

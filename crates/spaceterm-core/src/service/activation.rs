@@ -327,6 +327,33 @@ impl Operation {
 }
 
 impl Service {
+    /// A dead helper cannot dispatch Stop from StopDispatched. Keep both ownership locks
+    /// through release so neither a live helper nor recovery can cross that decision.
+    pub(crate) fn release_idle_grant_if_safe(
+        &self,
+        release: impl FnOnce(),
+    ) -> Result<bool, CoreError> {
+        let Some((data, _)) = self.read()? else {
+            return Err(CoreError::NotInstalled);
+        };
+        let Some(_helper) = data.try_lock(super::operations::HELPER_LOCK)? else {
+            return Ok(false);
+        };
+        let Some(_operation) = data.try_lock("service.lock")? else {
+            return Ok(false);
+        };
+        let state = Self::state(&data)?.ok_or(CoreError::NotInstalled)?;
+        if state
+            .activation
+            .as_ref()
+            .is_some_and(|operation| operation.pending() && operation.step != Step::StopDispatched)
+        {
+            return Ok(false);
+        }
+        release();
+        Ok(true)
+    }
+
     /// Read-only approval preparation. Staging alone grants no runtime authority.
     pub fn prepare_activation(
         &self,
