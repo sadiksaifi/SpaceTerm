@@ -86,7 +86,10 @@ pub(crate) const fn blocked_unnamed(incompatible: Incompatible) -> &'static str 
 /// What a blocked Workspace surface offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BlockedAction {
-    RestartCore,
+    /// `asks`: the restart ends Terminal Sessions or is breaking, so a confirmation follows.
+    RestartCore {
+        asks: bool,
+    },
     RelaunchToUpdate,
     DownloadUpdate,
 }
@@ -94,7 +97,9 @@ pub(crate) enum BlockedAction {
 impl BlockedAction {
     pub(crate) const fn label(self) -> &'static str {
         match self {
-            Self::RestartCore => "Restart Core\u{2026}",
+            // A label ends in an ellipsis only when a confirmation follows.
+            Self::RestartCore { asks: true } => "Restart Core\u{2026}",
+            Self::RestartCore { asks: false } => "Restart Core",
             Self::RelaunchToUpdate => "Relaunch to Update",
             Self::DownloadUpdate => "Download Update",
         }
@@ -150,7 +155,9 @@ pub(crate) fn blocked(
                          Sessions on {machine}."
                     ),
                 });
-                action = Some(BlockedAction::RestartCore);
+                action = Some(BlockedAction::RestartCore {
+                    asks: sessions > 0 || pending.breaking,
+                });
             } else if let Some(Operation::Installing { version, .. }) =
                 facts.and_then(|facts| facts.operation.as_ref())
             {

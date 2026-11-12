@@ -671,8 +671,15 @@ impl SettingsWindow {
         if let Some(update) = self.machine_update(&MachineChoice::Direct(route), cx)
             && !pending(&update)
         {
+            // The Core's preview asks first when the restart ends Terminal Sessions, and the label
+            // ends in an ellipsis then, or while the facts can't say.
+            let ends = update.facts.as_ref().is_none_or(|facts| facts.sessions > 0);
             let mut restart = MenuItem::new(
-                copy::RESTART_SAME_VERSION,
+                if ends {
+                    copy::RESTART_SAME_VERSION
+                } else {
+                    copy::RESTART_SAME_VERSION_NOW
+                },
                 StatusStep::Shared(Command::Machine(
                     update.machine,
                     crate::updates::machines::MachineAction::Restart,

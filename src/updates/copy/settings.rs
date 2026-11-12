@@ -26,6 +26,8 @@ pub(crate) const NO_MACHINES: &str = "No Machines yet";
 /// The Machine card's ⋯ item for a same-version restart. Offered only while no Pending Version
 /// waits, because a restart moves into a waiting one.
 pub(crate) const RESTART_SAME_VERSION: &str = "Restart SpaceTerm Core\u{2026}";
+/// The same item when the restart ends no Terminal Session, so no confirmation follows.
+pub(crate) const RESTART_SAME_VERSION_NOW: &str = "Restart SpaceTerm Core";
 
 /// The menu bar extra's name for the SpaceTerm row's `Download`, the label the pill gives it.
 pub(crate) const DOWNLOAD_UPDATE: &str = "Download Update";

@@ -249,8 +249,10 @@ pub(super) enum LaunchAction {
     Retry,
     Settings,
     /// Restarts this computer's SpaceTerm Core into its downloaded version, after its fresh
-    /// preview and the person's confirmation.
-    RestartCore,
+    /// preview and, when `asks`, the person's confirmation.
+    RestartCore {
+        asks: bool,
+    },
     /// Relaunches SpaceTerm into its downloaded update.
     RelaunchToUpdate,
     /// Downloads SpaceTerm's available update.
@@ -266,7 +268,7 @@ impl LaunchAction {
             Self::Authorize => "Authorize\u{2026}",
             Self::Retry => "Try Again",
             Self::Settings => "Machine Settings\u{2026}",
-            Self::RestartCore => BlockedAction::RestartCore.label(),
+            Self::RestartCore { asks } => BlockedAction::RestartCore { asks }.label(),
             Self::RelaunchToUpdate => BlockedAction::RelaunchToUpdate.label(),
             Self::DownloadUpdate => BlockedAction::DownloadUpdate.label(),
             Self::OpenLoginItems => "Open Login Items",
@@ -279,7 +281,7 @@ impl LaunchAction {
             Self::Authorize => LAUNCH_AUTHORIZE_SELECTOR,
             Self::Retry => LAUNCH_RETRY_SELECTOR,
             Self::Settings => LAUNCH_SETTINGS_SELECTOR,
-            Self::RestartCore => LAUNCH_RESTART_CORE_SELECTOR,
+            Self::RestartCore { .. } => LAUNCH_RESTART_CORE_SELECTOR,
             Self::RelaunchToUpdate => LAUNCH_RELAUNCH_SELECTOR,
             Self::DownloadUpdate => LAUNCH_DOWNLOAD_SELECTOR,
             Self::OpenLoginItems => LAUNCH_LOGIN_ITEMS_SELECTOR,
@@ -1127,7 +1129,7 @@ impl WorkspaceManager {
             if let Some(action) = blocked.action {
                 actions = vec![
                     match action {
-                        BlockedAction::RestartCore => LaunchAction::RestartCore,
+                        BlockedAction::RestartCore { asks } => LaunchAction::RestartCore { asks },
                         BlockedAction::RelaunchToUpdate => LaunchAction::RelaunchToUpdate,
                         BlockedAction::DownloadUpdate => LaunchAction::DownloadUpdate,
                     },
@@ -1372,8 +1374,8 @@ impl WorkspaceManager {
                 Some(crate::ui::settings_window::SettingsSectionId::Machines),
                 cx,
             ),
-            LaunchAction::RestartCore => crate::ui::core_pane::perform_blocked_action(
-                BlockedAction::RestartCore,
+            LaunchAction::RestartCore { asks } => crate::ui::core_pane::perform_blocked_action(
+                BlockedAction::RestartCore { asks },
                 self.local_machine(cx),
                 cx,
             ),

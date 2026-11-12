@@ -19,12 +19,14 @@ pub(crate) const DOWNLOADING_UPDATE: &str = "Downloading Update\u{2026}";
 pub(crate) const RELAUNCHING: &str = "Relaunching\u{2026}";
 pub(crate) const RELAUNCH_TO_UPDATE: &str = "Relaunch to Update";
 pub(crate) const RESTART_CORE: &str = "Restart Core\u{2026}";
+/// Restart Core when it restarts at once, with no confirmation.
+pub(crate) const RESTART_CORE_NOW: &str = "Restart Core";
 pub(crate) const DOWNLOAD_UPDATE: &str = "Download Update";
 pub(crate) const WHATS_NEW: &str = "What\u{2019}s New";
 
 /// Every main-area label.
 #[cfg(test)]
-pub(crate) const LABELS: [&str; 9] = [
+pub(crate) const LABELS: [&str; 10] = [
     UPDATE_FAILED,
     RESTART_NOT_CONFIRMED,
     RESTARTING_CORE,
@@ -32,6 +34,7 @@ pub(crate) const LABELS: [&str; 9] = [
     RELAUNCHING,
     RELAUNCH_TO_UPDATE,
     RESTART_CORE,
+    RESTART_CORE_NOW,
     DOWNLOAD_UPDATE,
     WHATS_NEW,
 ];
@@ -147,7 +150,12 @@ pub(crate) fn pill(view: &UpdateView) -> Option<PillView> {
                     ActKind::RestartCore(id) => {
                         let row = machine(id)?;
                         (
-                            RESTART_CORE,
+                            // A label ends in an ellipsis only when a confirmation follows.
+                            if row.restart_asks() {
+                                RESTART_CORE
+                            } else {
+                                RESTART_CORE_NOW
+                            },
                             Glyph::UpdateCore,
                             restart_tooltip(row),
                             Command::Machine(id, MachineAction::Restart),

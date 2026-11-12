@@ -19,6 +19,8 @@ pub(crate) const WHATS_NEW: &str = "What\u{2019}s New";
 pub(crate) const DOWNLOAD: &str = "Download";
 pub(crate) const RELAUNCH_TO_UPDATE: &str = "Relaunch to Update";
 pub(crate) const RESTART_CORE: &str = "Restart Core\u{2026}";
+/// Restart Core when it restarts at once, with no confirmation.
+pub(crate) const RESTART_CORE_NOW: &str = "Restart Core";
 pub(crate) const TRY_AGAIN: &str = "Try Again";
 pub(crate) const TRY_AGAIN_ASKS: &str = "Try Again\u{2026}";
 pub(crate) const CHECK_AGAIN: &str = "Check Again";
@@ -172,13 +174,16 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
         0 => None,
         n => Some(format!("Ends {}", sessions(n))),
     };
+    // A label ends in an ellipsis only when a confirmation follows.
+    let asks = row.restart_asks();
     let restart = || {
         action(
-            RESTART_CORE,
+            if asks { RESTART_CORE } else { RESTART_CORE_NOW },
             ends.clone(),
             Command::Machine(id, MachineAction::Restart),
         )
     };
+    let try_again = if asks { TRY_AGAIN_ASKS } else { TRY_AGAIN };
     let too_old = row.blocked == Some(Blocked::CoreTooOld);
     let blocked = |text: String| {
         if too_old {
@@ -300,7 +305,7 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
                     Continuation::StartFailed => (
                         format!("Couldn\u{2019}t restart into {version}"),
                         action(
-                            TRY_AGAIN_ASKS,
+                            try_again,
                             None,
                             Command::Machine(id, MachineAction::Restart),
                         ),
@@ -332,7 +337,7 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
             format!("Couldn\u{2019}t restart into {version}"),
             kept.then(|| {
                 action(
-                    TRY_AGAIN_ASKS,
+                    try_again,
                     None,
                     Command::Machine(id, MachineAction::Restart),
                 )

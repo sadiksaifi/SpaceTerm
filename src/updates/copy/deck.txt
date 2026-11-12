@@ -14,21 +14,24 @@ Relaunch to Update | Accent | Relaunching updates SpaceTerm to 0.11.5. Terminal 
 Relaunch to Update | Accent | SpaceTerm 0.11.5 is downloaded. Relaunching keeps Terminal Sessions running.
 Relaunch to Update | Warning | SpaceTerm 0.11.5 is downloaded. Relaunching keeps Terminal Sessions running.
 Relaunching… | Plain | Relaunching SpaceTerm. Terminal Sessions keep running.
-Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Computer. No Terminal Session is open.
+Restart Core | Accent | SpaceTerm Core 0.11.4 is downloaded on This Computer. No Terminal Session is open.
+Restart Core | Accent | SpaceTerm Core 0.11.4 is downloaded on This Mac. No Terminal Session is open.
+Restart Core | Accent | SpaceTerm Core 0.11.4 is downloaded on penguin. No Terminal Session is open.
+Restart Core | Warning | This Computer’s Workspaces can’t open until SpaceTerm Core restarts into 0.11.4. No Terminal Session is open.
+Restart Core | Warning | This Mac’s Workspaces can’t open until SpaceTerm Core restarts into 0.11.4. No Terminal Session is open.
+Restart Core | Warning | penguin’s Workspaces can’t open until SpaceTerm Core restarts into 0.11.4. No Terminal Session is open.
 Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Computer. No Terminal Session is open. Devices with an older SpaceTerm can’t connect to This Computer until they update.
 Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Computer. Restarting into it ends 1 Terminal Session.
 Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Computer. Restarting into it ends 1 Terminal Session. Devices with an older SpaceTerm can’t connect to This Computer until they update.
 Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Computer. Restarting into it ends 2 Terminal Sessions.
 Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Computer. Restarting into it ends 3 Terminal Sessions.
 Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Computer. Restarting into it ends 3 Terminal Sessions. Devices with an older SpaceTerm can’t connect to This Computer until they update.
-Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Mac. No Terminal Session is open.
 Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Mac. No Terminal Session is open. Devices with an older SpaceTerm can’t connect to This Mac until they update.
 Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Mac. Restarting into it ends 1 Terminal Session.
 Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Mac. Restarting into it ends 1 Terminal Session. Devices with an older SpaceTerm can’t connect to This Mac until they update.
 Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Mac. Restarting into it ends 2 Terminal Sessions.
 Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Mac. Restarting into it ends 3 Terminal Sessions.
 Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on This Mac. Restarting into it ends 3 Terminal Sessions. Devices with an older SpaceTerm can’t connect to This Mac until they update.
-Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on penguin. No Terminal Session is open.
 Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on penguin. No Terminal Session is open. Devices with an older SpaceTerm can’t connect to penguin until they update.
 Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on penguin. Restarting into it ends 1 Terminal Session.
 Restart Core… | Accent | SpaceTerm Core 0.11.4 is downloaded on penguin. Restarting into it ends 1 Terminal Session. Devices with an older SpaceTerm can’t connect to penguin until they update.
@@ -128,6 +131,7 @@ SpaceTerm | Couldn’t relaunch · Try Again | a11y: SpaceTerm couldn’t relaun
 SpaceTerm | Downloading 0.11.5… | a11y: Downloading SpaceTerm 0.11.5.
 SpaceTerm | Relaunching… | a11y: Relaunching SpaceTerm. Terminal Sessions keep running.
 SpaceTerm | {cant-replace-status} | a11y: {cant-replace-status}.
+This Computer | 0.11.4 downloaded · Restart Core | An update has waited 3 days. | a11y: SpaceTerm Core on This Computer has 0.11.4 downloaded. No Terminal Session is open.
 This Computer | 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | An update has waited 3 days. | a11y: SpaceTerm Core on This Computer has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.
 This Computer | 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | An update has waited 8 days. | a11y: SpaceTerm Core on This Computer has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.
 This Computer | 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | a11y: SpaceTerm Core on This Computer has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.
@@ -144,6 +148,7 @@ This Computer | Connecting… | a11y: Connecting to SpaceTerm Core on This Compu
 This Computer | Couldn’t download 0.11.5 | SpaceTerm Core tries again later. | a11y: SpaceTerm couldn’t download SpaceTerm Core 0.11.5 to This Computer.
 This Computer | Couldn’t download 0.11.5 · Try Again | a11y: SpaceTerm couldn’t download SpaceTerm Core 0.11.5 to This Computer.
 This Computer | Couldn’t restart into 0.11.4 | SpaceTerm waits for the next update. | a11y: SpaceTerm Core on This Computer couldn’t restart into 0.11.4.
+This Computer | Couldn’t restart into 0.11.4 · Try Again | a11y: SpaceTerm Core on This Computer couldn’t restart into 0.11.4.
 This Computer | Couldn’t restart into 0.11.4 · Try Again… | An update has waited 3 days. | a11y: SpaceTerm Core on This Computer couldn’t restart into 0.11.4.
 This Computer | Couldn’t restart into 0.11.4 · Try Again… | An update has waited 8 days. | a11y: SpaceTerm Core on This Computer couldn’t restart into 0.11.4.
 This Computer | Couldn’t restart into 0.11.4 · Try Again… | a11y: SpaceTerm Core on This Computer couldn’t restart into 0.11.4.
@@ -168,6 +173,9 @@ This Computer | Restarts into 0.11.4 when 3 Terminal Sessions end · Restart Cor
 This Computer | Restarts into 0.11.4 when 3 Terminal Sessions end · Restart Core… (Ends 3 Terminal Sessions) | An update has waited 8 days. | a11y: SpaceTerm Core on This Computer restarts into 0.11.4 when its 3 Terminal Sessions end. Restarting SpaceTerm Core now ends 3 Terminal Sessions.
 This Computer | Restarts into 0.11.4 when 3 Terminal Sessions end · Restart Core… (Ends 3 Terminal Sessions) | a11y: SpaceTerm Core on This Computer restarts into 0.11.4 when its 3 Terminal Sessions end. Restarting SpaceTerm Core now ends 3 Terminal Sessions.
 This Computer | Stopped | a11y: SpaceTerm Core on This Computer is stopped.
+This Computer | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core | An update has waited 3 days. | a11y: SpaceTerm Core on This Computer is too old for this SpaceTerm and has 0.11.4 downloaded. No Terminal Session is open.
+This Computer | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core | An update has waited 8 days. | a11y: SpaceTerm Core on This Computer is too old for this SpaceTerm and has 0.11.4 downloaded. No Terminal Session is open.
+This Computer | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core | a11y: SpaceTerm Core on This Computer is too old for this SpaceTerm and has 0.11.4 downloaded. No Terminal Session is open.
 This Computer | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | An update has waited 3 days. | a11y: SpaceTerm Core on This Computer is too old for this SpaceTerm and has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.
 This Computer | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | An update has waited 8 days. | a11y: SpaceTerm Core on This Computer is too old for this SpaceTerm and has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.
 This Computer | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | a11y: SpaceTerm Core on This Computer is too old for this SpaceTerm and has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.
@@ -178,6 +186,7 @@ This Computer | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core�
 This Computer | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core… | An update has waited 8 days. | a11y: SpaceTerm Core on This Computer is too old for this SpaceTerm and has 0.11.4 downloaded. No Terminal Session is open.
 This Computer | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core… | a11y: SpaceTerm Core on This Computer is too old for this SpaceTerm and has 0.11.4 downloaded. No Terminal Session is open.
 This Computer | Too old for this SpaceTerm · Needs 0.12.0 before 0.12.1 · Download | a11y: SpaceTerm Core on This Computer is too old for this SpaceTerm and needs 0.12.0 before it can update to 0.12.1.
+This Mac | 0.11.4 downloaded · Restart Core | An update has waited 3 days. | a11y: SpaceTerm Core on This Mac has 0.11.4 downloaded. No Terminal Session is open.
 This Mac | 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | An update has waited 3 days. | a11y: SpaceTerm Core on This Mac has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.
 This Mac | 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | An update has waited 8 days. | a11y: SpaceTerm Core on This Mac has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.
 This Mac | 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | a11y: SpaceTerm Core on This Mac has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.
@@ -194,6 +203,7 @@ This Mac | Connecting… | a11y: Connecting to SpaceTerm Core on This Mac.
 This Mac | Couldn’t download 0.11.5 | SpaceTerm Core tries again later. | a11y: SpaceTerm couldn’t download SpaceTerm Core 0.11.5 to This Mac.
 This Mac | Couldn’t download 0.11.5 · Try Again | a11y: SpaceTerm couldn’t download SpaceTerm Core 0.11.5 to This Mac.
 This Mac | Couldn’t restart into 0.11.4 | SpaceTerm waits for the next update. | a11y: SpaceTerm Core on This Mac couldn’t restart into 0.11.4.
+This Mac | Couldn’t restart into 0.11.4 · Try Again | a11y: SpaceTerm Core on This Mac couldn’t restart into 0.11.4.
 This Mac | Couldn’t restart into 0.11.4 · Try Again… | An update has waited 3 days. | a11y: SpaceTerm Core on This Mac couldn’t restart into 0.11.4.
 This Mac | Couldn’t restart into 0.11.4 · Try Again… | An update has waited 8 days. | a11y: SpaceTerm Core on This Mac couldn’t restart into 0.11.4.
 This Mac | Couldn’t restart into 0.11.4 · Try Again… | a11y: SpaceTerm Core on This Mac couldn’t restart into 0.11.4.
@@ -218,6 +228,9 @@ This Mac | Restarts into 0.11.4 when 3 Terminal Sessions end · Restart Core… 
 This Mac | Restarts into 0.11.4 when 3 Terminal Sessions end · Restart Core… (Ends 3 Terminal Sessions) | An update has waited 8 days. | a11y: SpaceTerm Core on This Mac restarts into 0.11.4 when its 3 Terminal Sessions end. Restarting SpaceTerm Core now ends 3 Terminal Sessions.
 This Mac | Restarts into 0.11.4 when 3 Terminal Sessions end · Restart Core… (Ends 3 Terminal Sessions) | a11y: SpaceTerm Core on This Mac restarts into 0.11.4 when its 3 Terminal Sessions end. Restarting SpaceTerm Core now ends 3 Terminal Sessions.
 This Mac | Stopped | a11y: SpaceTerm Core on This Mac is stopped.
+This Mac | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core | An update has waited 3 days. | a11y: SpaceTerm Core on This Mac is too old for this SpaceTerm and has 0.11.4 downloaded. No Terminal Session is open.
+This Mac | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core | An update has waited 8 days. | a11y: SpaceTerm Core on This Mac is too old for this SpaceTerm and has 0.11.4 downloaded. No Terminal Session is open.
+This Mac | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core | a11y: SpaceTerm Core on This Mac is too old for this SpaceTerm and has 0.11.4 downloaded. No Terminal Session is open.
 This Mac | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | An update has waited 3 days. | a11y: SpaceTerm Core on This Mac is too old for this SpaceTerm and has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.
 This Mac | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | An update has waited 8 days. | a11y: SpaceTerm Core on This Mac is too old for this SpaceTerm and has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.
 This Mac | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | a11y: SpaceTerm Core on This Mac is too old for this SpaceTerm and has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.
@@ -228,6 +241,7 @@ This Mac | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core… | 
 This Mac | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core… | An update has waited 8 days. | a11y: SpaceTerm Core on This Mac is too old for this SpaceTerm and has 0.11.4 downloaded. No Terminal Session is open.
 This Mac | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core… | a11y: SpaceTerm Core on This Mac is too old for this SpaceTerm and has 0.11.4 downloaded. No Terminal Session is open.
 This Mac | Too old for this SpaceTerm · Needs 0.12.0 before 0.12.1 · Download | a11y: SpaceTerm Core on This Mac is too old for this SpaceTerm and needs 0.12.0 before it can update to 0.12.1.
+penguin | 0.11.4 downloaded · Restart Core | An update has waited 3 days. | a11y: SpaceTerm Core on penguin has 0.11.4 downloaded. No Terminal Session is open.
 penguin | 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | An update has waited 3 days. | a11y: SpaceTerm Core on penguin has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.
 penguin | 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | An update has waited 8 days. | a11y: SpaceTerm Core on penguin has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.
 penguin | 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | a11y: SpaceTerm Core on penguin has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.
@@ -244,6 +258,7 @@ penguin | Connecting… | a11y: Connecting to SpaceTerm Core on penguin.
 penguin | Couldn’t download 0.11.5 | SpaceTerm Core tries again later. | a11y: SpaceTerm couldn’t download SpaceTerm Core 0.11.5 to penguin.
 penguin | Couldn’t download 0.11.5 · Try Again | a11y: SpaceTerm couldn’t download SpaceTerm Core 0.11.5 to penguin.
 penguin | Couldn’t restart into 0.11.4 | SpaceTerm waits for the next update. | a11y: SpaceTerm Core on penguin couldn’t restart into 0.11.4.
+penguin | Couldn’t restart into 0.11.4 · Try Again | a11y: SpaceTerm Core on penguin couldn’t restart into 0.11.4.
 penguin | Couldn’t restart into 0.11.4 · Try Again… | An update has waited 3 days. | a11y: SpaceTerm Core on penguin couldn’t restart into 0.11.4.
 penguin | Couldn’t restart into 0.11.4 · Try Again… | An update has waited 8 days. | a11y: SpaceTerm Core on penguin couldn’t restart into 0.11.4.
 penguin | Couldn’t restart into 0.11.4 · Try Again… | a11y: SpaceTerm Core on penguin couldn’t restart into 0.11.4.
@@ -268,6 +283,9 @@ penguin | Restarts into 0.11.4 when 3 Terminal Sessions end · Restart Core… (
 penguin | Restarts into 0.11.4 when 3 Terminal Sessions end · Restart Core… (Ends 3 Terminal Sessions) | An update has waited 8 days. | a11y: SpaceTerm Core on penguin restarts into 0.11.4 when its 3 Terminal Sessions end. Restarting SpaceTerm Core now ends 3 Terminal Sessions.
 penguin | Restarts into 0.11.4 when 3 Terminal Sessions end · Restart Core… (Ends 3 Terminal Sessions) | a11y: SpaceTerm Core on penguin restarts into 0.11.4 when its 3 Terminal Sessions end. Restarting SpaceTerm Core now ends 3 Terminal Sessions.
 penguin | Stopped | a11y: SpaceTerm Core on penguin is stopped.
+penguin | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core | An update has waited 3 days. | a11y: SpaceTerm Core on penguin is too old for this SpaceTerm and has 0.11.4 downloaded. No Terminal Session is open.
+penguin | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core | An update has waited 8 days. | a11y: SpaceTerm Core on penguin is too old for this SpaceTerm and has 0.11.4 downloaded. No Terminal Session is open.
+penguin | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core | a11y: SpaceTerm Core on penguin is too old for this SpaceTerm and has 0.11.4 downloaded. No Terminal Session is open.
 penguin | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | An update has waited 3 days. | a11y: SpaceTerm Core on penguin is too old for this SpaceTerm and has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.
 penguin | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | An update has waited 8 days. | a11y: SpaceTerm Core on penguin is too old for this SpaceTerm and has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.
 penguin | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | a11y: SpaceTerm Core on penguin is too old for this SpaceTerm and has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.

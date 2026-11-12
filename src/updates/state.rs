@@ -179,6 +179,8 @@ pub(crate) struct MachineRow {
     pub(crate) dismissed: bool,
     /// Cancel at the Ask stage hides this Machine's step for 24 hours on this desktop.
     pub(crate) deferred: bool,
+    /// The waiting Pending Version is breaking.
+    pub(crate) breaking: bool,
 }
 
 /// A protocol mismatch: a hard stop above the ladder.
@@ -688,7 +690,15 @@ impl MachineRow {
             waited,
             dismissed,
             deferred,
+            breaking: pending.is_some_and(|pending| pending.breaking),
         }
+    }
+
+    /// Whether restarting this Core asks first, as its own preview decides from the same facts:
+    /// the restart ends Terminal Sessions or crosses a breaking change. A label that leads to it
+    /// ends in an ellipsis only then.
+    pub(crate) fn restart_asks(&self) -> bool {
+        self.sessions > 0 || self.breaking
     }
 
     /// The step this Machine contributes. Offline or stale facts never produce one, and work

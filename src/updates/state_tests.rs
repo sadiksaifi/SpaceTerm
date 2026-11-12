@@ -499,16 +499,16 @@ fn i5_each_action_has_one_command_and_download_never_relaunches() {
         actions.extend(view.app_row().action);
         for action in actions {
             let label = action.label.as_ref();
-            let asks = matches!(
-                action.command,
-                Command::Machine(_, MachineAction::Restart) | Command::Explain(_)
-            );
-            assert_eq!(
-                label.ends_with('\u{2026}'),
-                asks,
-                "{label}: {:?}",
-                action.command
-            );
+            // A restart's ellipsis follows its confirmation, which
+            // `restart_core_has_an_ellipsis_only_when_a_confirmation_follows` checks.
+            if !matches!(action.command, Command::Machine(_, MachineAction::Restart)) {
+                assert_eq!(
+                    label.ends_with('\u{2026}'),
+                    matches!(action.command, Command::Explain(_)),
+                    "{label}: {:?}",
+                    action.command
+                );
+            }
             match label {
                 "Download" => assert!(matches!(
                     action.command,
@@ -518,7 +518,7 @@ fn i5_each_action_has_one_command_and_download_never_relaunches() {
                 "Relaunch to Update" => {
                     assert_eq!(action.command, Command::Desktop(DesktopAction::Update))
                 }
-                "Restart Core\u{2026}" | "Try Again\u{2026}" => {
+                "Restart Core\u{2026}" | "Restart Core" | "Try Again\u{2026}" => {
                     assert!(matches!(
                         action.command,
                         Command::Machine(_, MachineAction::Restart)
@@ -618,6 +618,68 @@ fn i7_the_menu_bar_extra_offers_the_spaceterm_row_action() {
             (action, step) => panic!("row {action:?}, extra {step:?}"),
         }
     });
+}
+
+/// A label ends in an ellipsis only when a confirmation follows. Restarting asks first when it
+/// ends Terminal Sessions or crosses a breaking change, as the Core's own preview decides; with
+/// neither, `Restart Core` restarts at once and says so by having no ellipsis, on the pill, the
+/// row and the menu bar extra alike. Every surface's action matches the confirmation that does
+/// or does not follow.
+#[test]
+fn restart_core_has_an_ellipsis_only_when_a_confirmation_follows() {
+    use crate::status_menu::model::{Command as MenuCommand, Menu};
+    use crate::updates::confirm::previewed;
+    let mut seen = [false; 2];
+    scenes(|view, fleet| {
+        let menu = Menu::new(view, fleet);
+        for update in fleet {
+            let Some(row) = view.machine_row(update.machine) else {
+                continue;
+            };
+            let Some(action) = row.action.filter(|action| {
+                action.command == Command::Machine(update.machine, MachineAction::Restart)
+            }) else {
+                continue;
+            };
+            let facts = update.facts.as_ref().unwrap();
+            let preview = MachinePreview {
+                machine: update.machine,
+                action: MachineAction::Restart,
+                sessions: facts.sessions,
+                running: Some(facts.running.clone()),
+                target: facts
+                    .pending
+                    .as_ref()
+                    .map(|pending| pending.version.clone()),
+                id: 1,
+            };
+            let asks = previewed(fleet, std::slice::from_ref(&preview), false).is_some();
+            seen[usize::from(asks)] = true;
+            assert_eq!(
+                action.label.ends_with('\u{2026}'),
+                asks,
+                "{}: {} with {} sessions",
+                row.name,
+                action.label,
+                facts.sessions
+            );
+            if let Some(pill) = view.pill().filter(|pill| pill.main == action.command) {
+                assert_eq!(pill.label.ends_with('\u{2026}'), asks, "{}", pill.label);
+            }
+            let item =
+                menu.machines
+                    .iter()
+                    .find(|shown| shown.machine == update.machine)
+                    .and_then(|shown| {
+                        shown.items.iter().find(|item| {
+                            item.command == MenuCommand::Update(action.command.clone())
+                        })
+                    })
+                    .expect("the menu bar extra offers the restart");
+            assert_eq!(item.title, action.label);
+        }
+    });
+    assert_eq!(seen, [true, true], "both kinds of restart are generated");
 }
 
 /// A flat menu lists Machine actions away from their rows, so each one names SpaceTerm Core and

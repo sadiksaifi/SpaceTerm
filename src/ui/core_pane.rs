@@ -833,7 +833,7 @@ pub(crate) fn perform_blocked_action(
     use crate::updates::machines::MachineAction;
     use crate::updates::state::{Command, DesktopAction};
     let command = match action {
-        BlockedAction::RestartCore => match machine {
+        BlockedAction::RestartCore { .. } => match machine {
             Some(machine) => Command::Machine(machine, MachineAction::Restart),
             None => return,
         },
