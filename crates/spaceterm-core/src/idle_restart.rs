@@ -86,6 +86,21 @@ impl Activity {
             && state.pending.is_empty()
             && now.saturating_duration_since(state.last) >= period
     }
+    /// Store already-read native facts only before an idle lease owns this activity. The
+    /// callback must only record its observation, without native I/O or activity locks.
+    pub fn record_idle_observation(&self, record: impl FnOnce()) -> Result<(), Restarting> {
+        let state = self.lock();
+        if state.generation.is_none()
+            || !state.pending.is_empty()
+            || state.granted
+            || state.lease.upgrade().is_some()
+        {
+            return Err(Restarting);
+        }
+        record();
+        drop(state);
+        Ok(())
+    }
     pub fn generation(&self) -> Option<u64> {
         self.lock().generation
     }
@@ -519,6 +534,44 @@ mod scan_tests {
         }
     }
     const HOUR: Duration = Duration::from_secs(3600);
+    #[test]
+    fn a_late_work_refresh_cannot_replace_the_observation_owned_by_a_lease() {
+        let start = Instant::now();
+        let activity = Activity::new(start);
+        let value = std::sync::atomic::AtomicUsize::new(0);
+        activity
+            .record_idle_observation(|| {
+                value.store(1, Ordering::SeqCst);
+            })
+            .unwrap();
+        let sessions: Vec<Arc<dyn Session>> = vec![Arc::new(Shell {
+            activity: activity.clone(),
+            pause: None,
+        })];
+        let lease = Lease::scan(&sessions, start + HOUR * 2, HOUR).unwrap();
+        assert_eq!(
+            activity.record_idle_observation(|| {
+                value.store(2, Ordering::SeqCst);
+            }),
+            Err(Restarting)
+        );
+        assert_eq!(value.load(Ordering::SeqCst), 1);
+        lease.grant().unwrap();
+        assert_eq!(
+            activity.record_idle_observation(|| {
+                value.store(2, Ordering::SeqCst);
+            }),
+            Err(Restarting)
+        );
+        assert_eq!(value.load(Ordering::SeqCst), 1);
+        lease.release();
+        activity
+            .record_idle_observation(|| {
+                value.store(3, Ordering::SeqCst);
+            })
+            .unwrap();
+        assert_eq!(value.load(Ordering::SeqCst), 3);
+    }
     #[test]
     fn activity_in_either_session_during_either_probe_refuses_the_scan() {
         for paused in 0..2 {

@@ -183,7 +183,44 @@ fn bounded<T: Send + 'static>(
     Ok(result)
 }
 
+pub(super) type CpuSnapshot = Vec<(ProcessIdentity, Duration)>;
+#[derive(Clone)]
+pub(super) struct Checkpoint {
+    cpu: CpuSnapshot,
+    image: std::path::PathBuf,
+}
+pub(super) fn checkpoint(
+    host: &dyn UnixPtyHost,
+    session: ProcessSessionIdentity,
+    slave: &std::path::Path,
+    image: &std::path::Path,
+) -> io::Result<Checkpoint> {
+    if host.process_image(session.leader)? != image {
+        return Err(io::Error::other("the owning shell image changed"));
+    }
+    let observed = members(host, session)?;
+    let snapshot = observed
+        .iter()
+        .map(|p| host.cpu_time(p.identity).map(|cpu| (p.identity, cpu)))
+        .collect::<io::Result<Vec<_>>>()?;
+    if observed.len() != 1 || !host.prompt_waiting(session.leader, slave, false)? {
+        return Err(io::Error::other(
+            "the shell is not blocked at its terminal prompt",
+        ));
+    }
+    for &(identity, cpu) in &snapshot {
+        if host.cpu_time(identity)? != cpu {
+            return Err(io::Error::other("CPU changed during the idle scan"));
+        }
+    }
+    Ok(Checkpoint {
+        cpu: snapshot,
+        image: image.into(),
+    })
+}
+
 struct Facts {
+    baseline: Checkpoint,
     host: Arc<dyn UnixPtyHost>,
     session: ProcessSessionIdentity,
     master: std::sync::Weak<OwnedFd>,
@@ -218,6 +255,7 @@ impl Population {
         master: &Arc<OwnedFd>,
         slave: &std::path::Path,
         deadline: Instant,
+        baseline: Checkpoint,
     ) -> io::Result<Self> {
         let cleanup = Cleanup::new();
         let owned = cleanup.clone();
@@ -228,6 +266,7 @@ impl Population {
             let permissions = host.fence_slave(&slave)?;
             owned.install(permissions)?;
             let facts = Arc::new(Facts {
+                baseline,
                 host,
                 session,
                 master,
@@ -270,7 +309,33 @@ impl Facts {
                 "a frozen process resumed or became unreadable",
             ));
         }
-
+        if self.host.process_image(self.session.leader)? != self.baseline.image {
+            return Err(io::Error::other("the owning shell image changed"));
+        }
+        for member in &fresh {
+            let previous = self
+                .baseline
+                .cpu
+                .iter()
+                .find(|(id, _)| *id == member.identity)
+                .ok_or_else(|| io::Error::other("no CPU checkpoint for a frozen process"))?
+                .1;
+            let current = self.host.cpu_time(member.identity)?;
+            if current
+                .checked_sub(previous)
+                .is_none_or(|used| !used.is_zero())
+            {
+                return Err(io::Error::other(
+                    "a session process used CPU after the idle scan",
+                ));
+            }
+        }
+        if !self
+            .host
+            .prompt_waiting(self.session.leader, &self.slave, true)?
+        {
+            return Err(io::Error::other("the shell left its terminal read"));
+        }
         let holders = self.host.slave_holders(&self.slave)?;
         if !holders.contains(&self.session.leader) {
             return Err(io::Error::other(
@@ -422,6 +487,11 @@ mod tests {
         DelayedAck,
         Stall,
         StallPermissions,
+        CpuAdvanced,
+        ImageChanged,
+        SmallCpuAdvance,
+        CpuUnreadable,
+        NotWaiting,
         Members(usize),
         Observation,
         Pin(i32),
@@ -501,6 +571,35 @@ mod tests {
         }
     }
     impl UnixPtyHost for Facts {
+        fn process_image(&self, _: ProcessIdentity) -> io::Result<std::path::PathBuf> {
+            Ok(std::path::PathBuf::from(
+                if self.fault() == Fault::ImageChanged {
+                    "/bin/other-program"
+                } else {
+                    "/bin/test-shell"
+                },
+            ))
+        }
+        fn cpu_time(&self, _: ProcessIdentity) -> io::Result<Duration> {
+            if self.fault() == Fault::CpuUnreadable {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+            Ok(if self.fault() == Fault::CpuAdvanced {
+                Duration::from_millis(20)
+            } else if self.fault() == Fault::SmallCpuAdvance {
+                Duration::from_nanos(1)
+            } else {
+                Duration::ZERO
+            })
+        }
+        fn prompt_waiting(
+            &self,
+            _: ProcessIdentity,
+            _: &std::path::Path,
+            _: bool,
+        ) -> io::Result<bool> {
+            Ok(self.fault() != Fault::NotWaiting)
+        }
         fn fence_slave(&self, _: &std::path::Path) -> io::Result<Box<dyn SlaveFence>> {
             self.0.permissions.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(Permissions(self.0.clone())))
@@ -659,11 +758,20 @@ mod tests {
             master,
             std::path::Path::new("/dev/test-terminal"),
             deadline,
+            Checkpoint {
+                cpu: vec![(session(facts).leader, Duration::ZERO)],
+                image: "/bin/test-shell".into(),
+            },
         )
     }
     #[test]
     fn every_native_refusal_thaws_only_the_processes_this_attempt_stopped() {
         for (fault, expected) in [
+            (Fault::CpuAdvanced, vec![100]),
+            (Fault::ImageChanged, vec![100]),
+            (Fault::SmallCpuAdvance, vec![100]),
+            (Fault::CpuUnreadable, vec![100]),
+            (Fault::NotWaiting, vec![100]),
             (Fault::Members(1), vec![]),
             (Fault::Observation, vec![]),
             (Fault::Pin(100), vec![]),
@@ -809,6 +917,10 @@ mod tests {
                     &master(),
                     std::path::Path::new("/dev/test-terminal"),
                     Instant::now() + Duration::from_millis(80),
+                    Checkpoint {
+                        cpu: vec![(session(&host).leader, Duration::ZERO)],
+                        image: "/bin/test-shell".into(),
+                    },
                 )
                 .is_err()
             });

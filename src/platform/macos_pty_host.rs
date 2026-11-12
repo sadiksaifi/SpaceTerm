@@ -9,6 +9,122 @@ use crate::platform::unix_pty::{
 pub(super) struct MacosPtyHost;
 
 impl UnixPtyHost for MacosPtyHost {
+    fn process_image(&self, identity: ProcessIdentity) -> io::Result<std::path::PathBuf> {
+        use std::os::unix::ffi::OsStrExt;
+        if self.observe_exactly(identity.process)?.map(|p| p.identity) != Some(identity) {
+            return Err(io::Error::other("process identity changed"));
+        }
+        let mut path = [0_u8; 4096];
+        // SAFETY: proc_pidpath writes at most this buffer's length and terminates the result.
+        if unsafe {
+            libc::proc_pidpath(
+                identity.process,
+                path.as_mut_ptr().cast(),
+                path.len() as u32,
+            )
+        } <= 0
+        {
+            return Err(io::Error::other("the process image is unavailable"));
+        }
+        let image = std::ffi::CStr::from_bytes_until_nul(&path)
+            .map_err(|_| io::Error::other("unreadable process image"))?;
+        if self.observe_exactly(identity.process)?.map(|p| p.identity) != Some(identity) {
+            return Err(io::Error::other("process identity changed"));
+        }
+        Ok(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
+            image.to_bytes(),
+        )))
+    }
+
+    #[allow(
+        deprecated,
+        reason = "libc exposes the kernel timebase through this API"
+    )]
+    fn cpu_time(&self, identity: ProcessIdentity) -> io::Result<std::time::Duration> {
+        if self.observe_exactly(identity.process)?.map(|p| p.identity) != Some(identity) {
+            return Err(io::Error::other("process identity changed"));
+        }
+        let mut task = std::mem::MaybeUninit::<libc::proc_taskinfo>::zeroed();
+        let size = std::mem::size_of::<libc::proc_taskinfo>() as i32;
+        // SAFETY: flavor 4 writes exactly proc_taskinfo into this initialized-size buffer.
+        if unsafe {
+            libc::proc_pidinfo(
+                identity.process,
+                libc::PROC_PIDTASKINFO,
+                0,
+                task.as_mut_ptr().cast(),
+                size,
+            )
+        } != size
+        {
+            return Err(io::Error::other("CPU time is unavailable"));
+        }
+        // SAFETY: the complete structure was initialized by proc_pidinfo.
+        let task = unsafe { task.assume_init() };
+        let nanos = task
+            .pti_total_user
+            .checked_add(task.pti_total_system)
+            .ok_or_else(|| io::Error::other("CPU time overflow"))?;
+        if self.observe_exactly(identity.process)?.map(|p| p.identity) != Some(identity) {
+            return Err(io::Error::other("process identity changed"));
+        }
+        let mut timebase = libc::mach_timebase_info_data_t { numer: 0, denom: 0 };
+        // SAFETY: timebase is writable storage for the kernel conversion ratio.
+        if unsafe { libc::mach_timebase_info(&mut timebase) } != 0
+            || timebase.denom == 0
+            || timebase.numer == 0
+        {
+            return Err(io::Error::other("CPU timebase is unavailable"));
+        }
+        let nanos = u64::try_from(
+            u128::from(nanos) * u128::from(timebase.numer) / u128::from(timebase.denom),
+        )
+        .map_err(|_| io::Error::other("CPU time conversion overflow"))?;
+        Ok(std::time::Duration::from_nanos(nanos))
+    }
+    fn prompt_waiting(
+        &self,
+        identity: ProcessIdentity,
+        _slave: &std::path::Path,
+        frozen: bool,
+    ) -> io::Result<bool> {
+        if self.observe_exactly(identity.process)?.map(|p| p.identity) != Some(identity) {
+            return Err(io::Error::other("process identity changed"));
+        }
+        let threads = process_threads(identity.process)?;
+        if threads.is_empty() {
+            return Err(io::Error::other("no readable threads"));
+        }
+        for &thread in &threads {
+            let mut info = std::mem::MaybeUninit::<libc::proc_threadinfo>::zeroed();
+            let size = std::mem::size_of::<libc::proc_threadinfo>() as i32;
+            // SAFETY: flavor 5 writes proc_threadinfo for this exact thread identifier.
+            if unsafe {
+                libc::proc_pidinfo(
+                    identity.process,
+                    libc::PROC_PIDTHREADINFO,
+                    thread,
+                    info.as_mut_ptr().cast(),
+                    size,
+                )
+            } != size
+            {
+                return Err(io::Error::other("thread state is unavailable"));
+            }
+            // SAFETY: proc_pidinfo initialized the complete structure.
+            let state = unsafe { info.assume_init() }.pth_run_state;
+            if state != libc::TH_STATE_WAITING && !(frozen && state == libc::TH_STATE_STOPPED) {
+                return Ok(false);
+            }
+        }
+        if process_threads(identity.process)? != threads
+            || self.observe_exactly(identity.process)?.map(|p| p.identity) != Some(identity)
+        {
+            return Err(io::Error::other("thread membership changed"));
+        }
+        Ok(true)
+    }
+
     fn pin_process(
         &self,
         identity: ProcessIdentity,
@@ -126,6 +242,29 @@ fn bsd_with_unique(pid: i32) -> io::Result<BsdWithUnique> {
     // SAFETY: the complete structure was initialized.
     Ok(unsafe { info.assume_init() })
 }
+fn process_threads(pid: i32) -> io::Result<Vec<u64>> {
+    let mut capacity = 16;
+    loop {
+        let mut threads = vec![0_u64; capacity];
+        let size = (capacity * std::mem::size_of::<u64>()) as i32;
+        // SAFETY: flavor 6 writes a list of 64-bit thread identifiers to this sized buffer.
+        let read = unsafe { libc::proc_pidinfo(pid, 6, 0, threads.as_mut_ptr().cast(), size) };
+        if read <= 0 || !(read as usize).is_multiple_of(8) {
+            return Err(io::Error::other("thread enumeration is unavailable"));
+        }
+        if read >= size {
+            if capacity >= 4096 {
+                return Err(io::Error::other("incomplete thread enumeration"));
+            }
+            capacity *= 2;
+            continue;
+        }
+        threads.truncate(read as usize / 8);
+        threads.sort_unstable();
+        return Ok(threads);
+    }
+}
+
 struct PinnedProcess {
     identity: ProcessIdentity,
     token: [u32; 8],
@@ -378,6 +517,59 @@ fn all_process_ids() -> io::Result<Vec<i32>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_process_image_matches_the_native_executable() {
+        use crate::platform::unix_pty::UnixPtyHost;
+        let host = super::MacosPtyHost;
+        let identity = host
+            .observe_exactly(std::process::id() as i32)
+            .unwrap()
+            .unwrap()
+            .identity;
+        assert_eq!(
+            host.process_image(identity).unwrap(),
+            std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn an_observed_cpu_interval_uses_the_macos_timebase() {
+        fn used() -> std::time::Duration {
+            let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+            // SAFETY: usage is sized writable storage for this process's resource accounting.
+            assert_eq!(
+                unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) },
+                0
+            );
+            // SAFETY: getrusage initialized the whole record.
+            let usage = unsafe { usage.assume_init() };
+            std::time::Duration::from_secs((usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) as u64)
+                + std::time::Duration::from_micros(
+                    (usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) as u64,
+                )
+        }
+        use crate::platform::unix_pty::UnixPtyHost;
+        let pid = std::process::id() as i32;
+        let identity = super::MacosPtyHost
+            .observe_exactly(pid)
+            .unwrap()
+            .unwrap()
+            .identity;
+        let before = super::MacosPtyHost.cpu_time(identity).unwrap();
+        let start = used();
+        while used().saturating_sub(start) < std::time::Duration::from_millis(50) {
+            std::hint::spin_loop();
+        }
+        let elapsed = super::MacosPtyHost
+            .cpu_time(identity)
+            .unwrap()
+            .saturating_sub(before);
+        assert!(
+            elapsed >= std::time::Duration::from_millis(40),
+            "native CPU accounting must use timebase-converted time: {elapsed:?}"
+        );
+    }
+
     use super::*;
 
     #[test]

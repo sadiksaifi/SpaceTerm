@@ -10,6 +10,61 @@ use crate::platform::unix_pty::{
 pub(super) struct LinuxPtyHost;
 
 impl UnixPtyHost for LinuxPtyHost {
+    fn process_image(&self, identity: ProcessIdentity) -> io::Result<std::path::PathBuf> {
+        if self.observe_exactly(identity.process)?.map(|p| p.identity) != Some(identity) {
+            return Err(io::Error::other("process identity changed"));
+        }
+        let image = std::fs::read_link(format!("/proc/{}/exe", identity.process))?;
+        if self.observe_exactly(identity.process)?.map(|p| p.identity) != Some(identity) {
+            return Err(io::Error::other("process identity changed"));
+        }
+        Ok(image)
+    }
+
+    fn cpu_time(&self, identity: ProcessIdentity) -> io::Result<std::time::Duration> {
+        let stat = std::fs::read(format!("/proc/{}/stat", identity.process))?;
+        if exact_stat(identity.process, &stat)?.map(|p| p.identity) != Some(identity) {
+            return Err(io::Error::other("process identity changed"));
+        }
+        let end = stat
+            .iter()
+            .rposition(|b| *b == b')')
+            .ok_or_else(|| io::Error::other("unreadable CPU time"))?;
+        let fields = std::str::from_utf8(&stat[end + 1..])
+            .map_err(|_| io::Error::other("unreadable CPU time"))?
+            .split_ascii_whitespace()
+            .collect::<Vec<_>>();
+        let ticks = fields
+            .get(11)
+            .and_then(|n| n.parse::<u64>().ok())
+            .zip(fields.get(12).and_then(|n| n.parse::<u64>().ok()))
+            .and_then(|(u, s)| u.checked_add(s))
+            .ok_or_else(|| io::Error::other("unreadable CPU time"))?;
+        // SAFETY: sysconf reads the kernel's clock-tick frequency.
+        let frequency = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        if frequency <= 0 {
+            return Err(io::Error::other("CPU tick frequency is unavailable"));
+        }
+        let nanos = u64::try_from(u128::from(ticks) * 1_000_000_000 / (frequency as u128))
+            .map_err(|_| io::Error::other("CPU time overflow"))?;
+        Ok(std::time::Duration::from_nanos(nanos))
+    }
+    fn prompt_waiting(
+        &self,
+        identity: ProcessIdentity,
+        slave: &std::path::Path,
+        _frozen: bool,
+    ) -> io::Result<bool> {
+        if self.observe_exactly(identity.process)?.map(|p| p.identity) != Some(identity) {
+            return Err(io::Error::other("process identity changed"));
+        }
+        let waiting = terminal_read_wait(identity.process, slave)?;
+        if self.observe_exactly(identity.process)?.map(|p| p.identity) != Some(identity) {
+            return Err(io::Error::other("process identity changed"));
+        }
+        Ok(waiting)
+    }
+
     fn pin_process(
         &self,
         identity: ProcessIdentity,
@@ -128,6 +183,74 @@ impl UnixPtyHost for LinuxPtyHost {
             MasterReadError::Failure
         }
     }
+}
+
+/// Inspect only syscall arguments and the bounded read descriptor set. Never read the
+/// terminal's input buffer or follow any descriptor target into a filesystem.
+fn terminal_read_wait(pid: i32, slave: &std::path::Path) -> io::Result<bool> {
+    use std::os::unix::fs::FileExt;
+    let syscall = std::fs::read_to_string(format!("/proc/{pid}/syscall"))?;
+    let fields = syscall.split_ascii_whitespace().collect::<Vec<_>>();
+    let Some(number) = fields.first().and_then(|n| n.parse::<i64>().ok()) else {
+        return Ok(false);
+    };
+    if number < 0 {
+        return Ok(false);
+    }
+    let arg = |index: usize| -> io::Result<u64> {
+        fields
+            .get(index + 1)
+            .and_then(|s| s.strip_prefix("0x"))
+            .and_then(|s| u64::from_str_radix(s, 16).ok())
+            .ok_or_else(|| io::Error::other("unreadable syscall arguments"))
+    };
+    let is_terminal = |fd: i32| -> io::Result<bool> {
+        Ok(std::fs::read_link(format!("/proc/{pid}/fd/{fd}"))? == slave)
+    };
+    if number == libc::SYS_read || number == libc::SYS_readv {
+        return is_terminal(
+            i32::try_from(arg(0)?).map_err(|_| io::Error::other("invalid read descriptor"))?,
+        );
+    }
+    let select = number == libc::SYS_pselect6;
+    #[cfg(target_arch = "x86_64")]
+    let select = select || number == libc::SYS_select;
+    if select {
+        let count = arg(0)?;
+        let address = arg(1)?;
+        if count == 0 || count > 1024 || address == 0 {
+            return Ok(false);
+        }
+        let mut descriptors = vec![0_u8; (count as usize).div_ceil(64) * 8];
+        std::fs::File::open(format!("/proc/{pid}/mem"))?
+            .read_exact_at(&mut descriptors, address)?;
+        for fd in 0..count as usize {
+            if descriptors[fd / 8] & (1 << (fd % 8)) != 0 && is_terminal(fd as i32)? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+    let polling = number == libc::SYS_ppoll;
+    #[cfg(target_arch = "x86_64")]
+    let polling = polling || number == libc::SYS_poll;
+    if polling {
+        let count = arg(1)?;
+        if count == 0 || count > 64 {
+            return Ok(false);
+        }
+        let mut descriptors = vec![0_u8; count as usize * 8];
+        std::fs::File::open(format!("/proc/{pid}/mem"))?
+            .read_exact_at(&mut descriptors, arg(0)?)?;
+        for entry in descriptors.chunks_exact(8) {
+            let fd = i32::from_ne_bytes(entry[..4].try_into().expect("poll descriptor"));
+            let events = i16::from_ne_bytes(entry[4..6].try_into().expect("poll events"));
+            if fd >= 0 && events & libc::POLLIN != 0 && is_terminal(fd)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 struct PinnedProcess {
@@ -277,6 +400,21 @@ fn parse_process_stat(process: i32, stat: &[u8]) -> Option<ProcessStat> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_process_image_matches_the_native_executable() {
+        use crate::platform::unix_pty::UnixPtyHost;
+        let host = super::LinuxPtyHost;
+        let identity = host
+            .observe_exactly(std::process::id() as i32)
+            .unwrap()
+            .unwrap()
+            .identity;
+        assert_eq!(
+            host.process_image(identity).unwrap(),
+            std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap()
+        );
+    }
+
     use super::*;
 
     fn stat(name: &str, state: &str, group: i32, session: i32, start: u64) -> Vec<u8> {

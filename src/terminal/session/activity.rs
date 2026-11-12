@@ -109,6 +109,7 @@ impl TerminalEventPublisher {
                 activity.last,
             )
         };
+        let checkpoint = probe.clone();
         let working = work_going_on(quiet, running, empty_prompt, || {
             let probe = probe.ok_or_else(|| io::Error::other("no process facts"))?;
             if !probe.shell_foreground()? {
@@ -116,6 +117,7 @@ impl TerminalEventPublisher {
             }
             probe.others()
         });
+        let working = working || checkpoint.is_none_or(|probe| probe.checkpoint().is_err());
         let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         working || state.stopped || state.activity.last != last
     }
