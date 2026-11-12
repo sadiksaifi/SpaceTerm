@@ -161,17 +161,18 @@ pub(crate) const CHECKING_START: &str = "Checking\u{2026}";
 pub(crate) const START_STILL_UNKNOWN: &str =
     "SpaceTerm still can\u{2019}t tell whether the shell started.";
 
-/// The notice title and cause of a connection SpaceTerm stopped retrying. Incompatibility names
-/// the refusal and never which side is older, because release numbers don't say.
+/// The notice title and cause of a connection SpaceTerm stopped retrying. A protocol refusal
+/// names the side that is too old, which the protocol major says (ADR 0035).
 fn failure_copy(error: CoreError) -> (&'static str, SharedString) {
+    use crate::updates::copy::pane;
     match error {
         CoreError::Protocol => (
             "Connection Failed",
             SharedString::new_static("SpaceTerm stopped reconnecting."),
         ),
-        CoreError::IncompatibleProtocol(_) => (
-            "Incompatible SpaceTerm Core",
-            SharedString::new_static("SpaceTerm and this SpaceTerm Core are incompatible."),
+        CoreError::IncompatibleProtocol(incompatible) => (
+            pane::blocked_title(incompatible),
+            SharedString::new_static(pane::blocked_unnamed(incompatible)),
         ),
         error => (OFFLINE_TITLE, SharedString::from(error.to_string())),
     }

@@ -374,6 +374,18 @@ fn build() -> Deck {
         deck.field(Role::Text, status);
         deck.pane.insert(format!("Status | {status}"));
     }
+    for incompatible in [
+        spaceterm_core::protocol::version::Incompatible::ListenerTooOld,
+        spaceterm_core::protocol::version::Incompatible::CallerTooOld,
+    ] {
+        let (title, detail) = (
+            pane::blocked_title(incompatible),
+            pane::blocked_unnamed(incompatible),
+        );
+        deck.field(Role::Text, title);
+        deck.field(Role::Text, detail);
+        deck.pane.insert(format!("Blocked | {title} | {detail}"));
+    }
     deck.field(Role::Label, pane::COPY_TYPED_TEXT);
     deck.field(Role::Text, pane::COPY_TYPED_TEXT_DESCRIPTION);
     deck.pane.insert(format!(

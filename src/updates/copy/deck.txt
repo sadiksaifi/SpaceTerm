@@ -459,6 +459,8 @@ Stop SpaceTerm Core on penguin? | This ends 3 Terminal Sessions. SpaceTerm Core 
 
 ## Pane after a restart: title | detail, status or button
 
+Blocked | SpaceTerm Core Is Too Old | This SpaceTerm Core is too old for this SpaceTerm.
+Blocked | This SpaceTerm Is Too Old | This SpaceTerm is too old for this SpaceTerm Core.
 Button | Copy Typed Text | Copies what you typed to the clipboard without sending it.
 Status | What you typed may not have been sent. SpaceTerm Core was about to restart.
 Status | What you typed may not have been sent. The connection to SpaceTerm Core was lost.

@@ -67,6 +67,22 @@ pub(crate) fn could_not_restart_into(version: &Version) -> String {
 /// The launch screen's title when this SpaceTerm was replaced on disk while it ran.
 pub(crate) const RELAUNCH_SPACETERM: &str = "Relaunch SpaceTerm";
 
+/// The blocked Workspace surface's title, which names the side that is too old.
+pub(crate) const fn blocked_title(incompatible: Incompatible) -> &'static str {
+    match incompatible {
+        Incompatible::ListenerTooOld => "SpaceTerm Core Is Too Old",
+        Incompatible::CallerTooOld => "This SpaceTerm Is Too Old",
+    }
+}
+
+/// The blocked detail where the Machine has no name to show.
+pub(crate) const fn blocked_unnamed(incompatible: Incompatible) -> &'static str {
+    match incompatible {
+        Incompatible::ListenerTooOld => "This SpaceTerm Core is too old for this SpaceTerm.",
+        Incompatible::CallerTooOld => "This SpaceTerm is too old for this SpaceTerm Core.",
+    }
+}
+
 /// What a blocked Workspace surface offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BlockedAction {

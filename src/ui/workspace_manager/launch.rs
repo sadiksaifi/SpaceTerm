@@ -353,9 +353,10 @@ pub(super) const LOGIN_ITEM_OFF_TITLE: &str = "SpaceTerm Core is off in Login It
 /// The title for a launch that could not finish. The detail names the exact reason.
 const fn failure_title(error: CoreError) -> &'static str {
     match error {
-        CoreError::IncompatibleState | CoreError::IncompatibleProtocol(_) => {
-            "Incompatible SpaceTerm Core"
+        CoreError::IncompatibleProtocol(incompatible) => {
+            crate::updates::copy::pane::blocked_title(incompatible)
         }
+        CoreError::IncompatibleState => "Incompatible SpaceTerm Core",
         CoreError::ActivationUnresolved => "SpaceTerm Core Update Unfinished",
         CoreError::CandidateChanged => crate::updates::copy::pane::RELAUNCH_SPACETERM,
         CoreError::CandidateMissing => "SpaceTerm Core Not Included",

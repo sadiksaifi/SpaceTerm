@@ -956,7 +956,13 @@ fn a_failure_before_inventory_explains_itself_and_offers_recovery(cx: &mut TestA
             CoreError::IncompatibleProtocol(
                 spaceterm_core::protocol::version::Incompatible::ListenerTooOld,
             ),
-            "Incompatible SpaceTerm Core",
+            "SpaceTerm Core Is Too Old",
+        ),
+        (
+            CoreError::IncompatibleProtocol(
+                spaceterm_core::protocol::version::Incompatible::CallerTooOld,
+            ),
+            "This SpaceTerm Is Too Old",
         ),
         (CoreError::IncompatibleState, "Incompatible SpaceTerm Core"),
         (
@@ -1062,7 +1068,7 @@ fn a_refused_core_names_the_older_side_and_shows_its_download(cx: &mut TestAppCo
         .manager
         .read_with(cx, |manager, _| manager.launch_presentation())
         .expect("the refusal is presented");
-    assert_eq!(presentation.title, "Incompatible SpaceTerm Core");
+    assert_eq!(presentation.title, "SpaceTerm Core Is Too Old");
     assert!(
         presentation
             .detail
@@ -1179,10 +1185,7 @@ fn a_refusal_after_admission_presents_the_blocked_screen(cx: &mut TestAppContext
         spaceterm_core::protocol::version::Incompatible::ListenerTooOld,
     ));
     sync(&harness, cx);
-    assert_eq!(
-        harness.launch_title(cx),
-        Some("Incompatible SpaceTerm Core")
-    );
+    assert_eq!(harness.launch_title(cx), Some("SpaceTerm Core Is Too Old"));
     assert!(
         cx.debug_bounds(launch::LAUNCH_RESTART_CORE_SELECTOR)
             .is_none()

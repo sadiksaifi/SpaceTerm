@@ -295,13 +295,15 @@ fn a_restored_pane_that_stopped_reconnecting_names_the_failure() {
 #[test]
 fn a_blocked_paired_machine_names_the_side_that_is_too_old() {
     use spaceterm_core::protocol::version::Incompatible;
-    for (incompatible, detail) in [
+    for (incompatible, title, detail) in [
         (
             Incompatible::ListenerTooOld,
+            "SpaceTerm Core Is Too Old",
             "SpaceTerm Core on penguin is too old for this SpaceTerm.",
         ),
         (
             Incompatible::CallerTooOld,
+            "This SpaceTerm Is Too Old",
             "This SpaceTerm is too old for SpaceTerm Core on penguin.",
         ),
     ] {
@@ -312,9 +314,28 @@ fn a_blocked_paired_machine_names_the_side_that_is_too_old() {
             incompatible,
         )));
         view.sync();
+        assert_eq!(notice(&view), Some((title.to_owned(), detail.to_owned())));
+    }
+    // Without the Machine's name the detail still names the side that is too old.
+    for (incompatible, detail) in [
+        (
+            Incompatible::ListenerTooOld,
+            "This SpaceTerm Core is too old for this SpaceTerm.",
+        ),
+        (
+            Incompatible::CallerTooOld,
+            "This SpaceTerm is too old for this SpaceTerm Core.",
+        ),
+    ] {
+        let connection = Connection::new(CorePaneStatus::Connected);
+        let mut view = CorePaneView::new(connection.clone());
+        connection.set(CorePaneStatus::Failed(CoreError::IncompatibleProtocol(
+            incompatible,
+        )));
+        view.sync();
         assert_eq!(
-            notice(&view),
-            Some(("Incompatible SpaceTerm Core".to_owned(), detail.to_owned()))
+            notice(&view).map(|(_, shown)| shown).as_deref(),
+            Some(detail)
         );
     }
 }

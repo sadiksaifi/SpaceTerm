@@ -8812,7 +8812,7 @@ fn a_blocked_pane_follows_the_cores_download_and_restarts_only_after_approval(
     )]));
     settle_panes(cx);
     assert_eq!(
-        A11yTree::read(cx).node("Incompatible SpaceTerm Core")["aria"]["description"],
+        A11yTree::read(cx).node("SpaceTerm Core Is Too Old")["aria"]["description"],
         "SpaceTerm Core on This Mac is too old for this SpaceTerm. Downloading SpaceTerm Core \
          0.14.0\u{2026}"
     );
