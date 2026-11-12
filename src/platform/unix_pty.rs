@@ -95,6 +95,9 @@ struct TerminationTarget {
 /// Operating-System process facts that the shared POSIX PTY owner needs to supervise a Shell
 /// Process session without trusting reusable process identifiers.
 pub(super) trait UnixPtyHost: Send + Sync + 'static {
+    fn fence_slave(&self, slave: &std::path::Path) -> io::Result<Box<dyn SlaveFence>> {
+        Ok(Box::new(freeze::SlavePermissions::close(slave)?))
+    }
     fn pin_process(&self, _identity: ProcessIdentity) -> io::Result<Box<dyn ProcessControl>> {
         Err(io::Error::other("stable process signalling is unavailable"))
     }
@@ -192,6 +195,14 @@ pub(super) trait UnixPtyHost: Send + Sync + 'static {
 
     fn master_read_error(&self, error: &io::Error) -> MasterReadError;
 }
+pub(super) trait SlaveFence: Send + Sync {
+    /// This snapshot must not retain the permission owner: timeout cleanup can restore the
+    /// node even while its validation is stalled in a native query.
+    fn verification(&self) -> Box<dyn FnOnce() -> io::Result<()> + Send> {
+        Box::new(|| Ok(()))
+    }
+}
+
 /// An OS-bound process identity. Signals must never fall back to a reusable PID.
 pub(super) trait ProcessControl: Send + Sync {
     fn identity(&self) -> ProcessIdentity;
@@ -1732,6 +1743,72 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    fn a_granted_freeze_blocks_fresh_slave_opens_and_restores_its_exact_mode_and_owner() {
+        use std::os::unix::fs::MetadataExt;
+        const NAME: &str = "platform::unix_pty::tests::a_granted_freeze_blocks_fresh_slave_opens_and_restores_its_exact_mode_and_owner";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _lock = lock_real_pty_test();
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args(["-c", "printf READY; read line"]);
+        let (mut pty, terminator) = spawn_command_in_pty(
+            freeze_test_host(),
+            PtySize::default(),
+            command,
+            Arc::default(),
+        )
+        .unwrap();
+        let mut reader = pty.take_reader().unwrap();
+        read_output_marker(&mut reader, b"READY");
+        let slave = pty.probe.slave.as_ref().unwrap();
+        let before = std::fs::metadata(slave).unwrap();
+        let frozen = pty.probe.freeze().unwrap();
+        frozen.verify().unwrap();
+        let mode = std::fs::metadata(slave).unwrap();
+        let opened = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+            .open(slave);
+        let fenced = mode.mode() & 0o7777 == 0;
+        let refused = if unsafe { libc::geteuid() } == 0 {
+            opened.is_ok()
+        } else {
+            opened.is_err()
+        };
+        drop(opened);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            slave,
+            std::fs::Permissions::from_mode((before.mode() & 0o7777) ^ 0o100),
+        )
+        .unwrap();
+        let changed = frozen.verify().is_err();
+        drop(frozen);
+        let after = std::fs::metadata(slave).unwrap();
+        // Capture the failure before rescuing permissions for a deliberately broken mutant.
+        std::fs::set_permissions(
+            slave,
+            std::fs::Permissions::from_mode(before.mode() & 0o7777),
+        )
+        .unwrap();
+        terminator.terminate().unwrap();
+        drop(reader);
+        drop(pty);
+        assert!(fenced, "the final grant must retain mode zero through Stop");
+        assert!(
+            refused,
+            "only root can bypass the fresh-open permission fence"
+        );
+        assert!(changed, "a changed permission fence must refuse Stop");
+        assert_eq!(
+            (after.mode(), after.uid(), after.gid()),
+            (before.mode(), before.uid(), before.gid())
+        );
+    }
+
     #[test]
     fn an_outside_slave_holder_refuses_the_grant_without_stopping_the_holder() {
         const NAME: &str = "platform::unix_pty::tests::an_outside_slave_holder_refuses_the_grant_without_stopping_the_holder";

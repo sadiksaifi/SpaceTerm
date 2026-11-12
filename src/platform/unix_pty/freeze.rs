@@ -3,6 +3,7 @@ use super::*;
 
 struct Resources {
     stopped: Vec<Arc<dyn ProcessControl>>,
+    permissions: Option<Box<dyn SlaveFence>>,
     inspection: Option<u64>,
     serial: u64,
     thawed: bool,
@@ -12,21 +13,23 @@ impl Cleanup {
     fn new() -> Arc<Self> {
         Arc::new(Self(Mutex::new(Resources {
             stopped: Vec::new(),
+            permissions: None,
             inspection: None,
             serial: 0,
             thawed: false,
         })))
     }
     fn thaw(&self, inspection: Option<u64>) {
-        let stopped = {
+        let (stopped, permissions) = {
             let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
             if state.thawed || inspection.is_some_and(|id| state.inspection != Some(id)) {
                 return;
             }
             state.thawed = true;
             state.inspection = None;
-            std::mem::take(&mut state.stopped)
+            (std::mem::take(&mut state.stopped), state.permissions.take())
         };
+        drop(permissions);
         for process in stopped.into_iter().rev() {
             if let Err(error) = process.signal(libc::SIGCONT)
                 && error.raw_os_error() != Some(libc::ESRCH)
@@ -35,7 +38,14 @@ impl Cleanup {
             }
         }
     }
-
+    fn install(&self, permissions: Box<dyn SlaveFence>) -> io::Result<()> {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if state.thawed {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        state.permissions = Some(permissions);
+        Ok(())
+    }
     fn stop(&self, process: Arc<dyn ProcessControl>) -> io::Result<()> {
         if process.stopped()? {
             return Err(io::Error::other("a session process was already stopped"));
@@ -49,7 +59,20 @@ impl Cleanup {
         state.stopped.push(process);
         Ok(())
     }
-
+    fn verify_permissions(&self) -> io::Result<()> {
+        let check = {
+            let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            if state.thawed {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            state
+                .permissions
+                .as_ref()
+                .ok_or_else(|| io::Error::other("no terminal permission fence"))?
+                .verification()
+        };
+        check()
+    }
     fn stopped(&self) -> Vec<Arc<dyn ProcessControl>> {
         self.0
             .lock()
@@ -202,6 +225,8 @@ impl Population {
         let slave = slave.to_owned();
         let facts = bounded(cleanup.clone(), deadline, move || {
             let observed = members(host.as_ref(), session)?;
+            let permissions = host.fence_slave(&slave)?;
+            owned.install(permissions)?;
             let facts = Arc::new(Facts {
                 host,
                 session,
@@ -237,6 +262,7 @@ impl Facts {
                 "the terminal session has work or changed membership",
             ));
         }
+        cleanup.verify_permissions()?;
         let stopped = cleanup.stopped();
         if stopped.len() != fresh.len() || stopped.iter().any(|p| !matches!(p.stopped(), Ok(true)))
         {
@@ -280,6 +306,88 @@ impl Facts {
     }
 }
 
+pub(super) struct SlavePermissions {
+    path: std::path::PathBuf,
+    device: u64,
+    inode: u64,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+}
+impl SlaveFence for SlavePermissions {
+    fn verification(&self) -> Box<dyn FnOnce() -> io::Result<()> + Send> {
+        let path = self.path.clone();
+        let expected = (self.device, self.inode, self.uid, self.gid);
+        Box::new(move || {
+            use std::os::unix::fs::MetadataExt;
+            let current = std::fs::symlink_metadata(path)?;
+            if current.mode() & 0o7777 != 0
+                || (current.dev(), current.ino(), current.uid(), current.gid()) != expected
+            {
+                return Err(io::Error::other("the terminal permission fence changed"));
+            }
+            Ok(())
+        })
+    }
+}
+impl SlavePermissions {
+    pub(super) fn close(path: &std::path::Path) -> io::Result<Self> {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+        let metadata = std::fs::symlink_metadata(path)?;
+        if !metadata.file_type().is_char_device() {
+            return Err(io::Error::other("the slave is not a device node"));
+        }
+        let saved = Self {
+            path: path.into(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            mode: metadata.mode() & 0o7777,
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+        };
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0))?;
+        let closed = std::fs::symlink_metadata(path)?;
+        if closed.mode() & 0o7777 != 0
+            || closed.uid() != saved.uid
+            || closed.gid() != saved.gid
+            || closed.dev() != saved.device
+            || closed.ino() != saved.inode
+        {
+            return Err(io::Error::other("the terminal permission fence changed"));
+        }
+        Ok(saved)
+    }
+    fn restore(&self) -> io::Result<()> {
+        use std::os::unix::{
+            ffi::OsStrExt,
+            fs::{MetadataExt, PermissionsExt},
+        };
+        let current = match std::fs::symlink_metadata(&self.path) {
+            Ok(value) => value,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if current.dev() != self.device || current.ino() != self.inode {
+            return Err(io::Error::other("the terminal device identity changed"));
+        }
+        if current.uid() != self.uid || current.gid() != self.gid {
+            let path = std::ffi::CString::new(self.path.as_os_str().as_bytes())
+                .map_err(|_| io::Error::other("invalid terminal device"))?;
+            // SAFETY: the path is NUL terminated; restore only the recorded device's ownership.
+            if unsafe { libc::chown(path.as_ptr(), self.uid, self.gid) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(self.mode))
+    }
+}
+impl Drop for SlavePermissions {
+    fn drop(&mut self) {
+        if let Err(error) = self.restore() {
+            eprintln!("failed to restore terminal permissions: {:?}", error.kind());
+        }
+    }
+}
 fn members(
     host: &dyn UnixPtyHost,
     session: ProcessSessionIdentity,
@@ -313,6 +421,7 @@ mod tests {
         None,
         DelayedAck,
         Stall,
+        StallPermissions,
         Members(usize),
         Observation,
         Pin(i32),
@@ -338,15 +447,36 @@ mod tests {
         reads: AtomicUsize,
         stopped: Mutex<BTreeSet<i32>>,
         signals: Mutex<Vec<(i32, i32)>>,
+        permissions: AtomicUsize,
         stall: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
     }
     #[derive(Clone)]
     struct Facts(Arc<Data>);
+    struct Permissions(Arc<Data>);
+    impl SlaveFence for Permissions {
+        fn verification(&self) -> Box<dyn FnOnce() -> io::Result<()> + Send> {
+            let data = self.0.clone();
+            Box::new(move || {
+                if *data.fault.lock().unwrap() == Fault::StallPermissions {
+                    let (entered, resume) = data.stall.lock().unwrap().take().unwrap();
+                    entered.send(()).unwrap();
+                    resume.recv().unwrap();
+                }
+                Ok(())
+            })
+        }
+    }
+    impl Drop for Permissions {
+        fn drop(&mut self) {
+            assert_eq!(self.0.permissions.fetch_sub(1, Ordering::SeqCst), 1);
+        }
+    }
     impl Facts {
         fn new(fault: Fault) -> Self {
             Self(Arc::new(Data {
                 fault: Mutex::new(fault),
                 stall: Mutex::new(None),
+                permissions: AtomicUsize::new(0),
                 scans: AtomicUsize::new(0),
                 reads: AtomicUsize::new(0),
                 stopped: Mutex::new(BTreeSet::new()),
@@ -371,6 +501,10 @@ mod tests {
         }
     }
     impl UnixPtyHost for Facts {
+        fn fence_slave(&self, _: &std::path::Path) -> io::Result<Box<dyn SlaveFence>> {
+            self.0.permissions.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(Permissions(self.0.clone())))
+        }
         fn observe_process(&self, pid: i32) -> Option<ProcessObservation> {
             Some(self.observation(pid))
         }
@@ -557,6 +691,11 @@ mod tests {
         ] {
             let facts = Facts::new(fault);
             assert!(capture(&facts, &master()).is_err(), "{fault:?}");
+            assert_eq!(
+                facts.0.permissions.load(Ordering::SeqCst),
+                0,
+                "{fault:?}: restored permissions on refusal"
+            );
             let signals = facts.0.signals.lock().unwrap();
             let stopped = signals
                 .iter()
@@ -657,52 +796,57 @@ mod tests {
     }
     #[test]
     fn a_stalled_inspection_thaws_without_waiting_for_the_inspection_to_return() {
-        let fault = Fault::Stall;
-        let facts = Facts::new(fault);
-        let (entered, paused) = std::sync::mpsc::channel();
-        let (resume, inspection) = std::sync::mpsc::channel();
-        *facts.0.stall.lock().unwrap() = Some((entered, inspection));
-        let host = facts.clone();
-        let worker = thread::spawn(move || {
-            Population::capture(
-                Arc::new(host.clone()),
-                session(&host),
-                &master(),
-                std::path::Path::new("/dev/test-terminal"),
-                Instant::now() + Duration::from_millis(80),
-            )
-            .is_err()
-        });
-        paused.recv_timeout(Duration::from_secs(3)).unwrap();
-        let until = Instant::now() + Duration::from_secs(2);
-        let thawed = loop {
-            if facts
-                .0
-                .signals
-                .lock()
-                .unwrap()
-                .contains(&(100, libc::SIGCONT))
-            {
-                break true;
-            }
-            if Instant::now() >= until {
-                break false;
-            }
-            thread::sleep(Duration::from_millis(2));
-        };
-
-        resume.send(()).unwrap();
-        assert!(
-            worker.join().unwrap(),
-            "an expired inspection can never grant"
-        );
-        assert!(
-            thawed,
-            "cleanup must run while the native inspector is still stalled"
-        );
-        assert_eq!(
-            *facts.0.signals.lock().unwrap(),
-            vec![(100, libc::SIGSTOP), (100, libc::SIGCONT)]
-        );
+        for fault in [Fault::Stall, Fault::StallPermissions] {
+            let facts = Facts::new(fault);
+            let (entered, paused) = std::sync::mpsc::channel();
+            let (resume, inspection) = std::sync::mpsc::channel();
+            *facts.0.stall.lock().unwrap() = Some((entered, inspection));
+            let host = facts.clone();
+            let worker = thread::spawn(move || {
+                Population::capture(
+                    Arc::new(host.clone()),
+                    session(&host),
+                    &master(),
+                    std::path::Path::new("/dev/test-terminal"),
+                    Instant::now() + Duration::from_millis(80),
+                )
+                .is_err()
+            });
+            paused.recv_timeout(Duration::from_secs(3)).unwrap();
+            let until = Instant::now() + Duration::from_secs(2);
+            let thawed = loop {
+                if facts
+                    .0
+                    .signals
+                    .lock()
+                    .unwrap()
+                    .contains(&(100, libc::SIGCONT))
+                {
+                    break true;
+                }
+                if Instant::now() >= until {
+                    break false;
+                }
+                thread::sleep(Duration::from_millis(2));
+            };
+            let permissions_restored = facts.0.permissions.load(Ordering::SeqCst) == 0;
+            resume.send(()).unwrap();
+            assert!(
+                worker.join().unwrap(),
+                "an expired inspection can never grant"
+            );
+            assert!(
+                permissions_restored,
+                "the stalled inspector retained the permission fence"
+            );
+            assert!(
+                thawed,
+                "cleanup must run while the native inspector is still stalled"
+            );
+            assert_eq!(
+                *facts.0.signals.lock().unwrap(),
+                vec![(100, libc::SIGSTOP), (100, libc::SIGCONT)]
+            );
+        }
     }
 }
