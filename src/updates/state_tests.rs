@@ -620,6 +620,34 @@ fn i7_the_menu_bar_extra_offers_the_spaceterm_row_action() {
     });
 }
 
+/// A flat menu lists Machine actions away from their rows, so each one names SpaceTerm Core and
+/// its Machine, never the computer alone.
+#[test]
+fn every_flat_menu_action_names_spaceterm_core_and_its_machine() {
+    use crate::status_menu::model::{FlatRow, Menu};
+    scenes(|view, fleet| {
+        let menu = Menu::new(view, fleet);
+        for machine in &menu.machines {
+            for item in &machine.items {
+                let title = menu
+                    .flat()
+                    .into_iter()
+                    .find_map(|row| match row {
+                        FlatRow::Action { title, command } if command == item.command => {
+                            Some(title)
+                        }
+                        _ => None,
+                    })
+                    .expect("every Machine action is in the flat menu");
+                assert!(
+                    title.contains("SpaceTerm Core") && title.contains(machine.name.as_ref()),
+                    "{title}"
+                );
+            }
+        }
+    });
+}
+
 /// L1: presence, emphasis and cadence follow the stage only, and no label or row status
 /// changes text between stages.
 #[test]

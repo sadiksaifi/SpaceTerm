@@ -179,7 +179,7 @@ impl Menu {
                     title: copy::flat_action(
                         &item.title,
                         &machine.name,
-                        restarts_core(&item.command),
+                        machine_action(&item.command),
                     ),
                     command: item.command.clone(),
                 })
@@ -252,12 +252,12 @@ fn machine_row(update: &MachineUpdate, row: RowView) -> MachineRow {
     }
 }
 
-/// Whether `command` restarts a SpaceTerm Core.
-fn restarts_core(command: &Command) -> bool {
-    matches!(
-        command,
-        Command::Update(state::Command::Machine(_, MachineAction::Restart))
-    )
+/// The Machine action `command` performs, if it performs one.
+fn machine_action(command: &Command) -> Option<&MachineAction> {
+    match command {
+        Command::Update(state::Command::Machine(_, action)) => Some(action),
+        _ => None,
+    }
 }
 
 fn kind(update: &MachineUpdate) -> MachineKind {

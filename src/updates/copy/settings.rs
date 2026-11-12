@@ -3,6 +3,8 @@
 //! rows' own statuses and actions come from [`super::rows`] through
 //! [`crate::updates::state::RowView`]; this module only frames them.
 
+use crate::updates::machines::MachineAction;
+
 /// The product name, which heads the SpaceTerm row and the menu bar extra.
 pub(crate) const SPACETERM: &str = "SpaceTerm";
 /// The heading over the Machine rows on every surface.
@@ -64,17 +66,21 @@ pub(crate) fn ends(n: u32) -> Option<String> {
     }
 }
 
-/// A flat menu's item, which has no submenu to name its Machine: "Restart SpaceTerm Core on This
-/// Computer…" for the Core's restart, otherwise the label with the Machine after it.
-pub(crate) fn flat_action(label: &str, machine: &str, restarts_core: bool) -> String {
+/// A flat menu's item, which has no submenu or row to name its subject, so it names SpaceTerm
+/// Core and the Machine: "Restart SpaceTerm Core on This Computer…", "Download SpaceTerm Core to
+/// penguin", "Check SpaceTerm Core on penguin", "How to Update SpaceTerm Core on penguin…".
+/// `action` is the item's Machine action, if it performs one.
+pub(crate) fn flat_action(label: &str, machine: &str, action: Option<&MachineAction>) -> String {
     let (label, asks) = match label.strip_suffix('\u{2026}') {
         Some(label) => (label, "\u{2026}"),
         None => (label, ""),
     };
-    if restarts_core {
-        format!("Restart SpaceTerm Core on {machine}{asks}")
-    } else {
-        format!("{label} on {machine}{asks}")
+    match action {
+        Some(MachineAction::Restart) => format!("Restart SpaceTerm Core on {machine}{asks}"),
+        Some(MachineAction::Install) => format!("Download SpaceTerm Core to {machine}{asks}"),
+        Some(MachineAction::CheckAgain) => format!("Check SpaceTerm Core on {machine}{asks}"),
+        _ if label.contains("SpaceTerm Core") => format!("{label} on {machine}{asks}"),
+        _ => format!("{label} SpaceTerm Core on {machine}{asks}"),
     }
 }
 
