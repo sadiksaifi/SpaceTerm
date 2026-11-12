@@ -299,7 +299,7 @@ mod tests {
 
         let tree = A11yTree::read(cx);
         for text in [
-            "What's New in SpaceTerm 0.9.0",
+            "What\u{2019}s New in SpaceTerm 0.9.0",
             "Released 3 November",
             "panes: Let panes swap places",
             "SpaceTerm uses less energy while idle",

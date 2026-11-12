@@ -617,7 +617,11 @@ fn update_text_uses_curly_apostrophes() {
     for file in UPDATE_UI_MODULES
         .iter()
         .copied()
-        .chain(["src/updates.rs", "src/ui/updates/whats_new.rs"])
+        .chain([
+            "src/updates.rs",
+            "src/updates/release_notes.rs",
+            "src/ui/updates/whats_new.rs",
+        ])
         .chain(copy.iter().map(String::as_str))
     {
         for (number, literal) in literals(root, file) {
