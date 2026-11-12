@@ -302,9 +302,12 @@ fn build() -> Deck {
                     deck.names = vec![name.to_owned()];
                     // At Offer and at Ask, where the other button hides the step for a day.
                     for now in [NOW, NOW + 3 * 86_400] {
-                        let Some(confirmation) =
-                            previewed(&[update.clone()], &[preview.clone()], true, now)
-                        else {
+                        let Some(confirmation) = previewed(
+                            std::slice::from_ref(&update),
+                            std::slice::from_ref(&preview),
+                            true,
+                            now,
+                        ) else {
                             continue;
                         };
                         deck.field(Role::Text, &confirmation.title);
