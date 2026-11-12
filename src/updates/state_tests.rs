@@ -643,6 +643,17 @@ fn every_flat_menu_action_names_spaceterm_core_and_its_machine() {
                     title.contains("SpaceTerm Core") && title.contains(machine.name.as_ref()),
                     "{title}"
                 );
+                if let crate::status_menu::model::Command::Update(Command::Machine(
+                    _,
+                    MachineAction::CheckAgain,
+                )) = item.command
+                {
+                    assert_eq!(
+                        title,
+                        format!("Check for SpaceTerm Core Updates on {}", machine.name),
+                        "it says what it checks, as its failure alert does"
+                    );
+                }
             }
         }
     });

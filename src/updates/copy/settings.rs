@@ -68,7 +68,8 @@ pub(crate) fn ends(n: u32) -> Option<String> {
 
 /// A flat menu's item, which has no submenu or row to name its subject, so it names SpaceTerm
 /// Core and the Machine: "Restart SpaceTerm Core on This Computer…", "Download SpaceTerm Core to
-/// penguin", "Check SpaceTerm Core on penguin", "How to Update SpaceTerm Core on penguin…".
+/// penguin", "Check for SpaceTerm Core Updates on penguin", "How to Update SpaceTerm Core on
+/// penguin…".
 /// `action` is the item's Machine action, if it performs one.
 pub(crate) fn flat_action(label: &str, machine: &str, action: Option<&MachineAction>) -> String {
     let (label, asks) = match label.strip_suffix('\u{2026}') {
@@ -78,7 +79,9 @@ pub(crate) fn flat_action(label: &str, machine: &str, action: Option<&MachineAct
     match action {
         Some(MachineAction::Restart) => format!("Restart SpaceTerm Core on {machine}{asks}"),
         Some(MachineAction::Install) => format!("Download SpaceTerm Core to {machine}{asks}"),
-        Some(MachineAction::CheckAgain) => format!("Check SpaceTerm Core on {machine}{asks}"),
+        Some(MachineAction::CheckAgain) => {
+            format!("Check for SpaceTerm Core Updates on {machine}{asks}")
+        }
         _ if label.contains("SpaceTerm Core") => format!("{label} on {machine}{asks}"),
         _ => format!("{label} SpaceTerm Core on {machine}{asks}"),
     }
