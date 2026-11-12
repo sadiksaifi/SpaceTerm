@@ -4,6 +4,8 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum WaitingFor {
     ClientViewLock,
+    AttachmentsLock,
+    WorkspaceOrderLock,
     LocalAdmission,
 }
 

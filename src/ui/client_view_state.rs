@@ -37,7 +37,16 @@ impl RetainedClientViews {
         let worker = std::thread::Builder::new()
             .name("spaceterm-client-view".into())
             .spawn(move || {
-                let attachments = core.attachments();
+                let attachments = match core.attachments_cancellable(&|| {
+                    shared.lock().unwrap_or_else(|e| e.into_inner()).closed
+                }) {
+                    Ok(Some(attachments)) => Ok(attachments),
+                    Ok(None) => return,
+                    Err(error) => {
+                        eprintln!("spaceterm_startup_failure classification=ClientAttachmentsRead error={error:?} attempts=1");
+                        Err(error)
+                    }
+                };
                 let opened = match core.client_view_store_cancellable(&|| {
                     shared.lock().unwrap_or_else(|e| e.into_inner()).closed
                 }) {

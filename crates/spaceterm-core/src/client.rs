@@ -64,7 +64,7 @@ fn direct_account(account: &str, route: &[u8; 32]) -> String {
 /// Clones retain the same client identity binding and its attachment writer.
 #[derive(Default)]
 struct ClientCache {
-    attachments: std::sync::OnceLock<Result<crate::attachments::Attachments, CoreError>>,
+    attachments: std::sync::OnceLock<crate::attachments::Attachments>,
     scope: std::sync::OnceLock<ClientScope>,
 }
 
@@ -385,30 +385,62 @@ impl MachineConnection {
     /// Every handle to one client directory in this process shares it, so a route's
     /// presentation keeps its attachments while one connection replaces another.
     pub fn attachments(&self) -> Result<crate::attachments::Attachments, CoreError> {
+        self.try_attachments()?.ok_or(CoreError::StorageUnavailable)
+    }
+    fn try_attachments(&self) -> Result<Option<crate::attachments::Attachments>, CoreError> {
         if let Some(attachments) = self.client_cache.attachments.get() {
-            return attachments.clone();
+            return Ok(Some(attachments.clone()));
         }
         let core = self.machine_id()?;
-        self.client_cache
-            .attachments
-            .get_or_init(|| {
-                let client = self.client_id()?;
-                let path = self.paths.data.join("clients").join(&self.account);
-                let mut open = OPEN_ATTACHMENTS.lock().unwrap_or_else(|e| e.into_inner());
-                open.retain(|(_, writer)| writer.alive());
-                if let Some(attachments) = open
-                    .iter()
-                    .filter(|(retained, _)| *retained == path)
-                    .find_map(|(_, writer)| writer.upgrade(core, client))
-                {
-                    return Ok(attachments);
-                }
-                let attachments =
-                    crate::attachments::Attachments::open(self.client_directory()?, core, client)?;
+        let client = self.client_id()?;
+        let path = self.paths.data.join("clients").join(&self.account);
+        let mut open = OPEN_ATTACHMENTS.lock().unwrap_or_else(|e| e.into_inner());
+        open.retain(|(_, writer)| writer.alive());
+        let attachments = match open
+            .iter()
+            .filter(|(retained, _)| *retained == path)
+            .find_map(|(_, writer)| writer.upgrade(core, client))
+        {
+            Some(attachments) => attachments,
+            None => {
+                let Some(attachments) = crate::attachments::Attachments::try_open(
+                    self.client_directory()?,
+                    core,
+                    client,
+                )?
+                else {
+                    return Ok(None);
+                };
                 open.push((path, attachments.downgrade()));
-                Ok(attachments)
-            })
-            .clone()
+                attachments
+            }
+        };
+        // Cache only an open writer. A previous process's lock is not a retained read error.
+        Ok(Some(
+            self.client_cache
+                .attachments
+                .get_or_init(|| attachments)
+                .clone(),
+        ))
+    }
+    /// Opens saved attachments for startup, waiting only for the previous writer's lock.
+    /// Cancellation leaves no writer; unreadable data fails without retry or replacement.
+    pub fn attachments_cancellable(
+        &self,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<crate::attachments::Attachments>, CoreError> {
+        let mut retry = crate::retry::Backoff::new(crate::retry::WaitingFor::AttachmentsLock);
+        loop {
+            if cancelled() {
+                return Ok(None);
+            }
+            if let Some(attachments) = self.try_attachments()? {
+                return Ok(Some(attachments));
+            }
+            if !retry.pause(cancelled) {
+                return Ok(None);
+            }
+        }
     }
     /// One journal writer for this stable client and original server identity.
     pub fn operation_journal(&self) -> Result<crate::hierarchy::ClientJournal, CoreError> {
@@ -464,6 +496,21 @@ impl MachineConnection {
         crate::workspace_order::WorkspaceOrderStore::open(
             self.client_directory()?,
             self.client_id()?,
+        )
+    }
+
+    /// Opens the desktop order for startup, observing cancellation while storage is busy.
+    pub fn workspace_order_store_cancellable(
+        &self,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<crate::workspace_order::WorkspaceOrderStore>, CoreError> {
+        if !self.is_account_local() {
+            return Err(CoreError::AuthenticationRefused);
+        }
+        crate::workspace_order::WorkspaceOrderStore::open_cancellable(
+            self.client_directory()?,
+            self.client_id()?,
+            cancelled,
         )
     }
 
@@ -2047,3 +2094,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[cfg(test)]
+mod startup_view_tests;

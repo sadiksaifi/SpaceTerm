@@ -131,7 +131,17 @@ impl Attachments {
         core: Id,
         client: Id,
     ) -> Result<Self, CoreError> {
-        let lock = directory.lock("attachments.lock", true)?;
+        Self::try_open(directory, core, client)?.ok_or(CoreError::StorageUnavailable)
+    }
+    #[cfg(feature = "client")]
+    pub(crate) fn try_open(
+        directory: crate::storage::Directory,
+        core: Id,
+        client: Id,
+    ) -> Result<Option<Self>, CoreError> {
+        let Some(lock) = directory.try_lock("attachments.lock")? else {
+            return Ok(None);
+        };
         let record = directory
             .read_json::<Record>("attachments.json")?
             .unwrap_or(Record {
@@ -147,13 +157,13 @@ impl Attachments {
         if !valid_choices(&choices) {
             return Err(CoreError::UnsafeStorage);
         }
-        Ok(Self(Arc::new(Mutex::new(State {
+        Ok(Some(Self(Arc::new(Mutex::new(State {
             choices,
             catalog: BTreeMap::new(),
             blocked: false,
             watchers: Vec::new(),
             storage: Some((directory, lock, core, client)),
-        }))))
+        })))))
     }
     /// Prepare a new client's exact initial attachment, or its deliberately empty view.
     /// Retained choices always win. Returns whether this call made the client's initial choice.
