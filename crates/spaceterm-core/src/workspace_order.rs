@@ -139,6 +139,34 @@ impl WorkspaceOrderStore {
         client: Id,
     ) -> Result<Self, CoreError> {
         let lock = directory.lock("workspace-order.lock", true)?;
+        Self::read_locked(directory, lock, client)
+    }
+
+    pub(crate) fn open_cancellable(
+        directory: crate::storage::Directory,
+        client: Id,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<Self>, CoreError> {
+        let mut retry = crate::retry::Backoff::new(crate::retry::WaitingFor::WorkspaceOrderLock);
+        let lock = loop {
+            if cancelled() {
+                return Ok(None);
+            }
+            if let Some(lock) = directory.try_lock("workspace-order.lock")? {
+                break lock;
+            }
+            if !retry.pause(cancelled) {
+                return Ok(None);
+            }
+        };
+        Self::read_locked(directory, lock, client).map(Some)
+    }
+
+    fn read_locked(
+        directory: crate::storage::Directory,
+        lock: crate::storage::Lock,
+        client: Id,
+    ) -> Result<Self, CoreError> {
         let record = directory
             .read_json::<Record>("workspace-order.json")?
             .unwrap_or(Record {

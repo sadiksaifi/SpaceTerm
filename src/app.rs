@@ -484,8 +484,6 @@ enum ApplicationQuitCoordinatorState {
     SessionEnding,
     WaitingForSettings,
     WaitingForUpdater,
-    /// A confirmed quit waits for This Mac's SpaceTerm Core to finish its restart.
-    WaitingForCore,
     /// An approved update relaunch quits. [`RelaunchQuit`] holds how far it got.
     Relaunching,
     /// A termination signal ends the process: Settings save, then SpaceTerm quits.
@@ -815,39 +813,6 @@ impl ApplicationQuitCoordinator {
     }
 
     fn finish(self: &Rc<Self>, current: ApplicationQuitSnapshot, cx: &mut App) {
-        // An installed client's quit leaves its Core running. While This Mac's Core restarts, the
-        // quit waits until it is back, so Recent Updates records the update it finished.
-        if self.sessions.is_none() && LocalRestart::current(cx).is_some() {
-            self.wait_for_local_restart(current, cx);
-            return;
-        }
-        self.finish_now(current, cx);
-    }
-
-    fn wait_for_local_restart(self: &Rc<Self>, current: ApplicationQuitSnapshot, cx: &mut App) {
-        *self.state.borrow_mut() = ApplicationQuitCoordinatorState::WaitingForCore;
-        let coordinator = Rc::clone(self);
-        cx.spawn(async move |cx| {
-            let executor = cx.background_executor().clone();
-            let deadline = executor.now() + LOCAL_RESTART_WAIT;
-            loop {
-                executor.timer(std::time::Duration::from_millis(100)).await;
-                let restarting = cx.update(|cx| LocalRestart::current(cx).is_some());
-                if !restarting || executor.now() >= deadline {
-                    break;
-                }
-            }
-            cx.update(|cx| {
-                if *coordinator.state.borrow() == ApplicationQuitCoordinatorState::WaitingForCore {
-                    *coordinator.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
-                    coordinator.finish_now(current, cx);
-                }
-            });
-        })
-        .detach();
-    }
-
-    fn finish_now(self: &Rc<Self>, current: ApplicationQuitSnapshot, cx: &mut App) {
         let coordinator = Rc::clone(self);
         let updater_authorization = current.clone();
         if crate::updates::prepare_before_quit(
@@ -1224,8 +1189,7 @@ fn cancel_quit_prompt(place: QuitPromptPlace, cx: &mut App) {
     close_quit_prompt_host(place, cx);
 }
 
-/// This Mac's SpaceTerm Core restarting while the person quits, which the quit waits for so
-/// Recent Updates still records its update.
+/// This Mac's SpaceTerm Core restarting while the person quits, which the quit warning names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LocalRestart {
     /// "This Mac" or "This Computer".
@@ -1251,9 +1215,6 @@ impl LocalRestart {
         })
     }
 }
-
-/// How long a confirmed quit waits for This Mac's SpaceTerm Core to come back from its restart.
-const LOCAL_RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// `status_area` names where the client shows its status item, or None when the session shows
 /// none. `restart` names This Mac's Core restart, whose Terminal Sessions already ended, so the
@@ -2388,6 +2349,7 @@ mod tests {
             Operation, Platform, UpdateCheck, UpdateFacts, Version,
         };
         crate::updates::machines::MachineUpdate {
+            detailed: None,
             machine: [1; 32],
             name: "This Mac".into(),
             local: true,
@@ -2412,14 +2374,13 @@ mod tests {
             bundled: None,
             failed_push: None,
             asked: None,
-            retrying_since: None,
         }
     }
 
-    /// A confirmed quit during This Mac's Core update waits for the Core to come back, so Recent
-    /// Updates records "This Mac updated to X", and quits at the deadline when it doesn't.
+    /// A confirmed quit during This Mac's Core update quits at once. The warning says the Core
+    /// keeps running, and the quit does not wait for the restart to finish.
     #[gpui::test]
-    fn a_quit_during_this_macs_core_update_waits_for_it_to_finish(cx: &mut TestAppContext) {
+    fn a_quit_during_this_macs_core_update_quits_at_once(cx: &mut TestAppContext) {
         use crate::updates::machines::{MachineUpdatesAdapter, MachineUpdatesEvent};
         let updates = Rc::new(crate::updates::testing::RecordingAdapter::available());
         let machines = Rc::new(crate::updates::machines::testing::ScriptedMachines::default());
@@ -2434,64 +2395,28 @@ mod tests {
         updates.emit(crate::updates::UpdateEvent::UpToDate);
         updates.emit(crate::updates::UpdateEvent::Finished);
         let (quit, _) = windowless_client_asking_alone(cx);
-        let quit_now = |cx: &mut TestAppContext| {
-            cx.run_until_parked();
-            quit.simulate_native_request(ApplicationQuitRequest::Exit);
-            cx.run_until_parked();
-            let prompts = quit.windowless_prompts();
-            assert!(
-                prompts[0]
-                    .detail
-                    .contains("SpaceTerm Core on This Mac is updating to 0.9.0"),
-                "{prompts:?}"
-            );
-            quit.answer_windowless(Some(QuitAnswer::Quit));
-            cx.run_until_parked();
-        };
-        let recent = |cx: &mut TestAppContext| {
-            cx.update(|cx| {
-                cx.global::<crate::updates::UpdateService>()
-                    .0
-                    .read(cx)
-                    .recent()
-                    .iter()
-                    .map(|entry| entry.text.clone())
-                    .collect::<Vec<_>>()
-            })
-        };
-
         machines.emit(MachineUpdatesEvent::Machines(vec![this_mac(
             "0.8.0",
             Some("0.9.0"),
         )]));
-        quit_now(cx);
-        assert_eq!(quit.confirmations(), 0, "the quit waits for the restart");
-        machines.emit(MachineUpdatesEvent::Changed(Box::new(this_mac(
-            "0.9.0", None,
-        ))));
         cx.run_until_parked();
-        assert_eq!(quit.confirmations(), 0, "the wait checks again shortly");
-        cx.executor()
-            .advance_clock(std::time::Duration::from_millis(100));
-        cx.run_until_parked();
-        assert_eq!(quit.confirmations(), 1);
-        assert_eq!(recent(cx), ["This Mac updated to 0.9.0"]);
 
-        // A restart that doesn't finish holds the quit only until the deadline.
-        machines.emit(MachineUpdatesEvent::Changed(Box::new(this_mac(
-            "0.8.0",
-            Some("0.9.0"),
-        ))));
+        quit.simulate_native_request(ApplicationQuitRequest::Exit);
         cx.run_until_parked();
-        quit_now(cx);
-        cx.executor()
-            .advance_clock(LOCAL_RESTART_WAIT - std::time::Duration::from_secs(1));
+        let prompts = quit.windowless_prompts();
+        assert!(
+            prompts[0]
+                .detail
+                .contains("SpaceTerm Core on This Mac is updating to 0.9.0"),
+            "{prompts:?}"
+        );
+        quit.answer_windowless(Some(QuitAnswer::Quit));
         cx.run_until_parked();
-        assert_eq!(quit.confirmations(), 1);
-        cx.executor()
-            .advance_clock(std::time::Duration::from_secs(1));
-        cx.run_until_parked();
-        assert_eq!(quit.confirmations(), 2);
+        assert_eq!(
+            quit.confirmations(),
+            1,
+            "the quit does not wait for the restart"
+        );
     }
 
     /// The coordinator takes the keyboard before it makes the window key and presents the
@@ -4115,13 +4040,12 @@ mod runtime_tests {
         assert_eq!(quit.confirmations(), 1);
     }
 
-    /// A relaunch that has not quit SpaceTerm after 30 seconds fails, and its alert appears even
-    /// though the person closed every window: SpaceTerm opens a Workspace Window to show it. Try
-    /// Again quits through the relaunch, with no quit warning.
+    /// A relaunch that has not quit SpaceTerm after 30 seconds fails. With every window closed,
+    /// SpaceTerm opens no window and no alert, because only a refused click alerts unasked: the
+    /// SpaceTerm row reads "Couldn't relaunch", and its Try Again quits through the relaunch with
+    /// no quit warning.
     #[gpui::test]
-    fn a_failed_relaunch_alerts_without_a_window_and_try_again_quits(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn a_failed_relaunch_waits_in_the_row_and_try_again_quits(cx: &mut gpui::TestAppContext) {
         let (_, quit, service) = relaunch_fixture(cx);
         cx.update(|cx| cx.dispatch_action(&DismissApplication));
         cx.run_until_parked();
@@ -4131,17 +4055,25 @@ mod runtime_tests {
             .advance_clock(std::time::Duration::from_secs(30));
         cx.run_until_parked();
 
-        let windows = cx.update(|cx| workspace_windows(cx));
-        assert_eq!(windows.len(), 1);
-        let cx = &mut gpui::VisualTestContext::from_window(windows[0].into(), cx);
-        cx.run_until_parked();
-        assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+        assert!(cx.update(|cx| cx.windows().is_empty()), "no window opens");
+        assert!(!cx.has_pending_prompt());
         assert_eq!(
             quit.confirmations(),
             1,
             "the relaunch confirmed its quit, and SpaceTerm kept running"
         );
-        click("modal-action-update-relaunch-failure-try-again", cx);
+        let row = cx.update(|cx| crate::updates::state::current(cx).app_row());
+        assert_eq!(row.status.as_deref(), Some("Couldn’t relaunch"));
+        let action = row.action.expect("the failed relaunch offers Try Again");
+        assert_eq!(action.label.as_ref(), "Try Again");
+        cx.update(|cx| {
+            crate::ui::updates::commands::perform(
+                action.command,
+                crate::ui::updates::commands::Presenter::Front,
+                cx,
+            );
+        });
+        cx.run_until_parked();
         assert!(!cx.has_pending_prompt());
         assert_eq!(quit.confirmations(), 2);
     }

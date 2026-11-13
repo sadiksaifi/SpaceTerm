@@ -85,6 +85,13 @@ pub trait PaneService: Send {
     /// Applies or discards the message as a whole. A discard on a channel the service knows is
     /// reported as `PaneEvent::Input`.
     fn input(&mut self, peer: &Peer, input: Input);
+    fn received_input(
+        &mut self,
+        _peer: &Peer,
+        _input: &Input,
+    ) -> Option<crate::idle_restart::Receipt> {
+        None
+    }
     /// The connection already applied `view` to its outbox. A newly visible channel needs its
     /// current presentation published again.
     fn view(&mut self, peer: &Peer, view: View);
@@ -115,6 +122,14 @@ pub trait PaneService: Send {
     /// nothing.
     fn sessions(&self) -> Vec<[u8; 32]> {
         Vec::new()
+    }
+    /// How many live Terminal Sessions have work going on (ADR 0065). A service that cannot
+    /// tell counts every one.
+    fn working(&self) -> u32 {
+        u32::try_from(self.sessions().len()).unwrap_or(u32::MAX)
+    }
+    fn idle_sessions(&self) -> Option<Vec<Arc<dyn crate::idle_restart::Session>>> {
+        None
     }
 }
 

@@ -6,7 +6,8 @@ use spaceterm_core::service::lane::{LaneAction, LaneEffects};
 use spaceterm_core::update::facts::{PendingVersion, Platform, Protocols, UpdateCheck};
 
 use super::*;
-use crate::updates::presentation::{CheckProblem, Dismissed, MachineState, MachineView};
+use crate::updates::machines::Bundled;
+use crate::updates::state::{Dismissed, MachineRow, MachineStage, Marks};
 
 const LOCAL: MachineId = [1; 32];
 const PENGUIN: MachineId = [2; 32];
@@ -15,6 +16,18 @@ const PROMPT: Duration = Duration::from_secs(5);
 /// How long a test waits to show that something did not happen.
 const QUIET: Duration = Duration::from_millis(300);
 
+/// The update view's row for one Machine, with nothing dismissed or deferred on this desktop.
+fn row(update: &MachineUpdate, now: u64) -> MachineRow {
+    let dismissed = Dismissed::new();
+    let deferred = HashMap::new();
+    let marks = Marks {
+        dismissed: &dismissed,
+        deferred: &deferred,
+        pushes_held: false,
+    };
+    MachineRow::new(update, marks, now)
+}
+
 fn version(text: &str) -> Version {
     Version::parse(text).unwrap()
 }
@@ -22,6 +35,7 @@ fn version(text: &str) -> Version {
 fn facts(revision: u64, sessions: u32, pending: Option<&str>) -> Observed {
     Observed {
         boot: "boot-1".into(),
+        detailed: None,
         facts: UpdateFacts {
             revision,
             platform: Platform::LinuxX86_64,
@@ -51,7 +65,8 @@ struct ScriptedLane {
     waits: Mutex<mpsc::Receiver<Result<Observed, ActionFailure>>>,
     answer: Mutex<mpsc::Sender<Result<Observed, ActionFailure>>>,
     previewed: Mutex<u32>,
-    install_result: Mutex<Result<(), ActionFailure>>,
+    /// The facts each Install answers with.
+    install_result: Mutex<Result<UpdateFacts, ActionFailure>>,
     requests: Mutex<Vec<String>>,
 }
 
@@ -63,7 +78,7 @@ impl ScriptedLane {
             waits: Mutex::new(waits),
             answer: Mutex::new(answer),
             previewed: Mutex::new(0),
-            install_result: Mutex::new(Ok(())),
+            install_result: Mutex::new(Ok(self::facts(2, 0, Some("0.9.0")).facts)),
             requests: Mutex::new(Vec::new()),
         })
     }
@@ -133,12 +148,12 @@ impl MachineLane for ScriptedLane {
         Ok(())
     }
 
-    fn install(&self, build: Option<&EmbeddedCore>) -> Result<(), ActionFailure> {
+    fn install(&self, build: Option<&EmbeddedCore>) -> Result<UpdateFacts, ActionFailure> {
         self.record(build.map_or_else(
             || "install".into(),
             |build| format!("push {}", build.candidate.version()),
         ));
-        *self.install_result.lock().unwrap()
+        self.install_result.lock().unwrap().clone()
     }
 
     fn preview(&self, change: LaneChange) -> Result<admin::Preview, ActionFailure> {
@@ -422,13 +437,9 @@ fn a_core_that_predates_update_facts_reads_cant_check() {
     let update = changed(&events, "the unreported Core", |update| {
         update.link == MachineLink::Unreported
     });
-    let view = MachineView::new(&update, &Dismissed::new(), crate::updates::now());
     assert_eq!(
-        view.state,
-        MachineState::CantCheck {
-            reason: CheckProblem::Unreported,
-            push: None,
-        }
+        row(&update, crate::updates::now()).stage,
+        MachineStage::CantCheck
     );
 }
 
@@ -481,6 +492,35 @@ fn a_stopped_local_core_reads_stopped_and_starts_through_the_service_manager() {
         update.link == MachineLink::Connected && update.facts.is_some()
     });
     assert_eq!(running.facts.unwrap().sessions, 0);
+}
+
+/// A service 1.2 Core that is then deliberately stopped reads as stopped in every copy of its
+/// facts: the update view counts no sessions and nothing running from its last detailed answer.
+#[test]
+fn a_stopped_service_1_2_core_keeps_no_sessions_from_its_detailed_facts() {
+    let mut answered = facts(1, 2, Some("0.9.0"));
+    answered.detailed = Some(spaceterm_core::update::DetailedUpdateFacts {
+        facts: answered.facts.clone(),
+        continuation: None,
+        working: 2,
+        restart: None,
+    });
+    let lane = ScriptedLane::new([Ok(answered)]);
+    let machine = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
+    let sources = ScriptedSources::with(vec![known(LOCAL, "This Mac", true, &machine)]);
+    let (_adapter, events) = started(&sources, RESTART_LIMIT);
+    let running = changed(&events, "the running Core", |update| {
+        update.link == MachineLink::Connected && update.facts.is_some()
+    });
+    assert_eq!(row(&running, 1).sessions, 2);
+
+    machine.set(Script::Stopped);
+    sources.change();
+    let stopped = changed(&events, "the stopped Core", |update| {
+        update.link == MachineLink::Stopped
+    });
+    assert_eq!(stopped.facts.as_ref().map(|facts| facts.sessions), Some(0));
+    assert_eq!(row(&stopped, 1).sessions, 0);
 }
 
 /// Install and Check Again become their lane requests. A Restart performed without a preview
@@ -963,15 +1003,14 @@ fn a_core_without_feed_access_offers_the_verified_embedded_build() {
     }
 }
 
-/// A Core below the embedded build's Update Floor is offered no push across the floor, but it
-/// never reads as up to date: it offers the Core's own feed install, which reaches the floor
-/// through a Stepping Stone.
+/// A Core below the embedded build's Update Floor gets no push across the floor. Install asks
+/// the Core to update from its own feed, which reaches the floor through a Stepping Stone.
 #[test]
-fn a_core_below_the_embedded_floor_offers_its_feed_update() {
+fn a_core_below_the_embedded_floor_gets_no_push_and_installs_from_its_feed() {
     let catalog = Catalog::floored("spaceterm-development", "1.2.2", "1.1.0");
     let mut observed = facts(1, 2, None);
     observed.facts.running = version("1.0.0");
-    let lane = ScriptedLane::new([Ok(observed)]);
+    let lane = ScriptedLane::new([Ok(observed.clone())]);
     let machine = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
     let sources = ScriptedSources::with(vec![known(PENGUIN, "penguin", false, &machine)]);
     let adapter = LiveMachines::new(sources, catalog.embedded("spaceterm-development"));
@@ -979,29 +1018,21 @@ fn a_core_below_the_embedded_floor_offers_its_feed_update() {
     adapter.start(sent).unwrap();
     let update = changed(&events, "the Core facts", |update| update.facts.is_some());
     assert_eq!(update.push, None, "no push crosses the floor");
-
-    let view = MachineView::new(&update, &Dismissed::new(), crate::updates::now());
+    let floor = spaceterm_core::update::ordering::Floor::parse("1.1.0").unwrap();
     assert_eq!(
-        view.state,
-        MachineState::BelowFloor {
-            to: version("1.2.2")
-        }
-    );
-    assert_eq!(
-        view.sentence().as_ref(),
-        "SpaceTerm Core 1.0.0 on penguin is too old to install SpaceTerm Core 1.2.2 directly. \
-         Updating penguin installs the release it needs first from its update feed. Its 2 \
-         Terminal Sessions keep running."
-    );
-    let row = view.settings_row();
-    assert_eq!(row.status.as_ref(), "Older than 1.2.2");
-    let button = row.button.expect("Settings offers the feed update");
-    assert_eq!(button.label.as_ref(), "Update penguin");
-    assert_eq!(
-        button.command,
-        crate::updates::presentation::Command::Machine(PENGUIN, MachineAction::Install)
+        update.bundled,
+        Some(Bundled {
+            version: version("1.2.2"),
+            floor: Some(floor),
+        }),
+        "the Machine's row learns the floor it needs first"
     );
 
+    // The fetch leaves the Stepping Stone downloaded, whether it fetched it now or the Core's
+    // own check had already, before this desktop's facts showed it.
+    let mut fetched = observed.facts.clone();
+    fetched.pending = facts(2, 2, Some("1.1.0")).facts.pending;
+    *lane.install_result.lock().unwrap() = Ok(fetched);
     adapter.perform(PENGUIN, MachineAction::Install);
     assert_eq!(finished(&events, &MachineAction::Install), Ok(()));
     assert!(
@@ -1009,14 +1040,39 @@ fn a_core_below_the_embedded_floor_offers_its_feed_update() {
         "Install asks the Core to update from its own feed"
     );
 
-    *lane.install_result.lock().unwrap() = Err(ActionFailure::Unreachable);
+    // The Core couldn't get the Stepping Stone: its feed failed, or named nothing newer.
+    for result in [Err(ActionFailure::Unreachable), Ok(observed.facts.clone())] {
+        *lane.install_result.lock().unwrap() = result.clone();
+        adapter.perform(PENGUIN, MachineAction::Install);
+        assert_eq!(
+            finished(&events, &MachineAction::Install),
+            Err(ActionFailure::NeedsFloor(floor)),
+            "{result:?}"
+        );
+    }
+}
+
+#[test]
+fn a_core_can_download_an_intermediate_stepping_stone_below_the_embedded_floor() {
+    // ADR 0064's feed chain: 1.2.2 needs 1.2.0, which needs 1.1.0, which admits 1.0.0.
+    let catalog = Catalog::floored("spaceterm-development", "1.2.2", "1.2.0");
+    let mut observed = facts(1, 2, None);
+    observed.facts.running = version("1.0.0");
+    let lane = ScriptedLane::new([Ok(observed.clone())]);
+    let machine = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
+    let sources = ScriptedSources::with(vec![known(PENGUIN, "penguin", false, &machine)]);
+    let adapter = LiveMachines::new(sources, catalog.embedded("spaceterm-development"));
+    let (sent, events) = async_channel::unbounded();
+    adapter.start(sent).unwrap();
+    let update = changed(&events, "the Core facts", |update| update.facts.is_some());
+    assert_eq!(update.push, None);
+
+    let mut fetched = observed.facts;
+    fetched.pending = facts(2, 2, Some("1.1.0")).facts.pending;
+    *lane.install_result.lock().unwrap() = Ok(fetched);
     adapter.perform(PENGUIN, MachineAction::Install);
-    assert_eq!(
-        finished(&events, &MachineAction::Install),
-        Err(ActionFailure::NeedsFloor(
-            spaceterm_core::update::ordering::Floor::parse("1.1.0").unwrap()
-        ))
-    );
+    assert_eq!(finished(&events, &MachineAction::Install), Ok(()));
+    assert_eq!(lane.actions(), vec!["install"]);
 }
 
 #[test]
@@ -1170,9 +1226,12 @@ fn removing_a_machine_does_not_leave_a_restart_wait_on_other_desktops() {
     let removed = changed(&events, "removed machine", |update| {
         matches!(update.link, MachineLink::Offline { .. })
     });
+    let removed = row(&removed, 1);
+    assert_eq!(removed.stage, MachineStage::Offline);
     assert_eq!(
-        MachineView::new(&removed, &Dismissed::new(), 1).state,
-        MachineState::Unpaired
+        removed.step(),
+        None,
+        "a removed Machine asks for no restart"
     );
     assert_eq!(*machine.retries.lock().unwrap(), 0);
 }

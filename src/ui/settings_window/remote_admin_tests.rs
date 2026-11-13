@@ -255,6 +255,7 @@ fn a_paired_machine_that_is_not_ready_takes_no_lane_step(cx: &mut TestAppContext
     });
     machines.direct.disconnect(&route);
     adapter.emit(MachineUpdatesEvent::Machines(vec![MachineUpdate {
+        detailed: None,
         machine: machines.direct.route(&route).unwrap().paired.pin.core,
         name: "penguin".into(),
         local: false,
@@ -265,7 +266,6 @@ fn a_paired_machine_that_is_not_ready_takes_no_lane_step(cx: &mut TestAppContext
         bundled: None,
         failed_push: None,
         asked: None,
-        retrying_since: None,
     }]));
     machines.cx.run_until_parked();
 
@@ -273,7 +273,7 @@ fn a_paired_machine_that_is_not_ready_takes_no_lane_step(cx: &mut TestAppContext
     click(super::super::machine_card::MENU_SELECTOR, machines.cx);
     let tree = A11yTree::read(machines.cx);
     assert_eq!(
-        tree.node("Restart SpaceTerm Core on penguin\u{2026}")["aria"]["disabled"],
+        tree.node("Restart SpaceTerm Core\u{2026}")["aria"]["disabled"],
         true
     );
     assert!(
@@ -500,6 +500,7 @@ fn a_paired_card_updates_through_the_shared_store_and_shows_its_progress(cx: &mu
         .update
         .unwrap();
     let update = MachineUpdate {
+        detailed: None,
         machine: id,
         name: "penguin".into(),
         local: false,
@@ -510,18 +511,28 @@ fn a_paired_card_updates_through_the_shared_store_and_shows_its_progress(cx: &mu
         bundled: None,
         failed_push: None,
         asked: None,
-        retrying_since: None,
     };
     adapter.emit(MachineUpdatesEvent::Machines(vec![update.clone()]));
     machines.cx.run_until_parked();
     let subtitle = machines
         .window
         .read_with(machines.cx, |settings, cx| settings.core_subtitle(cx));
-    assert_eq!(subtitle.as_ref(), "Version 1.2.0 · Update ready");
+    let row = machines
+        .cx
+        .update(|_, cx| crate::updates::state::current(cx).machine_row(id))
+        .expect("penguin has an update row");
+    assert_eq!(
+        subtitle.as_ref(),
+        crate::updates::copy::settings::line(row.version.as_deref(), row.status.as_deref())
+    );
+    assert!(subtitle.starts_with("1.2.0 \u{b7} "), "{subtitle}");
     click(super::super::core_update::UPDATE_SELECTOR, machines.cx);
     let tree = A11yTree::read(machines.cx);
-    tree.text("Update SpaceTerm Core on penguin?");
-    tree.text("SpaceTerm Core restarts from 1.2.0 to 1.3.0. This ends 2 Terminal Sessions on penguin. Your Workspaces, Tabs and Panes stay, and each Pane starts a new shell when you select it.");
+    tree.text("Restart SpaceTerm Core on penguin?");
+    tree.text(
+        "SpaceTerm Core restarts from 1.2.0 to 1.3.0. This ends 2 Terminal Sessions. \
+         Workspaces, Tabs and Panes stay.",
+    );
     answer(
         super::super::core_update::UPDATE_CONFIRM_SELECTOR,
         machines.cx,
@@ -539,7 +550,18 @@ fn a_paired_card_updates_through_the_shared_store_and_shows_its_progress(cx: &mu
         });
     adapter.emit(MachineUpdatesEvent::Changed(Box::new(updating)));
     machines.cx.run_until_parked();
-    assert!(footnote(&machines).contains("Updating SpaceTerm Core on penguin to 1.3.0."));
+    let restarting = machines
+        .cx
+        .update(|_, cx| crate::updates::state::current(cx).machine_row(id))
+        .expect("penguin has an update row");
+    let explained = restarting
+        .description
+        .clone()
+        .unwrap_or(restarting.accessibility.clone());
+    assert!(
+        footnote(&machines).contains(explained.as_ref()),
+        "the footnote explains the restart: {explained}"
+    );
     assert!(
         machines
             .cx

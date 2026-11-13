@@ -1506,7 +1506,7 @@ fn the_status_menu_offers_stopping_only_a_running_machine(cx: &mut TestAppContex
         true
     );
     assert_eq!(
-        tree.node("Restart SpaceTerm Core on This Computer…")["aria"]["disabled"],
+        tree.node("Restart SpaceTerm Core\u{2026}")["aria"]["disabled"],
         true
     );
     assert_ne!(

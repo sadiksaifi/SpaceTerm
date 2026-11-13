@@ -23,6 +23,8 @@ pub mod update;
 mod golden_tests;
 #[cfg(test)]
 mod notice_tests;
+#[cfg(test)]
+mod update_copy_lint;
 
 use crate::args::{CoreCommand, Global};
 use crate::contract::{
@@ -201,10 +203,11 @@ fn notice(context: &Context<'_>, command: &CoreCommand, reply: &Reply) -> Option
     ) {
         return None;
     }
-    let facts = context.facts.borrow_mut().take()?;
+    let reported = context.facts.borrow_mut().take()?;
     let machine = reply.envelope.machine.as_ref()?;
     crate::notice::line(
-        &facts,
+        &reported.facts,
+        reported.continuation,
         display_name(machine),
         &context.command_line(machine, &["restart"]),
         crate::notice::now(),
@@ -217,7 +220,7 @@ pub struct Context<'a> {
     pub global: &'a Global,
     pub credentials: crate::connection::CliCredentials<'a>,
     /// The update facts of the Core this command reached, for its notice.
-    pub facts: std::cell::RefCell<Option<spaceterm_core::update::facts::UpdateFacts>>,
+    pub facts: std::cell::RefCell<Option<crate::notice::Reported>>,
     /// The command's share of its CLI state, which a Stop, Restart or network change lets go
     /// while it waits.
     pub state: std::cell::RefCell<crate::state::StateShare>,
@@ -414,6 +417,38 @@ pub fn local_direct(error: spaceterm_core::direct::DirectError) -> Failure {
     }
 }
 
+/// What a service lane answers about updates. [`Session`] is the real one; it asks a Core below
+/// service 1.2 nothing for the detailed facts.
+pub(crate) trait UpdateLane {
+    /// The detailed update facts, or None from a Core below service 1.2.
+    fn detailed_facts(
+        &mut self,
+    ) -> Result<Option<spaceterm_core::update::facts::DetailedUpdateFacts>, LaneError>;
+    fn facts(&mut self) -> Result<spaceterm_core::update::facts::UpdateFacts, LaneError>;
+}
+
+impl UpdateLane for Session {
+    fn detailed_facts(
+        &mut self,
+    ) -> Result<Option<spaceterm_core::update::facts::DetailedUpdateFacts>, LaneError> {
+        admin::detailed_facts(self)
+    }
+    fn facts(&mut self) -> Result<spaceterm_core::update::facts::UpdateFacts, LaneError> {
+        admin::facts(self).map(|(_, facts)| facts)
+    }
+}
+
+/// The update facts of the Core on `lane` with the continuation its engine reports: the
+/// detailed facts of a Core of service 1.2, otherwise its facts. None when it answers neither.
+pub(crate) fn reported(lane: &mut dyn UpdateLane) -> Option<crate::notice::Reported> {
+    let detailed = lane.detailed_facts().ok().flatten();
+    let facts = match detailed {
+        Some(_) => None,
+        None => lane.facts().ok(),
+    };
+    crate::notice::Reported::of(detailed, facts)
+}
+
 pub fn lane_failure(error: LaneError) -> Failure {
     match error {
         LaneError::Code(code) => contract::from_lane_code(&code),
@@ -477,10 +512,8 @@ pub fn open_lane(
         .map_err(contract::from_core_error)?;
     let (mut session, settled) = admin::open(&lane, &pending.operations).map_err(lane_failure)?;
     // Only a notice that can print costs the round trip.
-    if crate::notice::shown(context.global.into(), terminal(libc::STDERR_FILENO))
-        && let Ok((_, facts)) = admin::facts(&mut session)
-    {
-        context.facts.replace(Some(facts));
+    if crate::notice::shown(context.global.into(), terminal(libc::STDERR_FILENO)) {
+        context.facts.replace(reported(&mut session));
     }
     let mut recovered: Vec<_> = settled
         .iter()

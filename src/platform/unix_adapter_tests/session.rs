@@ -336,3 +336,154 @@ impl Drop for ShellStartupDirectory {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
+
+#[test]
+fn a_real_integrated_shell_needs_a_quiet_hour_and_receives_input_after_a_lease() {
+    const NAME: &str = "terminal::session::unix_adapter_tests::a_real_integrated_shell_needs_a_quiet_hour_and_receives_input_after_a_lease";
+    let _isolation = crate::platform::unix_pty::lock_real_pty_test();
+    if crate::platform::unix_pty::isolate_real_pty_test(NAME) {
+        return;
+    }
+    let startup = ShellStartupDirectory::new();
+    let (session, events, _) = TerminalRuntime::start(
+        native_pty_adapter_factory(),
+        test_launch_planner(startup.path()),
+        test_geometry(),
+        &std::env::current_dir().unwrap(),
+        Some("fixture.test"),
+        LocalFilesystemAuthority::testing(),
+        Arc::default(),
+    )
+    .unwrap();
+    let session = JoinedRealPtySession(session);
+    wait_for_shell_prompt(&session, &events);
+    let observed = session.idle_session().expect("native receipt tracking");
+    assert!(
+        observed
+            .activity()
+            .generation()
+            .is_some_and(|generation| generation > 0),
+        "the real PTY read stamped output"
+    );
+    let hour = spaceterm_core::service::updates::IDLE_PERIOD;
+    assert!(
+        spaceterm_core::idle_restart::Lease::scan(
+            std::slice::from_ref(&observed),
+            Instant::now() + hour / 2,
+            hour
+        )
+        .is_none()
+    );
+    let deadline = Instant::now() + REAL_SHELL_DEADLINE;
+    let lease = loop {
+        if let Some(lease) = spaceterm_core::idle_restart::Lease::scan(
+            std::slice::from_ref(&observed),
+            Instant::now() + hour * 2,
+            hour,
+        ) {
+            break lease;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the integrated shell never became bare at its empty prompt"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    session.key(KeyInput::input_method_commit("x"));
+    assert_eq!(
+        lease.freeze_and_grant(),
+        Err(spaceterm_core::idle_restart::Restarting)
+    );
+    lease.release();
+}
+
+#[test]
+fn a_real_integrated_shell_computing_in_a_builtin_trap_is_refused_and_finishes_after_thaw() {
+    const NAME: &str = "terminal::session::unix_adapter_tests::a_real_integrated_shell_computing_in_a_builtin_trap_is_refused_and_finishes_after_thaw";
+    if crate::platform::unix_pty::isolate_real_pty_test(NAME) {
+        return;
+    }
+    let _lock = crate::platform::unix_pty::lock_real_pty_test();
+    let startup = ShellStartupDirectory::new();
+    let quoted = startup.path().to_string_lossy().replace('\'', "'\\''");
+    std::fs::write(startup.path().join(".zshrc"), format!("typeset -g TRAP_FIXTURE='{}'\nprint -r -- $$ > \"$TRAP_FIXTURE/pid\"\nTRAPALRM() {{ integer n=0; repeat 1000000 {{ (( ++n )); }}; print busy > \"$TRAP_FIXTURE/computing\"; while [[ ! -e \"$TRAP_FIXTURE/finish\" ]]; do (( ++n )); done; print done > \"$TRAP_FIXTURE/done\"; }}\n", quoted)).unwrap();
+    let (session, events, _) = TerminalRuntime::start(
+        Arc::new(crate::platform::unix_pty::freeze_test_factory()),
+        test_launch_planner(startup.path()),
+        test_geometry(),
+        &std::env::current_dir().unwrap(),
+        Some("fixture.test"),
+        LocalFilesystemAuthority::testing(),
+        Arc::default(),
+    )
+    .unwrap();
+    let session = JoinedRealPtySession(session);
+    wait_for_shell_prompt(&session, &events);
+    session
+        .event_publisher
+        .note_activity(Instant::now() - Duration::from_secs(7200), true);
+    let observed = session.idle_session().unwrap();
+    let scan = || {
+        let deadline = Instant::now() + REAL_SHELL_DEADLINE;
+        loop {
+            // Advance the test's quiet period after real startup and resume output drained.
+            session
+                .event_publisher
+                .note_activity(Instant::now() - Duration::from_secs(7200), true);
+            if let Some(lease) = spaceterm_core::idle_restart::Lease::scan(
+                std::slice::from_ref(&observed),
+                Instant::now() + Duration::from_secs(7200),
+                Duration::from_secs(3600),
+            ) {
+                break lease;
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let healthy = scan();
+    healthy
+        .freeze_and_grant()
+        .expect("the real integrated idle prompt must grant");
+    healthy.verify_frozen().unwrap();
+    healthy.release();
+    let lease = scan();
+    let deadline = Instant::now() + REAL_SHELL_DEADLINE;
+    let generation = observed.activity().generation();
+    let pid: i32 = std::fs::read_to_string(startup.path().join("pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // Deliver the timer's alarm after the idle scan, without Core input or output. Its handler
+    // performs only shell builtins and signals progress through files, never the terminal.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGALRM) }, 0);
+
+    while !startup.path().join("computing").exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the builtin trap never reached its computing boundary"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    let unchanged = observed.activity().generation() == generation;
+    let result = lease.freeze_and_grant();
+    lease.release();
+    std::fs::write(startup.path().join("finish"), b"go").unwrap();
+    while !startup.path().join("done").exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the original builtin work did not finish after thaw"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        unchanged,
+        "the trap schedule must not change receipt generations"
+    );
+    assert_eq!(
+        result,
+        Err(spaceterm_core::idle_restart::Restarting),
+        "the shell is working even with an unchanged empty prompt and no child"
+    );
+}

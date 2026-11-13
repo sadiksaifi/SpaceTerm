@@ -1,8 +1,7 @@
 //! Machine updates: what the desktop knows about each Machine's SpaceTerm Core updates, and the
 //! actions it takes on them. The desktop's own update stays on [`super::UpdateAdapter`].
 //!
-//! Restart All is the UI performing [`MachineAction::Restart`] for each waiting Machine.
-//! Confirmation alerts read `facts.sessions` and `pending.breaking` before `perform`.
+//! A restart runs on one Machine at a time, through its Core's own preview.
 #![allow(
     dead_code,
     reason = "#799 composes the adapter and builds the UI that consumes it"
@@ -32,28 +31,37 @@ pub(crate) struct MachineUpdate {
     pub(crate) link: MachineLink,
     /// The latest facts received in this run over either lane. None before the first.
     pub(crate) facts: Option<UpdateFacts>,
+    /// The latest detailed update facts, from a Core whose service lane offers them. They hold
+    /// the same facts as `facts` and the engine's own continuation, which takes precedence over
+    /// [`spaceterm_core::update::continuation`]. None from an older Core. Every writer that
+    /// changes `facts` without a new detailed answer clears them, so the two copies never differ.
+    pub(crate) detailed: Option<spaceterm_core::update::DetailedUpdateFacts>,
     pub(crate) capabilities: Capabilities,
     /// This desktop's embedded Core version for the Machine's platform, when it is newer than
-    /// `facts.running` and not `facts.skipped`. It drives "Update {Machine}".
+    /// `facts.running` and not `facts.skipped`. The shared store pushes it.
     pub(crate) push: Option<Version>,
-    /// This desktop's embedded Core version for the Machine's platform, when it is newer than
+    /// This desktop's embedded Core build for the Machine's platform, when it is newer than
     /// every version the Core has and not `facts.skipped`, whether or not its Update Floor
     /// admits `facts.running`. It differs from `push` while the Core must first reach that floor
     /// from its own feed through a Stepping Stone.
-    pub(crate) bundled: Option<Version>,
+    pub(crate) bundled: Option<Bundled>,
     /// The last push of `push` that failed. The shared store records it, because a push that
     /// breaks off or runs out of disk space records nothing in the Core's facts. Adapters leave
     /// it None.
     pub(crate) failed_push: Option<FailedPush>,
-    /// A check or install a person started on this desktop that the Core has not ended. The
-    /// shared store records it, so the title bar shows that work and keeps quiet about the work
-    /// a Core starts by itself. Adapters leave it None.
+    /// A check, install or restart a person started on this desktop that the Core has not
+    /// ended. The shared store records it, so the title bar shows that work and keeps quiet about
+    /// the work a Core starts by itself. Adapters leave it None.
     pub(crate) asked: Option<Asked>,
-    /// When this desktop first saw the Core's own download of an update fail, while the Core
-    /// tries it again by itself. None when a person's own try from this desktop failed, or when
-    /// the failure began unseen, so no first time is known. The shared store records it.
-    /// Adapters leave it None.
-    pub(crate) retrying_since: Option<u64>,
+}
+
+/// This desktop's embedded Core build, as one Machine needs it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Bundled {
+    pub(crate) version: Version,
+    /// The build's Update Floor, when it does not admit `facts.running`. The Core fetches a
+    /// Stepping Stone at that floor from its own feed before it can take `version`.
+    pub(crate) floor: Option<spaceterm_core::update::ordering::Floor>,
 }
 
 /// The work on a Machine that a person started on this desktop.
@@ -61,6 +69,9 @@ pub(crate) struct MachineUpdate {
 pub(crate) enum Asked {
     Check,
     Install,
+    /// From the approval until the Core comes back, or while it does not answer past the restart
+    /// deadline.
+    Restart,
 }
 
 /// A push of this desktop's embedded Core build that failed.
@@ -68,6 +79,33 @@ pub(crate) enum Asked {
 pub(crate) struct FailedPush {
     pub(crate) version: Version,
     pub(crate) failure: ActionFailure,
+}
+
+impl FailedPush {
+    /// Whether `facts` settle this failure. A Stepping Stone the Core couldn't fetch is settled
+    /// once the Core meets the floor or has downloaded a newer Stepping Stone toward it.
+    pub(crate) fn settled_by(&self, facts: &UpdateFacts) -> bool {
+        match self.failure {
+            ActionFailure::NeedsFloor(floor) => has_floor_progress(floor, facts),
+            _ => false,
+        }
+    }
+}
+
+/// Whether the Core meets `floor` or has a newer Pending Version to restart into on the way.
+pub(crate) fn has_floor_progress(
+    floor: spaceterm_core::update::ordering::Floor,
+    facts: &UpdateFacts,
+) -> bool {
+    floor.admits(&facts.running)
+        || facts.pending.as_ref().is_some_and(|pending| {
+            floor.admits(&pending.version)
+                || pending
+                    .version
+                    .release()
+                    .zip(facts.running.release())
+                    .is_some_and(|(pending, running)| pending > running)
+        })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

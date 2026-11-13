@@ -1,22 +1,21 @@
-//! What the status menu shows and offers, modeled on Apple's menu bar extras: a header with the
-//! desktop's own status, a Machines section with one row per Machine, Recent Updates, the actions
-//! that apply now, then Settings and Quit. There is no "Open SpaceTerm". Each row's wording comes
-//! from [`crate::updates::presentation`]; hosts render this tree natively.
-use crate::updates::machines::{MachineId, MachineUpdate};
-use crate::updates::presentation::{self, DesktopState, ExtraHeader, ExtraItem, ExtraRow, Tone};
+//! What the status menu shows and offers, modeled on Apple's menu bar extras: a `SpaceTerm`
+//! header with SpaceTerm's own row, SpaceTerm's step when it has one, a `SpaceTerm Core` section
+//! with one row per Machine, then Settings and Quit. There is no "Open SpaceTerm". Every status
+//! and action comes from the one update view ([`crate::updates::state`]), so the menu says what
+//! the title-bar list and Settings say; hosts render this tree natively.
+use gpui::SharedString;
 use spaceterm_core::update::facts::Platform;
 
-pub(crate) const HEADER_TITLE: &str = "SpaceTerm";
-pub(crate) const SETTINGS_TITLE: &str = "SpaceTerm Settings\u{2026}";
-pub(crate) const RECENT_TITLE: &str = "Recent Updates";
-pub(crate) const QUIT_TITLE: &str = "Quit SpaceTerm";
+use crate::updates::copy::rows;
+use crate::updates::copy::settings as copy;
+use crate::updates::machines::{MachineAction, MachineId, MachineLink, MachineUpdate};
+use crate::updates::state::{self, DesktopAction, RowView, UpdateView};
 
 /// One person-chosen operation the menu offers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Command {
-    /// An update surface command: a Machine action, a confirmation, an explanation, or the
-    /// desktop's own update.
-    Update(presentation::Command),
+    /// An update surface command: a row's action, or a Start or Stop of this computer's Core.
+    Update(state::Command),
     Settings,
     /// Exits the whole client, status item included. Every Core and its sessions keep running.
     Quit,
@@ -31,28 +30,44 @@ pub(crate) enum MachineKind {
     Linux,
 }
 
+/// One item that performs a command.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Item {
+    pub(crate) title: SharedString,
+    pub(crate) subtitle: Option<SharedString>,
+    pub(crate) command: Command,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct MachineRow {
-    pub(crate) row: ExtraRow,
+    pub(crate) machine: MachineId,
     pub(crate) kind: MachineKind,
-    /// The Machine's own update control label, such as "Update penguin", which names it.
-    control_label: String,
+    pub(crate) name: SharedString,
+    /// "{running} · {status}", or "{running} · {n} Terminal Sessions" with nothing waiting.
+    pub(crate) line: String,
+    /// The row's status alone, the part a warning colors.
+    pub(crate) status: Option<SharedString>,
+    /// The row's full sentence, for the tooltip and assistive technology.
+    pub(crate) accessibility: SharedString,
+    /// The row's longer explanation, such as how long an update has waited.
+    pub(crate) description: Option<SharedString>,
+    /// An offline Machine offers nothing, so its row dims.
+    pub(crate) offline: bool,
+    /// The submenu: the row's action first, then Stop or Start for this computer's Core.
+    pub(crate) items: Vec<Item>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Menu {
     /// The item's accessibility label and tooltip.
     pub(crate) summary: String,
-    /// Something in the menu is a problem, so the item's symbol shows it.
+    /// An update has waited until Insist, or a Machine is blocked: the item's symbol shows a dot.
     pub(crate) attention: bool,
-    pub(crate) header: ExtraHeader,
-    /// Why the desktop's update failed or can't happen, for a menu without subtitles. The menu
-    /// bar extra shows it as its action's subtitle.
-    header_info: Option<String>,
+    /// The header's subtitle: "{v}" or "{v} · {status}".
+    pub(crate) header: String,
+    /// SpaceTerm's row action, such as Relaunch to Update, Download Update or Try Again.
+    pub(crate) step: Option<Item>,
     pub(crate) machines: Vec<MachineRow>,
-    /// Recent history, newest first. Hosts show Recent Updates only when it has any.
-    pub(crate) recent: Vec<String>,
-    pub(crate) actions: Vec<ExtraItem>,
 }
 
 /// One row of a flat menu, for status areas whose menus have no subtitles or custom rows.
@@ -68,59 +83,53 @@ pub(crate) enum FlatRow {
 }
 
 impl Menu {
-    /// The menu for `update`, with each Machine row's symbol read from `machines`.
-    pub(crate) fn new(
-        update: &presentation::Presentation,
-        machines: &[MachineUpdate],
-        recent: Vec<String>,
-    ) -> Self {
-        let header = update.extra_header();
-        let machines: Vec<MachineRow> = update
-            .extra_rows()
+    /// The menu for `view`. `machines` gives each row its order, symbol, Terminal Sessions and
+    /// whether this computer's Core runs.
+    pub(crate) fn new(view: &UpdateView, machines: &[MachineUpdate]) -> Self {
+        let app = view.app_row();
+        let header = copy::line(app.version.as_deref(), app.status.as_deref());
+        // SpaceTerm's step is its row's action, so a failure offers the same `Try Again` here as
+        // in Settings and the title-bar list. What's New stays in the title bar and Help.
+        let step = app.action.and_then(|action| {
+            if action.command == state::Command::Desktop(DesktopAction::WhatsNew) {
+                return None;
+            }
+            let title = if action.label.as_ref() == rows::DOWNLOAD {
+                copy::DOWNLOAD_UPDATE.into()
+            } else {
+                action.label
+            };
+            Some(Item {
+                title,
+                subtitle: action.subtitle,
+                command: Command::Update(action.command),
+            })
+        });
+        // Local first, then store order, as every update surface lists them.
+        let mut ordered: Vec<&MachineUpdate> = machines.iter().collect();
+        ordered.sort_by_key(|update| !update.local);
+        let machines = ordered
             .into_iter()
-            .map(|row| MachineRow {
-                kind: kind(row.machine, row.local, machines),
-                control_label: update
-                    .machine(row.machine)
-                    .map(presentation::MachineView::control_label)
-                    .unwrap_or_default(),
-                row,
+            .filter_map(|update| {
+                view.machine_row(update.machine)
+                    .map(|row| machine_row(update, row))
             })
             .collect();
-        let header_info = matches!(
-            update.desktop,
-            DesktopState::InstallFailed { .. }
-                | DesktopState::RelaunchHeld { .. }
-                | DesktopState::TooOld { .. }
-                | DesktopState::NeedsNewerSystem
-        )
-        .then(|| update.desktop.sentence().to_string());
-        let attention = header.tone == Tone::Problem
-            || machines
-                .iter()
-                .any(|machine| machine.row.tone == Tone::Problem);
         Self {
-            summary: format!("{HEADER_TITLE}, {}", header.line),
-            attention,
+            summary: copy::summary(&header),
+            attention: view.insists(),
             header,
-            header_info,
+            step,
             machines,
-            recent,
-            actions: update.extra_actions(),
         }
     }
 
     /// Every command the menu offers, in menu order.
     pub(crate) fn commands(&self) -> impl Iterator<Item = Command> + '_ {
-        self.machines
+        self.step
             .iter()
-            .filter_map(|machine| machine.row.items.as_deref())
-            .flatten()
-            .chain(&self.actions)
-            .filter_map(|item| match item {
-                ExtraItem::Action { command, .. } => Some(Command::Update(command.clone())),
-                ExtraItem::Separator => None,
-            })
+            .chain(self.machines.iter().flat_map(|machine| &machine.items))
+            .map(|item| item.command.clone())
             .chain([Command::Settings, Command::Quit])
     }
 
@@ -129,69 +138,53 @@ impl Menu {
         self.commands().any(|offered| offered == *command)
     }
 
-    /// The same menu without submenus or subtitles: one status line each for the desktop and every
-    /// Machine, each followed by its information line, then Recent Updates, then every available
-    /// Machine action, naming the Machine, then the actions group, Settings and Quit.
+    /// The same menu without submenus or subtitles: SpaceTerm's line and step, the `SpaceTerm
+    /// Core` heading with one line per Machine and its explanation, then every Machine action,
+    /// naming its Machine, then Settings and Quit.
     #[cfg_attr(
         not(any(target_os = "linux", test)),
         allow(dead_code, reason = "only the Linux status area shows a flat menu")
     )]
     pub(crate) fn flat(&self) -> Vec<FlatRow> {
         let mut rows = vec![FlatRow::Text(format!(
-            "{HEADER_TITLE} \u{b7} {}",
-            self.header.line
+            "{} \u{b7} {}",
+            copy::SPACETERM,
+            self.header
         ))];
-        rows.extend(self.header_info.iter().cloned().map(FlatRow::Text));
+        rows.extend(self.step.iter().map(|step| FlatRow::Action {
+            title: step.title.to_string(),
+            command: step.command.clone(),
+        }));
+        if !self.machines.is_empty() {
+            rows.push(FlatRow::Separator);
+            rows.push(FlatRow::Text(copy::CORE_HEADING.to_owned()));
+        }
         for machine in &self.machines {
             rows.push(FlatRow::Text(format!(
                 "{} \u{b7} {}",
-                machine.row.name, machine.row.line
+                machine.name, machine.line
             )));
             rows.extend(
                 machine
-                    .row
-                    .info
+                    .description
                     .iter()
-                    .map(|info| FlatRow::Text(info.to_string())),
+                    .map(|description| FlatRow::Text(description.to_string())),
             );
         }
-        if !self.recent.is_empty() {
-            rows.push(FlatRow::Separator);
-            rows.push(FlatRow::Text(RECENT_TITLE.to_owned()));
-            rows.extend(self.recent.iter().cloned().map(FlatRow::Text));
-        }
-        let machines = self.machines.iter().flat_map(|machine| {
-            machine.row.items.iter().flatten().filter_map(move |item| {
-                let (title, command) = action(item)?;
-                let (title, asks) = match title.strip_suffix('\u{2026}') {
-                    Some(title) => (title, "\u{2026}"),
-                    None => (title, ""),
-                };
-                // The Machine's own update control already names it. Other submenu actions get
-                // their Machine from the row and need it added when flattened.
-                let names_machine = machine
-                    .control_label
-                    .strip_suffix('\u{2026}')
-                    .unwrap_or(&machine.control_label)
-                    == title;
-                Some(FlatRow::Action {
-                    title: if names_machine {
-                        format!("{title}{asks}")
-                    } else {
-                        format!("{title} on {}{asks}", machine.row.name)
-                    },
-                    command: Command::Update(command.clone()),
+        let actions: Vec<FlatRow> = self
+            .machines
+            .iter()
+            .flat_map(|machine| {
+                machine.items.iter().map(|item| FlatRow::Action {
+                    title: copy::flat_action(
+                        &item.title,
+                        &machine.name,
+                        machine_action(&item.command),
+                    ),
+                    command: item.command.clone(),
                 })
             })
-        });
-        let actions = self.actions.iter().filter_map(|item| {
-            let (title, command) = action(item)?;
-            Some(FlatRow::Action {
-                title: title.to_owned(),
-                command: Command::Update(command.clone()),
-            })
-        });
-        let actions: Vec<FlatRow> = machines.chain(actions).collect();
+            .collect();
         if !actions.is_empty() {
             rows.push(FlatRow::Separator);
             rows.extend(actions);
@@ -199,11 +192,11 @@ impl Menu {
         rows.extend([
             FlatRow::Separator,
             FlatRow::Action {
-                title: SETTINGS_TITLE.to_owned(),
+                title: copy::SETTINGS.to_owned(),
                 command: Command::Settings,
             },
             FlatRow::Action {
-                title: QUIT_TITLE.to_owned(),
+                title: copy::QUIT.to_owned(),
                 command: Command::Quit,
             },
         ]);
@@ -211,23 +204,67 @@ impl Menu {
     }
 }
 
-fn action(item: &ExtraItem) -> Option<(&str, &presentation::Command)> {
-    match item {
-        ExtraItem::Action { title, command, .. } => Some((title.as_ref(), command)),
-        ExtraItem::Separator => None,
+fn machine_row(update: &MachineUpdate, row: RowView) -> MachineRow {
+    let sessions = update.facts.as_ref().map_or(0, |facts| facts.sessions);
+    // A settled Machine's status is its version alone, so the extra shows its Terminal
+    // Sessions after it.
+    let settled = row.status.is_none() || row.status == row.version;
+    let line = if settled {
+        copy::line(row.version.as_deref(), Some(&copy::sessions(sessions)))
+    } else {
+        copy::line(row.version.as_deref(), row.status.as_deref())
+    };
+    let machine = update.machine;
+    let mut items: Vec<Item> = row
+        .action
+        .map(|action| Item {
+            title: action.label,
+            subtitle: action.subtitle,
+            command: Command::Update(action.command),
+        })
+        .into_iter()
+        .collect();
+    if update.local {
+        match update.link {
+            MachineLink::Stopped => items.push(Item {
+                title: copy::START_CORE.into(),
+                subtitle: None,
+                command: Command::Update(state::Command::Machine(machine, MachineAction::Start)),
+            }),
+            MachineLink::Offline { .. } => {}
+            _ => items.push(Item {
+                title: copy::STOP_CORE.into(),
+                subtitle: copy::ends(sessions).map(Into::into),
+                command: Command::Update(state::Command::Machine(machine, MachineAction::Stop)),
+            }),
+        }
+    }
+    MachineRow {
+        machine,
+        kind: kind(update),
+        name: row.name,
+        line,
+        status: row.status,
+        accessibility: row.accessibility,
+        description: row.description,
+        offline: matches!(update.link, MachineLink::Offline { .. }),
+        items,
     }
 }
 
-fn kind(machine: MachineId, local: bool, machines: &[MachineUpdate]) -> MachineKind {
-    if local {
+/// The Machine action `command` performs, if it performs one.
+fn machine_action(command: &Command) -> Option<&MachineAction> {
+    match command {
+        Command::Update(state::Command::Machine(_, action)) => Some(action),
+        _ => None,
+    }
+}
+
+fn kind(update: &MachineUpdate) -> MachineKind {
+    if update.local {
         return MachineKind::Local;
     }
-    let platform = machines
-        .iter()
-        .find(|update| update.machine == machine)
-        .and_then(|update| update.facts.as_ref())
-        .map(|facts| facts.platform);
-    match platform {
+    match update.facts.as_ref().map(|facts| facts.platform) {
         Some(Platform::MacosArm64) => MachineKind::Mac,
         Some(Platform::LinuxX86_64) | None => MachineKind::Linux,
     }

@@ -37,11 +37,11 @@ impl Kind {
             Self::Restart => LaneAction::Restart,
         }
     }
-    /// The confirmation question's label, ADR 0034's destructive button for a restart.
-    fn confirm_label(self, previewed: &Previewed) -> &'static str {
+    /// The confirmation question's label, the destructive button of a restart confirmation.
+    /// A restart into the Pending Version and a same-version restart share it (ADR 0034).
+    pub(crate) fn confirm_label(self) -> &'static str {
         match self {
             Self::Stop => "Stop SpaceTerm Core",
-            Self::Restart if previewed.effects.pending.is_some() => "Update Core",
             Self::Restart => "Restart Core",
         }
     }
@@ -166,7 +166,7 @@ fn preview(
             .collect();
         contract::write_warnings(&warnings, &mut std::io::stderr().lock());
         eprint!("{summary}");
-        if super::confirm(kind.confirm_label(&previewed)) {
+        if super::confirm(kind.confirm_label()) {
             return execute(context, kind, routed, opened, pending, token);
         }
         return Reply::failure(
@@ -212,18 +212,21 @@ pub(crate) fn terminal_sessions(n: u32) -> String {
     format!("{n} Terminal Session{}", if n == 1 { "" } else { "s" })
 }
 
-/// The preview text in ADR 0034's wording: the action, the machine it acts on, the versions an
-/// update moves between and whether that breaks devices, and what ends and what is kept.
+/// The preview text: the action, the machine it acts on, the versions a restart moves between
+/// and the devices a breaking version strands, and what ends and what is kept. A restart says
+/// it in the words of the desktop's restart confirmation (ADR 0065).
 pub(crate) fn summary(kind: Kind, machine: &str, previewed: &Previewed) -> String {
-    let ends = format!(
-        "This ends {} on {machine}.",
-        terminal_sessions(previewed.effects.ends_sessions)
-    );
+    let sessions = previewed.effects.ends_sessions;
     match kind {
         Kind::Stop => format!(
-            "Stop SpaceTerm Core on {machine}?\n{ends} Your Workspaces, Tabs and Panes stay, and SpaceTerm Core stays stopped until you start it again with: spaceterm start\n"
+            "Stop SpaceTerm Core on {machine}?\nThis ends {} on {machine}. Your Workspaces, Tabs and Panes stay, and SpaceTerm Core stays stopped until you start it again with: spaceterm start\n",
+            terminal_sessions(sessions)
         ),
         Kind::Restart => {
+            let ends = match sessions {
+                0 => "No Terminal Session is open.".to_owned(),
+                sessions => format!("This ends {}.", terminal_sessions(sessions)),
+            };
             let Some(target) = &previewed.effects.pending else {
                 let running = previewed
                     .running
@@ -235,25 +238,14 @@ pub(crate) fn summary(kind: Kind, machine: &str, previewed: &Previewed) -> Strin
                 );
             };
             let mut text = format!(
-                "Update SpaceTerm Core on {machine}?\nSpaceTerm Core restarts from {} to {}. {ends} Your Workspaces, Tabs and Panes stay, and each Pane starts a new shell when you select it.\n",
+                "Restart SpaceTerm Core on {machine}?\nSpaceTerm Core restarts from {} to {}. {ends} Workspaces, Tabs and Panes stay.",
                 target.from, target.to
             );
             if target.breaking {
-                if target.stranded.is_empty() {
-                    text.push_str(&format!(
-                        "{} changes the protocol. Older clients can\u{2019}t connect until they update.\n",
-                        target.to
-                    ));
-                } else {
-                    let names: Vec<&str> =
-                        target.stranded.iter().map(|v| v.name.as_str()).collect();
-                    text.push_str(&format!(
-                        "{} changes the protocol. These devices can\u{2019}t connect until they update: {}\n",
-                        target.to,
-                        names.join(", ")
-                    ));
-                }
+                text.push(' ');
+                text.push_str(&super::status::stranded(&target.stranded, machine));
             }
+            text.push('\n');
             text
         }
     }
@@ -420,7 +412,7 @@ fn execute(
             "Stop is in progress. Check it with: spaceterm status\n".to_owned()
         }
         (_, None) if kind == Kind::Restart => match &target {
-            Some(version) => format!("SpaceTerm Core on {machine} updated to {version}.\n"),
+            Some(version) => format!("SpaceTerm Core on {machine} restarted into {version}.\n"),
             None => "SpaceTerm Core restarted.\n".to_owned(),
         },
         (_, None) => "SpaceTerm Core stopped.\n".to_owned(),
@@ -486,18 +478,18 @@ pub(crate) fn update_failure_text(
     };
     match details.reason {
         Some(UpdateFailureReason::NotReady) => format!(
-            "SpaceTerm Core {version} did not become ready, so {runs}. It skips {version} until a newer version appears.\n"
+            "SpaceTerm Core {version} didn't start, so {runs}. It skips {version} until a newer version appears.\n"
         ),
         Some(UpdateFailureReason::PortInUse) => format!(
-            "SpaceTerm Core {version} couldn\u{2019}t listen on the Network Access port because another program holds it, so {runs}. {version} stays pending. Free the port, then try again with: {restart}\n"
+            "SpaceTerm Core {version} couldn't listen on the Network Access port because another program holds it, so {runs}. {version} stays downloaded. Free the port, then try again with: {restart}\n"
         ),
         Some(UpdateFailureReason::DiskFull) => format!(
-            "SpaceTerm Core {version} couldn\u{2019}t start because the disk is full, so {runs}. {version} stays pending. Free some space, then try again with: {restart}\n"
+            "SpaceTerm Core {version} couldn't start because the disk is full, so {runs}. {version} stays downloaded. Free some space, then try again with: {restart}\n"
         ),
         Some(UpdateFailureReason::Interrupted) => format!(
-            "A reboot, logout or crash interrupted the restart into SpaceTerm Core {version}, so {runs}. {version} stays pending. Try again with: {restart}\n"
+            "A reboot, logout or crash interrupted the restart into SpaceTerm Core {version}, so {runs}. {version} stays downloaded. Try again with: {restart}\n"
         ),
-        _ => format!("SpaceTerm Core {version} did not start, so {runs}.\n"),
+        _ => format!("SpaceTerm Core {version} didn't start, so {runs}.\n"),
     }
 }
 

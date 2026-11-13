@@ -1,39 +1,44 @@
-//! The Updates section: the installed version, the latest check, and update preferences.
-//! [`crate::updates`] owns update policy and state.
+//! The Updates section: the SpaceTerm row, the `SpaceTerm Core` heading with one row per
+//! Machine, and update preferences. Every row is the one the title-bar list, the Machine card
+//! and the menu bar extra show, from [`crate::updates::state`]. Listing opens no connection
+//! (ADR 0039). [`crate::updates`] owns update policy and state.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, SharedString};
+use gpui::{AnyElement, App, Context, ElementId, Entity, SharedString, Window};
 use spaceterm_ui::{
     Button, ButtonSize, ButtonVariant, SegmentedControl, SegmentedOption, Switch, ToggleSize,
 };
 
 use super::{SettingsRowId, SettingsWindow};
-use crate::application_identity::ApplicationIdentity;
 use crate::settings::SettingsDocument;
+use crate::ui::appearance::ChromeAppearance;
+use crate::ui::sidebar_window::form::{CaptionTone, FormRow};
+use crate::updates::copy::settings as copy;
+use crate::updates::machines::store::{MachineUpdates, Surface};
+use crate::updates::machines::{MachineAction, MachineLink, MachineUpdate};
 use crate::updates::policy::{CheckInterval, UpdatePreferences};
-use crate::updates::presentation::{self, Command, DesktopState};
-use crate::updates::{ApplicationUpdates, UpdateError, UpdateService, UpdateState};
+use crate::updates::state::{self, RowAction, RowView};
+use crate::updates::{ApplicationUpdates, UpdateService, UpdateState};
 
-/// The status row's label names the running build, so the page answers "which version" first.
-pub(super) const CURRENT_VERSION_LABEL: &str = ApplicationIdentity::current().version_label();
+/// The SpaceTerm row's label: the product, whose version leads its description.
+pub(super) const SPACETERM_LABEL: &str = copy::SPACETERM;
 
 pub(super) const CHECK_NOW_SELECTOR: &str = "settings-update-check-now";
+/// The Check Now row's content, which spans the row with the button at its trailing edge.
+pub(super) const CHECK_NOW_CONTROL_SELECTOR: &str = "settings-row-update-check-now-control";
+/// The SpaceTerm row's action, such as Relaunch to Update or What's New.
 pub(super) const RESTART_SELECTOR: &str = "settings-update-restart";
+/// Each Machine row under `SpaceTerm Core`, numbered in list order.
+pub(super) const MACHINE_ROW_SELECTOR: &str = "settings-row-core-update";
 
-/// The shared row's next command, or a passive check when nothing needs action.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum UpdateStatusAction {
-    CheckNow { enabled: bool },
-    Command(Command),
-}
-
+/// How the SpaceTerm row reads and what it offers: the shared SpaceTerm row, with or without a
+/// desktop update service.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct UpdateStatusPresentation {
+    /// "{v}" or "{v} · {status}", as every update surface reads it.
     pub(super) summary: SharedString,
-    pub(super) action: Option<UpdateStatusAction>,
-    pub(super) button: SharedString,
-    /// Check Now beside the row's own command, after an update and after a failure.
-    pub(super) check_now: bool,
+    /// The row's own action, if any.
+    pub(super) action: Option<RowAction>,
 }
 
 /// How long ago the service last completed a check. A stamp after `now` reads as just now.
@@ -66,112 +71,76 @@ fn unix_now() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
+/// The desktop update service, when this build updates itself.
 fn service(cx: &App) -> Option<Entity<ApplicationUpdates>> {
     cx.try_global::<UpdateService>()
         .map(|service| service.0.clone())
+        .filter(|service| !matches!(service.read(cx).state(), UpdateState::Unavailable))
+}
+
+/// The Machines in list order: local first, then store order.
+fn listed(cx: &App) -> Vec<MachineUpdate> {
+    let mut machines: Vec<MachineUpdate> = MachineUpdates::global(cx)
+        .map(|store| store.read(cx).machines().to_vec())
+        .unwrap_or_default();
+    machines.sort_by_key(|update| !update.local);
+    machines
+}
+
+/// Checks for a newer SpaceTerm, when this build updates itself, and asks each connected
+/// Machine's SpaceTerm Core to check, over the connections SpaceTerm already holds. A Machine it
+/// isn't connected to is left alone.
+pub(super) fn check_now(cx: &mut App) {
+    if let Some(updates) = service(cx) {
+        updates.update(cx, |updates, cx| updates.check(true, cx));
+    }
+    let Some(store) = MachineUpdates::global(cx) else {
+        return;
+    };
+    let connected: Vec<_> = store
+        .read(cx)
+        .machines()
+        .iter()
+        .filter(|update| update.link == MachineLink::Connected)
+        .map(|update| update.machine)
+        .collect();
+    store.update(cx, |store, cx| {
+        for machine in connected {
+            store.perform(machine, MachineAction::CheckAgain, Surface::Settings, cx);
+        }
+    });
+}
+
+/// Whether SpaceTerm's own check runs now.
+fn checking(cx: &App) -> bool {
+    service(cx).is_some_and(|updates| matches!(updates.read(cx).state(), UpdateState::Checking))
 }
 
 impl SettingsWindow {
     pub(super) fn update_status(&self, cx: &App) -> UpdateStatusPresentation {
-        let shared = presentation::current(cx);
-        if let Some(row) = shared.desktop_row() {
-            let (button, action) = row.button.map_or_else(
-                || (SharedString::default(), None),
-                |button| {
-                    (
-                        button.label,
-                        Some(UpdateStatusAction::Command(button.command)),
-                    )
-                },
-            );
-            // A failure the updater still holds offers only Relaunch, which no check can replace.
-            let check_now = matches!(
-                shared.desktop,
-                DesktopState::WhatsNew { .. } | DesktopState::InstallFailed { held: false, .. }
-            );
-            return UpdateStatusPresentation {
-                summary: row.sentence,
-                action,
-                button,
-                check_now,
-            };
-        }
-        let Some(updates) = service(cx) else {
-            return UpdateStatusPresentation {
-                summary: UpdateError::Unavailable.to_string().into(),
-                action: None,
-                button: SharedString::default(),
-                check_now: false,
-            };
-        };
-        let updates = updates.read(cx);
-        if matches!(updates.state(), UpdateState::Unavailable) {
-            return UpdateStatusPresentation {
-                summary: UpdateError::Unavailable.to_string().into(),
-                action: None,
-                button: SharedString::default(),
-                check_now: false,
-            };
-        }
-        let checking = matches!(updates.state(), UpdateState::Checking);
+        let row = state::current(cx).app_row();
         UpdateStatusPresentation {
-            summary: if checking {
-                "Checking for SpaceTerm updates…".into()
-            } else {
-                format!(
-                    "{} {}.",
-                    shared.desktop.sentence(),
-                    last_checked(updates.last_check(), unix_now())
-                )
-                .into()
-            },
-            action: Some(UpdateStatusAction::CheckNow { enabled: !checking }),
-            button: "Check Now".into(),
-            check_now: false,
+            summary: copy::line(row.version.as_deref(), row.status.as_deref()).into(),
+            action: row.action,
         }
     }
 
+    /// The SpaceTerm row's control: its action, if any.
     pub(super) fn render_update_status(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let owner = cx.weak_entity();
         let status = self.update_status(cx);
-        let checking = service(cx)
-            .is_some_and(|updates| matches!(updates.read(cx).state(), UpdateState::Checking));
-        let check_now = status.check_now.then(|| {
-            Button::new(CHECK_NOW_SELECTOR, "Check Now")
-                .tab_stop(true)
-                .variant(ButtonVariant::Outline)
-                .size(ButtonSize::Regular)
-                .disabled(checking)
-                .debug_selector(CHECK_NOW_SELECTOR)
-                .on_activate(|_, _, cx| {
-                    if let Some(updates) = service(cx) {
-                        updates.update(cx, |updates, cx| updates.check(true, cx));
-                    }
-                })
-        });
         let button = status.action.map(|action| {
-            let (selector, enabled) = match &action {
-                UpdateStatusAction::CheckNow { enabled } => (CHECK_NOW_SELECTOR, *enabled),
-                UpdateStatusAction::Command(_) => (RESTART_SELECTOR, true),
-            };
-            Button::new(selector, status.button)
+            let command = action.command;
+            Button::new(RESTART_SELECTOR, action.label)
                 .accessibility_description(status.summary.clone())
                 .tab_stop(true)
                 .variant(ButtonVariant::Outline)
                 .size(ButtonSize::Regular)
-                .disabled(!enabled)
-                .debug_selector(selector)
+                .debug_selector(RESTART_SELECTOR)
                 .on_activate(move |_, window, cx| {
-                    let action = action.clone();
-                    let _ = owner.update(cx, |settings, cx| match action {
-                        UpdateStatusAction::CheckNow { .. } => {
-                            if let Some(updates) = service(cx) {
-                                updates.update(cx, |updates, cx| updates.check(true, cx));
-                            }
-                        }
-                        UpdateStatusAction::Command(command) => {
-                            settings.perform_update_command(command, window.window_handle(), cx)
-                        }
+                    let command = command.clone();
+                    let _ = owner.update(cx, |settings, cx| {
+                        settings.perform_update_command(command, window.window_handle(), cx)
                     });
                 })
         });
@@ -179,9 +148,108 @@ impl SettingsWindow {
             .debug_selector(|| "settings-row-update-status-control".to_owned())
             .flex()
             .gap_2()
-            .children(check_now)
             .children(button)
             .into_any_element()
+    }
+
+    /// Check Now, after the interval. It is offered with or without a desktop update service,
+    /// because it also asks each connected Machine's SpaceTerm Core to check.
+    pub(super) fn render_update_check_now(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let last = service(cx)
+            .map(|updates| last_checked(updates.read(cx).last_check(), unix_now()))
+            .unwrap_or_default();
+        gpui::div()
+            .debug_selector(|| CHECK_NOW_CONTROL_SELECTOR.to_owned())
+            .flex()
+            .w_full()
+            .justify_end()
+            .child(
+                Button::new(CHECK_NOW_SELECTOR, copy::CHECK_NOW)
+                    .accessibility_description(SharedString::from(format!(
+                        "{} {last}",
+                        copy::CHECK_NOW_DESCRIPTION
+                    )))
+                    .tab_stop(true)
+                    .variant(ButtonVariant::Outline)
+                    .size(ButtonSize::Regular)
+                    .disabled(checking(cx))
+                    .debug_selector(CHECK_NOW_SELECTOR)
+                    .on_activate(|_, _, cx| check_now(cx)),
+            )
+            .into_any_element()
+    }
+
+    /// Each Machine's update row, local first, then store order.
+    pub(super) fn update_machine_rows(&self, cx: &App) -> Vec<RowView> {
+        let view = state::current(cx);
+        listed(cx)
+            .into_iter()
+            .filter_map(|update| view.machine_row(update.machine))
+            .collect()
+    }
+
+    /// The rows under `SpaceTerm Core`: one per Machine, local first, then store order, each
+    /// with its version and status and its action. Never empty, so the catalog row keeps a
+    /// place: with no Machine known it says so.
+    pub(super) fn render_update_machine_rows(
+        &mut self,
+        appearance: &ChromeAppearance,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let rows = self.update_machine_rows(cx);
+        if rows.is_empty() {
+            return vec![
+                FormRow::new(
+                    SettingsRowId::CoreUpdates.descriptor().selector,
+                    copy::NO_MACHINES,
+                    gpui::div().into_any_element(),
+                )
+                .render(appearance, window, cx)
+                .into_any_element(),
+            ];
+        }
+        rows.into_iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let selector = if index == 0 {
+                    SettingsRowId::CoreUpdates.descriptor().selector.to_owned()
+                } else {
+                    format!("{MACHINE_ROW_SELECTOR}-{index}")
+                };
+                let owner = cx.weak_entity();
+                let control = row.action.clone().map(|action| {
+                    let command = action.command;
+                    Button::new(
+                        ElementId::from(SharedString::from(format!("{selector}-action"))),
+                        action.label,
+                    )
+                    .accessibility_description(row.accessibility.clone())
+                    .tab_stop(true)
+                    .variant(ButtonVariant::Outline)
+                    .size(ButtonSize::Regular)
+                    .debug_selector(format!("{selector}-action"))
+                    .on_activate(move |_, window, cx| {
+                        let command = command.clone();
+                        let _ = owner.update(cx, |settings, cx| {
+                            settings.perform_update_command(command, window.window_handle(), cx)
+                        });
+                    })
+                    .into_any_element()
+                });
+                let line = copy::line(row.version.as_deref(), row.status.as_deref());
+                let mut rendered = FormRow::new(
+                    SharedString::from(selector),
+                    row.name.clone(),
+                    control.unwrap_or_else(|| gpui::div().into_any_element()),
+                )
+                .description(SharedString::from(line));
+                if let Some(description) = row.description {
+                    rendered = rendered.message(Some((description, CaptionTone::Guidance)));
+                }
+                rendered.render(appearance, window, cx).into_any_element()
+            })
+            .collect()
     }
 
     pub(super) fn render_automatic_update_downloads(
@@ -192,7 +260,7 @@ impl SettingsWindow {
         let owner = cx.weak_entity();
         Switch::new(
             "settings-automatic-update-downloads",
-            "Download updates automatically",
+            copy::AUTOMATIC_DOWNLOADS,
             value,
         )
         .size(ToggleSize::Regular)
@@ -276,10 +344,9 @@ fn reset_update_preference(row: SettingsRowId, preferences: &mut UpdatePreferenc
 /// One line of guidance for the preference rows.
 pub(super) fn update_row_description(row: SettingsRowId) -> Option<&'static str> {
     Some(match row {
-        SettingsRowId::AutomaticUpdateDownloads => {
-            "Relaunch SpaceTerm to install a downloaded update. Terminal Sessions keep running."
-        }
-        SettingsRowId::UpdateCheckInterval => "SpaceTerm checks when it opens.",
+        SettingsRowId::AutomaticUpdateDownloads => copy::AUTOMATIC_DOWNLOADS_DESCRIPTION,
+        SettingsRowId::UpdateCheckInterval => copy::CHECK_INTERVAL_DESCRIPTION,
+        SettingsRowId::UpdateCheckNow => copy::CHECK_NOW_DESCRIPTION,
         _ => return None,
     })
 }

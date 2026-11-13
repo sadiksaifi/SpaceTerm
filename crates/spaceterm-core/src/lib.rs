@@ -10,6 +10,7 @@ pub mod diagnostics;
 pub mod direct;
 pub mod hierarchy;
 mod host;
+pub mod idle_restart;
 pub mod labels;
 #[cfg(target_os = "macos")]
 mod launch_services;
@@ -22,6 +23,8 @@ pub mod permissions;
 pub mod protocol;
 pub mod provisioning;
 pub mod repository;
+#[cfg(feature = "client")]
+mod retry;
 pub mod service;
 #[cfg(feature = "client")]
 mod startup;

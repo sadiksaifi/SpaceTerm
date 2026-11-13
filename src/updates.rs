@@ -3,15 +3,19 @@
 #[cfg(feature = "developer-tools")]
 pub(crate) mod preview;
 
+pub(crate) mod confirm;
+pub(crate) mod copy;
+pub(crate) mod ladder;
 pub(crate) mod machines;
 pub(crate) mod policy;
-pub(crate) mod presentation;
 pub(crate) mod push;
 pub(crate) mod release_feed;
 pub(crate) mod release_notes;
 pub(crate) mod reminders;
+pub(crate) mod state;
 
-use policy::{UpdateHistory, UpdatePreferences, UpdateStage};
+use ladder::Stage;
+use policy::{UpdateHistory, UpdatePreferences};
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -85,15 +89,15 @@ pub(crate) enum UpdateError {
     )]
     SystemTooOld,
     /// Desktop wording names the remedy, which differs by platform.
-    #[error("SpaceTerm can’t replace its installation.")]
+    #[error("SpaceTerm can\u{2019}t replace its installation.")]
     ReadOnly,
     /// SpaceTerm was still running when its approved relaunch ended or ran out of time. The update
     /// stays downloaded and Try Again relaunches into it.
-    #[error("SpaceTerm couldn’t quit to install the update.")]
+    #[error("SpaceTerm couldn\u{2019}t quit to install the update.")]
     Relaunch,
     /// Settings couldn't be saved when the approved relaunch began, so SpaceTerm kept running.
     /// The update stays downloaded and Try Again relaunches into it.
-    #[error("SpaceTerm couldn’t save Settings, so it didn’t relaunch.")]
+    #[error("SpaceTerm couldn\u{2019}t save Settings, so it didn\u{2019}t relaunch.")]
     SettingsUnsaved,
 }
 
@@ -225,6 +229,8 @@ struct UpdateModel {
     /// take back. Until the updater ends its cycle, every quit is that relaunch.
     relaunch_released: bool,
     manual_check: bool,
+    /// How many failures this run reported, which names the current one.
+    failures: u64,
 }
 
 impl UpdateModel {
@@ -244,7 +250,13 @@ impl UpdateModel {
             installer_held: false,
             relaunch_released: false,
             manual_check: false,
+            failures: 0,
         }
+    }
+
+    fn fail(&mut self, error: UpdateError) {
+        self.failures += 1;
+        self.state = UpdateState::Failed { error };
     }
 
     fn begin_check(&mut self, manual: bool) -> bool {
@@ -360,9 +372,7 @@ impl UpdateModel {
         match event {
             UpdateEvent::Available(version) if matches!(self.state, UpdateState::Checking) => {
                 if stable_version(&version).is_none() {
-                    self.state = UpdateState::Failed {
-                        error: UpdateError::Verification,
-                    };
+                    self.fail(UpdateError::Verification);
                     return Some(UpdateNotice::Failed);
                 }
                 self.version = Some(version.clone());
@@ -407,7 +417,7 @@ impl UpdateModel {
                 let visible = self.manual_check
                     || (self.version.is_some() && error != UpdateError::SystemTooOld);
                 self.install_authorized = false;
-                self.state = UpdateState::Failed { error };
+                self.fail(error);
                 return visible.then_some(UpdateNotice::Failed);
             }
             _ => {}
@@ -420,7 +430,7 @@ impl UpdateModel {
     fn fail_relaunch(&mut self, error: UpdateError) {
         self.install_authorized = false;
         self.installer_held = self.cycle_active;
-        self.state = UpdateState::Failed { error };
+        self.fail(error);
     }
 
     /// Approves the relaunch again after it failed while the updater still holds its installer.
@@ -439,7 +449,10 @@ impl UpdateModel {
 }
 
 /// How long an approved relaunch may take before SpaceTerm reports that it is still running.
-const RELAUNCH_DEADLINE: Duration = Duration::from_secs(30);
+/// How long a download that SpaceTerm tries again by itself keeps failing before the title bar
+/// shows it. Settings and the menu bar extra show it at once.
+const RETRY_QUIETLY_FOR: u64 = policy::DAY;
+pub(crate) const RELAUNCH_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Whether Sparkle may install the appcast item: a stable release whose enclosure is that
 /// release's disk image, named as the release publishes it.
@@ -488,46 +501,59 @@ pub(crate) fn now() -> u64 {
         .as_secs()
 }
 
-/// Recent Updates as every surface lists it, newest first: "penguin updated to 0.9.0 · 09:41".
-pub(crate) fn recent_lines(cx: &App) -> Vec<String> {
-    let Some(service) = cx.try_global::<UpdateService>() else {
-        return Vec::new();
-    };
-    service
-        .0
-        .read(cx)
-        .recent()
-        .iter()
-        .map(|entry| format!("{} \u{b7} {}", entry.text, recent_time(entry.at, cx)))
-        .collect()
-}
-
-/// "09:41" today, otherwise "Nov 3", in this computer's local time.
-fn recent_time(at: u64, cx: &App) -> String {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let Some(calendar) = cx.try_global::<crate::desktop_profile::DesktopPresentation>() else {
-        return "earlier".to_owned();
-    };
-    match (calendar.local_time(at), calendar.local_time(now())) {
-        (Some(at), Some(now)) if (at.year, at.month, at.day) == (now.year, now.month, now.day) => {
-            format!("{:02}:{:02}", at.hour, at.minute)
-        }
-        (Some(at), _) => format!("{} {}", MONTHS.get(at.month).copied().unwrap_or(""), at.day),
-        (None, _) => "earlier".to_owned(),
-    }
-}
-
-/// Records a Machine's finished update in Recent, which the desktop's update history keeps
-/// across relaunch.
-pub(crate) fn record_recent(text: String, cx: &mut App) {
-    if let Some(service) = cx.try_global::<UpdateService>().map(|s| s.0.clone()) {
-        service.update(cx, |updates, cx| updates.record_recent(text, cx));
-    }
-}
-
 pub(crate) type ResumeQuit = Rc<dyn Fn(&mut App)>;
+
+/// What SpaceTerm's relaunch by itself observes about the person's use of SpaceTerm.
+pub(crate) trait Presence {
+    /// Whether an alert, sheet or menu is open, portable or native. A window that can't be read
+    /// counts as presenting.
+    fn presenting(&self, cx: &mut App) -> bool;
+    /// A count that grows with every keyboard, input-method and pointer event SpaceTerm
+    /// receives, counted before any view can handle it. `None` where the platform can't observe
+    /// all of them: SpaceTerm then never counts as unused.
+    fn input(&self, cx: &mut App) -> Option<u64>;
+}
+
+/// Whether a portable alert, sheet or menu is open in any SpaceTerm window.
+pub(crate) fn portable_presenting(cx: &mut App) -> bool {
+    cx.windows().into_iter().any(|handle| {
+        handle
+            .update(cx, |_, window, cx| {
+                spaceterm_ui::window_modal_is_open(window, cx)
+                    || spaceterm_ui::window_menu_is_open(window, cx)
+            })
+            .unwrap_or(true)
+    })
+}
+
+/// [`Presence`] where SpaceTerm can read only its portable alerts and menus. GPUI dispatch can't
+/// show every key and pointer event (a view may consume one, an input method may bypass
+/// dispatch), so input is unobservable and SpaceTerm never relaunches by itself. Linux uses it.
+pub(crate) struct PortablePresence;
+
+impl Presence for PortablePresence {
+    fn presenting(&self, cx: &mut App) -> bool {
+        portable_presenting(cx)
+    }
+
+    fn input(&self, _: &mut App) -> Option<u64> {
+        None
+    }
+}
+
+/// The platform's [`Presence`]: AppKit on macOS, where every input event can be counted; the
+/// portable one elsewhere and off the main thread.
+fn platform_presence() -> Rc<dyn Presence> {
+    #[cfg(target_os = "macos")]
+    if let Some(presence) = crate::platform::macos_presence::MacosPresence::install() {
+        return Rc::new(presence);
+    }
+    Rc::new(PortablePresence)
+}
+
+/// How long SpaceTerm waits to look again when the idle period has passed but an alert, sheet,
+/// menu or unsaved Settings holds its relaunch.
+const IDLE_RECHECK: u64 = 5 * 60;
 
 pub(crate) struct ApplicationUpdates {
     model: UpdateModel,
@@ -535,8 +561,16 @@ pub(crate) struct ApplicationUpdates {
     pending_quit: Option<ResumeQuit>,
     settings: Option<crate::settings::Settings>,
     history: UpdateHistory,
-    stage: UpdateStage,
-    reminder: Option<UpdateStage>,
+    stage: Stage,
+    reminder: Option<Stage>,
+    /// This launch is the first run on a newer version than the last launch.
+    updated_this_launch: bool,
+    presence: Rc<dyn Presence>,
+    /// The last keyboard, input-method or pointer input to SpaceTerm on the update clock. The
+    /// launch counts as input.
+    last_input: u64,
+    /// The input count as last read. `None` while the platform can't observe input.
+    seen_input: Option<u64>,
     publication: u64,
     prepared: bool,
     automatic_download: bool,
@@ -547,9 +581,16 @@ pub(crate) struct ApplicationUpdates {
     /// finishes, SpaceTerm is current, a different release is found, or they dismiss it or
     /// stop a try, so no later try dates it.
     own_download_failed: bool,
+    /// The failure the person dismissed on this desktop, by [`UpdateModel::failures`]. Its
+    /// title-bar step stays hidden until a newer failure replaces it.
+    dismissed_failure: Option<u64>,
     download_requested: bool,
     /// The person chose Relaunch before the release was ready, so it relaunches once it is.
     relaunch_requested: bool,
+    /// The downloaded release a scheduled check replaces with the same or a newer one, until a
+    /// release is ready again, SpaceTerm is current or the person checks. The main area keeps
+    /// its Relaunch meanwhile (design 4.5).
+    replacing: Option<String>,
     /// A due check ended a cycle that only waited for the person, so a check follows once the
     /// updater finishes it.
     recheck: bool,
@@ -584,6 +625,16 @@ impl Global for UpdateService {}
 
 impl ApplicationUpdates {
     pub(crate) fn install(adapter: Rc<dyn UpdateAdapter>, cx: &mut App) {
+        Self::install_with(adapter, platform_presence(), cx);
+    }
+
+    /// Installs the update service with `presence` as the source of what SpaceTerm shows the
+    /// person, for its relaunch by itself.
+    pub(crate) fn install_with(
+        adapter: Rc<dyn UpdateAdapter>,
+        presence: Rc<dyn Presence>,
+        cx: &mut App,
+    ) {
         let (sender, receiver) = async_channel::unbounded();
         let available = adapter.start(sender).is_ok();
         let entity = cx.new(|cx: &mut Context<Self>| {
@@ -607,6 +658,7 @@ impl ApplicationUpdates {
                     let Ok((wait, attached)) = this.update(cx, |this, cx| {
                         let time = this.adapter.now();
                         this.tick(time, cx);
+                        this.relaunch_if_unused(time, cx);
                         let wait = this.next_due(time).map(|due| due - time);
                         (wait, this.settings_changes.take())
                     }) else {
@@ -656,9 +708,10 @@ impl ApplicationUpdates {
                     this.reschedule()
                 })
             };
+            let seen_input = presence.input(cx);
             let saved_history = adapter.load_history();
             let mut history = saved_history.clone();
-            history.launched(env!("SPACETERM_VERSION"), adapter.now());
+            let updated_this_launch = history.launched(env!("SPACETERM_VERSION"), adapter.now());
             let mut model = UpdateModel::new(available);
             if available {
                 model.version = history
@@ -669,15 +722,21 @@ impl ApplicationUpdates {
                 saved_history,
                 history,
                 settings: None,
-                stage: UpdateStage::Optional,
+                stage: Stage::Offer,
                 reminder: None,
+                updated_this_launch,
+                presence,
+                last_input: adapter.now(),
+                seen_input,
                 publication: 0,
                 prepared: false,
                 automatic_download: false,
                 retrying_since: None,
                 own_download_failed: false,
+                dismissed_failure: None,
                 download_requested: false,
                 relaunch_requested: false,
+                replacing: None,
                 recheck: false,
                 relaunch_approvals: 0,
                 last_attempt: 0,
@@ -703,8 +762,9 @@ impl ApplicationUpdates {
         self.reschedule();
     }
 
-    /// A window became active, which may let a due reminder appear.
-    pub(crate) fn window_activated(&self) {
+    /// SpaceTerm has no active window, which lets a due reminder appear. While a window is
+    /// active the title-bar pill shows the step instead.
+    pub(crate) fn left_spaceterm(&self) {
         self.reschedule();
     }
 
@@ -731,7 +791,57 @@ impl ApplicationUpdates {
             })
             .filter(|due| *due > time);
         let change = self.history.next_change(time).filter(|due| *due > time);
-        check.into_iter().chain(change).min()
+        let observed = self.seen_input.is_some();
+        let unused = (observed && self.relaunches_when_unused(time)).then(|| {
+            Some(self.last_input.saturating_add(ladder::IDLE_PERIOD))
+                .filter(|due| *due > time)
+                .unwrap_or(time + IDLE_RECHECK)
+        });
+        check.into_iter().chain(change).chain(unused).min()
+    }
+
+    /// Whether SpaceTerm relaunches into its downloaded update by itself once nobody uses it:
+    /// from the Ask stage, while the release is downloaded and nothing about it is in progress.
+    fn relaunches_when_unused(&mut self, time: u64) -> bool {
+        matches!(self.model.state, UpdateState::Ready { .. })
+            && !self.model.cancelling
+            && !self.model.confirmation_open
+            && !self.relaunch_requested
+            && self.relaunch_approval().is_none()
+            && self.history.stage(time) >= Stage::Ask
+    }
+
+    /// Relaunches into the downloaded update once nobody has used SpaceTerm for
+    /// [`ladder::IDLE_PERIOD`]: no keyboard or pointer input to SpaceTerm, no alert, sheet or
+    /// menu open, and Settings saved. It takes the approved-relaunch path, so no quit warning
+    /// appears and every Terminal Session keeps running (ADR 0049).
+    /// The scheduler reads the input count at each wake, so input between two wakes counts as
+    /// input at the later one. Where input can't be observed, it never relaunches.
+    fn relaunch_if_unused(&mut self, time: u64, cx: &mut Context<Self>) {
+        let input = self.presence.input(cx);
+        if input != self.seen_input {
+            self.last_input = self.last_input.max(time);
+        }
+        self.seen_input = input;
+        if input.is_none() || !self.relaunches_when_unused(time) {
+            return;
+        }
+        if time < self.last_input.saturating_add(ladder::IDLE_PERIOD)
+            || self.presence.presenting(cx)
+            || !self.settings_saved()
+        {
+            return;
+        }
+        self.relaunch(cx);
+    }
+
+    /// Whether Settings hold no edit that has not been saved.
+    fn settings_saved(&self) -> bool {
+        self.settings.as_ref().is_none_or(|settings| {
+            let snapshot = settings.snapshot();
+            std::sync::Arc::ptr_eq(&snapshot.committed, &snapshot.candidate)
+                || *snapshot.committed == *snapshot.candidate
+        })
     }
 
     fn preferences(&self) -> UpdatePreferences {
@@ -741,12 +851,22 @@ impl ApplicationUpdates {
             .unwrap_or_default()
     }
 
-    pub(crate) fn reminder(&self) -> Option<UpdateStage> {
+    /// The stage of a reminder that is due now and waits to be shown.
+    pub(crate) fn reminder(&self) -> Option<Stage> {
         self.reminder
     }
-    /// How old the pending release is.
-    pub(crate) fn stage(&self) -> UpdateStage {
+    /// The ladder stage of the waiting SpaceTerm update, from the earliest publication among
+    /// the versions it has waited for. Offer when nothing waits.
+    pub(crate) fn ladder_stage(&self) -> Stage {
         self.stage
+    }
+    /// When the waiting SpaceTerm update started waiting, in Unix seconds, if one waits.
+    pub(crate) fn waiting_since(&self) -> Option<u64> {
+        self.history.waiting_since()
+    }
+    /// The time on the update clock, in Unix seconds.
+    pub(crate) fn now(&self) -> u64 {
+        self.adapter.now()
     }
     pub(crate) fn last_check(&self) -> Option<u64> {
         self.history.last_check
@@ -758,16 +878,17 @@ impl ApplicationUpdates {
         self.history.notes_unread(env!("SPACETERM_VERSION"))
     }
 
-    /// Finished updates of this desktop and every Machine, newest first.
-    pub(crate) fn recent(&self) -> &[policy::RecentUpdate] {
-        self.history.recent()
+    /// Whether `What's New` is owed: this launch is the first run on a newer version, and its
+    /// release notes have not opened since. It never returns on a later launch. Whether the
+    /// build carries notes is the presentation's to check.
+    pub(crate) fn whats_new(&self) -> bool {
+        self.updated_this_launch && self.release_notes_unread()
     }
 
-    /// Adds a finished update to Recent, such as "penguin updated to 0.9.0".
-    pub(crate) fn record_recent(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
-        self.history.record(text, self.adapter.now());
-        self.save_history();
-        cx.notify();
+    /// Finished updates of this desktop and every Machine, newest first.
+    #[allow(dead_code, reason = "Recent is no longer recorded or shown")]
+    pub(crate) fn recent(&self) -> &[policy::RecentUpdate] {
+        self.history.recent()
     }
 
     /// Records that the person opened this build's release notes.
@@ -793,7 +914,7 @@ impl ApplicationUpdates {
                 self.model.state,
                 UpdateState::UpToDate | UpdateState::Installing { .. }
             );
-        if outstanding && cx.active_window().is_some() && self.history.reminder_due(time) {
+        if outstanding && cx.active_window().is_none() && self.history.reminder_due(time) {
             self.reminder = Some(self.stage);
             self.history.reminded(time);
         }
@@ -820,6 +941,9 @@ impl ApplicationUpdates {
             // A release waiting for the person must not hide a newer one: the check ends that
             // cycle first, so the next Relaunch installs the newest release.
             if self.model.replaceable() {
+                if let UpdateState::Ready { version } = &self.model.state {
+                    self.replacing = Some(version.clone());
+                }
                 self.last_attempt = time;
                 self.recheck = true;
                 self.cancel(cx);
@@ -828,6 +952,11 @@ impl ApplicationUpdates {
             }
         }
         cx.notify();
+    }
+
+    /// The downloaded release a scheduled check replaces, while it does.
+    pub(crate) fn replaces_download(&self) -> Option<&str> {
+        self.replacing.as_deref()
     }
 
     /// Retained presentation metadata, never authority to install without a verified check.
@@ -852,6 +981,7 @@ impl ApplicationUpdates {
         }
         if manual {
             self.retrying_since = None;
+            self.replacing = None;
         }
         self.last_attempt = self.adapter.now();
         self.reschedule();
@@ -910,12 +1040,14 @@ impl ApplicationUpdates {
     }
 
     /// Whether an automatic download failed and SpaceTerm has tried it again by itself for less
-    /// than [`presentation::RETRY_QUIETLY_FOR`]. The failure then stays out of the title bar.
+    /// than [`RETRY_QUIETLY_FOR`]. The failure then stays out of the title bar.
     pub(crate) fn retries_download(&self) -> bool {
-        self.preferences().automatic_downloads
-            && self.retrying_since.is_some_and(|since| {
-                self.adapter.now().saturating_sub(since) < presentation::RETRY_QUIETLY_FOR
-            })
+        // A scheduled check's replacement download is SpaceTerm's own, so it retries quietly
+        // whatever the automatic-download preference.
+        (self.preferences().automatic_downloads || self.replacing.is_some())
+            && self
+                .retrying_since
+                .is_some_and(|since| self.adapter.now().saturating_sub(since) < RETRY_QUIETLY_FOR)
     }
 
     pub(crate) fn cancel(&mut self, cx: &mut Context<Self>) {
@@ -1028,15 +1160,23 @@ impl ApplicationUpdates {
         self.model.installer_held
     }
 
-    /// Clears a failed download or installation. The release stays pending, and the next
-    /// scheduled check tries again. An installer the updater already holds stays held.
+    /// Hides the current failure's title-bar step on this desktop. The failure, its Try Again
+    /// and an installer the updater already holds all stay, so every row keeps showing the
+    /// failure until newer updater facts replace it. SpaceTerm's next try by itself is quiet
+    /// again.
     pub(crate) fn dismiss_failure(&mut self, cx: &mut Context<Self>) {
         if matches!(self.model.state, UpdateState::Failed { .. }) {
-            self.model.state = UpdateState::Idle;
+            self.dismissed_failure = Some(self.model.failures);
             self.retrying_since = None;
             self.own_download_failed = false;
             cx.notify();
         }
+    }
+
+    /// Whether the person dismissed the current failure on this desktop.
+    pub(crate) fn failure_dismissed(&self) -> bool {
+        matches!(self.model.state, UpdateState::Failed { .. })
+            && self.dismissed_failure == Some(self.model.failures)
     }
 
     fn receive(&mut self, event: UpdateEvent, cx: &mut Context<Self>) {
@@ -1058,6 +1198,10 @@ impl ApplicationUpdates {
         let failed = matches!(event, UpdateEvent::Failed(_));
         let current = matches!(event, UpdateEvent::UpToDate);
         if let UpdateEvent::Available(version) = &event {
+            // Relaunch installs the release the replacing check found, so the main area names it.
+            if self.replacing.is_some() {
+                self.replacing = Some(version.clone());
+            }
             self.history
                 .observe(env!("SPACETERM_VERSION"), version, self.publication, time);
             self.history.last_check = Some(time);
@@ -1072,7 +1216,7 @@ impl ApplicationUpdates {
         if current {
             self.history.clear();
             self.history.last_check = Some(time);
-            self.stage = UpdateStage::Optional;
+            self.stage = Stage::Offer;
             self.reminder = None;
             self.save_history();
         }
@@ -1097,14 +1241,19 @@ impl ApplicationUpdates {
         if ready || current {
             self.retrying_since = None;
             self.own_download_failed = false;
+            self.replacing = None;
         }
         let finished = matches!(event, UpdateEvent::Finished);
         let notice = self.model.receive(event);
         if found && matches!(self.model.state, UpdateState::Available { .. }) {
+            // A scheduled check that replaced a downloaded release downloads what it found, so
+            // the Relaunch the main area kept stays true.
+            let automatic = self.preferences().automatic_downloads;
             if !self.prepared
                 && (self.download_requested
                     || self.relaunch_requested
-                    || self.preferences().automatic_downloads)
+                    || self.replacing.is_some()
+                    || automatic)
             {
                 self.automatic_download = !self.model.manual_check
                     && !self.download_requested
@@ -1565,6 +1714,110 @@ mod tests {
         assert_eq!(adapter.deferred_installs.get(), 0);
     }
 
+    /// Design 4.5: a scheduled check of a downloaded release ends its cycle and downloads it
+    /// again. The main area keeps `Relaunch to Update` through the whole check, and the row
+    /// agrees once the release is downloaded again.
+    #[gpui::test]
+    fn a_scheduled_check_keeps_relaunch_to_update_in_the_main_area(cx: &mut gpui::TestAppContext) {
+        scheduled_check_keeps_relaunch("0.1.1", true, cx);
+    }
+
+    /// The same when the scheduled check finds a newer release and downloads that one by itself.
+    #[gpui::test]
+    fn a_scheduled_check_that_finds_a_newer_release_keeps_relaunch_to_update(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        scheduled_check_keeps_relaunch("0.1.2", true, cx);
+    }
+
+    /// With automatic downloads off, the check downloads the release the person downloaded again,
+    /// so `Relaunch to Update` stays true.
+    #[gpui::test]
+    fn a_scheduled_check_downloads_again_a_release_the_person_downloaded(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        scheduled_check_keeps_relaunch("0.1.1", false, cx);
+    }
+
+    /// With automatic downloads off, the replacement download fails. SpaceTerm retries it
+    /// quietly, so the main area keeps `Relaunch to Update`.
+    #[gpui::test]
+    fn a_failed_replacement_download_keeps_relaunch_to_update(cx: &mut gpui::TestAppContext) {
+        scheduled_check_keeps_relaunch_or_fails("0.1.1", false, true, cx);
+    }
+
+    fn scheduled_check_keeps_relaunch(found: &str, automatic: bool, cx: &mut gpui::TestAppContext) {
+        scheduled_check_keeps_relaunch_or_fails(found, automatic, false, cx);
+    }
+
+    fn scheduled_check_keeps_relaunch_or_fails(
+        found: &str,
+        automatic: bool,
+        fails: bool,
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let adapter = Rc::new(RecordingAdapter::available());
+        cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
+        let service = cx.update(|cx| cx.global::<UpdateService>().0.clone());
+        let mut document = crate::settings::SettingsDocument::default();
+        document.updates.automatic_downloads = automatic;
+        let settings = crate::settings::Settings::load(
+            crate::settings::storage::testing::MemoryStorage::with_document(&document),
+        );
+        service.update(cx, |updates, _| updates.attach_settings(settings));
+        service.update(cx, |updates, cx| updates.check(false, cx));
+        adapter.emit(UpdateEvent::Available("0.1.1".into()));
+        cx.run_until_parked();
+        service.update(cx, |updates, cx| updates.download(cx));
+        adapter.emit(UpdateEvent::Ready);
+        cx.run_until_parked();
+        let main = |cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| state::current(cx).pill().map(|pill| pill.label.to_string()))
+        };
+        let relaunch = Some(copy::title_bar::RELAUNCH_TO_UPDATE.to_owned());
+        assert_eq!(main(cx), relaunch);
+
+        let later = adapter.now() + 30 * policy::DAY;
+        service.update(cx, |updates, cx| updates.tick(later, cx));
+        assert_eq!(adapter.cancellations.get(), 1, "the check ends the cycle");
+        assert_eq!(main(cx), relaunch, "while the cycle ends");
+        adapter.emit(UpdateEvent::Finished);
+        cx.run_until_parked();
+        assert_eq!(main(cx), relaunch, "while it checks");
+        adapter.emit(UpdateEvent::Available(found.into()));
+        cx.run_until_parked();
+        assert_eq!(main(cx), relaunch, "after it finds {found}");
+        assert_eq!(
+            service.read_with(cx, |updates, _| updates
+                .replaces_download()
+                .map(str::to_owned)),
+            Some(found.to_owned()),
+            "the main area names the release Relaunch installs"
+        );
+        assert_eq!(adapter.downloads.get(), 2, "it downloads {found} again");
+        if fails {
+            adapter.emit(UpdateEvent::Failed(UpdateError::Download));
+            cx.run_until_parked();
+            assert_eq!(main(cx), relaunch, "after the replacement download fails");
+            return;
+        }
+        adapter.emit(UpdateEvent::Downloading {
+            received: 1,
+            total: 2,
+        });
+        cx.run_until_parked();
+        assert_eq!(main(cx), relaunch, "while it downloads again");
+        adapter.emit(UpdateEvent::Ready);
+        cx.run_until_parked();
+        assert_eq!(main(cx), relaunch);
+        let row = cx.update(|cx| state::current(cx).app_row());
+        assert_eq!(
+            row.status.as_deref(),
+            Some(format!("{found} downloaded").as_str()),
+            "the row agrees"
+        );
+    }
+
     /// The scheduler sleeps from one due check or reminder to the next. Every step lands exactly
     /// on the due time, nothing runs or writes in between, and settings, clock and window changes
     /// move the next due time.
@@ -1583,10 +1836,9 @@ mod tests {
             }));
         }
         let wall = |adapter: &RecordingAdapter| adapter.now();
+        // SpaceTerm runs in the background, where reminders appear.
         let window = cx.add_window(|_, _| gpui::EmptyView);
-        window
-            .update(cx, |_, window, _| window.activate_window())
-            .unwrap();
+        gpui::VisualTestContext::from_window(window.into(), cx).deactivate_window();
         let document = crate::settings::SettingsDocument {
             updates: UpdatePreferences {
                 automatic_downloads: false,
@@ -1610,9 +1862,10 @@ mod tests {
             cx.run_until_parked();
             waited
         };
+        // The release came out a day before launch, so it asks a day after launch.
         let found = |adapter: &RecordingAdapter, cx: &mut gpui::TestAppContext| {
             adapter.emit(UpdateEvent::ReleaseMetadata {
-                published_at: START,
+                published_at: START - DAY,
                 prepared: false,
             });
             adapter.emit(UpdateEvent::Available("0.1.1".into()));
@@ -1625,17 +1878,17 @@ mod tests {
         found(&adapter, cx);
         let first_check = START + 1;
 
-        // The release turns one day old before the daily check is due again.
+        // The update reaches Ask before the daily check is due again.
         let saves = adapter.saves.get();
         assert_eq!(wall(&adapter) + step(cx), START + DAY);
         assert_eq!(adapter.checks.get(), 1);
         assert_eq!(
             service.read_with(cx, |updates, _| updates.reminder()),
-            Some(UpdateStage::Warning),
-            "the warning reminder appears when the release turns one day old"
+            Some(Stage::Ask),
+            "the reminder appears when the update has waited two days"
         );
         assert_eq!(adapter.saves.get(), saves + 1, "one write at the due time");
-        service.read_with(cx, |updates, _| updates.window_activated());
+        service.read_with(cx, |updates, _| updates.left_spaceterm());
         cx.run_until_parked();
         assert_eq!(
             adapter.saves.get(),
@@ -1675,8 +1928,11 @@ mod tests {
         );
         found(&adapter, cx);
 
-        // The overdue reminder waits for an active window, then appears when one activates.
-        gpui::VisualTestContext::from_window(window.into(), cx).deactivate_window();
+        // While a window is active the pill shows the step, so the next daily reminder waits,
+        // then appears once SpaceTerm has no active window.
+        window
+            .update(cx, |_, window, _| window.activate_window())
+            .unwrap();
         let mut checks = adapter.checks.get();
         while wall(&adapter) < START + 2 * DAY {
             step(cx);
@@ -1688,16 +1944,14 @@ mod tests {
         assert_eq!(
             service.read_with(cx, |updates, _| updates.reminder()),
             None,
-            "a due reminder waits for an active window"
+            "a due reminder waits while a window is active"
         );
-        window
-            .update(cx, |_, window, _| window.activate_window())
-            .unwrap();
-        service.read_with(cx, |updates, _| updates.window_activated());
+        gpui::VisualTestContext::from_window(window.into(), cx).deactivate_window();
+        service.read_with(cx, |updates, _| updates.left_spaceterm());
         cx.run_until_parked();
         assert_eq!(
             service.read_with(cx, |updates, _| updates.reminder()),
-            Some(UpdateStage::Overdue)
+            Some(Stage::Ask)
         );
     }
 
@@ -1718,10 +1972,9 @@ mod tests {
                 START + slept.get() + (executor.now() - began).as_secs()
             }));
         }
+        // SpaceTerm runs in the background, where reminders appear.
         let window = cx.add_window(|_, _| gpui::EmptyView);
-        window
-            .update(cx, |_, window, _| window.activate_window())
-            .unwrap();
+        gpui::VisualTestContext::from_window(window.into(), cx).deactivate_window();
         let document = crate::settings::SettingsDocument {
             updates: UpdatePreferences {
                 automatic_downloads: false,
@@ -1736,9 +1989,10 @@ mod tests {
         let service = cx.update(|cx| cx.global::<UpdateService>().0.clone());
         service.update(cx, |updates, _| updates.attach_settings(settings.clone()));
         cx.run_until_parked();
+        // The release came out a day before launch, so it asks a day after launch.
         let found = |adapter: &RecordingAdapter, cx: &mut gpui::TestAppContext| {
             adapter.emit(UpdateEvent::ReleaseMetadata {
-                published_at: START,
+                published_at: START - DAY,
                 prepared: false,
             });
             adapter.emit(UpdateEvent::Available("0.1.1".into()));
@@ -1750,7 +2004,7 @@ mod tests {
         assert_eq!(adapter.checks.get(), 1);
         found(&adapter, cx);
 
-        // The machine sleeps past the daily check and the release's first day.
+        // The machine sleeps past the daily check and the update reaching Ask.
         slept.set(DAY + 600);
         let woke = adapter.now();
         cx.run_until_parked();
@@ -1762,8 +2016,8 @@ mod tests {
         assert_eq!(adapter.checks.get(), 2, "the overdue check runs on wake");
         assert_eq!(
             service.read_with(cx, |updates, _| updates.reminder()),
-            Some(UpdateStage::Warning),
-            "the due warning appears on wake"
+            Some(Stage::Ask),
+            "the due reminder appears on wake"
         );
         let mut saved = adapter.saved.borrow().clone().unwrap();
         assert_eq!(
@@ -1787,17 +2041,22 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(adapter.checks.get(), 2, "a second wake runs nothing");
         assert_eq!(adapter.saves.get(), saves, "a second wake writes nothing");
+        service.update(cx, |updates, cx| updates.dismiss_reminder(cx));
+        assert_eq!(service.read_with(cx, |updates, _| updates.reminder()), None);
 
-        // The next due time is the release turning two days old, before the next daily check.
-        let before = cx.executor().now();
-        assert!(cx.dispatcher.scheduler().advance_clock_to_next_timer());
-        let waited = (cx.executor().now() - before).as_secs();
-        assert_eq!(woke + waited, START + 2 * DAY);
-        cx.run_until_parked();
-        assert_eq!(adapter.checks.get(), 2);
+        // The next due time is a day after the wake: the next check and the next daily
+        // reminder.
+        // A timer set before the sleep may still fire first; it brings nothing.
+        while adapter.checks.get() == 2 {
+            assert_eq!(service.read_with(cx, |updates, _| updates.reminder()), None);
+            assert!(cx.dispatcher.scheduler().advance_clock_to_next_timer());
+            cx.run_until_parked();
+        }
+        assert_eq!(adapter.now(), woke + DAY);
+        assert_eq!(adapter.checks.get(), 3);
         assert_eq!(
             service.read_with(cx, |updates, _| updates.reminder()),
-            Some(UpdateStage::Overdue)
+            Some(Stage::Ask)
         );
     }
 
@@ -1812,28 +2071,253 @@ mod tests {
         (adapter, service)
     }
 
-    /// Nothing installs without the person's Relaunch, however old the release or whether the
-    /// updater retained its installer.
+    /// What's New is owed on the first run after an update until the notes open, and never on
+    /// a later launch.
     #[gpui::test]
-    fn an_overdue_or_prepared_update_never_installs_by_itself(cx: &mut gpui::TestAppContext) {
-        let (adapter, service) = launch_fixture(cx);
-        adapter.emit(UpdateEvent::ReleaseMetadata {
-            published_at: now() - 2 * policy::DAY,
-            prepared: true,
-        });
-        adapter.emit(UpdateEvent::Available("0.1.1".into()));
-        adapter.emit(UpdateEvent::Ready);
-        cx.run_until_parked();
-        cx.executor().advance_clock(Duration::from_secs(60));
-        cx.run_until_parked();
-        assert_eq!(adapter.downloads.get(), 0);
-        assert_eq!(adapter.installations.get(), 0);
+    fn whats_new_lasts_from_the_first_run_on_a_newer_version_until_the_notes_open(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut adapter = RecordingAdapter::available();
+        adapter.history.launched("0.0.1", 0);
+        let adapter = Rc::new(adapter);
+        cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
+        let service = cx.update(|cx| cx.global::<UpdateService>().0.clone());
+        assert!(service.read_with(cx, |updates, _| updates.whats_new()));
+        service.update(cx, |updates, cx| updates.read_release_notes(cx));
+        assert!(!service.read_with(cx, |updates, _| updates.whats_new()));
+
+        let mut unread = RecordingAdapter::available();
+        unread.history.launched("0.0.1", 0);
+        unread.history.launched(env!("SPACETERM_VERSION"), 1);
+        let unread = Rc::new(unread);
+        cx.update(|cx| ApplicationUpdates::install(unread.clone(), cx));
+        let service = cx.update(|cx| cx.global::<UpdateService>().0.clone());
+        assert!(service.read_with(cx, |updates, _| updates.release_notes_unread()));
+        assert!(
+            !service.read_with(cx, |updates, _| updates.whats_new()),
+            "a later launch of the same version owes nothing"
+        );
         assert_eq!(
-            service.read_with(cx, |updates, _| updates.state().clone()),
-            UpdateState::Ready {
+            service.read_with(cx, |updates, _| updates.ladder_stage()),
+            Stage::Offer,
+            "nothing waits"
+        );
+    }
+
+    /// A [`Presence`] the test sets, on a platform that observes input.
+    #[derive(Default)]
+    struct ScriptedPresence {
+        presenting: std::cell::Cell<bool>,
+        input: std::cell::Cell<u64>,
+    }
+
+    impl ScriptedPresence {
+        /// One more keyboard, input-method or pointer event.
+        fn event(&self) {
+            self.input.set(self.input.get() + 1);
+        }
+    }
+
+    impl Presence for ScriptedPresence {
+        fn presenting(&self, _: &mut App) -> bool {
+            self.presenting.get()
+        }
+        fn input(&self, _: &mut App) -> Option<u64> {
+            Some(self.input.get())
+        }
+    }
+
+    /// SpaceTerm launched at `LAUNCH` and downloaded a release published at `published_at`.
+    /// The update clock follows the test executor's, which only timers move.
+    struct Unused {
+        adapter: Rc<RecordingAdapter>,
+        service: Entity<ApplicationUpdates>,
+        presence: Rc<ScriptedPresence>,
+    }
+
+    const LAUNCH: u64 = 1_000_000;
+
+    impl Unused {
+        fn new(published_at: u64, cx: &mut gpui::TestAppContext) -> Self {
+            let presence = Rc::new(ScriptedPresence::default());
+            let (adapter, service, _window) = Self::ready(published_at, presence.clone(), cx);
+            Self {
+                adapter,
+                service,
+                presence,
+            }
+        }
+
+        /// Launches with `presence` and a downloaded release published at `published_at`.
+        fn ready(
+            published_at: u64,
+            presence: Rc<dyn Presence>,
+            cx: &mut gpui::TestAppContext,
+        ) -> (
+            Rc<RecordingAdapter>,
+            Entity<ApplicationUpdates>,
+            gpui::AnyWindowHandle,
+        ) {
+            let adapter = Rc::new(RecordingAdapter::available());
+            let executor = cx.executor();
+            let began = executor.now();
+            *adapter.clock.borrow_mut() = Some(Box::new(move || {
+                LAUNCH + (executor.now() - began).as_secs()
+            }));
+            let window = cx.add_window(|_, _| gpui::EmptyView);
+            cx.update(|cx| ApplicationUpdates::install_with(adapter.clone(), presence.clone(), cx));
+            let service = cx.update(|cx| cx.global::<UpdateService>().0.clone());
+            cx.run_until_parked();
+            assert!(cx.dispatcher.scheduler().advance_clock_to_next_timer());
+            cx.run_until_parked();
+            assert_eq!(adapter.checks.get(), 1, "the first check after launch");
+            adapter.emit(UpdateEvent::ReleaseMetadata {
+                published_at,
+                prepared: false,
+            });
+            adapter.emit(UpdateEvent::Available("0.1.1".into()));
+            cx.run_until_parked();
+            assert_eq!(adapter.downloads.get(), 1, "an automatic download");
+            adapter.emit(UpdateEvent::Ready);
+            cx.run_until_parked();
+            (adapter, service, window.into())
+        }
+
+        /// Runs to the next timer and returns the update clock there.
+        fn step(&self, cx: &mut gpui::TestAppContext) -> u64 {
+            cx.run_until_parked();
+            assert!(cx.dispatcher.scheduler().advance_clock_to_next_timer());
+            cx.run_until_parked();
+            self.adapter.now()
+        }
+
+        fn relaunched(&self, cx: &mut gpui::TestAppContext) -> bool {
+            let relaunched = self.adapter.installations.get() > 0;
+            assert_eq!(
+                relaunched,
+                self.service
+                    .read_with(cx, |updates, _| updates.relaunch_approval())
+                    .is_some(),
+                "only the approved-relaunch path installs"
+            );
+            relaunched
+        }
+    }
+
+    /// From the Ask stage, SpaceTerm relaunches into a downloaded update by itself after an
+    /// hour with no input, on the approved-relaunch path that keeps every Terminal Session.
+    #[gpui::test]
+    fn a_downloaded_update_relaunches_by_itself_after_an_hour_unused_from_ask(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let unused = Unused::new(LAUNCH - ladder::ASK_AFTER, cx);
+        assert!(!unused.relaunched(cx));
+        assert_eq!(
+            unused.step(cx),
+            LAUNCH + ladder::IDLE_PERIOD,
+            "the launch counts as input"
+        );
+        assert!(unused.relaunched(cx));
+        assert_eq!(
+            unused
+                .service
+                .read_with(cx, |updates, _| updates.state().clone()),
+            UpdateState::Installing {
                 version: "0.1.1".into()
             }
         );
+    }
+
+    /// Before Ask, however long nobody uses SpaceTerm, the update waits for the person; the
+    /// relaunch comes once Ask arrives.
+    #[gpui::test]
+    fn an_update_at_offer_never_relaunches_by_itself(cx: &mut gpui::TestAppContext) {
+        let ask = LAUNCH + 3 * ladder::IDLE_PERIOD;
+        let unused = Unused::new(ask - ladder::ASK_AFTER, cx);
+        while unused.adapter.now() < ask {
+            unused.step(cx);
+            if unused.adapter.now() < ask {
+                assert!(!unused.relaunched(cx), "Offer at {}", unused.adapter.now());
+            }
+        }
+        assert_eq!(unused.adapter.now(), ask);
+        assert!(unused.relaunched(cx));
+    }
+
+    /// Any keyboard, input-method or pointer event starts the hour again, counted at the next
+    /// wake. A scroll, a click without movement or a move away and back are each one event; the
+    /// macOS adapter's native tests show that each one is counted.
+    #[gpui::test]
+    fn input_to_spaceterm_postpones_the_relaunch_by_an_hour(cx: &mut gpui::TestAppContext) {
+        let unused = Unused::new(LAUNCH - ladder::ASK_AFTER, cx);
+        unused.presence.event();
+        assert_eq!(unused.step(cx), LAUNCH + ladder::IDLE_PERIOD);
+        assert!(!unused.relaunched(cx), "input came during the hour");
+        let first = unused.adapter.now();
+
+        cx.executor().advance_clock(Duration::from_secs(600));
+        unused.presence.event();
+        assert_eq!(unused.step(cx), first + ladder::IDLE_PERIOD);
+        assert!(!unused.relaunched(cx), "input came during the second hour");
+        let second = unused.adapter.now();
+        assert_eq!(unused.step(cx), second + ladder::IDLE_PERIOD);
+        assert!(unused.relaunched(cx));
+    }
+
+    /// Where input can't be observed, as with the portable adapter Linux uses, SpaceTerm never
+    /// relaunches by itself and wakes no extra time for it.
+    #[gpui::test]
+    fn a_platform_that_cannot_observe_input_never_relaunches_by_itself(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        assert_eq!(cx.update(|cx| PortablePresence.input(cx)), None);
+        let (adapter, service, _window) =
+            Unused::ready(LAUNCH - ladder::ASK_AFTER, Rc::new(PortablePresence), cx);
+        cx.run_until_parked();
+        assert!(cx.dispatcher.scheduler().advance_clock_to_next_timer());
+        cx.run_until_parked();
+        assert!(
+            adapter.now() >= LAUNCH + ladder::ASK_CADENCE,
+            "the next wake is the next reminder or check, not the idle period"
+        );
+        assert_eq!(adapter.installations.get(), 0);
+        assert!(
+            service
+                .read_with(cx, |updates, _| updates.relaunch_approval())
+                .is_none()
+        );
+    }
+
+    /// An open alert, sheet or menu, or Settings not saved, holds the relaunch until it ends.
+    #[gpui::test]
+    fn an_open_alert_or_unsaved_settings_holds_the_relaunch(cx: &mut gpui::TestAppContext) {
+        let unused = Unused::new(LAUNCH - ladder::ASK_AFTER, cx);
+        let settings = crate::settings::Settings::load(
+            crate::settings::storage::testing::MemoryStorage::with_document(
+                &crate::settings::SettingsDocument::default(),
+            ),
+        );
+        unused
+            .service
+            .update(cx, |updates, _| updates.attach_settings(settings.clone()));
+        unused.presence.presenting.set(true);
+        let idle = unused.step(cx);
+        assert!(!unused.relaunched(cx), "an alert is open");
+        assert_eq!(unused.step(cx), idle + IDLE_RECHECK);
+        assert!(!unused.relaunched(cx));
+
+        let snapshot = settings.snapshot();
+        let preview = settings.begin_preview(snapshot.committed.revision).unwrap();
+        let mut edited = (*snapshot.committed).clone();
+        edited.updates.check_interval = policy::CheckInterval::Hourly;
+        settings.update_preview(&preview, edited).unwrap();
+        unused.presence.presenting.set(false);
+        unused.step(cx);
+        assert!(!unused.relaunched(cx), "Settings are not saved");
+
+        settings.cancel_preview(&preview).unwrap();
+        cx.run_until_parked();
+        assert!(unused.relaunched(cx), "the relaunch follows at once");
     }
 
     #[gpui::test]

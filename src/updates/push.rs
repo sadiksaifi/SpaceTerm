@@ -13,7 +13,7 @@ use spaceterm_core::service::lane::client::{LaneError, Session};
 use spaceterm_core::update::facts::{Platform, UpdateFacts, Version};
 use spaceterm_core::update::ordering::{self, Candidate};
 
-use super::machines::ActionFailure;
+use super::machines::{ActionFailure, Bundled};
 
 /// One embedded Core build, verified for this desktop's identity and its platform.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,22 +102,25 @@ impl EmbeddedCores {
         .map(|()| build.candidate.version().clone())
     }
 
-    /// The embedded build's version when it is newer than every version a Machine with `facts`
-    /// has and not the skipped one, whether or not its Update Floor admits the running version.
-    /// Below the floor, the Core reaches it from its own feed through a Stepping Stone.
-    pub(crate) fn newer(&self, facts: &UpdateFacts) -> Option<Version> {
+    /// The embedded build when it is newer than every version a Machine with `facts` has and
+    /// not the skipped one, whether or not its Update Floor admits the running version. Below
+    /// the floor, the Core reaches it from its own feed through a Stepping Stone.
+    pub(crate) fn newer(&self, facts: &UpdateFacts) -> Option<Bundled> {
         let build = self.build(facts.platform)?;
-        match ordering::admit(
+        let floor = match ordering::admit(
             &build.candidate,
             &facts.running,
             facts.pending.as_ref().map(|pending| &pending.version),
             facts.skipped.as_ref(),
         ) {
-            Ok(()) | Err(ordering::Refusal::BelowFloor { .. }) => {
-                Some(build.candidate.version().clone())
-            }
-            Err(ordering::Refusal::NotNewer | ordering::Refusal::Skipped) => None,
-        }
+            Ok(()) => None,
+            Err(ordering::Refusal::BelowFloor { floor }) => Some(floor),
+            Err(ordering::Refusal::NotNewer | ordering::Refusal::Skipped) => return None,
+        };
+        Some(Bundled {
+            version: build.candidate.version().clone(),
+            floor,
+        })
     }
 }
 
@@ -285,8 +288,19 @@ mod tests {
         );
         assert_eq!(
             cores.newer(&facts("1.0.0", None, None)),
-            Some(version("1.2.2")),
-            "the Core below the floor is still older than the embedded build"
+            Some(Bundled {
+                version: version("1.2.2"),
+                floor: Some(ordering::Floor::parse("1.1.0").unwrap()),
+            }),
+            "the Core below the floor is still older than the embedded build, and needs its floor"
+        );
+        assert_eq!(
+            cores.newer(&facts("1.1.0", None, None)),
+            Some(Bundled {
+                version: version("1.2.2"),
+                floor: None,
+            }),
+            "a Core at the floor takes the build itself"
         );
         assert_eq!(cores.newer(&facts("1.0.0", None, Some("1.2.2"))), None);
         assert_eq!(cores.newer(&facts("1.2.2", None, None)), None);

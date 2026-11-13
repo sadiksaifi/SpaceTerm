@@ -140,6 +140,21 @@ pub enum LaneRequest {
     ResetPermission {
         permission: SystemPermission,
     },
+    /// Reads the Core's detailed update facts: the facts and what only its update engine knows,
+    /// as one snapshot. Since service [`crate::update::facts::MINOR_DETAILED_FACTS`].
+    DetailedFacts {},
+    /// As [`LaneRequest::WaitFacts`], answering with the detailed update facts. Since service
+    /// [`crate::update::facts::MINOR_DETAILED_FACTS`].
+    WaitDetailedFacts {
+        boot: String,
+        revision: u64,
+    },
+    /// Service 1.3, account-local only. The helper requests the final automatic Stop grant.
+    GrantStop {
+        operation: String,
+        boot: String,
+        candidate: String,
+    },
 }
 
 impl LaneReply {
@@ -186,7 +201,14 @@ impl LaneRequest {
     /// that its admission's selected version lacks, and the lane refuses one as `unsupported`.
     /// A minor adds a request by appending a variant above and naming its minor here.
     pub const fn since(&self) -> crate::protocol::version::ProtocolVersion {
-        crate::protocol::version::ProtocolVersion { major: 1, minor: 0 }
+        let minor = match self {
+            Self::DetailedFacts {} | Self::WaitDetailedFacts { .. } => {
+                crate::update::facts::MINOR_DETAILED_FACTS
+            }
+            Self::GrantStop { .. } => crate::idle_restart::MINOR,
+            _ => 0,
+        };
+        crate::protocol::version::ProtocolVersion { major: 1, minor }
     }
 }
 
@@ -216,6 +238,12 @@ pub enum LaneReply {
     Facts {
         boot: String,
         facts: Box<crate::update::facts::UpdateFacts>,
+    },
+    /// The detailed update facts of the Core run `boot`. Only a connection that selected
+    /// service [`crate::update::facts::MINOR_DETAILED_FACTS`] or later asks for them.
+    DetailedFacts {
+        boot: String,
+        detailed: Box<crate::update::facts::DetailedUpdateFacts>,
     },
     /// `StageFetch` or a push's last `UploadChunk` finished. `installed` is false when the feed
     /// named no newer version.
@@ -260,6 +288,7 @@ pub enum LaneReply {
     BelowFloor {
         floor: crate::update::ordering::Floor,
     },
+    StopGranted {},
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -357,6 +386,41 @@ pub trait LaneHost: Send + Sync {
     /// Session is refused with `ServiceBusy`.
     fn fence(&self, admit: &mut dyn FnMut(&[Id]) -> Result<(), CoreError>)
     -> Result<(), CoreError>;
+    fn fence_automatic(
+        &self,
+        idle: bool,
+        _operation: OperationId,
+        _candidate: [u8; 32],
+        _boot: Id,
+        admit: &mut dyn FnMut(&[Id]) -> Result<(), CoreError>,
+    ) -> Result<(), CoreError> {
+        if idle {
+            return Err(CoreError::Changed);
+        }
+        self.fence(admit)
+    }
+    fn grant_stop(
+        &self,
+        _operation: OperationId,
+        _candidate: [u8; 32],
+        _boot: Id,
+        _check: &mut dyn FnMut(bool) -> Result<(), CoreError>,
+    ) -> Result<(), CoreError> {
+        Err(CoreError::Changed)
+    }
+    fn idle_granted(&self) -> bool {
+        false
+    }
+    /// How many live Terminal Sessions have work going on (ADR 0065). A host that cannot tell
+    /// counts every one.
+    fn working(&self) -> u32 {
+        u32::try_from(self.sessions().len()).unwrap_or(u32::MAX)
+    }
+    /// Thaw a proven abandoned native grant without claiming ledger settlement or clearing
+    /// its membership fence. Hosts without separate native ownership may release their fence.
+    fn thaw_idle_grant(&self) {
+        self.release_fence();
+    }
     /// Clears the membership fence.
     fn release_fence(&self);
     /// The live Terminal Session IDs.
@@ -654,6 +718,32 @@ impl LaneCore {
             LaneRequest::Preview {
                 action: LaneAction::Network { access },
             } => self.preview_network(access, actor, caller),
+            LaneRequest::GrantStop {
+                operation,
+                boot,
+                candidate,
+            } => {
+                if actor.pairing.is_some() {
+                    return (
+                        LaneReply::Error {
+                            code: LOCAL_ONLY.to_owned(),
+                        },
+                        None,
+                    );
+                }
+                (|| {
+                    let id = OperationId::parse(&operation).ok_or(CoreError::Changed)?;
+                    let candidate = digest_bytes(&candidate)?;
+                    if boot != hex(&self.boot) {
+                        return Err(CoreError::Changed);
+                    }
+                    self.host
+                        .grant_stop(id, candidate, self.boot, &mut |idle| {
+                            self.updates()?.permits_automatic_stop(candidate, idle)
+                        })?;
+                    Ok(LaneReply::StopGranted {})
+                })()
+            }
             LaneRequest::Status => self
                 .admin()
                 .status(Some((self.host.as_ref(), self.facts().ok())))
@@ -665,6 +755,16 @@ impl LaneCore {
                     .then(|| updates.wait(revision, WAIT_FACTS_LIMIT))
                     .flatten();
                 self.facts_reply(waited.unwrap_or_else(|| updates.facts()))
+            }),
+            LaneRequest::DetailedFacts {} => self
+                .updates()
+                .map(|updates| self.detailed_reply(FactsSource::detailed(updates))),
+            LaneRequest::WaitDetailedFacts { boot, revision } => self.updates().map(|updates| {
+                // A stopping server answers with its facts now, then closes the lane.
+                let waited = (boot == hex(&self.boot))
+                    .then(|| updates.wait_detailed(revision, WAIT_FACTS_LIMIT))
+                    .flatten();
+                self.detailed_reply(waited.unwrap_or_else(|| FactsSource::detailed(updates)))
             }),
             LaneRequest::Check => return (sourced(self.check()), None),
             LaneRequest::StageFetch => return (sourced(self.stage_fetch()), None),
@@ -767,6 +867,13 @@ impl LaneCore {
     /// The Core's update facts now.
     fn facts(&self) -> Result<UpdateFacts, CoreError> {
         self.updates().map(FactsSource::facts)
+    }
+
+    fn detailed_reply(&self, detailed: crate::update::facts::DetailedUpdateFacts) -> LaneReply {
+        LaneReply::DetailedFacts {
+            boot: hex(&self.boot),
+            detailed: Box::new(detailed),
+        }
     }
 
     fn facts_reply(&self, facts: UpdateFacts) -> LaneReply {
@@ -1209,7 +1316,14 @@ impl LaneCore {
     /// the release. An operation admitted after the release finds no watcher and starts one.
     fn release_if_settled(&self) -> bool {
         let _executing = self.executing.lock().unwrap_or_else(|e| e.into_inner());
-        if !self.settled().unwrap_or(false) {
+        let granted = self.host.idle_granted();
+        let thawed = granted
+            && self
+                .service
+                .release_idle_grant_if_safe(|| self.host.thaw_idle_grant())
+                .unwrap_or(false);
+        // Native ownership cannot depend on a successful write to settle the operation.
+        if !self.settled().unwrap_or(false) || (granted && !thawed) {
             return false;
         }
         self.host.release_fence();
@@ -1553,9 +1667,9 @@ impl runtime::updates::Restarter for LaneCore {
     fn restart(
         self: Arc<Self>,
         candidate: Option<[u8; 32]>,
-        silent: bool,
+        fence: runtime::updates::Fence,
     ) -> Result<runtime::updates::Launch, runtime::updates::RestartRefusal> {
-        use runtime::updates::RestartRefusal;
+        use runtime::updates::{Fence, RestartRefusal};
         let id = OperationId::random().map_err(RestartRefusal::Core)?;
         let record = Record {
             id,
@@ -1577,17 +1691,31 @@ impl runtime::updates::Restarter for LaneCore {
             let _executing = self.executing.lock().unwrap_or_else(|e| e.into_inner());
             let mut open = false;
             let mut admitted = None;
-            let fenced = self.host.fence(&mut |sessions| {
-                if silent && !sessions.is_empty() {
+            let mut admit = |sessions: &[Id]| {
+                if fence == Fence::NoSessions && !sessions.is_empty() {
                     open = true;
                     return Err(CoreError::Changed);
                 }
                 admitted = Some(self.ledger()?.admit(record.clone())?);
                 Ok(())
-            });
+            };
+            let fenced = match fence {
+                Fence::Any => self.host.fence(&mut admit),
+                Fence::NoSessions if candidate.is_none() => self.host.fence(&mut admit),
+                Fence::NoSessions | Fence::NothingRunning => self.host.fence_automatic(
+                    fence == Fence::NothingRunning,
+                    id,
+                    candidate.ok_or(RestartRefusal::NothingPending)?,
+                    self.boot,
+                    &mut admit,
+                ),
+            };
             match fenced {
                 Ok(()) => admitted,
                 Err(_) if open => return Err(RestartRefusal::SessionsOpen),
+                Err(CoreError::Changed) if fence != Fence::Any => {
+                    return Err(RestartRefusal::SessionsOpen);
+                }
                 Err(CoreError::ServiceBusy) => return Err(RestartRefusal::Busy),
                 Err(error) => return Err(RestartRefusal::Core(error)),
             }

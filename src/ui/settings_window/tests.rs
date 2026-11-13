@@ -1252,6 +1252,8 @@ fn every_appearance_row_reset_restores_only_its_field(cx: &mut TestAppContext) {
             | SettingsRowId::AddMachine
             | SettingsRowId::CommandLineTool
             | SettingsRowId::UpdateStatus
+            | SettingsRowId::CoreUpdates
+            | SettingsRowId::UpdateCheckNow
             | SettingsRowId::AutomaticUpdateDownloads
             | SettingsRowId::UpdateCheckInterval
             | SettingsRowId::Shortcut(_)
@@ -2785,8 +2787,12 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::CommandLineTool => "settings-row-command-line-tool-control",
             // The fixture installs no update service, so this row presents no action control.
             SettingsRowId::UpdateStatus => return None,
+            // The fixture has no Machine updates, so the list says so and offers nothing.
+            SettingsRowId::CoreUpdates => return None,
             SettingsRowId::AutomaticUpdateDownloads => "settings-automatic-update-downloads",
             SettingsRowId::UpdateCheckInterval => "settings-update-check-interval",
+            // Check Now asks connected Cores too, so it shows without a desktop update service.
+            SettingsRowId::UpdateCheckNow => "settings-row-update-check-now-control",
             SettingsRowId::SettingsFile => "settings-file-frame",
             SettingsRowId::ExportSettings => "settings-document-export",
             SettingsRowId::ImportSettings => "settings-import",
@@ -2871,11 +2877,7 @@ fn every_row_shares_one_left_edge_for_labels_and_one_right_edge_for_controls(
                     window.read_with(cx, |settings, cx| settings.update_status(cx).action),
                     None
                 );
-                for selector in [
-                    "settings-update-check-now",
-                    "settings-update-download",
-                    "settings-update-restart",
-                ] {
+                for selector in ["settings-update-download", "settings-update-restart"] {
                     assert!(cx.debug_bounds(selector).is_none());
                 }
             }

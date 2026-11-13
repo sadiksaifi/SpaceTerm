@@ -1,7 +1,7 @@
 //! The application's one view of Machine updates: it starts the composed
 //! [`MachineUpdatesAdapter`], keeps the latest [`MachineUpdate`] per Machine and the failure
-//! notices dismissed on this desktop, records each finished update in Recent, and performs
-//! actions. Observers of [`MachineUpdatesService`] hear every change. [`MachineUpdatesNotice`]
+//! failure steps dismissed on this desktop and the restart confirmations cancelled here, and
+//! performs actions. Observers of [`MachineUpdatesService`] hear every change. [`MachineUpdatesNotice`]
 //! reports how each action a surface performed finished, so that surface, and only it, can
 //! explain a failure.
 //!
@@ -12,34 +12,44 @@
 //! because a push that breaks off or runs out of disk space records nothing in the Core's
 //! facts, so every surface explains it and offers Try Again.
 //!
-//! It also marks each Machine with what only this desktop knows: the check or install a person
-//! started here that the Core has not ended, and when the Core's own download first failed while
-//! the Core keeps trying. The presentation shows the first and keeps quiet about the second.
+//! It also marks each Machine with what only this desktop knows: the check, install or restart a
+//! person started here that the Core has not ended. The update view shows that work, and keeps
+//! quiet about the work a Core starts by itself.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, SharedString, Task};
-use spaceterm_core::update::facts::{FailureKind, InstallFailure, Version};
+use spaceterm_core::update::facts::{Operation, Version};
 
 use super::{
     ActionFailure, Asked, FailedPush, MachineAction, MachineId, MachineLink, MachinePreview,
     MachineUpdate, MachineUpdatesAdapter, MachineUpdatesEvent,
 };
-use crate::updates::presentation::{self, Approval, Confirmation, Dismissed};
+use crate::updates::confirm::{self, Approval, Confirmation};
+use crate::updates::state::{Dismissed, PUSH_FAILURE};
 
 /// How long Check Again reads as Checking on a Machine no route reached, while its routes try
 /// again.
 pub(crate) const RECONNECT_WAIT: Duration = Duration::from_secs(10);
 
-/// A check or install a person started, until the Core's facts show it ended.
+/// The adapter's restart deadline. Past it, a restart that never came back reads as
+/// Unconfirmed, and a restart approved here stays this desktop's step as Restart Not Confirmed.
+pub(crate) const RESTART_DEADLINE: Duration = super::live::RESTART_LIMIT;
+
+/// A check, install or restart a person started, until the Core's facts show it ended.
 struct AskedWork {
     machine: MachineId,
     asked: Asked,
     phase: Phase,
-    /// Names this work to the timer that ends its reconnect wait.
+    /// Names this work to the timer that ends its reconnect or restart wait.
     serial: u64,
+    /// A restart: the facts showed it begin, by a restart operation or the Core going away.
+    began: bool,
+    /// A restart: the running version the approved preview observed, so a Core that came back
+    /// on another version settles the restart even when its restart was never observed.
+    running: Option<Version>,
 }
 
 enum Phase {
@@ -51,16 +61,6 @@ enum Phase {
     /// No route reached the Machine, so the check answered at once and its routes try again.
     /// The mark stays until the link changes from this one or [`RECONNECT_WAIT`] ends.
     Reconnecting(MachineLink),
-}
-
-/// A Machine's own failed download while its Core tries again by itself.
-struct Retrying {
-    /// The ID of the latest failure, which each try that fails replaces.
-    failure: u64,
-    /// When this desktop first saw the download fail, on its own clock. None when a person's
-    /// own try from this desktop failed, or when the failure began unseen, before this run or
-    /// while the Machine was out of reach, so that failure shows at once.
-    since: Option<u64>,
 }
 
 /// Where the person asked for an action.
@@ -83,6 +83,28 @@ pub(crate) struct MachineUpdatesNotice {
     pub(crate) action: MachineAction,
     pub(crate) surface: Surface,
     pub(crate) outcome: Result<(), ActionFailure>,
+    /// The Core refused the click's restart at once, while the person waits on it: at its
+    /// preview, or when the approved restart executed. Only such a refusal opens an alert unasked
+    /// (D5); a later outcome shows once in the title bar.
+    pub(crate) refused_at_once: bool,
+}
+
+impl MachineUpdatesNotice {
+    /// The alert this outcome opens without a click on it, as a title and a message: D5 for an
+    /// action the Core refused at its preview, and a failed Start or Stop, which no update step
+    /// reports. A later outcome of an update action shows once in the title bar instead (design
+    /// 4.6). `Changed` and `LoginItemOff` have no alert.
+    pub(crate) fn unasked_alert(&self) -> Option<(SharedString, SharedString)> {
+        let Err(failure) = self.outcome else {
+            return None;
+        };
+        let waiting = self.refused_at_once
+            || matches!(self.action, MachineAction::Start | MachineAction::Stop);
+        if !waiting {
+            return None;
+        }
+        crate::updates::copy::dialogs::action_failure(&self.name, &self.action, failure)
+    }
 }
 
 /// What a Restart or Stop needs next, from the Cores' own previews.
@@ -141,6 +163,7 @@ fn request_approved(
                 let again = Rc::clone(&ask);
                 let answered = Box::new(move |approved: bool, cx: &mut App| {
                     if !approved {
+                        defer(&actions, cx);
                         return;
                     }
                     let holds = MachineUpdates::global(cx)
@@ -160,12 +183,28 @@ fn request_approved(
 
 fn execute_all(previews: Vec<MachinePreview>, surface: Surface, cx: &mut App) {
     if let Some(store) = MachineUpdates::global(cx) {
-        store.update(cx, |store, _| {
+        store.update(cx, |store, cx| {
             for preview in previews {
-                store.execute(preview, surface);
+                store.execute(preview, surface, cx);
             }
         });
     }
+}
+
+/// The person cancelled a restart confirmation: at the Ask stage it hides that Machine's step
+/// for [`crate::updates::ladder::ASK_DEFERRAL`] on this desktop, in this run.
+fn defer(actions: &[(MachineId, MachineAction)], cx: &mut App) {
+    let Some(store) = MachineUpdates::global(cx) else {
+        return;
+    };
+    let now = crate::updates::now();
+    store.update(cx, |store, cx| {
+        for (machine, action) in actions {
+            if *action == MachineAction::Restart {
+                store.defer(*machine, now, cx);
+            }
+        }
+    });
 }
 
 pub(crate) struct MachineUpdates {
@@ -176,9 +215,10 @@ pub(crate) struct MachineUpdates {
     performed: Vec<(MachineId, MachineAction, Surface)>,
     /// Each check or install a person started that has not ended, oldest first.
     asked: Vec<AskedWork>,
-    /// How many checks and installs people started, which names the next one.
+    /// How many checks, installs and restarts people started, which names the next one.
     serial: u64,
-    retrying: HashMap<MachineId, Retrying>,
+    /// When the person last cancelled each Machine's restart confirmation.
+    deferred: HashMap<MachineId, u64>,
     /// Machines where a person's check or install answered, with the facts revision then. The
     /// next revision is that work's result, so a failure it records is the person's own.
     tried: HashMap<MachineId, Option<u64>>,
@@ -224,7 +264,7 @@ impl MachineUpdates {
                 performed: Vec::new(),
                 asked: Vec::new(),
                 serial: 0,
-                retrying: HashMap::new(),
+                deferred: HashMap::new(),
                 tried: HashMap::new(),
                 heard: HashSet::new(),
                 offered: HashSet::new(),
@@ -262,6 +302,47 @@ impl MachineUpdates {
         &self.dismissed
     }
 
+    /// When the person last cancelled each Machine's restart confirmation, in this run.
+    pub(crate) fn deferred(&self) -> &HashMap<MachineId, u64> {
+        &self.deferred
+    }
+
+    /// Records that the person cancelled `machine`'s restart confirmation at `at`, when its
+    /// Pending Version is at the Ask stage and is no hard stop. The update view then hides that
+    /// Machine's step for a day on this desktop. Cancel at Offer or Insist records nothing, so
+    /// it never hides a later stage's first step.
+    pub(crate) fn defer(&mut self, machine: MachineId, at: u64, cx: &mut Context<Self>) {
+        if !self.cancel_defers(machine, at, cx) {
+            return;
+        }
+        self.deferred.insert(machine, at);
+        cx.notify();
+    }
+
+    /// Whether Cancel in `machine`'s restart confirmation at `now` hides its step for a day.
+    pub(crate) fn cancel_defers(&self, machine: MachineId, now: u64, cx: &App) -> bool {
+        let Some(update) = self.machines.iter().find(|known| known.machine == machine) else {
+            return false;
+        };
+        let marks = crate::updates::state::Marks {
+            dismissed: &self.dismissed,
+            deferred: &HashMap::new(),
+            pushes_held: self.holds_pushes(cx),
+        };
+        crate::updates::state::cancel_defers(update, marks, now)
+    }
+
+    /// Whether automatic pushes wait for SpaceTerm's startup check or a newer SpaceTerm.
+    pub(crate) fn holds_pushes(&self, cx: &App) -> bool {
+        cx.try_global::<crate::updates::UpdateService>()
+            .is_some_and(|service| {
+                let updates = service.0.read(cx);
+                (self.startup_check
+                    && matches!(updates.state(), crate::updates::UpdateState::Checking))
+                    || updates.pending_version().is_some()
+            })
+    }
+
     /// Asks the adapter to perform `action` for `surface`. Dismissing a failure retires it here
     /// at once.
     pub(crate) fn perform(
@@ -274,6 +355,12 @@ impl MachineUpdates {
         let asked = match action {
             MachineAction::DismissFailure(id) => {
                 self.dismissed.insert((machine, id));
+                // A failed push and a skipped Stepping Stone have no failure the Core retires.
+                if id >= crate::updates::state::STEPPING_STONE {
+                    self.mark();
+                    cx.notify();
+                    return;
+                }
                 None
             }
             MachineAction::CheckAgain => Some(Asked::Check),
@@ -287,6 +374,8 @@ impl MachineUpdates {
                 asked,
                 phase: Phase::Requested,
                 serial: self.serial,
+                began: false,
+                running: None,
             });
         }
         self.mark();
@@ -306,6 +395,7 @@ impl MachineUpdates {
         let asked = match action {
             MachineAction::CheckAgain => Asked::Check,
             MachineAction::Install => Asked::Install,
+            MachineAction::Restart => Asked::Restart,
             _ => return,
         };
         let Some(index) = self.asked.iter().position(|work| {
@@ -319,15 +409,20 @@ impl MachineUpdates {
             .map(|facts| facts.revision);
         // A request the Core refused, or that never reached it, ran no work of the person's.
         // An operation the Core's facts report, and the result that follows, are the Core's own.
-        if matches!(
-            outcome,
-            Err(ActionFailure::Busy
-                | ActionFailure::Unavailable(_)
-                | ActionFailure::Unreachable
-                | ActionFailure::RelaunchRequired
-                | ActionFailure::Changed
-                | ActionFailure::LoginItemOff)
-        ) {
+        // A restart that loses its lane answers Unreachable although the Core may have accepted
+        // it, so only the facts settle that restart.
+        let unknown = asked == Asked::Restart && *outcome == Err(ActionFailure::Unreachable);
+        if !unknown
+            && matches!(
+                outcome,
+                Err(ActionFailure::Busy
+                    | ActionFailure::Unavailable(_)
+                    | ActionFailure::Unreachable
+                    | ActionFailure::RelaunchRequired
+                    | ActionFailure::Changed
+                    | ActionFailure::LoginItemOff)
+            )
+        {
             self.asked.remove(index);
             return;
         }
@@ -358,42 +453,13 @@ impl MachineUpdates {
         };
     }
 
-    /// Writes what only this desktop knows onto each Machine: the work a person started here
-    /// and when the Core's own download first failed. The adapter's updates carry neither.
+    /// Writes what only this desktop knows onto each Machine: the work a person started here.
+    /// The adapter's updates carry none.
     fn mark(&mut self) {
         for update in &mut self.machines {
             let machine = update.machine;
             let facts = update.facts.as_ref();
             let revision = facts.map(|facts| facts.revision);
-            let own = self.tried.contains_key(&machine)
-                || self.asked.iter().any(|work| work.machine == machine);
-            let failure = facts
-                .and_then(|facts| facts.last_failure.as_ref())
-                .filter(|failure| failure.kind == FailureKind::Install(InstallFailure::Download));
-            match (failure, self.retrying.get_mut(&machine)) {
-                // A Machine out of reach reports nothing, which ends no failure.
-                (None, _) if facts.is_none() => {}
-                (None, _) => {
-                    self.retrying.remove(&machine);
-                }
-                (Some(failure), None) => {
-                    // The day counts on this desktop's clock, which the presentation reads.
-                    let since = (!own && self.heard.contains(&machine)).then(crate::updates::now);
-                    self.retrying.insert(
-                        machine,
-                        Retrying {
-                            failure: failure.id,
-                            since,
-                        },
-                    );
-                }
-                (Some(failure), Some(retrying)) => {
-                    if own && retrying.failure != failure.id {
-                        retrying.since = None;
-                    }
-                    retrying.failure = failure.id;
-                }
-            }
             if self
                 .tried
                 .get(&machine)
@@ -411,28 +477,50 @@ impl MachineUpdates {
                 self.heard.remove(&machine);
             }
             let working = reachable && facts.is_some_and(|facts| facts.operation.is_some());
-            self.asked.retain(|work| {
-                work.machine != machine
-                    || match &work.phase {
-                        Phase::Requested => true,
-                        Phase::Answered => working,
-                        Phase::Reconnecting(link) => *link == update.link,
+            let restarting = reachable
+                && facts.is_some_and(|facts| {
+                    matches!(
+                        facts.operation,
+                        Some(Operation::Restarting { .. } | Operation::RestartingSameVersion)
+                    )
+                });
+            let running = facts.map(|facts| &facts.running);
+            self.asked.retain_mut(|work| {
+                if work.machine != machine {
+                    return true;
+                }
+                match (&work.phase, work.asked) {
+                    // A restart stays marked from the approval, whether or not its request has
+                    // answered, until the Core comes back without one: after it was seen to
+                    // begin, or on another version than the approval observed. While its
+                    // Machine does not answer it stays marked, so past the adapter's deadline
+                    // the Unconfirmed link is this desktop's step.
+                    (_, Asked::Restart) => {
+                        if restarting || !reachable {
+                            work.began = true;
+                            return true;
+                        }
+                        let moved = work
+                            .running
+                            .as_ref()
+                            .zip(running)
+                            .is_some_and(|(approved, now)| approved != now);
+                        !(work.began || moved)
                     }
+                    (Phase::Requested, _) => true,
+                    (Phase::Answered, _) => working,
+                    (Phase::Reconnecting(link), _) => *link == update.link,
+                }
             });
             update.asked = self
                 .asked
                 .iter()
                 .find(|work| work.machine == machine)
                 .map(|work| work.asked);
-            update.retrying_since = self
-                .retrying
-                .get(&machine)
-                .and_then(|retrying| retrying.since);
         }
         let machines = &self.machines;
         let known = |machine: &MachineId| machines.iter().any(|update| update.machine == *machine);
         self.asked.retain(|work| known(&work.machine));
-        self.retrying.retain(|machine, _| known(machine));
         self.tried.retain(|machine, _| known(machine));
         self.heard.retain(known);
     }
@@ -469,7 +557,7 @@ impl MachineUpdates {
                     Ok(preview) => previews.push((index, preview)),
                     Err(failure) => {
                         let _ = this.update(cx, |this, cx| {
-                            this.notify_outcome(machine, action, surface, Err(failure), cx);
+                            this.notify_outcome(machine, action, surface, Err(failure), true, cx);
                         });
                     }
                 }
@@ -485,17 +573,91 @@ impl MachineUpdates {
             if previews.is_empty() {
                 return Prepared::Nothing;
             }
-            cx.update(
-                |cx| match presentation::current(cx).previewed(&previews, always) {
-                    Some(confirmation) => Prepared::Ask(confirmation, previews),
+            cx.update(|cx| {
+                let store = MachineUpdates::global(cx);
+                let machines = store
+                    .as_ref()
+                    .map(|store| store.read(cx).machines.clone())
+                    .unwrap_or_default();
+                let now = crate::updates::now();
+                match confirm::previewed(&machines, &previews, always) {
+                    Some(confirmation) => Prepared::Ask(
+                        confirmation.defers(|machine| {
+                            store
+                                .as_ref()
+                                .is_some_and(|store| store.read(cx).cancel_defers(machine, now, cx))
+                        }),
+                        previews,
+                    ),
                     None => Prepared::Run(previews),
-                },
-            )
+                }
+            })
         })
     }
 
-    /// Executes exactly `preview`, which the person confirmed on `surface`.
-    pub(crate) fn execute(&mut self, preview: MachinePreview, surface: Surface) {
+    /// Executes exactly `preview`, which the person confirmed on `surface`. A restart stays
+    /// marked as this desktop's until the Core comes back, or for the restart deadline while
+    /// the facts never show it begin.
+    pub(crate) fn execute(
+        &mut self,
+        preview: MachinePreview,
+        surface: Surface,
+        cx: &mut Context<Self>,
+    ) {
+        if preview.action == MachineAction::Restart {
+            self.serial += 1;
+            let serial = self.serial;
+            self.asked.retain(|work| work.machine != preview.machine);
+            self.asked.push(AskedWork {
+                machine: preview.machine,
+                asked: Asked::Restart,
+                phase: Phase::Requested,
+                serial,
+                began: false,
+                running: preview.running.clone().or_else(|| {
+                    self.machines
+                        .iter()
+                        .find(|update| update.machine == preview.machine)
+                        .and_then(|update| update.facts.as_ref())
+                        .map(|facts| facts.running.clone())
+                }),
+            });
+            // The adapter's own deadline turns a restart that never came back into an
+            // Unconfirmed link, which keeps the mark. This later one only ends a mark whose
+            // restart never began while its Core answers as before.
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(2 * RESTART_DEADLINE).await;
+                let _ = this.update(cx, |this, cx| {
+                    let quiet: Vec<MachineId> = this
+                        .machines
+                        .iter()
+                        .filter(|update| {
+                            matches!(
+                                update.link,
+                                MachineLink::Connected | MachineLink::Incompatible(_)
+                            ) && update.facts.as_ref().is_some_and(|facts| {
+                                !matches!(
+                                    facts.operation,
+                                    Some(
+                                        Operation::Restarting { .. }
+                                            | Operation::RestartingSameVersion
+                                    )
+                                )
+                            })
+                        })
+                        .map(|update| update.machine)
+                        .collect();
+                    this.asked.retain(|work| {
+                        work.serial != serial || work.began || !quiet.contains(&work.machine)
+                    });
+                    this.mark();
+                    cx.notify();
+                });
+            })
+            .detach();
+            self.mark();
+            cx.notify();
+        }
         self.performed
             .push((preview.machine, preview.action.clone(), surface));
         self.adapter.execute(preview);
@@ -507,6 +669,7 @@ impl MachineUpdates {
         action: MachineAction,
         surface: Surface,
         outcome: Result<(), ActionFailure>,
+        refused_at_once: bool,
         cx: &mut Context<Self>,
     ) {
         let Some(update) = self.machines.iter().find(|known| known.machine == machine) else {
@@ -519,6 +682,7 @@ impl MachineUpdates {
             action,
             surface,
             outcome,
+            refused_at_once,
         });
     }
 
@@ -541,13 +705,9 @@ impl MachineUpdates {
                     .find(|known| known.machine == update.machine)
                 {
                     Some(known) => {
-                        let finished = finished_update(known, &update);
                         let failed_push = carried_failure(known, &update);
                         *known = update;
                         known.failed_push = failed_push;
-                        if let Some(text) = finished {
-                            crate::updates::record_recent(text, cx);
-                        }
                     }
                     None => self.machines.push(update),
                 }
@@ -595,7 +755,16 @@ impl MachineUpdates {
         if let MachineAction::DismissFailure(_) = action {
             return;
         }
-        self.notify_outcome(machine, action, surface, outcome, cx);
+        // An approved restart the Core refused without running it leaves no failure in its
+        // facts, so the person waiting on the click hears it at once.
+        let refused = action == MachineAction::Restart
+            && matches!(
+                outcome,
+                Err(ActionFailure::Busy
+                    | ActionFailure::Unreachable
+                    | ActionFailure::Unavailable(_))
+            );
+        self.notify_outcome(machine, action, surface, outcome, refused, cx);
     }
 
     /// Keeps the outcome of an Install that pushed the bundled Core: an automatic one of
@@ -617,15 +786,22 @@ impl MachineUpdates {
         match outcome {
             Ok(()) => update.failed_push = None,
             Err(failure) => {
+                // A new failed push shows its step again.
+                self.dismissed.remove(&(machine, PUSH_FAILURE));
                 let Some(version) = automatic.or_else(|| update.push.clone()).or_else(|| {
                     matches!(failure, ActionFailure::NeedsFloor(_))
-                        .then(|| update.bundled.clone())
+                        .then(|| {
+                            update
+                                .bundled
+                                .as_ref()
+                                .map(|bundled| bundled.version.clone())
+                        })
                         .flatten()
                 }) else {
                     return;
                 };
                 if update.push.as_ref() == Some(&version)
-                    || update.bundled.as_ref() == Some(&version)
+                    || update.bundled.as_ref().map(|bundled| &bundled.version) == Some(&version)
                 {
                     update.failed_push = Some(FailedPush {
                         version,
@@ -677,71 +853,33 @@ impl MachineUpdates {
     }
 }
 
-/// The failed push `previous` recorded, while `next` still offers its version.
+/// The failed push `previous` recorded, while `next` still offers its version and its facts do
+/// not settle it.
 fn carried_failure(previous: &MachineUpdate, next: &MachineUpdate) -> Option<FailedPush> {
     previous.failed_push.clone().filter(|failed| {
-        next.push.as_ref() == Some(&failed.version)
-            || next.bundled.as_ref() == Some(&failed.version)
-    })
-}
-
-/// What Recent says when `next` finishes an update `previous` was waiting for.
-fn finished_update(previous: &MachineUpdate, next: &MachineUpdate) -> Option<String> {
-    let (before, after) = (previous.facts.as_ref()?, next.facts.as_ref()?);
-    let name = &next.name;
-    if before.running != after.running && is_newer(&after.running, &before.running) {
-        return Some(format!("{name} updated to {}", after.running));
-    }
-    match (&before.pending, &after.pending) {
-        (previous, Some(pending))
-            if previous
+        (next.push.as_ref() == Some(&failed.version)
+            || next.bundled.as_ref().map(|bundled| &bundled.version) == Some(&failed.version))
+            && !next
+                .facts
                 .as_ref()
-                .is_none_or(|previous| previous.version != pending.version) =>
-        {
-            Some(format!("{name} installed {}", pending.version))
-        }
-        _ => None,
-    }
-}
-
-fn is_newer(next: &Version, previous: &Version) -> bool {
-    match (next.release(), previous.release()) {
-        (Some(next), Some(previous)) => next > previous,
-        _ => true,
-    }
+                .is_some_and(|facts| failed.settled_by(facts))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::testing::ScriptedMachines;
     use super::*;
-    use crate::updates::presentation::Command;
+    use crate::updates::state::{self, Command, MachineStage, Step, Target};
     use spaceterm_core::protocol::capability::{Capabilities, Capability};
     use spaceterm_core::update::facts::{
         FailureKind, InstallFailure, Operation, PendingVersion, Platform, Protocols, UpdateCheck,
         UpdateFacts, UpdateFailure,
     };
 
-    #[test]
-    fn replacing_a_pending_version_records_the_new_install() {
-        assert_eq!(
-            finished_update(
-                &update("0.8.0", Some("0.9.0")),
-                &update("0.8.0", Some("0.9.1"))
-            ),
-            Some("penguin installed 0.9.1".to_owned())
-        );
-        assert_eq!(
-            finished_update(
-                &update("0.8.0", Some("0.9.1")),
-                &update("0.8.0", Some("0.9.1"))
-            ),
-            None
-        );
-    }
-
     fn update(running: &str, pending: Option<&str>) -> MachineUpdate {
         MachineUpdate {
+            detailed: None,
             machine: [2; 32],
             name: "penguin".into(),
             local: false,
@@ -769,7 +907,6 @@ mod tests {
             bundled: None,
             failed_push: None,
             asked: None,
-            retrying_since: None,
         }
     }
 
@@ -882,7 +1019,8 @@ mod tests {
             None
         );
 
-        // The Core's own download then fails. That failure is not the person's either.
+        // The Core's own download then fails. That failure is not the person's either, and the
+        // Core tries it again by itself, so it holds no step.
         let mut failed = penguin;
         let facts = failed.facts.as_mut().unwrap();
         facts.revision = 2;
@@ -894,11 +1032,7 @@ mod tests {
         });
         adapter.emit(MachineUpdatesEvent::Changed(Box::new(failed)));
         cx.run_until_parked();
-        assert!(
-            store
-                .read_with(cx, |store, _| store.machines()[0].retrying_since)
-                .is_some()
-        );
+        assert_eq!(cx.update(|cx| state::current(cx).step), None);
     }
 
     /// An install that ran and failed keeps its mark until the Core's facts end the operation,
@@ -943,11 +1077,10 @@ mod tests {
         );
         adapter.emit(MachineUpdatesEvent::Changed(Box::new(failed)));
         cx.run_until_parked();
-        let (asked, since) = store.read_with(cx, |store, _| {
-            let update = &store.machines()[0];
-            (update.asked, update.retrying_since)
-        });
-        assert_eq!((asked, since), (None, None));
+        assert_eq!(
+            store.read_with(cx, |store, _| store.machines()[0].asked),
+            None
+        );
     }
 
     /// A mark ends with its Machine: when the Machine goes out of reach after the request
@@ -1055,130 +1188,6 @@ mod tests {
             store.read_with(cx, |store, _| store.machines()[0].asked),
             None
         );
-    }
-
-    /// A Core's own failed download that begins in this run is dated from its first failure
-    /// while the Core keeps trying, until a person's own try from this desktop fails.
-    #[gpui::test]
-    fn a_cores_own_failed_download_is_dated_until_a_persons_try_fails(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let (adapter, store) = installed(cx);
-        let failed = |id, at, reason| {
-            let mut update = update("0.8.0", None);
-            let facts = update.facts.as_mut().unwrap();
-            facts.revision = id + 1;
-            facts.last_failure = Some(UpdateFailure {
-                id,
-                at,
-                version: Version::parse("0.9.0").unwrap(),
-                kind: FailureKind::Install(reason),
-            });
-            update
-        };
-        let machine = update("0.8.0", None).machine;
-        let since = |cx: &mut gpui::TestAppContext| {
-            store.read_with(cx, |store, _| store.machines()[0].retrying_since)
-        };
-        let changed = |update, cx: &mut gpui::TestAppContext| {
-            adapter.emit(MachineUpdatesEvent::Changed(Box::new(update)));
-            cx.run_until_parked();
-        };
-        let try_again = |cx: &mut gpui::TestAppContext| {
-            store.update(cx, |store, cx| {
-                store.perform(machine, MachineAction::Install, Surface::Window, cx);
-            });
-        };
-        let answer = |cx: &mut gpui::TestAppContext| {
-            adapter.emit(MachineUpdatesEvent::Finished {
-                machine,
-                action: MachineAction::Install,
-                outcome: Err(ActionFailure::Failed),
-            });
-            cx.run_until_parked();
-        };
-        adapter.emit(MachineUpdatesEvent::Machines(vec![update("0.8.0", None)]));
-        cx.run_until_parked();
-        // The Machine's clock is far behind. The day counts on this desktop's clock.
-        let began = crate::updates::now();
-        changed(failed(1, 500, InstallFailure::Download), cx);
-        let first = since(cx);
-        assert!(first.is_some_and(|since| since >= began));
-        // The Core tries again and fails again.
-        changed(failed(2, 900, InstallFailure::Download), cx);
-        assert_eq!(since(cx), first);
-        // A Machine out of reach for a moment keeps the day it began.
-        changed(
-            MachineUpdate {
-                link: super::super::MachineLink::Offline { since: 1 },
-                facts: None,
-                ..update("0.8.0", None)
-            },
-            cx,
-        );
-        changed(failed(2, 900, InstallFailure::Download), cx);
-        assert_eq!(since(cx), first);
-        // Only a download is tried again by itself.
-        changed(failed(3, 950, InstallFailure::DiskFull), cx);
-        assert_eq!(since(cx), None);
-        changed(failed(4, 2_000, InstallFailure::Download), cx);
-        let first = since(cx);
-        assert!(first.is_some());
-
-        // The person's try ends the quiet only once it fails, whether its answer or the facts
-        // that record the failure arrive first.
-        try_again(cx);
-        assert_eq!(since(cx), first, "the old failure stays quiet");
-        answer(cx);
-        assert_eq!(since(cx), first);
-        changed(failed(5, 2_100, InstallFailure::Download), cx);
-        assert_eq!(since(cx), None, "the person's own try failed");
-        // The Core's later tries change nothing while that failure stands.
-        changed(failed(6, 2_500, InstallFailure::Download), cx);
-        assert_eq!(since(cx), None);
-
-        // A download that works ends it, and a later failure is dated anew.
-        changed(update("0.8.0", None), cx);
-        changed(failed(7, 3_000, InstallFailure::Download), cx);
-        assert!(since(cx).is_some());
-        try_again(cx);
-        changed(failed(8, 3_100, InstallFailure::Download), cx);
-        assert_eq!(since(cx), None, "the person's own try failed");
-        answer(cx);
-        assert_eq!(since(cx), None);
-    }
-
-    /// A failure a Machine already reports when this run first hears from it, or when it comes
-    /// back into reach, has no known first time, so it is not dated and shows at once.
-    #[gpui::test]
-    fn a_failed_download_that_began_unseen_is_not_dated(cx: &mut gpui::TestAppContext) {
-        let (adapter, store) = installed(cx);
-        let mut failed = update("0.8.0", None);
-        failed.facts.as_mut().unwrap().last_failure = Some(UpdateFailure {
-            id: 1,
-            at: 500,
-            version: Version::parse("0.9.0").unwrap(),
-            kind: FailureKind::Install(InstallFailure::Download),
-        });
-        let since = |cx: &mut gpui::TestAppContext| {
-            store.read_with(cx, |store, _| store.machines()[0].retrying_since)
-        };
-        adapter.emit(MachineUpdatesEvent::Machines(vec![failed.clone()]));
-        cx.run_until_parked();
-        assert_eq!(since(cx), None, "older than this run");
-
-        for update in [
-            update("0.8.0", None),
-            MachineUpdate {
-                link: super::super::MachineLink::Offline { since: 1 },
-                ..update("0.8.0", None)
-            },
-            failed,
-        ] {
-            adapter.emit(MachineUpdatesEvent::Changed(Box::new(update)));
-            cx.run_until_parked();
-        }
-        assert_eq!(since(cx), None, "it failed while out of reach");
     }
 
     /// Check Again on a Machine no route reaches answers at once while its routes try again.
@@ -1340,20 +1349,7 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(adapter.performed(), [(penguin, install.clone())]);
 
-        for (failure, sentence) in [
-            (
-                ActionFailure::Unreachable,
-                "SpaceTerm Core 0.9.0 couldn't install on penguin because penguin stopped \
-                 answering. penguin still runs SpaceTerm Core 0.8.0, and its Terminal Sessions \
-                 keep running. Choose Try Again to install it.",
-            ),
-            (
-                ActionFailure::DiskFull,
-                "SpaceTerm Core 0.9.0 couldn't install on penguin because penguin is out of disk \
-                 space. penguin still runs SpaceTerm Core 0.8.0, and its Terminal Sessions keep \
-                 running. Free some space, then choose Try Again.",
-            ),
-        ] {
+        for failure in [ActionFailure::Unreachable, ActionFailure::DiskFull] {
             adapter.emit(MachineUpdatesEvent::Finished {
                 machine: penguin,
                 action: install.clone(),
@@ -1361,28 +1357,19 @@ mod tests {
             });
             adapter.emit(MachineUpdatesEvent::Changed(Box::new(idle())));
             cx.run_until_parked();
-            let shown = cx.update(|cx| presentation::current(cx));
-            let view = shown.machine(penguin).unwrap();
-            assert_eq!(view.control_label(), "penguin Install Failed");
-            assert_eq!(view.sentence().as_ref(), sentence);
-            let row = view.settings_row();
-            assert_eq!(row.status.as_ref(), "Install failed");
-            let button = row.button.expect("Settings offers Try Again");
-            assert_eq!(button.label.as_ref(), "Try Again");
-            assert_eq!(button.command, Command::Machine(penguin, install.clone()));
-            let items = view.extra_row().items.unwrap();
-            assert!(items.iter().any(|item| matches!(
-                item,
-                presentation::ExtraItem::Action { title, command, .. }
-                    if title.as_ref() == "Try Again"
-                        && *command == Command::Machine(penguin, install.clone())
-            )));
-            assert!(
-                shown
-                    .items()
-                    .iter()
-                    .any(|item| item.command == Some(Command::Machine(penguin, install.clone()))),
-                "the title bar offers it too"
+            let view = cx.update(|cx| state::current(cx));
+            let row = view.machine_row(penguin).unwrap();
+            assert_eq!(
+                row.status.as_deref(),
+                Some("Couldn\u{2019}t download 0.9.0")
+            );
+            let action = row.action.expect("the row offers Try Again");
+            assert_eq!(action.label.as_ref(), "Try Again");
+            assert_eq!(action.command, Command::Machine(penguin, install.clone()));
+            assert_eq!(
+                view.step,
+                Some(Step::Failed(Target::Machine(penguin))),
+                "the title bar shows it once"
             );
             assert_eq!(
                 adapter.performed().len(),
@@ -1410,13 +1397,9 @@ mod tests {
             outcome: Ok(()),
         });
         cx.run_until_parked();
-        let shown = cx.update(|cx| presentation::current(cx));
-        assert_eq!(
-            shown.machine(penguin).unwrap().state,
-            presentation::MachineState::Available {
-                to: Version::parse("0.9.0").unwrap()
-            }
-        );
+        let view = cx.update(|cx| state::current(cx));
+        assert_eq!(view.machine(penguin).unwrap().stage, MachineStage::Running);
+        assert_eq!(view.step, None);
     }
 
     /// A Core too old for this desktop's work major keeps its failed automatic install on every
@@ -1448,35 +1431,21 @@ mod tests {
         });
         adapter.emit(MachineUpdatesEvent::Changed(Box::new(incompatible())));
         cx.run_until_parked();
-        let shown = cx.update(|cx| presentation::current(cx));
-        let view = shown.machine(penguin).unwrap();
-        assert_eq!(view.control_label(), "penguin Install Failed");
+        let view = cx.update(|cx| state::current(cx));
+        let row = view.machine_row(penguin).unwrap();
         assert_eq!(
-            view.sentence().as_ref(),
-            "SpaceTerm Core 0.9.0 couldn't install on penguin because penguin is out of disk \
-             space. penguin still runs SpaceTerm Core 0.8.0, which is too old for this \
-             SpaceTerm. Its Terminal Sessions keep running. Free some space, then choose Try \
-             Again."
+            row.status.as_deref(),
+            Some("Couldn\u{2019}t download 0.9.0")
         );
-        let row = view.settings_row();
-        assert_eq!(row.status.as_ref(), "Install failed");
-        let button = row.button.expect("Settings offers Try Again");
-        assert_eq!(button.label.as_ref(), "Try Again");
-        assert_eq!(button.command, Command::Machine(penguin, install.clone()));
-        let items = view.extra_row().items.unwrap();
-        assert!(items.iter().any(|item| matches!(
-            item,
-            presentation::ExtraItem::Action { title, command, .. }
-                if title.as_ref() == "Try Again"
-                    && *command == Command::Machine(penguin, install.clone())
-        )));
+        let action = row.action.expect("the row offers Try Again");
+        assert_eq!(action.label.as_ref(), "Try Again");
+        assert_eq!(action.command, Command::Machine(penguin, install.clone()));
+        assert_eq!(view.step, Some(Step::Failed(Target::Machine(penguin))));
         assert_eq!(adapter.performed().len(), 1, "nothing retries it");
     }
 
     #[gpui::test]
-    fn recent_names_each_install_and_update_and_failures_reach_observers(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn failures_reach_only_the_surface_that_performed_them(cx: &mut gpui::TestAppContext) {
         let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
         cx.update(|cx| crate::updates::ApplicationUpdates::install(updater.clone(), cx));
         let adapter = Rc::new(ScriptedMachines::default());
@@ -1520,19 +1489,14 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let recent: Vec<String> = cx.read(|cx| {
+        let recent = cx.read(|cx| {
             cx.global::<crate::updates::UpdateService>()
                 .0
                 .read(cx)
                 .recent()
-                .iter()
-                .map(|entry| entry.text.clone())
-                .collect()
+                .len()
         });
-        assert_eq!(
-            recent,
-            ["penguin updated to 0.9.0", "penguin installed 0.9.0"]
-        );
+        assert_eq!(recent, 0, "a finished update records nothing");
         assert_eq!(notices.borrow().len(), 1);
         assert_eq!(notices.borrow()[0].surface, Surface::StatusMenu);
         assert_eq!(notices.borrow()[0].outcome, Err(ActionFailure::Busy));
@@ -1571,7 +1535,7 @@ mod tests {
         cx.run_until_parked();
         assert!(
             adapter.performed().is_empty(),
-            "wait for the desktop's startup check"
+            "wait for the desktop\u{2019}s startup check"
         );
         updater.emit(crate::updates::UpdateEvent::Available("0.10.0".into()));
         cx.run_until_parked();

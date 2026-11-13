@@ -319,6 +319,28 @@ def exercise(client, environment, allowed, core=None):
         time.sleep(0.25)
     if (outcome := _outcome(client, ["status"], environment)) != allowed["status"]:
         raise TaskError(f"the client's status ended in {outcome}")
+    if allowed["list"] == "ok":
+        exercise_terminal(client, environment)
+
+
+def exercise_terminal(client, environment):
+    """Exercise work admission, input, progress, run completion and screen decoding with the
+    paired executable, rather than letting list/status stand in for the Pane protocol.
+    """
+    workspace = f"protocol-compatibility-{os.getpid()}"
+    _envelope(client, ["workspace", "create", workspace], environment)
+    marker = "spaceterm-compatibility-output"
+    finished = _envelope(
+        client, ["pane", "run", f"printf '{marker}\\n'", "--workspace", workspace], environment
+    )
+    run = finished["data"].get("run") or {}
+    output = finished["data"].get("output") or {}
+    rows = output.get("rows") or []
+    if run.get("state") != "finished" or run.get("exit_status") != 0:
+        raise TaskError("the compatibility command returned no successful run receipt")
+    if not any(marker in row.get("text", "") for row in rows):
+        raise TaskError("the compatibility command lost its output")
+    _envelope(client, ["pane", "read", "--workspace", workspace], environment)
 
 
 # The Command Line Tool that setup links for the release identity.
@@ -524,7 +546,7 @@ def _environment(account):
         **{key: str(directory) for key, directory in roots.items()},
         **({"XDG_RUNTIME_DIR": str(runtime)} if runtime.is_dir() else {}),
         "PATH": "/usr/bin:/bin",
-        "SHELL": "/bin/sh",
+        "SHELL": "/bin/bash",
         "LANG": "C.UTF-8",
     }
 

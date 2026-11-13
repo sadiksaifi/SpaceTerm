@@ -97,14 +97,10 @@ impl ReleaseNotes {
         })
     }
 
-    /// The sheet's title, such as "What's new in SpaceTerm 0.9".
-    pub(crate) fn title(&self) -> String {
-        format!("What's new in SpaceTerm {}", self.version)
-    }
-
-    /// The menu command that opens the sheet, such as "What's New in SpaceTerm 0.9".
+    /// The sheet's title and the menu command that opens it, such as "What's New in SpaceTerm
+    /// 0.9".
     pub(crate) fn menu_title(&self) -> String {
-        format!("What's New in SpaceTerm {}", self.version)
+        format!("What\u{2019}s New in SpaceTerm {}", self.version)
     }
 
     /// "Released 3 November", with the year only when it is not `this_year`.
@@ -254,8 +250,7 @@ mod tests {
     #[test]
     fn the_sheet_names_the_version_and_its_release_day() {
         let notes = ReleaseNotes::parse("0.9.0", "2026-11-03", CLIFF).unwrap();
-        assert_eq!(notes.title(), "What's new in SpaceTerm 0.9.0");
-        assert_eq!(notes.menu_title(), "What's New in SpaceTerm 0.9.0");
+        assert_eq!(notes.menu_title(), "What\u{2019}s New in SpaceTerm 0.9.0");
         assert_eq!(notes.released(2026).as_deref(), Some("Released 3 November"));
         assert_eq!(
             notes.released(2027).as_deref(),

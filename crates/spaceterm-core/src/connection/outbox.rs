@@ -183,6 +183,10 @@ impl Outbox {
         }
     }
 
+    pub fn work(&self) -> ProtocolVersion {
+        self.shared.work
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.shared.state.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -266,6 +270,12 @@ impl Outbox {
     /// Queues a Pane event that leaves the channel open. Use [`Outbox::end`] for `Ended`,
     /// `SessionEnded`, `Failed`, `DirectoryUnavailable` and `Takeover`.
     pub fn pane(&self, channel: Channel, event: PaneEvent) -> Result<(), OutboxError> {
+        if matches!(event, PaneEvent::InputRestarting { .. })
+            && self.shared.work.minor < crate::idle_restart::MINOR
+        {
+            return Err(OutboxError::Misuse);
+        }
+
         let frames = encode(&CoreMessage::Pane(PaneMessage { channel, event }))?;
         self.with(|state| state.push_l1(Entry::Message(frames, None)))
     }
@@ -290,6 +300,25 @@ impl Outbox {
     /// Replaces any update facts not yet written, keeping their place in L1.
     pub fn update_facts(&self, facts: UpdateFacts) -> Result<(), OutboxError> {
         let frames = encode(&CoreMessage::UpdateFacts(Box::new(facts)))?;
+        self.with(|state| {
+            state.open()?;
+            if !state.update_facts_queued {
+                state.push_l1(Entry::UpdateFacts)?;
+                state.update_facts_queued = true;
+            }
+            state.update_facts = Some(frames);
+            Ok(())
+        })
+    }
+
+    /// Replaces any update facts not yet written with `detailed`, keeping their place in L1.
+    /// Only for a connection whose admission selected work
+    /// [`crate::update::facts::MINOR_DETAILED_FACTS`] or later.
+    pub fn detailed_update_facts(
+        &self,
+        detailed: crate::update::facts::DetailedUpdateFacts,
+    ) -> Result<(), OutboxError> {
+        let frames = encode(&CoreMessage::DetailedUpdateFacts(Box::new(detailed)))?;
         self.with(|state| {
             state.open()?;
             if !state.update_facts_queued {

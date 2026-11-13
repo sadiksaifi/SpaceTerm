@@ -1,16 +1,20 @@
-//! The title-bar update control. It appears only while something needs doing or reading and shows
-//! one glyph: blue for action and progress, orange for problems and overdue states. One pending
-//! item is a plain button that performs its action, or a status while it works. Two or more open
-//! a compact menu with one line per Machine, "Restart All…" and Recent. Work shows only when a
-//! person started it on this desktop, or when it is a Core restart. The presentation decides
-//! that.
+//! The title-bar split pill. It shows while an update step is owed and hides otherwise. Whenever
+//! it shows it has two segments: the main area, which performs the step or opens the list while
+//! work the person started is in progress, and the chevron, which always opens the same list of
+//! SpaceTerm and every Machine. While the list is open the pill keeps its shape: the rows keep
+//! their number and order and only their text changes, and the pill stays until the list closes.
+//! The pill is one split capsule in every state, progress included, so starting or finishing work
+//! never changes its shape. [`crate::updates::state`] decides every label, row and command.
+
+use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Pixels, Rgba, SharedString, Window, div};
+use gpui::{AnyElement, App, Context, Pixels, Rgba, SharedString, WeakEntity, Window, div};
 use spaceterm_ui::{
-    Button, ButtonPaint, ButtonShape, ButtonSize, ButtonVariant, ButtonVariantStyle,
-    DeterminateProgress, Icon, IconName, Menu, MenuAlignment, MenuEntry, MenuPlacement,
-    MenuPlacementConfig, MenuSize, ProgressRing, ProgressSize, ProgressState, Tooltip,
+    ButtonPaint, ButtonShape, ButtonSize, ButtonVariant, ButtonVariantStyle, ComboButton,
+    DeterminateProgress, Icon, IconName, MenuAlignment, MenuEntry, MenuLifecycleEvent,
+    MenuPlacement, MenuPlacementConfig, MenuSize, ProgressRing, ProgressSize, ProgressState,
+    Tooltip,
 };
 
 use super::commands::{self, Presenter};
@@ -18,25 +22,90 @@ use super::service;
 use crate::ui::appearance::{chrome, gpui_color};
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::workspace_frame::WorkspaceFrame;
+use crate::updates::copy::rows::{CORE_HEADING, UPDATE_SETTINGS};
+use crate::updates::ladder::Emphasis;
+use crate::updates::machines::MachineId;
 use crate::updates::machines::store::MachineUpdates;
-use crate::updates::presentation::{
-    self, Command, Control, Glyph, Item, MenuRow, Presentation, Tone,
-};
+use crate::updates::state::{self, Command, Glyph, PillView, RowView, UpdateView};
 
-/// The control at the trailing end of one window's title bar.
+/// What the control reads each frame. The title bar reads the shared update state; a test
+/// scripts it.
+pub(crate) type ViewSource = Rc<dyn Fn(&App) -> Shown>;
+
+/// What the pill and its list show at one moment.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Shown {
+    pub(crate) pill: Option<PillView>,
+    pub(crate) app: RowView,
+    /// Each Machine's row, local first, then store order.
+    pub(crate) machines: Vec<(MachineId, RowView)>,
+}
+
+impl Shown {
+    pub(crate) fn of(view: &UpdateView) -> Self {
+        Self {
+            pill: view.pill(),
+            app: view.app_row(),
+            // `machine_rows()[i]` describes `machines[i]`.
+            machines: view
+                .machines
+                .iter()
+                .map(|machine| machine.id)
+                .zip(view.machine_rows())
+                .collect(),
+        }
+    }
+
+    /// What an open list shows when `next` arrives: the same Machines in the same order, each
+    /// with its own row from `next`. A Machine that left keeps its last row, and one that arrived
+    /// waits for the list to close. A pill whose step resolved stays until the list closes.
+    fn keep_shape(&self, next: Self) -> Self {
+        let machines = self
+            .machines
+            .iter()
+            .map(|(id, open)| {
+                let row = next
+                    .machines
+                    .iter()
+                    .find(|(next, _)| next == id)
+                    .map_or_else(|| open.clone(), |(_, row)| row.clone());
+                (*id, row)
+            })
+            .collect();
+        Self {
+            pill: next.pill.or_else(|| self.pill.clone()),
+            app: next.app,
+            machines,
+        }
+    }
+}
+
+/// Progress on work the person started: the main area then opens the list.
+fn in_progress(pill: &PillView) -> bool {
+    pill.main == Command::ShowList
+}
+
+/// The split pill at the trailing end of one window's title bar.
 pub(crate) struct UpdateControl {
+    source: ViewSource,
+    /// What the open list showed last. None while the list is closed.
+    open: Option<Shown>,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
 impl UpdateControl {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut subscriptions = vec![cx.observe_window_activation(window, |_, window, cx| {
-            // A due desktop reminder waits for an active window.
-            if window.is_window_active()
-                && let Some(updates) = service(cx)
-            {
-                updates.read(cx).window_activated();
-            }
+        Self::with_source(Rc::new(|cx| Shown::of(&state::current(cx))), window, cx)
+    }
+
+    pub(crate) fn with_source(
+        source: ViewSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut subscriptions = vec![cx.observe_window_activation(window, |_, _, cx| {
+            // A due reminder waits until the person leaves SpaceTerm.
+            crate::updates::reminders::UpdateReminders::activation_changed(cx);
         })];
         subscriptions
             .extend(service(cx).map(|updates| cx.observe(&updates, |_, _, cx| cx.notify())));
@@ -45,25 +114,45 @@ impl UpdateControl {
                 .map(|machines| cx.observe(&machines, |_, _, cx| cx.notify())),
         );
         Self {
+            source,
+            open: None,
             _subscriptions: subscriptions,
         }
     }
 
-    /// Whether the control shows. The title bar that holds it is then occupied.
+    /// What shows now: the current state, or while the list is open, the open list's shape.
+    fn shown(&self, cx: &App) -> Shown {
+        let next = (self.source)(cx);
+        match &self.open {
+            Some(open) => open.keep_shape(next),
+            None => next,
+        }
+    }
+
+    /// Whether the pill shows. The title bar that holds it is then occupied.
     pub(crate) fn shows_pill(&self, cx: &App) -> bool {
-        presentation::current(cx).control() != Control::Hidden
+        self.shown(cx).pill.is_some()
+    }
+
+    fn list_changed(&mut self, event: MenuLifecycleEvent, cx: &mut Context<Self>) {
+        self.open = match event {
+            MenuLifecycleEvent::Opened => Some(self.shown(cx)),
+            MenuLifecycleEvent::Closed(_) => None,
+        };
+        cx.notify();
     }
 }
 
-/// What a menu row does when chosen.
+/// What choosing an entry of the list does.
 #[derive(Clone)]
 enum Choice {
     Perform(Command),
+    UpdateSettings,
     /// A row that reports and cannot be chosen.
     Status,
 }
 
-/// The glyph leading the control or a menu row. Icons take `foreground`. A ring on the blue fill
+/// The glyph leading the main area or a row. Icons take `foreground`. A ring on the accent fill
 /// takes the foreground too, because the installed accent disappears against it.
 fn glyph(
     glyph: Glyph,
@@ -78,25 +167,21 @@ fn glyph(
             let state = fraction
                 .and_then(|fraction| DeterminateProgress::new(f64::from(fraction)).ok())
                 .map_or(ProgressState::Indeterminate, ProgressState::Determinate);
-            ProgressRing::new("update-control-progress", "Update", state)
+            ProgressRing::new("update-pill-progress", "Update", state)
                 .size(ProgressSize::Compact)
                 .when(inherited, ProgressRing::inherited)
                 .into_any_element()
         }
         Glyph::Download => icon(IconName::Download),
         Glyph::Restart => icon(IconName::RotateCw),
-        Glyph::Overdue => icon(IconName::Clock),
-        Glyph::UpdateDesktop => icon(IconName::CircleArrowUp),
         Glyph::UpdateCore => icon(IconName::Package),
         Glyph::WhatsNew => icon(IconName::Sparkles),
         Glyph::UpdateFailed => icon(IconName::CircleAlert),
-        Glyph::InstallFailed => icon(IconName::CircleX),
         Glyph::CantConfirm => icon(IconName::CircleHelp),
-        Glyph::CantCheck => icon(IconName::CloudOff),
     }
 }
 
-/// Orange paints over the neutral fill, from the installed warning pair.
+/// The warning tint paints over the neutral fill, from the installed warning pair.
 fn warning_style(cx: &App) -> (ButtonVariantStyle, Rgba) {
     let pair = chrome(cx).semantic_text_pairs.warning_status;
     let paint = |amount| {
@@ -112,175 +197,147 @@ fn warning_style(cx: &App) -> (ButtonVariantStyle, Rgba) {
     )
 }
 
-fn warning_color(cx: &App) -> Rgba {
-    gpui_color(chrome(cx).semantic_text_pairs.warning_status.primary)
-}
-
-fn variant(tone: Tone) -> ButtonVariant {
-    match tone {
-        Tone::Action => ButtonVariant::Primary,
-        Tone::Problem => ButtonVariant::Secondary,
+fn variant(emphasis: Emphasis) -> ButtonVariant {
+    match emphasis {
+        Emphasis::Accent => ButtonVariant::Primary,
+        Emphasis::Plain | Emphasis::Warning => ButtonVariant::Secondary,
     }
 }
 
-/// One item: a plain button that performs its command, or a status while the item works.
-fn single(item: Item, size: Pixels, presenter: Presenter, cx: &App) -> AnyElement {
-    let inherited = item.tone == Tone::Action;
-    let (mark, fraction) = (item.glyph, item.fraction);
-    let button = Button::new("update-control", item.label)
-        .variant(variant(item.tone))
-        .size(ButtonSize::Small)
-        .shape(ButtonShape::Capsule)
-        .leading(move |foreground| glyph(mark, fraction, size, inherited, foreground))
-        .accessibility_description(item.sentence.clone())
-        .tooltip(
-            Tooltip::new("update-control-tooltip", item.sentence)
-                .debug_selector("update-control-tooltip"),
-        )
-        .debug_selector("update-control")
-        .when(item.tone == Tone::Problem, |button| {
-            let (style, focus) = warning_style(cx);
-            button.contextual_style(style, focus)
-        });
-    match item.command {
-        Some(command) => button
-            .on_activate(move |_, _, cx| commands::perform(command.clone(), presenter.clone(), cx))
-            .into_any_element(),
-        // Work in progress: a focusable status in the blue progress paint, never a disabled
-        // button.
-        None => button.status().into_any_element(),
+/// A row's trailing text: `{status}` or `{status} · {action}`.
+fn detail(row: &RowView) -> Option<SharedString> {
+    let status = row.status.clone().or_else(|| row.version.clone());
+    match (status, &row.action) {
+        (Some(status), Some(action)) => Some(format!("{status} · {}", action.label).into()),
+        (Some(status), None) => Some(status),
+        (None, Some(action)) => Some(action.label.clone()),
+        (None, None) => None,
     }
 }
 
-/// The trailing text of a menu row: its status, then the action choosing it performs.
-fn trailing(row: &MenuRow) -> SharedString {
-    match &row.button {
-        Some(button) => format!("{} · {}", row.status, button.label).into(),
-        None => row.status.clone(),
-    }
-}
-
-fn row_entry(row: MenuRow, index: usize, warning: Rgba) -> MenuEntry<Choice> {
-    let choice = match &row.button {
-        Some(button) => Choice::Perform(button.command.clone()),
+fn row_entry(row: &RowView, selector: String) -> MenuEntry<Choice> {
+    let choice = match &row.action {
+        Some(action) => Choice::Perform(action.command.clone()),
         None => Choice::Status,
     };
     let informational = matches!(choice, Choice::Status);
-    let (mark, fraction, tone) = (row.glyph, row.fraction, row.tone);
     let mut entry = MenuEntry::action(row.name.clone(), choice)
-        .detail(trailing(&row))
-        .description(row.sentence.clone())
-        .debug_selector(format!("update-row-{index}"));
+        .description(row.accessibility.clone())
+        .debug_selector(selector);
+    if let Some(detail) = detail(row) {
+        entry = entry.detail(detail);
+    }
     if informational {
         entry = entry.informational();
-    }
-    if let Some(mark) = mark {
-        entry = entry.icon(move |foreground, size| {
-            let tint = if tone == Some(Tone::Problem) {
-                warning
-            } else {
-                foreground
-            };
-            glyph(mark, fraction, size, false, tint)
-        });
     }
     entry
 }
 
-/// The compact menu: the desktop's row, the "SpaceTerm Core" rows, then Restart All and Recent.
-fn menu_entries(presentation: &Presentation, warning: Rgba, cx: &App) -> Vec<MenuEntry<Choice>> {
-    let mut entries = Vec::new();
-    let desktop = presentation.desktop_row();
-    let machines = presentation.machine_rows();
-    let has_desktop = desktop.is_some();
-    entries.extend(desktop.map(|row| row_entry(row, 0, warning)));
-    if !machines.is_empty() {
-        if has_desktop {
-            entries.push(MenuEntry::separator());
-        }
+/// The list: SpaceTerm's row, the heading and one row per Machine, then Update Settings.
+fn entries(shown: &Shown) -> Vec<MenuEntry<Choice>> {
+    let mut entries = vec![row_entry(&shown.app, "update-row-app".to_owned())];
+    if !shown.machines.is_empty() {
         entries.push(MenuEntry::section(
-            "SpaceTerm Core",
-            machines
-                .into_iter()
+            CORE_HEADING,
+            shown
+                .machines
+                .iter()
                 .enumerate()
-                .map(|(index, row)| row_entry(row, index + 1, warning))
+                .map(|(index, (_, row))| row_entry(row, format!("update-row-{index}")))
                 .collect(),
         ));
     }
-    let restart_all = presentation.restart_all();
-    let recent: Vec<MenuEntry<Choice>> = crate::updates::recent_lines(cx)
-        .into_iter()
-        .map(|line| MenuEntry::action(line, Choice::Status).informational())
-        .collect();
-    if restart_all.is_some() || !recent.is_empty() {
-        entries.push(MenuEntry::separator());
-    }
-    if let Some(all) = restart_all {
-        entries.push(
-            MenuEntry::action(all.label, Choice::Perform(all.command))
-                .detail(all.trailing)
-                .description(all.sentence)
-                .debug_selector("update-restart-all"),
-        );
-    }
-    if !recent.is_empty() {
-        entries.push(MenuEntry::submenu("Recent", recent).debug_selector("update-recent"));
-    }
+    entries.push(MenuEntry::separator());
+    entries.push(
+        MenuEntry::action(UPDATE_SETTINGS, Choice::UpdateSettings)
+            .debug_selector("update-settings"),
+    );
     entries
+}
+
+fn choose(choice: &Choice, presenter: &Presenter, cx: &mut App) {
+    match choice {
+        Choice::Perform(command) => commands::perform(command.clone(), presenter.clone(), cx),
+        Choice::UpdateSettings => {
+            crate::ui::settings_window::open_or_activate(
+                Some(crate::ui::settings_window::SettingsSectionId::Updates),
+                cx,
+            );
+        }
+        Choice::Status => {}
+    }
+}
+
+/// Reports the list's openings and closings to the control, after the current update.
+fn lifecycle(control: WeakEntity<UpdateControl>) -> impl Fn(&MenuLifecycleEvent, &mut App) {
+    move |event, cx| {
+        let (control, event) = (control.clone(), *event);
+        cx.defer(move |cx| {
+            let _ = control.update(cx, |control, cx| control.list_changed(event, cx));
+        });
+    }
+}
+
+fn placement() -> MenuPlacementConfig {
+    MenuPlacementConfig::new(MenuPlacement::Bottom, MenuAlignment::End)
+}
+
+/// The capsule: main area and chevron. While work is in progress the main area opens the list
+/// too, and the capsule keeps both segments.
+fn pill(
+    pill: PillView,
+    shown: &Shown,
+    size: Pixels,
+    presenter: Presenter,
+    control: WeakEntity<UpdateControl>,
+    cx: &App,
+) -> AnyElement {
+    let inherited = pill.emphasis == Emphasis::Accent;
+    let (mark, fraction) = (pill.glyph, pill.progress);
+    let warning = (pill.emphasis == Emphasis::Warning).then(|| warning_style(cx));
+    let progress = in_progress(&pill);
+    let chosen = presenter.clone();
+    let main = pill.main;
+    let button = ComboButton::new("update-pill", pill.label, entries(shown))
+        .variant(variant(pill.emphasis))
+        .size(ButtonSize::Small)
+        .shape(ButtonShape::Capsule)
+        .leading(move |foreground| glyph(mark, fraction, size, inherited, foreground))
+        .accessibility_description(pill.tooltip.clone())
+        .tooltip(
+            Tooltip::new("update-pill-tooltip", pill.tooltip).debug_selector("update-pill-tooltip"),
+        )
+        .menu_label("Updates")
+        .menu_size(MenuSize::Wide)
+        // A row's detail carries the decision: how many Terminal Sessions a restart waits on and
+        // which action the row takes. The list grows to show it whole.
+        .fit_menu_rows()
+        .placement(placement())
+        .debug_selector("update-pill")
+        .on_menu_lifecycle(lifecycle(control))
+        .on_activate(move |_, _, cx| commands::perform(main.clone(), presenter.clone(), cx))
+        .primary_opens_menu(progress)
+        .on_menu_activate(move |activation, _, cx| choose(activation.action(), &chosen, cx));
+    match warning {
+        Some((style, focus)) => button.contextual_style(style, focus),
+        None => button,
+    }
+    .into_any_element()
 }
 
 impl Render for UpdateControl {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let presentation = presentation::current(cx);
-        let control = presentation.control();
-        if control == Control::Hidden {
-            return div().into_any_element();
+        let shown = self.shown(cx);
+        if self.open.is_some() {
+            self.open = Some(shown.clone());
         }
+        let Some(view) = shown.pill.clone() else {
+            return div().into_any_element();
+        };
         let appearance = chrome(cx);
         let size = appearance.icons.metrics(IconRole::Caption).glyph_size;
         let presenter = Presenter::Control(window.window_handle(), cx.weak_entity());
-        let warning = warning_color(cx);
-        let element = match control {
-            Control::Hidden => unreachable!("handled above"),
-            Control::Single(item) => single(item, size, presenter, cx),
-            Control::Menu {
-                label,
-                tone,
-                glyph: mark,
-                sentence,
-            } => {
-                let inherited = tone == Tone::Action;
-                Menu::new(
-                    "update-control-menu",
-                    label,
-                    menu_entries(&presentation, warning, cx),
-                )
-                .button_trigger(variant(tone), ButtonSize::Small, ButtonShape::Capsule)
-                .leading_icon(move |foreground| glyph(mark, None, size, inherited, foreground))
-                .when(tone == Tone::Problem, |menu| {
-                    let (style, focus) = warning_style(cx);
-                    menu.contextual_style(style, focus)
-                })
-                .accessibility_description(sentence.clone())
-                .tooltip(
-                    Tooltip::new("update-control-menu-tooltip", sentence)
-                        .debug_selector("update-control-menu-tooltip"),
-                )
-                .size(MenuSize::Wide)
-                .fit_rows()
-                .placement(MenuPlacementConfig::new(
-                    MenuPlacement::Bottom,
-                    MenuAlignment::End,
-                ))
-                .debug_selector("update-control-menu")
-                .on_activate(move |activation, _, cx| {
-                    if let Choice::Perform(command) = activation.action() {
-                        commands::perform(command.clone(), presenter.clone(), cx);
-                    }
-                })
-                .into_any_element()
-            }
-        };
+        let element = pill(view, &shown, size, presenter, cx.weak_entity(), cx);
         // The control owns its clicks inside the title bar's drag region. Its trailing edge stops
         // where the Pane beneath it stops, and it keeps one frame gap from the Tabs.
         let frame = WorkspaceFrame::for_appearance(appearance, cx);

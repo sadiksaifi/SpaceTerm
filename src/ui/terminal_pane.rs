@@ -492,6 +492,9 @@ pub(crate) struct TerminalPane {
     diagnostics: DiagnosticBundle,
     status: Option<String>,
     status_intent: StatusIntent,
+    /// What the person typed that the Pane kept after its Terminal Session ran on, until the
+    /// person copies it or the Session ends. Its status returns whenever no other status shows.
+    unsent: Option<crate::terminal::core_session::unsent::UnsentNotice>,
     fallback_title: SharedString,
     title: SharedString,
     focus_handle: FocusHandle,
@@ -784,6 +787,7 @@ impl TerminalPane {
             diagnostics: DiagnosticBundle::default(),
             status: None,
             status_intent: StatusIntent::Information,
+            unsent: None,
             title: fallback_title.clone(),
             fallback_title,
             focus_handle,
@@ -3988,6 +3992,66 @@ impl TerminalPane {
         }
     }
 
+    /// The Terminal Session runs on after an idle restart refused what the person typed, or
+    /// after a lost connection left it unconfirmed. The Pane says so and offers the text to
+    /// copy; it sends nothing again, because the text can hold Return.
+    fn sync_unsent_input(&mut self) {
+        if !self.interactive_input_available() {
+            return;
+        }
+        let change = self
+            .terminal_session
+            .session
+            .as_ref()
+            .map(|session| session.take_unsent_input())
+            .unwrap_or_default();
+        if change.session_left {
+            self.drop_unsent();
+        }
+        if let Some(notice) = change.notice {
+            let notice = match self.unsent.take() {
+                Some(earlier) => earlier.then(notice),
+                None => notice,
+            };
+            self.status = Some(unsent_status(&notice).to_owned());
+            self.status_intent = StatusIntent::Warning;
+            // Text typed only at a hidden prompt is never kept, so nothing waits to be copied.
+            self.unsent = (!notice.input.text.is_empty()).then_some(notice);
+        } else if self.status.is_none()
+            && let Some(notice) = &self.unsent
+        {
+            // Kept text stays offered until the person copies it.
+            self.status = Some(unsent_status(notice).to_owned());
+            self.status_intent = StatusIntent::Warning;
+        }
+    }
+
+    /// Forgets kept text, and its status if that shows.
+    fn drop_unsent(&mut self) {
+        if let Some(notice) = self.unsent.take()
+            && self.status.as_deref() == Some(unsent_status(&notice))
+        {
+            self.status = None;
+        }
+    }
+
+    /// The text Copy Typed Text copies, while its status shows.
+    fn unsent_typed(&self) -> Option<String> {
+        self.unsent
+            .as_ref()
+            .filter(|notice| self.status.as_deref() == Some(unsent_status(notice)))
+            .map(|notice| notice.input.text.clone())
+    }
+
+    /// Copies the kept text and forgets it. Nothing is sent.
+    fn copy_unsent(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = self.unsent_typed() {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            self.drop_unsent();
+            cx.notify();
+        }
+    }
+
     fn paste_request_guard_is_current(&self, guard: PasteRequestGuard) -> bool {
         self.terminal_session.session.is_some()
             && self.terminal_input_focus
@@ -4984,6 +5048,7 @@ impl Render for TerminalPane {
             );
         self.flush_pending_file_insertion(cx);
         self.sync_paste_unconfirmed();
+        self.sync_unsent_input();
         let surface_active = terminal_surface_active(self.product_focus, native_activity);
         let native_visibility = self
             .visibility_source
@@ -5200,6 +5265,8 @@ impl Render for TerminalPane {
         let diagnostics_available =
             self.pane_state.failure().is_some() && self.diagnostics.record_count() > 0;
         let recovery_available = self.pending_recovery.is_some();
+        let unsent_typed = self.unsent_typed();
+        let copy_pane = cx.entity().downgrade();
         let last_valid_frame_preserved = self.pane_state.last_valid_frame().is_some();
         let export_pane = cx.entity().downgrade();
         let report_pane = cx.entity().downgrade();
@@ -5500,6 +5567,12 @@ impl Render for TerminalPane {
                         appearance
                             .typography
                             .measure(TextRole::Body, "Try Again", window)
+                    } else if unsent_typed.is_some() {
+                        appearance.typography.measure(
+                            TextRole::Body,
+                            crate::updates::copy::pane::COPY_TYPED_TEXT,
+                            window,
+                        )
                     } else {
                         px(0.0)
                     };
@@ -5587,6 +5660,23 @@ impl Render for TerminalPane {
                                                 }),
                                         )
                                     })
+                                    .when(unsent_typed.is_some(), |status| {
+                                        use crate::updates::copy::pane;
+                                        status.child(
+                                            Button::new("copy-typed-text", pane::COPY_TYPED_TEXT)
+                                                .variant(ButtonVariant::Link)
+                                                .size(ButtonSize::Compact)
+                                                .accessibility_description(
+                                                    pane::COPY_TYPED_TEXT_DESCRIPTION,
+                                                )
+                                                .debug_selector("copy-typed-text")
+                                                .on_activate(move |_, _, cx| {
+                                                    let _ = copy_pane.update(cx, |pane, cx| {
+                                                        pane.copy_unsent(cx);
+                                                    });
+                                                }),
+                                        )
+                                    })
                                     .when(diagnostics_available, |status| {
                                         status
                                             .child(
@@ -5633,6 +5723,15 @@ impl Render for TerminalPane {
             )
             .into_any_element()
     }
+}
+
+/// The status that says what became of kept input.
+fn unsent_status(notice: &crate::terminal::core_session::unsent::UnsentNotice) -> &'static str {
+    use crate::terminal::core_session::unsent::{Delivery, Interruption};
+    crate::updates::copy::pane::reattached_input(
+        notice.interruption == Interruption::Restart,
+        notice.input.delivery == Delivery::NotSent,
+    )
 }
 
 /// The offer a Permission Request notice shows, where, and since when.

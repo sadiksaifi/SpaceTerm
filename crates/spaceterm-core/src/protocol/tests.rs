@@ -1249,6 +1249,33 @@ fn update_facts_travel_as_their_own_kind_within_their_bound() {
     let wire = encode_core(&message).unwrap();
     assert_eq!(wire.frames[0][4], 0x4a);
     core_round_trip(message);
+    // The detailed facts carry the largest facts within their own bound.
+    let detailed = crate::update::facts::DetailedUpdateFacts {
+        facts: largest.clone(),
+        continuation: Some(crate::update::Continuation::NeedsConfirmation),
+        working: u32::MAX,
+        restart: None,
+    };
+    let message = CoreMessage::DetailedUpdateFacts(Box::new(detailed.clone()));
+    let wire = encode_core(&message).unwrap();
+    assert_eq!(wire.frames[0][4], 0x4c);
+    core_round_trip(message);
+    // More working Terminal Sessions than live ones break the bound.
+    let inflated = crate::update::facts::DetailedUpdateFacts {
+        facts: UpdateFacts {
+            sessions: 1,
+            ..largest.clone()
+        },
+        working: 2,
+        ..detailed
+    };
+    let wire = encode_core(&CoreMessage::DetailedUpdateFacts(Box::new(inflated))).unwrap();
+    assert_eq!(
+        Assembler::default()
+            .core(RawFrame::parse(&wire.frames[0]).unwrap())
+            .err(),
+        Some(DecodeError::OutOfBounds)
+    );
 
     let regressed = UpdateFacts {
         operation: Some(Operation::Installing {
@@ -1265,4 +1292,137 @@ fn update_facts_travel_as_their_own_kind_within_their_bound() {
             .err(),
         Some(DecodeError::OutOfBounds)
     );
+}
+
+/// Work 1.0 through 1.2 append no Pane variants before RunFinished (discriminant 9).
+#[test]
+fn work_1_2_pane_discriminants_and_run_receipt_are_frozen() {
+    let receipt = RunReceipt {
+        run: RunId([1; 16]),
+        session: [2; 32],
+        state: RunState::Finished {
+            exit_status: Some(7),
+            duration_ms: 300,
+        },
+        end: Some(HistoryPosition { epoch: 4, row: 5 }),
+    };
+    let cases = [
+        (
+            0,
+            PaneEvent::Takeover(Takeover {
+                session_ended: None,
+                target: PaneTarget {
+                    core: [1; 32],
+                    session: [2; 32],
+                },
+                controller: pane::control::Controller::Client {
+                    name: "peer".into(),
+                    this_client: false,
+                },
+            }),
+        ),
+        (1, PaneEvent::Ended),
+        (2, PaneEvent::SessionEnded),
+        (3, PaneEvent::Failed),
+        (4, PaneEvent::DirectoryUnavailable),
+        (
+            5,
+            PaneEvent::Effect(pane::effects::Request {
+                id: 1,
+                generation: 2,
+                remaining_ms: 3,
+                effect: pane::effects::Effect::CommandFinished {
+                    exit_status: Some(7),
+                    duration_ms: 5,
+                },
+            }),
+        ),
+        (
+            6,
+            PaneEvent::Input {
+                serial: 4,
+                outcome: InputOutcome::Discarded(Refusal::Stale),
+            },
+        ),
+        (
+            7,
+            PaneEvent::Line(pane::LineState {
+                epoch: 7,
+                mode: pane::LineMode {
+                    canonical: true,
+                    echo: false,
+                    signals: true,
+                    shell_foreground: false,
+                },
+            }),
+        ),
+        (
+            8,
+            PaneEvent::Progress {
+                input: 4,
+                output_bytes: 300,
+            },
+        ),
+        (9, PaneEvent::RunFinished(Box::new(receipt))),
+    ];
+    for (old_tag, event) in cases {
+        let wire = core_bytes(&CoreMessage::Pane(PaneMessage {
+            channel: Channel(3),
+            event,
+        }));
+        assert_eq!(&wire[4..7], &[0x44, 3, old_tag]);
+    }
+    // Independent vector: frame length 59, kind 0x44, channel 3, old RunFinished tag 9,
+    // fixed-width IDs, Finished tag 2, Some(7) zigzag 14, 300 varint ac02, end Some(4,5).
+    const RUN: &[u8] = &[
+        0, 0, 0, 59, 0x44, 3, 9, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2,
+        2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 14,
+        0xac, 2, 1, 4, 5,
+    ];
+    let decoded = Assembler::default()
+        .core(RawFrame::parse(RUN).unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(&decoded, CoreMessage::Pane(PaneMessage { event:PaneEvent::RunFinished(run), .. }) if run.state == RunState::Finished { exit_status:Some(7), duration_ms:300 })
+    );
+    assert_eq!(core_bytes(&decoded), RUN);
+}
+
+#[test]
+fn work_1_2_detailed_snapshot_has_a_frozen_field_order() {
+    use crate::update::facts::{
+        DetailedUpdateFacts, Operation, Platform, RestartCause, UpdateCheck, UpdateFacts, Version,
+    };
+    let snapshot = DetailedUpdateFacts {
+        facts: UpdateFacts {
+            revision: 7,
+            platform: Platform::MacosArm64,
+            running: Version::parse("1.0.0").unwrap(),
+            pending: None,
+            sessions: 3,
+            operation: Some(Operation::RestartingSameVersion),
+            check: UpdateCheck::Disabled,
+            skipped: None,
+            last_failure: None,
+        },
+        continuation: None,
+        working: 2,
+        restart: Some(RestartCause::NothingRunning),
+    };
+    // Old postcard fields: facts, continuation(None), working(2), restart(Some(tag 2)).
+    const OLD: &[u8] = &[
+        0, 0, 0, 20, 0x4c, 7, 0, 5, b'1', b'.', b'0', b'.', b'0', 0, 3, 1, 5, 0, 0, 0, 0, 2, 1, 2,
+    ];
+    assert_eq!(
+        core_bytes(&CoreMessage::DetailedUpdateFacts(Box::new(
+            snapshot.clone()
+        ))),
+        OLD
+    );
+    let decoded = Assembler::default()
+        .core(RawFrame::parse(OLD).unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(matches!(decoded, CoreMessage::DetailedUpdateFacts(found) if *found == snapshot));
 }

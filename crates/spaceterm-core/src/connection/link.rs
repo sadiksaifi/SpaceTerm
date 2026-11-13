@@ -183,6 +183,8 @@ struct State {
     /// Handles reserved locally but not yet introduced on the wire.
     unbound: usize,
     channels: HashMap<Channel, ChannelState>,
+    unconfirmed_input: HashMap<Channel, Vec<InputEvent>>,
+    unsent_input: HashMap<Channel, Vec<InputEvent>>,
     /// Channels whose handle dropped while their `Release` waits for request capacity.
     releases: VecDeque<Channel>,
     l0: VecDeque<Queued>,
@@ -196,6 +198,9 @@ struct State {
     inventory: Option<(u64, Arc<InventoryRevision>)>,
     /// The newest update facts this link received.
     update_facts: Option<Arc<UpdateFacts>>,
+    /// The newest detailed update facts, from a Core whose work admission selected
+    /// [`crate::update::facts::MINOR_DETAILED_FACTS`] or later.
+    detailed_update_facts: Option<Arc<crate::update::facts::DetailedUpdateFacts>>,
     /// Bytes of every frame received, headers included.
     received_bytes: u64,
 }
@@ -208,6 +213,8 @@ struct Queued {
 struct ChannelState {
     sink: Arc<dyn ChannelSink>,
     serial: u32,
+    /// Original input, retained until the Core proves it applied or refused it.
+    input: std::collections::BTreeMap<u32, Vec<InputEvent>>,
     /// The server sent the channel's last event, so dropping the handle sends no `Release`.
     ended: bool,
 }
@@ -222,6 +229,8 @@ impl CoreLink {
                     next_channel: 0,
                     unbound: 0,
                     channels: HashMap::new(),
+                    unconfirmed_input: HashMap::new(),
+                    unsent_input: HashMap::new(),
                     releases: VecDeque::new(),
                     l0: VecDeque::new(),
                     l0_bytes: 0,
@@ -231,6 +240,7 @@ impl CoreLink {
                     closed: None,
                     inventory: None,
                     update_facts: None,
+                    detailed_update_facts: None,
                     received_bytes: 0,
                 }),
                 revisions: Condvar::new(),
@@ -276,6 +286,12 @@ impl CoreLink {
     /// after admission and again after every change.
     pub fn update_facts(&self) -> Option<Arc<UpdateFacts>> {
         self.lock().update_facts.clone()
+    }
+
+    /// The newest detailed update facts. None from a Core older than work
+    /// [`crate::update::facts::MINOR_DETAILED_FACTS`], and before the first.
+    pub fn detailed_update_facts(&self) -> Option<Arc<crate::update::facts::DetailedUpdateFacts>> {
+        self.lock().detailed_update_facts.clone()
     }
 
     /// Waits until this link received more than `seen` revisions, and returns the newest. Fails
@@ -405,6 +421,33 @@ impl CoreLink {
         }
     }
 
+    fn applied_input(&self, channel: Channel, serial: u32) {
+        if let Some(channel) = self.lock().channels.get_mut(&channel) {
+            channel.input.retain(|number, _| *number > serial);
+        }
+    }
+    /// Returns input the Core explicitly refused before applying any of it. It is never replayed.
+    pub fn take_unaccepted_input(&self, channel: Channel, serial: u32) -> Option<Vec<InputEvent>> {
+        self.lock()
+            .channels
+            .get_mut(&channel)?
+            .input
+            .remove(&serial)
+    }
+    pub fn take_unsent_input(&self, channel: Channel) -> Vec<InputEvent> {
+        self.lock()
+            .unsent_input
+            .remove(&channel)
+            .unwrap_or_default()
+    }
+    /// Takes input whose delivery could not be confirmed before the link closed. It is never
+    /// inferred to be unsent and never replayed across a reconnect.
+    pub fn take_unconfirmed_input(&self, channel: Channel) -> Vec<InputEvent> {
+        self.lock()
+            .unconfirmed_input
+            .remove(&channel)
+            .unwrap_or_default()
+    }
     fn dispatch(&self, message: CoreMessage) -> Result<(), LinkError> {
         match message {
             CoreMessage::Reply(reply) => {
@@ -424,22 +467,25 @@ impl CoreLink {
                 };
                 waiter.complete(result.map_err(RequestError::Refused));
             }
-            CoreMessage::Frame(frame) => match self.sink(frame.channel, false) {
-                Some(sink) => sink.deliver(ChannelEvent::Frame(frame)),
-                // Nobody holds the channel any more. Acknowledging keeps its credit from stalling
-                // the connection until the server processes the `Release`.
-                // A full L0 drops this acknowledgement; the server frees the credit when it
-                // processes the `Release`. Either way the link stays usable.
-                None => {
-                    let _ = self.send(
-                        &ClientMessage::FrameAck(FrameAck {
-                            channel: frame.channel,
-                            frame: frame.frame,
-                        }),
-                        true,
-                    );
+            CoreMessage::Frame(frame) => {
+                self.applied_input(frame.channel, frame.input);
+                match self.sink(frame.channel, false) {
+                    Some(sink) => sink.deliver(ChannelEvent::Frame(frame)),
+                    // Nobody holds the channel any more. Acknowledging keeps its credit from stalling
+                    // the connection until the server processes the `Release`.
+                    // A full L0 drops this acknowledgement; the server frees the credit when it
+                    // processes the `Release`. Either way the link stays usable.
+                    None => {
+                        let _ = self.send(
+                            &ClientMessage::FrameAck(FrameAck {
+                                channel: frame.channel,
+                                frame: frame.frame,
+                            }),
+                            true,
+                        );
+                    }
                 }
-            },
+            }
             // Nobody holds the channel any more. The server drops its semantic store when it
             // processes the `Release`, so the message needs no acknowledgement.
             CoreMessage::Accessibility(message) => {
@@ -449,6 +495,16 @@ impl CoreLink {
                 }
             }
             CoreMessage::Pane(pane) => {
+                match pane.event {
+                    PaneEvent::Progress { input, .. } => self.applied_input(pane.channel, input),
+                    PaneEvent::Input { serial, .. } => {
+                        self.take_unaccepted_input(pane.channel, serial);
+                    }
+                    PaneEvent::InputRestarting { channel, .. } if channel != pane.channel => {
+                        return Err(LinkError::Violation);
+                    }
+                    _ => {}
+                }
                 let last = pane.event.last();
                 if let Some(sink) = self.sink(pane.channel, last) {
                     sink.deliver(ChannelEvent::Pane(pane.event));
@@ -474,6 +530,16 @@ impl CoreLink {
                 self.lock().update_facts = Some(Arc::clone(&facts));
                 self.shared.events.deliver(LinkEvent::UpdateFacts(facts));
             }
+            // Every reader of the facts reads them from the detailed facts too.
+            CoreMessage::DetailedUpdateFacts(detailed) => {
+                let facts = Arc::new(detailed.facts.clone());
+                {
+                    let mut state = self.lock();
+                    state.update_facts = Some(Arc::clone(&facts));
+                    state.detailed_update_facts = Some(Arc::from(detailed));
+                }
+                self.shared.events.deliver(LinkEvent::UpdateFacts(facts));
+            }
             CoreMessage::Goodbye(fatal) => {
                 self.fail(LinkError::Goodbye(fatal));
                 return Err(LinkError::Goodbye(fatal));
@@ -484,9 +550,23 @@ impl CoreLink {
 
     fn sink(&self, channel: Channel, last: bool) -> Option<Arc<dyn ChannelSink>> {
         let mut state = self.lock();
-        let channel = state.channels.get_mut(&channel)?;
-        channel.ended |= last;
-        Some(Arc::clone(&channel.sink))
+        let owned = state.channels.get_mut(&channel)?;
+        owned.ended |= last;
+        let sink = Arc::clone(&owned.sink);
+        if last {
+            let input = std::mem::take(&mut owned.input)
+                .into_values()
+                .flatten()
+                .collect::<Vec<_>>();
+            if !input.is_empty() {
+                state
+                    .unconfirmed_input
+                    .entry(channel)
+                    .or_default()
+                    .extend(input);
+            }
+        }
+        Some(sink)
     }
 
     /// I/O thread: pings or ends the link from traffic, and returns when to check again.
@@ -534,6 +614,26 @@ impl CoreLink {
             state.l0.clear();
             state.l1.clear();
             state.releases.clear();
+            let unconfirmed = state
+                .channels
+                .iter_mut()
+                .map(|(id, channel)| {
+                    (
+                        *id,
+                        std::mem::take(&mut channel.input)
+                            .into_values()
+                            .flatten()
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            for (channel, events) in unconfirmed {
+                state
+                    .unconfirmed_input
+                    .entry(channel)
+                    .or_default()
+                    .extend(events);
+            }
             let channels: Vec<_> = state
                 .channels
                 .values_mut()
@@ -560,7 +660,7 @@ impl CoreLink {
 
     fn release(&self, channel: Channel) {
         let mut state = self.lock();
-        let Some(dropped) = state.channels.remove(&channel) else {
+        let Some(dropped) = state.remove_channel(channel) else {
             return;
         };
         if dropped.ended || state.closed.is_some() {
@@ -575,6 +675,21 @@ impl CoreLink {
 }
 
 impl State {
+    fn remove_channel(&mut self, id: Channel) -> Option<ChannelState> {
+        let channel = self.channels.get_mut(&id)?;
+        let remaining = std::mem::take(&mut channel.input)
+            .into_values()
+            .flatten()
+            .collect::<Vec<_>>();
+        if !remaining.is_empty() {
+            self.unconfirmed_input
+                .entry(id)
+                .or_default()
+                .extend(remaining);
+        }
+        self.channels.remove(&id)
+    }
+
     fn usable(&self) -> Result<(), LinkError> {
         match self.closed {
             Some(error) => Err(error),
@@ -808,6 +923,7 @@ impl ChannelHandle {
             ChannelState {
                 sink: Arc::clone(&self.sink),
                 serial: 0,
+                input: Default::default(),
                 ended: false,
             },
         );
@@ -837,7 +953,59 @@ impl ChannelHandle {
             return Err(LinkError::Unclaimed);
         }
         let (messages, serial) = build(channel.serial)?;
+        // Bound retained data independently of transport backpressure. A refused send queues nothing.
+        let retained = state
+            .channels
+            .values()
+            .flat_map(|channel| channel.input.values())
+            .map(|events| {
+                events
+                    .iter()
+                    .map(|event| match event {
+                        InputEvent::Key(key) => {
+                            key.logical.len() + key.text.as_ref().map_or(0, String::len) + 128
+                        }
+                        InputEvent::Paste { text, .. } => text.len() + 128,
+                        _ => 128,
+                    })
+                    .sum::<usize>()
+            })
+            .sum::<usize>();
+        let added = messages
+            .iter()
+            .filter_map(|message| {
+                if let ClientMessage::Input(input) = message {
+                    Some(
+                        input
+                            .events
+                            .iter()
+                            .map(|event| match event {
+                                InputEvent::Key(key) => {
+                                    key.logical.len()
+                                        + key.text.as_ref().map_or(0, String::len)
+                                        + 128
+                                }
+                                InputEvent::Paste { text, .. } => text.len() + 128,
+                                _ => 128,
+                            })
+                            .sum::<usize>(),
+                    )
+                } else {
+                    None
+                }
+            })
+            .sum::<usize>();
+        if retained.saturating_add(added) > 8 * limits::MAX_PASTE_BYTES {
+            return Err(LinkError::Busy);
+        }
         state.queue_all(&messages, urgent)?;
+        for message in &messages {
+            if let ClientMessage::Input(input) = message
+                && let Some(channel) = state.channels.get_mut(&input.channel)
+            {
+                channel.input.insert(input.serial, input.events.clone());
+            }
+        }
         if let Some(channel) = state.channels.get_mut(&self.channel()?) {
             channel.serial = serial;
         }
@@ -851,7 +1019,8 @@ impl ChannelHandle {
     /// [`ChannelHandle::paste`] for paste text.
     pub fn input(&self, generation: u64, events: Vec<InputEvent>) -> Result<u32, LinkError> {
         let channel = self.channel()?;
-        self.send_channel(true, move |last| {
+        let unsent = events.clone();
+        let result = self.send_channel(true, move |last| {
             let serial = last.checked_add(1).ok_or(LinkError::OutOfBounds)?;
             let message = ClientMessage::Input(Input {
                 channel,
@@ -860,7 +1029,16 @@ impl ChannelHandle {
                 events,
             });
             Ok((vec![message], serial))
-        })
+        });
+        if result.is_err() {
+            self.link
+                .lock()
+                .unsent_input
+                .entry(channel)
+                .or_default()
+                .extend(unsent);
+        }
+        result
     }
 
     /// Sends a whole paste of at most [`limits::MAX_PASTE_BYTES`] as consecutive Input messages,
@@ -871,7 +1049,11 @@ impl ChannelHandle {
         }
         let chunks = chunks(text, limits::MAX_PASTE_CHUNK_BYTES);
         let channel = self.channel()?;
-        self.send_channel(true, move |mut serial| {
+        let unsent = vec![InputEvent::Paste {
+            text: text.to_owned(),
+            last: true,
+        }];
+        let result = self.send_channel(true, move |mut serial| {
             let count = chunks.len();
             let mut messages = Vec::with_capacity(count);
             for (index, chunk) in chunks.into_iter().enumerate() {
@@ -887,7 +1069,16 @@ impl ChannelHandle {
                 }));
             }
             Ok((messages, serial))
-        })
+        });
+        if result.is_err() {
+            self.link
+                .lock()
+                .unsent_input
+                .entry(channel)
+                .or_default()
+                .extend(unsent);
+        }
+        result
     }
 
     fn send_simple(&self, message: ClientMessage, urgent: bool) -> Result<(), LinkError> {
@@ -981,7 +1172,7 @@ impl ChannelHandle {
     pub fn detach(self) {
         // Dropping finds no channel to release.
         if let Ok(channel) = self.channel() {
-            self.link.lock().channels.remove(&channel);
+            self.link.lock().remove_channel(channel);
         }
     }
 }
@@ -1065,5 +1256,196 @@ mod tests {
             Err(LinkError::Unclaimed),
             "every other message still refuses an ended channel"
         );
+    }
+    #[test]
+    fn a_restarting_refusal_keeps_the_original_input_and_never_replays_it() {
+        let now = Instant::now();
+        let link = CoreLink::new(Arc::new(|_: LinkEvent| {}), Arc::new(|| {}), now);
+        let seen = Arc::new(Mutex::new(false));
+        let received = seen.clone();
+        let channel = link
+            .open_channel(Arc::new(move |event: ChannelEvent| {
+                if matches!(event, ChannelEvent::Pane(PaneEvent::InputRestarting { .. })) {
+                    *received.lock().unwrap() = true;
+                }
+            }))
+            .unwrap();
+        let _claim = channel
+            .claim(
+                crate::attachments::Attachment {
+                    workspace: [1; 32],
+                    generation: 1,
+                },
+                [2; 32],
+                AttachmentClaim::Select { explicit: true },
+                PaneSize {
+                    columns: 80,
+                    rows: 24,
+                    cell_width: 8,
+                    cell_height: 16,
+                },
+                None,
+            )
+            .unwrap();
+        let serial = channel
+            .input(
+                1,
+                vec![InputEvent::Paste {
+                    text: "keep these bytes".into(),
+                    last: true,
+                }],
+            )
+            .unwrap();
+        while link.next_frame().is_some() {}
+        let wire = encode_core(&CoreMessage::Pane(PaneMessage {
+            channel: channel.channel().unwrap(),
+            event: PaneEvent::InputRestarting {
+                channel: channel.channel().unwrap(),
+                serial,
+            },
+        }))
+        .unwrap();
+        for frame in &wire.frames {
+            link.receive(RawFrame::parse(frame).unwrap(), now).unwrap();
+        }
+        assert!(*seen.lock().unwrap());
+        let retained = link
+            .take_unaccepted_input(channel.channel().unwrap(), serial)
+            .expect("the refused input");
+        assert!(
+            matches!(&retained[..], [InputEvent::Paste { text, last: true }] if text == "keep these bytes")
+        );
+        assert!(
+            link.next_frame().is_none(),
+            "a new shell never receives these bytes automatically"
+        );
+    }
+    #[test]
+    fn a_lost_refusal_keeps_input_unconfirmed_after_the_channel_drops() {
+        for ended in [false, true] {
+            let now = Instant::now();
+            let link = CoreLink::new(Arc::new(|_: LinkEvent| {}), Arc::new(|| {}), now);
+            let channel = link.open_channel(Arc::new(|_: ChannelEvent| {})).unwrap();
+            let _claim = channel
+                .claim(
+                    crate::attachments::Attachment {
+                        workspace: [1; 32],
+                        generation: 1,
+                    },
+                    [2; 32],
+                    AttachmentClaim::Select { explicit: true },
+                    PaneSize {
+                        columns: 80,
+                        rows: 24,
+                        cell_width: 8,
+                        cell_height: 16,
+                    },
+                    None,
+                )
+                .unwrap();
+            let id = channel.channel().unwrap();
+            channel
+                .input(
+                    1,
+                    vec![InputEvent::Paste {
+                        text: "delivery unknown".into(),
+                        last: true,
+                    }],
+                )
+                .unwrap();
+            if ended {
+                link.dispatch(CoreMessage::Pane(PaneMessage {
+                    channel: id,
+                    event: PaneEvent::Ended,
+                }))
+                .unwrap();
+            } else {
+                link.fail(LinkError::Closed);
+            }
+            drop(channel);
+            let retained = link.take_unconfirmed_input(id);
+            assert!(
+                matches!(&retained[..], [InputEvent::Paste { text, .. }] if text == "delivery unknown")
+            );
+        }
+    }
+    #[test]
+    fn a_local_channel_removal_keeps_later_input_after_only_the_first_refusal() {
+        for detach in [false, true] {
+            for closed in [false, true] {
+                let now = Instant::now();
+                let link = CoreLink::new(Arc::new(|_: LinkEvent| {}), Arc::new(|| {}), now);
+                let channel = link.open_channel(Arc::new(|_: ChannelEvent| {})).unwrap();
+                let _claim = channel
+                    .claim(
+                        crate::attachments::Attachment {
+                            workspace: [1; 32],
+                            generation: 1,
+                        },
+                        [2; 32],
+                        AttachmentClaim::Select { explicit: true },
+                        PaneSize {
+                            columns: 80,
+                            rows: 24,
+                            cell_width: 8,
+                            cell_height: 16,
+                        },
+                        None,
+                    )
+                    .unwrap();
+                let id = channel.channel().unwrap();
+                let first = channel
+                    .input(
+                        1,
+                        vec![InputEvent::Paste {
+                            text: "first".into(),
+                            last: true,
+                        }],
+                    )
+                    .unwrap();
+                let second = channel
+                    .input(
+                        1,
+                        vec![InputEvent::Paste {
+                            text: "second".into(),
+                            last: true,
+                        }],
+                    )
+                    .unwrap();
+                link.dispatch(CoreMessage::Pane(PaneMessage {
+                    channel: id,
+                    event: PaneEvent::InputRestarting {
+                        channel: id,
+                        serial: first,
+                    },
+                }))
+                .unwrap();
+                let refused = link.take_unaccepted_input(id, first).unwrap();
+                if detach {
+                    channel.detach();
+                } else {
+                    drop(channel);
+                }
+                if closed {
+                    link.fail(LinkError::Closed);
+                } else {
+                    link.dispatch(CoreMessage::Pane(PaneMessage {
+                        channel: id,
+                        event: PaneEvent::InputRestarting {
+                            channel: id,
+                            serial: second,
+                        },
+                    }))
+                    .unwrap();
+                }
+                let unknown = link.take_unconfirmed_input(id);
+                assert!(
+                    matches!(&refused[..], [InputEvent::Paste { text, .. }] if text == "first")
+                );
+                assert!(
+                    matches!(&unknown[..], [InputEvent::Paste { text, .. }] if text == "second")
+                );
+            }
+        }
     }
 }

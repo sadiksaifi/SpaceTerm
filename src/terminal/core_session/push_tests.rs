@@ -18,6 +18,10 @@ use std::time::Instant;
 
 #[derive(Default)]
 struct StartReplyLoss {
+    /// The server's end drops every Input message while set, so input stays unconfirmed.
+    hold_input: AtomicBool,
+    /// The channel and serial of each held Input message that carried a key.
+    held_keys: Mutex<Vec<(protocol::Channel, u32)>>,
     armed: AtomicBool,
     starts: AtomicUsize,
     accepted: Mutex<Option<[u8; 32]>>,
@@ -100,7 +104,27 @@ impl Carrier for Counting {
         self.inner.flush()
     }
     fn receive(&mut self) -> Result<Option<RawFrame>, CarrierError> {
-        let frame = self.inner.receive()?;
+        let mut frame = self.inner.receive()?;
+        while let Some(held) = &frame
+            && self.start_loss.hold_input.load(Ordering::Acquire)
+            && held.kind == protocol::frame::Kind::Input as u8
+        {
+            if let Some(protocol::ClientMessage::Input(input)) =
+                self.requests.client(held.clone())?
+                && input
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, protocol::InputEvent::Key(_)))
+            {
+                self.start_loss
+                    .held_keys
+                    .lock()
+                    .unwrap()
+                    .push((input.channel, input.serial));
+            }
+            self.traffic.client_frames.fetch_add(1, Ordering::SeqCst);
+            frame = self.inner.receive()?;
+        }
         if let Some(frame) = &frame {
             if let Some(protocol::ClientMessage::Request(request)) =
                 self.requests.client(frame.clone())?
@@ -412,6 +436,193 @@ pub(crate) fn await_status(state: &CorePaneState, expected: CorePaneStatus) {
         );
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// A paired Pane, started, shown and admitting input, whose server end can hold input.
+fn typing_pane() -> (ConnectedPane, crate::terminal::StartedTerminalSession) {
+    use spaceterm_core::direct::{DirectConnection, DirectConnector, DirectError};
+    struct Away;
+    impl DirectConnector for Away {
+        fn connect(&self) -> Result<DirectConnection, DirectError> {
+            Err(DirectError::Transport)
+        }
+    }
+    let core = ConnectedPane::with_connection(paired_connection(Arc::new(Away)));
+    let started = core
+        .factory
+        .start(
+            *super::tests::Adapter::new().handle.geometry.lock().unwrap(),
+            TerminalAppearanceUpdate::builtin().unwrap(),
+        )
+        .unwrap();
+    started.handle.set_presentable(true);
+    started.handle.interactive_focus(true, true);
+    admitted(&started);
+    (core, started)
+}
+
+fn admitted(started: &crate::terminal::StartedTerminalSession) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while started.handle.interactive_input() != InteractiveInput::Accepted {
+        assert!(Instant::now() < deadline, "the server never admitted input");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Types `text` while the server end holds input, and waits until it left this client.
+fn type_unconfirmed(
+    core: &ConnectedPane,
+    started: &crate::terminal::StartedTerminalSession,
+    text: &str,
+) {
+    core.start_loss.hold_input.store(true, Ordering::Release);
+    let before = core.traffic.totals()[0];
+    started.handle.key(KeyInput::text_input(text));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while core.traffic.totals()[0] == before {
+        assert!(Instant::now() < deadline, "the input never left the client");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Loses the connection and reconnects the same Terminal Session.
+fn lose_and_reconnect(core: &ConnectedPane, state: &CorePaneState) {
+    use spaceterm_core::connection::link::LinkError;
+    let generation = state.connection_generation();
+    core.factory.core.link().unwrap().fail(LinkError::Closed);
+    let until = Instant::now() + Duration::from_secs(8);
+    while state.connection_generation() == generation
+        && !matches!(state.status(), CorePaneStatus::Failed(_))
+    {
+        assert!(Instant::now() < until, "the loss was never noticed");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    core.start_loss.hold_input.store(false, Ordering::Release);
+    (core.reconnect)();
+    await_status(state, CorePaneStatus::Connected);
+}
+
+/// What the Pane's status is told once the reattached Session admits input.
+fn reattach_notice(
+    started: &crate::terminal::StartedTerminalSession,
+) -> Option<unsent::UnsentNotice> {
+    admitted(started);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let change = started.handle.take_unsent_input();
+        if change.notice.is_some() || Instant::now() >= deadline {
+            return change.notice;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// #902: after a lost connection the same Terminal Session tells the person, once, that what
+/// the Core never confirmed may not have been sent, and keeps it to copy. Nothing is resent.
+#[test]
+fn a_reattached_session_offers_what_a_lost_connection_left_unconfirmed() {
+    let (core, started) = typing_pane();
+    let state = Arc::clone(&core.factory.state);
+    type_unconfirmed(&core, &started, "make install");
+    lose_and_reconnect(&core, &state);
+    assert_eq!(
+        reattach_notice(&started),
+        Some(unsent::UnsentNotice {
+            interruption: unsent::Interruption::Connection,
+            input: unsent::UnsentInput {
+                delivery: unsent::Delivery::Unknown,
+                text: "make install".into(),
+            },
+        })
+    );
+    assert_eq!(
+        started.handle.take_unsent_input(),
+        Default::default(),
+        "it says so once"
+    );
+    drop(started);
+}
+
+/// Types `text` while the server end holds input, and waits until its key left this client.
+fn type_held_key(
+    core: &ConnectedPane,
+    started: &crate::terminal::StartedTerminalSession,
+    text: &str,
+) -> (protocol::Channel, u32) {
+    core.start_loss.hold_input.store(true, Ordering::Release);
+    let before = core.start_loss.held_keys.lock().unwrap().len();
+    started.handle.key(KeyInput::text_input(text));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(held) = core.start_loss.held_keys.lock().unwrap().get(before) {
+            return *held;
+        }
+        assert!(Instant::now() < deadline, "the key never left the client");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// The Core refuses the first of two keys in flight for an idle restart grant, and the worker
+/// sees the refusal while nothing else is queued. Both keys are kept, and the reattached
+/// Session offers all of what was typed.
+#[test]
+fn a_refusal_seen_while_idle_keeps_every_key_in_flight() {
+    use protocol::{CoreMessage, PaneMessage, frame::encode_core};
+    let (core, started) = typing_pane();
+    let state = Arc::clone(&core.factory.state);
+    let (channel, refused) = type_held_key(&core, &started, "git ");
+    type_held_key(&core, &started, "push");
+    let wire = encode_core(&CoreMessage::Pane(PaneMessage {
+        channel,
+        event: protocol::PaneEvent::InputRestarting {
+            channel,
+            serial: refused,
+        },
+    }))
+    .unwrap();
+    let link = core.factory.core.link().unwrap();
+    for bytes in &wire.frames {
+        link.receive(RawFrame::parse(bytes).unwrap(), Instant::now())
+            .unwrap();
+    }
+    core.start_loss.hold_input.store(false, Ordering::Release);
+    let notice = reattach_notice(&started).expect("the reattached Session says what was kept");
+    assert_eq!(notice.interruption, unsent::Interruption::Restart);
+    assert_eq!(notice.input.text, "git push", "no key in flight is lost");
+    drop(state);
+    drop(started);
+}
+
+/// Text typed at a hidden prompt is never kept, even when the prompt ended before the
+/// connection was lost. The loss is still reported.
+#[test]
+fn password_text_is_never_offered_after_a_lost_connection() {
+    let (core, started) = typing_pane();
+    let state = Arc::clone(&core.factory.state);
+    // The program reads a password, as `sudo` does, while the person types it.
+    state.hidden_input.store(true, Ordering::Release);
+    type_unconfirmed(&core, &started, "hunter2");
+    // The prompt ended before the connection was lost.
+    state.hidden_input.store(false, Ordering::Release);
+    lose_and_reconnect(&core, &state);
+    let notice = reattach_notice(&started).expect("the loss is reported");
+    assert_eq!(notice.input.text, "", "the password is never kept");
+    assert_eq!(notice.input.delivery, unsent::Delivery::Unknown);
+    drop(started);
+}
+
+/// Closing the window is no lost connection: the link carries the input ahead of the detach,
+/// so nothing is kept to offer again.
+#[test]
+fn closing_the_window_keeps_nothing_to_offer() {
+    let (core, started) = typing_pane();
+    let state = Arc::clone(&core.factory.state);
+    type_unconfirmed(&core, &started, "make install");
+    drop(started);
+    // The worker leaves when its presentation is dismissed.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(state.unsent_input(), None);
+    assert_eq!(state.take_unsent_notice().notice, None);
 }
 
 #[test]

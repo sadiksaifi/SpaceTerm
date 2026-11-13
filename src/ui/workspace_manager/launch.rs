@@ -17,16 +17,21 @@ use spaceterm_ui::{Button, ProgressRing, ProgressSize, ProgressState};
 use super::WorkspaceManager;
 use crate::machine_connection::{CoreError, MachineConnection};
 use crate::platform::local_filesystem::LocalFilesystemAuthority;
+use crate::ui::chrome_typography::ChromeTextStyleExt as _;
 use crate::ui::pane_lifecycle::PaneConstruction;
 use crate::ui::settings_window::{AuthorizationPrompt, AuthorizedRequest};
 use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
+use crate::updates::copy::pane::{AppRelease, BlockedAction};
+use spaceterm_core::protocol::version::Incompatible;
 
 pub(super) const LAUNCH_SELECTOR: &str = "server-launch";
 pub(super) const LAUNCH_START_SELECTOR: &str = "server-launch-start";
 pub(super) const LAUNCH_AUTHORIZE_SELECTOR: &str = "server-launch-authorize";
 pub(super) const LAUNCH_RETRY_SELECTOR: &str = "server-launch-retry";
 pub(super) const LAUNCH_SETTINGS_SELECTOR: &str = "server-launch-settings";
-pub(super) const LAUNCH_UPDATE_SELECTOR: &str = "server-launch-update";
+pub(super) const LAUNCH_RESTART_CORE_SELECTOR: &str = "server-launch-restart-core";
+pub(super) const LAUNCH_RELAUNCH_SELECTOR: &str = "server-launch-relaunch";
+pub(super) const LAUNCH_DOWNLOAD_SELECTOR: &str = "server-launch-download";
 pub(super) const LAUNCH_LOGIN_ITEMS_SELECTOR: &str = "server-launch-login-items";
 const LAUNCH_QUIET_SELECTOR: &str = "server-launch-quiet";
 /// The launch alert's first action, the launch screen's default one.
@@ -76,9 +81,6 @@ pub(crate) trait LocalLaunch: Send + Sync {
     /// Waits for the service operation a run answered `ServiceBusy` for. It fails with
     /// `ServiceBusy` only when the operation outlasts the server's bounded wait.
     fn wait_for_service(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<(), CoreError>;
-    /// Whether this SpaceTerm includes a verified server build other than the approved one.
-    /// Reads only: it stages, installs, and starts nothing.
-    fn update_offered(&self) -> bool;
 }
 
 /// The Workspaces a ready server presents, and the connection that retains this client's views.
@@ -170,11 +172,6 @@ impl LocalLaunch for AccountLaunch {
         Self::service()?
             .enable_linger(crate::machine_connection::service::LingerAuthorization::Desktop)
     }
-
-    fn update_offered(&self) -> bool {
-        // The same offer the Server version row makes, so both surfaces agree.
-        Self::service().is_ok_and(|service| crate::ui::settings_window::update_offered(&service))
-    }
 }
 
 struct AccountConnector;
@@ -238,12 +235,9 @@ pub(super) enum LaunchState {
     /// macOS waits for them to approve it. System Settings shows both the same way, and the
     /// person turns it on there in both.
     LoginItemOff,
-    /// This client refused the server, which keeps running with its Terminal Sessions.
-    /// `update` is whether this SpaceTerm includes a verified server build to update it to.
-    Incompatible {
-        reason: CoreError,
-        update: bool,
-    },
+    /// This client refused the server, which keeps running with its Terminal Sessions. The
+    /// protocol majors say which side is too old.
+    Incompatible(Incompatible),
     Ready,
 }
 
@@ -254,8 +248,15 @@ pub(super) enum LaunchAction {
     Authorize,
     Retry,
     Settings,
-    /// Opens Settings on Servers and starts the Update Server journey there.
-    Update,
+    /// Restarts this computer's SpaceTerm Core into its downloaded version, after its fresh
+    /// preview and, when `asks`, the person's confirmation.
+    RestartCore {
+        asks: bool,
+    },
+    /// Relaunches SpaceTerm into its downloaded update.
+    RelaunchToUpdate,
+    /// Downloads SpaceTerm's available update.
+    DownloadUpdate,
     /// Opens System Settings at Login Items & Extensions.
     OpenLoginItems,
 }
@@ -267,7 +268,9 @@ impl LaunchAction {
             Self::Authorize => "Authorize\u{2026}",
             Self::Retry => "Try Again",
             Self::Settings => "Machine Settings\u{2026}",
-            Self::Update => "Update SpaceTerm Core\u{2026}",
+            Self::RestartCore { asks } => BlockedAction::RestartCore { asks }.label(),
+            Self::RelaunchToUpdate => BlockedAction::RelaunchToUpdate.label(),
+            Self::DownloadUpdate => BlockedAction::DownloadUpdate.label(),
             Self::OpenLoginItems => "Open Login Items",
         }
     }
@@ -278,7 +281,9 @@ impl LaunchAction {
             Self::Authorize => LAUNCH_AUTHORIZE_SELECTOR,
             Self::Retry => LAUNCH_RETRY_SELECTOR,
             Self::Settings => LAUNCH_SETTINGS_SELECTOR,
-            Self::Update => LAUNCH_UPDATE_SELECTOR,
+            Self::RestartCore { .. } => LAUNCH_RESTART_CORE_SELECTOR,
+            Self::RelaunchToUpdate => LAUNCH_RELAUNCH_SELECTOR,
+            Self::DownloadUpdate => LAUNCH_DOWNLOAD_SELECTOR,
             Self::OpenLoginItems => LAUNCH_LOGIN_ITEMS_SELECTOR,
         }
     }
@@ -321,6 +326,9 @@ pub(super) struct LaunchPresentation {
     /// The window is only waiting for the server: nothing failed and nothing asks the person to
     /// act, so a short wait need not be presented at all.
     pub(super) waiting: bool,
+    /// The protocol refusal that blocks the Workspaces, which the Core's update facts and
+    /// SpaceTerm's own update explain further when the screen renders.
+    pub(super) blocked: Option<Incompatible>,
 }
 
 pub(super) const OPENING_TITLE: &str = "Opening Workspaces";
@@ -347,11 +355,12 @@ pub(super) const LOGIN_ITEM_OFF_TITLE: &str = "SpaceTerm Core is off in Login It
 /// The title for a launch that could not finish. The detail names the exact reason.
 const fn failure_title(error: CoreError) -> &'static str {
     match error {
-        CoreError::IncompatibleState | CoreError::IncompatibleProtocol(_) => {
-            "Incompatible SpaceTerm Core"
+        CoreError::IncompatibleProtocol(incompatible) => {
+            crate::updates::copy::pane::blocked_title(incompatible)
         }
+        CoreError::IncompatibleState => "Incompatible SpaceTerm Core",
         CoreError::ActivationUnresolved => "SpaceTerm Core Update Unfinished",
-        CoreError::CandidateChanged => "Restart SpaceTerm",
+        CoreError::CandidateChanged => crate::updates::copy::pane::RELAUNCH_SPACETERM,
         CoreError::CandidateMissing => "SpaceTerm Core Not Included",
         CoreError::RuntimeUnavailable => "Couldn\u{2019}t Verify SpaceTerm Core",
         CoreError::UnsafeStorage => "Unsafe SpaceTerm Core Storage",
@@ -397,22 +406,17 @@ const fn incompatible(error: CoreError) -> bool {
     matches!(error, CoreError::IncompatibleProtocol(_))
 }
 
-/// What launch presents for a failure. A refused server offers the update journey only when a
-/// read found a verified build to update it to.
-const fn failed(error: CoreError, update: bool) -> LaunchState {
-    if incompatible(error) {
-        LaunchState::Incompatible {
-            reason: error,
-            update,
-        }
-    } else {
-        LaunchState::Failed(error)
+/// What launch presents for a failure.
+const fn failed(error: CoreError) -> LaunchState {
+    match error {
+        CoreError::IncompatibleProtocol(incompatible) => LaunchState::Incompatible(incompatible),
+        error => LaunchState::Failed(error),
     }
 }
 
 /// `place` is the host's name for this computer, such as "This Mac".
 pub(super) fn present(state: LaunchState, place: &str) -> LaunchPresentation {
-    use LaunchAction::{Authorize, OpenLoginItems, Retry, Settings, Start, Update};
+    use LaunchAction::{Authorize, OpenLoginItems, Retry, Settings, Start};
     let failure = Some(LaunchIcon::Failure);
     let fixed = SharedString::new_static;
     match state {
@@ -423,6 +427,7 @@ pub(super) fn present(state: LaunchState, place: &str) -> LaunchPresentation {
             actions: &[],
             icon: None,
             waiting: true,
+            blocked: None,
         },
         LaunchState::Working(LaunchStep::Start) => LaunchPresentation {
             title: STOPPED_TITLE,
@@ -431,6 +436,7 @@ pub(super) fn present(state: LaunchState, place: &str) -> LaunchPresentation {
             actions: &[],
             icon: None,
             waiting: false,
+            blocked: None,
         },
         LaunchState::Working(LaunchStep::Authorize) => LaunchPresentation {
             title: AUTHORIZATION_TITLE,
@@ -439,6 +445,7 @@ pub(super) fn present(state: LaunchState, place: &str) -> LaunchPresentation {
             actions: &[],
             icon: None,
             waiting: false,
+            blocked: None,
         },
         // Nothing failed and nothing asks the person to act, so the screen offers no action.
         LaunchState::Working(LaunchStep::WaitForService) => LaunchPresentation {
@@ -448,6 +455,7 @@ pub(super) fn present(state: LaunchState, place: &str) -> LaunchPresentation {
             actions: &[],
             icon: None,
             waiting: false,
+            blocked: None,
         },
         LaunchState::Stopped => LaunchPresentation {
             title: STOPPED_TITLE,
@@ -456,6 +464,7 @@ pub(super) fn present(state: LaunchState, place: &str) -> LaunchPresentation {
             actions: &[Start],
             icon: Some(LaunchIcon::Stopped),
             waiting: false,
+            blocked: None,
         },
         // The wording claims no one's choice: the person may have turned it off, or never
         // approved it. Either way it is a state to change, not a fault, so nothing warns.
@@ -466,6 +475,7 @@ pub(super) fn present(state: LaunchState, place: &str) -> LaunchPresentation {
             actions: &[OpenLoginItems],
             icon: Some(LaunchIcon::Stopped),
             waiting: false,
+            blocked: None,
         },
         LaunchState::AuthorizationRequired { declined } => LaunchPresentation {
             title: if declined {
@@ -484,26 +494,27 @@ pub(super) fn present(state: LaunchState, place: &str) -> LaunchPresentation {
             actions: &[Authorize, Settings],
             icon: Some(LaunchIcon::Authorization),
             waiting: false,
+            blocked: None,
         },
-        LaunchState::Incompatible { reason, update } => {
-            let detail = if update {
-                "Updating SpaceTerm Core ends its Terminal Sessions for every client."
-            } else {
-                "SpaceTerm and this SpaceTerm Core are incompatible."
-            };
-            LaunchPresentation {
-                title: failure_title(reason),
-                detail: fixed(detail),
-                progress: None,
-                actions: if update {
-                    &[Update, Retry]
-                } else {
-                    &[Retry, Settings]
-                },
-                icon: failure,
-                waiting: false,
-            }
-        }
+        // The protocol major says which side is older. SpaceTerm pushes its included build to a
+        // Core too old for it without a click, so the screen offers Restart Core once that build
+        // is downloaded, from the facts it renders with.
+        LaunchState::Incompatible(incompatible) => LaunchPresentation {
+            title: failure_title(CoreError::IncompatibleProtocol(incompatible)),
+            detail: crate::updates::copy::pane::blocked(
+                incompatible,
+                place,
+                None,
+                AppRelease::None,
+            )
+            .detail
+            .into(),
+            progress: None,
+            actions: &[Retry, Settings],
+            icon: failure,
+            waiting: false,
+            blocked: Some(incompatible),
+        },
         LaunchState::Failed(error) => LaunchPresentation {
             title: failure_title(error),
             detail: failure_detail(error),
@@ -517,6 +528,7 @@ pub(super) fn present(state: LaunchState, place: &str) -> LaunchPresentation {
             },
             icon: failure,
             waiting: false,
+            blocked: None,
         },
     }
 }
@@ -555,8 +567,8 @@ pub(super) struct LocalLaunchState {
     _views_read: Option<Task<()>>,
     /// The open connection's refusal and whether a verified build can update its server. Read
     /// once per refusal, off the event thread; `false` until the read answers.
-    refusal_offer: Option<(CoreError, bool)>,
-    _refusal_offer: Option<Task<()>>,
+    /// Repaints a blocked screen when the Core's update facts or SpaceTerm's own update change.
+    _blocked_updates: Vec<gpui::Subscription>,
     /// New Workspace was chosen with no Workspace Window open. The window opened for it creates
     /// the Workspace once this computer's server presents its Workspaces.
     create_when_presented: bool,
@@ -584,8 +596,7 @@ impl LocalLaunchState {
             spoke: std::cell::Cell::new(false),
             _quiet: None,
             _views_read: None,
-            refusal_offer: None,
-            _refusal_offer: None,
+            _blocked_updates: Vec::new(),
             create_when_presented: false,
             reconnect_from: std::cell::Cell::new(None),
         }
@@ -624,8 +635,6 @@ impl Drop for LocalLaunchState {
 enum StepResult {
     Outcome(LaunchOutcome),
     Failed(CoreError),
-    /// The client refused the server. `update` is whether a verified build can update it.
-    Incompatible(CoreError, bool),
     /// The person's authorization did not complete.
     Declined,
 }
@@ -658,7 +667,7 @@ pub(crate) fn resume_waiting_launches(cx: &mut App) {
                     | LaunchState::AuthorizationRequired { .. }
                     | LaunchState::Failed(_)
                     | LaunchState::LoginItemOff
-                    | LaunchState::Incompatible { .. }
+                    | LaunchState::Incompatible(_)
             ) && manager.launch._task.is_none()
             {
                 manager.run_local_launch(None, window, cx);
@@ -749,9 +758,6 @@ impl WorkspaceManager {
             let observed = move || cancelled.load(Ordering::Acquire);
             match adapter.run(&observed) {
                 Ok(outcome) => StepResult::Outcome(outcome),
-                Err(error) if incompatible(error) => {
-                    StepResult::Incompatible(error, adapter.update_offered())
-                }
                 Err(error) => StepResult::Failed(error),
             }
         });
@@ -785,13 +791,15 @@ impl WorkspaceManager {
             }
             StepResult::Declined => LaunchState::AuthorizationRequired { declined: true },
             StepResult::Failed(CoreError::Stopped) => LaunchState::Stopped,
-            StepResult::Failed(error) => LaunchState::Failed(error),
-            StepResult::Incompatible(error, update) => failed(error, update),
+            StepResult::Failed(error) => failed(error),
             // Only a closing window cancels, so there is nothing left to present.
             StepResult::Outcome(LaunchOutcome::Cancelled) => return,
         };
         self.launch.state = state;
         self.launch._task = None;
+        if matches!(state, LaunchState::Incompatible(_)) {
+            self.follow_blocked_updates(cx);
+        }
         let was_turned_off = std::mem::replace(
             &mut self.launch.turned_off,
             state == LaunchState::LoginItemOff,
@@ -803,7 +811,7 @@ impl WorkspaceManager {
                     | LaunchState::AuthorizationRequired { .. }
                     | LaunchState::Failed(_)
                     | LaunchState::LoginItemOff
-                    | LaunchState::Incompatible { .. }
+                    | LaunchState::Incompatible(_)
             )
         {
             self.run_local_launch(None, window, cx);
@@ -982,13 +990,7 @@ impl WorkspaceManager {
                     Some(CoreError::ServiceBusy) => {
                         LaunchState::Working(LaunchStep::WaitForService)
                     }
-                    // An open connection's refusal offers what the Server version row offers.
-                    Some(error) if ends_opening(error) => failed(
-                        error,
-                        self.launch
-                            .refusal_offer
-                            .is_some_and(|(refused, update)| refused == error && update),
-                    ),
+                    Some(error) if ends_opening(error) => failed(error),
                     // The connection retries an interruption by itself, so opening goes on.
                     _ => LaunchState::Launching,
                 },
@@ -1013,42 +1015,37 @@ impl WorkspaceManager {
     /// Reads whether a verified build can update a server the open connection refused before
     /// its first inventory. Admission can succeed before Pane negotiation refuses a required
     /// capability, so this refusal reads the same offer launch reads, once per refusal.
-    pub(super) fn read_refusal_offer(&mut self, cx: &mut Context<Self>) {
+    /// Repaints the launch screen while it explains a protocol refusal, as the Core's download
+    /// and SpaceTerm's own update progress.
+    fn follow_blocked_updates(&mut self, cx: &mut Context<Self>) {
+        if !self.launch._blocked_updates.is_empty() {
+            return;
+        }
+        if let Some(store) = crate::updates::machines::store::MachineUpdates::global(cx) {
+            self.launch
+                ._blocked_updates
+                .push(cx.observe(&store, |_, _, cx| cx.notify()));
+        }
+        if let Some(service) = cx.try_global::<crate::updates::UpdateService>() {
+            let updates = service.0.clone();
+            self.launch
+                ._blocked_updates
+                .push(cx.observe(&updates, |_, _, cx| cx.notify()));
+        }
+    }
+
+    /// Follows the update facts and SpaceTerm's own update while the open connection's refusal
+    /// blocks this computer's Workspaces before their first inventory.
+    pub(super) fn follow_refusal(&mut self, cx: &mut Context<Self>) {
         let refused = self
             .binding
             .local()
             .filter(|binding| binding.latest_inventory().is_none())
             .and_then(|binding| binding.connection_error())
-            .filter(|error| incompatible(*error));
-        let Some(error) = refused else {
-            self.launch.refusal_offer = None;
-            self.launch._refusal_offer = None;
-            return;
-        };
-        if self
-            .launch
-            .refusal_offer
-            .is_some_and(|(read, _)| read == error)
-        {
-            return;
+            .is_some_and(incompatible);
+        if refused {
+            self.follow_blocked_updates(cx);
         }
-        self.launch.refusal_offer = Some((error, false));
-        let adapter = Arc::clone(&self.launch.adapters.launch);
-        let offered = cx.background_spawn(async move { adapter.update_offered() });
-        self.launch._refusal_offer = Some(cx.spawn(async move |manager, cx| {
-            let update = offered.await;
-            let _ = manager.update(cx, |manager, cx| {
-                // A later refusal reads its own offer.
-                if manager
-                    .launch
-                    .refusal_offer
-                    .is_some_and(|(read, _)| read == error)
-                {
-                    manager.launch.refusal_offer = Some((error, update));
-                    cx.notify();
-                }
-            });
-        }));
     }
 
     /// Whether the stage presents nothing for `presentation` now: the window's first launch is
@@ -1076,6 +1073,34 @@ impl WorkspaceManager {
 
     /// The launch screen's message and actions, centered in the empty stage. Return runs the
     /// default action, as it does for a dialog's default button.
+    /// What blocks this computer's Workspaces, from its Core's latest update facts and
+    /// SpaceTerm's own update.
+    fn blocked_launch(
+        &self,
+        incompatible: Incompatible,
+        cx: &App,
+    ) -> crate::updates::copy::pane::Blocked {
+        crate::ui::core_pane::blocked_surface(
+            incompatible,
+            self.launch.place,
+            |machine| machine.local,
+            cx,
+        )
+        .0
+    }
+
+    /// This computer's Machine in the shared update store.
+    fn local_machine(&self, cx: &App) -> Option<crate::updates::machines::MachineId> {
+        crate::updates::machines::store::MachineUpdates::global(cx).and_then(|store| {
+            store
+                .read(cx)
+                .machines()
+                .iter()
+                .find(|machine| machine.local)
+                .map(|machine| machine.machine)
+        })
+    }
+
     pub(super) fn render_launch_message(
         &self,
         presentation: LaunchPresentation,
@@ -1090,10 +1115,31 @@ impl WorkspaceManager {
             actions,
             icon,
             waiting: _,
+            blocked,
         } = presentation;
+        let mut detail = detail;
+        let mut progress = progress.map(SharedString::new_static);
+        let mut actions = actions.to_vec();
+        // A blocked screen's download is news the detail does not carry, so it shows in text.
+        let progress_shown = blocked.is_some();
+        if let Some(incompatible) = blocked {
+            let blocked = self.blocked_launch(incompatible, cx);
+            detail = blocked.detail.into();
+            progress = blocked.progress.map(SharedString::from);
+            if let Some(action) = blocked.action {
+                actions = vec![
+                    match action {
+                        BlockedAction::RestartCore { asks } => LaunchAction::RestartCore { asks },
+                        BlockedAction::RelaunchToUpdate => LaunchAction::RelaunchToUpdate,
+                        BlockedAction::DownloadUpdate => LaunchAction::DownloadUpdate,
+                    },
+                    LaunchAction::Retry,
+                ];
+            }
+        }
         self.launch.spoke.set(true);
-        let message: SharedString = match progress {
-            Some(progress) => progress.into(),
+        let message: SharedString = match &progress {
+            Some(progress) => progress.clone(),
             None if detail.is_empty() => title.into(),
             None => format!("{title}. {detail}").into(),
         };
@@ -1135,21 +1181,44 @@ impl WorkspaceManager {
                 state.link(button)
             };
         }
-        // The detail already says what launch waits for, so the progress label is spoken only.
+        // Otherwise the detail already says what launch waits for, so the progress label is
+        // spoken only.
         if let Some(progress) = progress {
-            state = state.footer(
-                div()
-                    .debug_selector(|| format!("{LAUNCH_SELECTOR}-progress"))
-                    .mt(appearance.spacing(12.0))
-                    .child(
-                        ProgressRing::new(
-                            "server-launch-progress",
-                            progress,
-                            ProgressState::Indeterminate,
+            let footer = div()
+                .debug_selector(|| format!("{LAUNCH_SELECTOR}-progress"))
+                .mt(appearance.spacing(12.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(appearance.spacing(6.0))
+                .child(
+                    ProgressRing::new(
+                        "server-launch-progress",
+                        progress.clone(),
+                        ProgressState::Indeterminate,
+                    )
+                    .size(ProgressSize::Compact),
+                );
+            state = state.footer(if progress_shown {
+                footer.child(
+                    div()
+                        .debug_selector(|| format!("{LAUNCH_SELECTOR}-progress-label"))
+                        .chrome_text(
+                            appearance
+                                .typography
+                                .style(crate::ui::chrome_typography::TextRole::Secondary),
                         )
-                        .size(ProgressSize::Compact),
-                    ),
-            );
+                        .text_color(crate::ui::appearance::gpui_color(
+                            appearance.colors.text_secondary,
+                        ))
+                        .child(gpui::Text::new(
+                            "server-launch-progress-label".into(),
+                            progress.clone(),
+                        )),
+                )
+            } else {
+                footer
+            });
         }
         let default = actions.first().copied();
         let owner = cx.weak_entity();
@@ -1305,9 +1374,21 @@ impl WorkspaceManager {
                 Some(crate::ui::settings_window::SettingsSectionId::Machines),
                 cx,
             ),
-            // The journey reads the server again and asks before it changes anything. A
-            // finished update runs launch again in every waiting window.
-            LaunchAction::Update => crate::ui::settings_window::open_core_update(cx),
+            LaunchAction::RestartCore { asks } => crate::ui::core_pane::perform_blocked_action(
+                BlockedAction::RestartCore { asks },
+                self.local_machine(cx),
+                cx,
+            ),
+            LaunchAction::RelaunchToUpdate => crate::ui::core_pane::perform_blocked_action(
+                BlockedAction::RelaunchToUpdate,
+                None,
+                cx,
+            ),
+            LaunchAction::DownloadUpdate => crate::ui::core_pane::perform_blocked_action(
+                BlockedAction::DownloadUpdate,
+                None,
+                cx,
+            ),
             // Launch runs again when the person comes back to this window.
             LaunchAction::OpenLoginItems => self.launch.adapters.launch.open_login_items(),
             LaunchAction::Start if ready => {
@@ -1427,17 +1508,11 @@ pub(crate) mod testing {
         steps: Mutex<Vec<&'static str>>,
         start: Mutex<Option<CoreError>>,
         authorize: Mutex<Option<CoreError>>,
-        /// Whether a verified build can update a refused server.
-        update: Mutex<bool>,
         /// Each background item read in order. It is on once the queue is empty.
         background_item_off: Mutex<VecDeque<bool>>,
     }
 
     impl ScriptedLaunch {
-        /// Offers a verified server build when a run refuses the server.
-        pub(crate) fn offer_update(&self) {
-            *self.update.lock().unwrap() = true;
-        }
         pub(crate) fn answer(&self, result: Result<LaunchOutcome, CoreError>) {
             self.runs.lock().unwrap().push_back(result);
         }
@@ -1453,8 +1528,8 @@ pub(crate) mod testing {
         pub(crate) fn refuse_authorization(&self, error: CoreError) {
             *self.authorize.lock().unwrap() = Some(error);
         }
-        /// Every step in order: `run`, `start`, `authorize`, `wait_for_service`,
-        /// `update_offered`, and `open_login_items`.
+        /// Every step in order: `run`, `start`, `authorize`, `wait_for_service`, and
+        /// `open_login_items`.
         pub(crate) fn steps(&self) -> Vec<&'static str> {
             self.steps.lock().unwrap().clone()
         }
@@ -1484,10 +1559,6 @@ pub(crate) mod testing {
         fn wait_for_service(&self, _: &(dyn Fn() -> bool + Sync)) -> Result<(), CoreError> {
             self.steps.lock().unwrap().push("wait_for_service");
             Ok(())
-        }
-        fn update_offered(&self) -> bool {
-            self.steps.lock().unwrap().push("update_offered");
-            *self.update.lock().unwrap()
         }
         fn background_item_off(&self) -> bool {
             self.background_item_off

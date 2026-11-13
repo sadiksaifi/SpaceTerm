@@ -32,7 +32,16 @@ impl RetainedWorkspaceOrder {
         let worker = std::thread::Builder::new()
             .name("spaceterm-workspace-order".into())
             .spawn(move || {
-                let opened = core.workspace_order_store();
+                let opened = match core.workspace_order_store_cancellable(&|| {
+                    shared.lock().unwrap_or_else(|e| e.into_inner()).closed
+                }) {
+                    Ok(Some(store)) => Ok(store),
+                    Ok(None) => return,
+                    Err(error) => {
+                        eprintln!("spaceterm_startup_failure classification=WorkspaceOrderRead error={error:?} attempts=1");
+                        Err(error)
+                    }
+                };
                 shared.lock().unwrap_or_else(|e| e.into_inner()).loaded = Some(
                     opened
                         .as_ref()

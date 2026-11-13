@@ -710,6 +710,8 @@ pub(crate) struct TabView {
     directory_recovery: Option<Entity<super::core_pane::DirectoryRecovery>>,
     /// Reads every Pane's connection status while the Tab lives.
     _workspace_status: gpui::Task<()>,
+    /// Repaints a blocked Pane's notice as the Core's download and SpaceTerm's own update move.
+    _blocked_updates: Vec<gpui::Subscription>,
 }
 
 impl TabView {
@@ -755,6 +757,22 @@ impl TabView {
 
         binding.register(initial_pane_id, root.0, root.1, cx.focus_handle());
         let changes = binding.changes();
+        let mut blocked_updates = Vec::new();
+        if let Some(store) = crate::updates::machines::store::MachineUpdates::global(cx) {
+            blocked_updates.push(cx.observe(&store, |view: &mut Self, _, cx| {
+                if view.binding.any_pane_blocked() {
+                    cx.notify();
+                }
+            }));
+        }
+        if let Some(service) = cx.try_global::<crate::updates::UpdateService>() {
+            let updates = service.0.clone();
+            blocked_updates.push(cx.observe(&updates, |view: &mut Self, _, cx| {
+                if view.binding.any_pane_blocked() {
+                    cx.notify();
+                }
+            }));
+        }
         let mut view = Self {
             tab,
             focus_epoch: 0,
@@ -790,6 +808,7 @@ impl TabView {
             binding,
             parked_panes: BTreeMap::new(),
             directory_recovery: None,
+            _blocked_updates: blocked_updates,
             _workspace_status: cx.spawn_in(window, async move |view, cx| {
                 while changes.recv().await.is_ok() {
                     if view
@@ -3206,6 +3225,7 @@ impl TabView {
                     core_pane::ScreenActions {
                         primary: action,
                         link: None,
+                        supplement: None,
                     },
                     status,
                     pane.announcements(),
@@ -3257,6 +3277,23 @@ impl TabView {
                             view.request_close_pane(pane_id, cx);
                         });
                     });
+                // What the person typed as a restart ended the Session goes only to the
+                // clipboard, at their click. Nothing sends it, because it can hold Return.
+                let copy_typed = copy.typed.clone().map(|typed| {
+                    Button::new(
+                        selector("copy-typed-text"),
+                        crate::updates::copy::pane::COPY_TYPED_TEXT,
+                    )
+                    .variant(ButtonVariant::Secondary)
+                    .tab_stop(true)
+                    .accessibility_description(
+                        crate::updates::copy::pane::COPY_TYPED_TEXT_DESCRIPTION,
+                    )
+                    .debug_selector(selector("copy-typed-text"))
+                    .on_activate(move |_, _, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(typed.to_string()));
+                    })
+                });
                 core_pane::render_screen(
                     selector(copy.screen),
                     core_pane::ScreenCopy::new(copy.title, copy.detail)
@@ -3265,6 +3302,7 @@ impl TabView {
                     core_pane::ScreenActions {
                         primary: Some(action),
                         link: Some(close),
+                        supplement: copy_typed,
                     },
                     status,
                     pane.announcements(),
@@ -3362,14 +3400,44 @@ impl TabView {
         // Start SpaceTerm Core reaches only this computer's server. Another computer's stopped server
         // is started there, so its Pane explains that and offers nothing.
         let remote = self.binding.sessions().remote_name();
+        // A protocol refusal blocks the Pane until one side updates. The shared update store
+        // says how far the Core's download got, and SpaceTerm's own update says what it offers.
+        let blocked = pane.blocked().map(|incompatible| {
+            let paired = self.binding.sessions().direct_route().and_then(|direct| {
+                crate::ui::direct_machines::installed(cx)
+                    .and_then(|connections| connections.route(&direct.route))
+                    .map(|route| route.paired.pin.core)
+            });
+            let name = self.binding.sessions().machine_name();
+            core_pane::blocked_surface(
+                incompatible,
+                &name,
+                |machine| match paired {
+                    Some(id) => machine.machine == id,
+                    None => machine.local && remote.is_none(),
+                },
+                cx,
+            )
+        });
         let notice = pane.notice().map(|(title, detail, intent)| {
-            let detail = match &remote {
-                Some(name) if pane.core_stopped() => gpui::SharedString::from(format!(
+            let detail = match (&remote, &blocked) {
+                (Some(name), _) if pane.core_stopped() => gpui::SharedString::from(format!(
                     "Start SpaceTerm Core on \u{201C}{name}\u{201D} to use this Pane again."
                 )),
+                (_, Some((blocked, _))) => match &blocked.progress {
+                    Some(progress) => format!("{} {progress}", blocked.detail).into(),
+                    None => blocked.detail.clone().into(),
+                },
                 _ => detail,
             };
-            let retry = if pane.core_stopped() {
+            let blocked_action = blocked.as_ref().and_then(|(blocked, machine)| {
+                blocked.action.map(|action| {
+                    core_pane::blocked_button(selector("blocked-action"), action, *machine)
+                })
+            });
+            let retry = if let Some(action) = blocked_action {
+                Some(action)
+            } else if pane.core_stopped() {
                 remote.is_none().then(|| {
                     core_pane::start_core_button(
                         selector("start-server"),

@@ -1,6 +1,6 @@
 # Freeze terminal screens while reconnecting
 
-Unexpected connection loss freezes the last terminal screen with "Reconnecting…" and Try Again. Automatic recovery uses bounded backoff with input disabled. Interrupted input is discarded and never replayed.
+Unexpected connection loss freezes the last terminal screen with "Reconnecting…" and Try Again. An announced SpaceTerm Core restart is not an unexpected loss. Until its 180-second restart deadline the Pane keeps its frozen screen with input disabled and shows no notice. After the deadline the reconnect notice applies. Automatic recovery uses bounded backoff with input disabled. Interrupted input is discarded and never replayed.
 
 Protocol failures and unconfirmed shell starts have a bounded recovery episode that retains the original typed cause across later transport failures. Sustained healthy traffic on the live connection renews recovery. Persistent failure presents its cause and explicit controls. Try Again observes passively; it never starts a replacement shell, restarts or updates SpaceTerm Core. An unconfirmed shell start remains guarded until its original outcome or evidence from the SpaceTerm Core run settles it.
 

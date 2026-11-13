@@ -1,6 +1,8 @@
-//! Performs what an update surface's click asks for: the desktop's own update, a Machine action,
-//! the agreed confirmation before closing sessions, or an alert with the full sentence. Normal
-//! update actions never open Settings.
+//! Performs what an update surface's click asks for, one command per action on every surface:
+//! the desktop's own update, a Machine action, the confirmation before a restart ends Terminal
+//! Sessions, or the alert of a failure the person opened. Only a click that a Machine refuses at
+//! once opens an alert unasked, because the person is waiting on that click. Normal update
+//! actions never open Settings.
 
 use std::rc::Rc;
 
@@ -11,11 +13,13 @@ use spaceterm_ui::{
 };
 
 use super::{UpdateControl, front_workspace_window, service, whats_new};
+use crate::updates::confirm::{Confirmation, Explanation};
 use crate::updates::machines::store::{self, MachineUpdates, MachineUpdatesNotice, Surface};
 use crate::updates::machines::{ActionFailure, MachineAction, MachineId};
-use crate::updates::presentation::{
-    self, Command, Confirmation, DesktopAction, Explanation, ItemKey,
-};
+use crate::updates::state::{self, Command, DesktopAction, Target};
+
+const OK: &str = "OK";
+const CANCEL: &str = "Cancel";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Answer {
@@ -26,7 +30,7 @@ pub(super) enum Answer {
 /// Where a command's alert appears.
 #[derive(Clone)]
 pub(crate) enum Presenter {
-    /// The front Workspace Window, for a notification or a failure report.
+    /// The front Workspace Window, for a notification or a refusal.
     Front,
     /// The window of the title-bar control that ran the command, which owns the alert.
     Control(AnyWindowHandle, WeakEntity<UpdateControl>),
@@ -39,7 +43,13 @@ pub(crate) fn perform(command: Command, presenter: Presenter, cx: &mut App) {
 
 fn perform_now(command: Command, presenter: Presenter, cx: &mut App) {
     match command {
-        Command::Desktop(DesktopAction::Update) => update_desktop(cx),
+        // Relaunch to Update: SpaceTerm relaunches at once and never asks.
+        Command::Desktop(DesktopAction::Update) => {
+            if let Some(updates) = service(cx) {
+                updates.update(cx, |updates, cx| updates.relaunch(cx));
+            }
+        }
+        // Download: downloads only. Relaunching stays a separate step.
         Command::Desktop(DesktopAction::Download) => {
             if let Some(updates) = service(cx) {
                 updates.update(cx, |updates, cx| updates.download_now(cx));
@@ -61,17 +71,9 @@ fn perform_now(command: Command, presenter: Presenter, cx: &mut App) {
                 });
             }
         }
-        // The confirmation is built again from the Cores' previews before it shows.
-        Command::Confirm(confirmation) => request(confirmation.actions, false, presenter, cx),
         Command::Explain(explanation) => explain(explanation, presenter, cx),
-    }
-}
-
-/// Relaunches into a ready release without asking, or downloads it first and relaunches once it
-/// is ready.
-fn update_desktop(cx: &mut App) {
-    if let Some(updates) = service(cx) {
-        updates.update(cx, |updates, cx| updates.relaunch(cx));
+        // The title-bar pill opens its own list; no other surface offers this command.
+        Command::ShowList => {}
     }
 }
 
@@ -127,7 +129,8 @@ fn present_alert<T: 'static>(
     }
 }
 
-/// The destructive button performs every action. Cancel and Escape change nothing.
+/// D1 and D2: the destructive button performs every action. Return never confirms it: Cancel
+/// is the safe answer, and Cancel and Escape change nothing.
 pub(super) fn confirmation_alert(confirmation: &Confirmation) -> Alert<Answer> {
     Alert::new(
         ModalId::new("update-confirm"),
@@ -141,11 +144,10 @@ pub(super) fn confirmation_alert(confirmation: &Confirmation) -> Alert<Answer> {
                 ModalActionRole::Affirmative,
                 "update-confirm-proceed",
             )
-            .with_intent(ModalActionIntent::Destructive)
-            .with_emphasis(ModalActionEmphasis::Prominent),
+            .with_intent(ModalActionIntent::Destructive),
             button(
                 Answer::Cancel,
-                "Cancel",
+                confirmation.cancel.clone(),
                 ModalActionRole::Cancel,
                 "update-confirm-cancel",
             ),
@@ -154,7 +156,8 @@ pub(super) fn confirmation_alert(confirmation: &Confirmation) -> Alert<Answer> {
     .intent(AlertIntent::Critical)
 }
 
-/// Restarts or stops on the Cores' own previews, confirming through `presenter`.
+/// Restarts or stops on the Cores' own previews, confirming through `presenter`. The store
+/// records Cancel's deferral for the Ask stage itself.
 fn request(
     actions: Vec<(MachineId, MachineAction)>,
     always: bool,
@@ -173,58 +176,87 @@ fn request(
     store::request(actions, always, Surface::Window, ask, cx);
 }
 
+/// D3 to D8: a failure's alert, with its follow-up and Cancel, or OK alone.
 pub(super) fn explanation_alert(explanation: &Explanation) -> Alert<Answer> {
-    Alert::new(
-        ModalId::new("update-explain"),
-        explanation.title.clone(),
-        explanation.title.clone(),
-        explanation.message.clone(),
-        vec![
+    let actions = match explanation.follow_up() {
+        Some(label) => vec![
             button(
                 Answer::Proceed,
-                "OK",
+                label,
+                ModalActionRole::Affirmative,
+                "update-explain-proceed",
+            )
+            .with_emphasis(ModalActionEmphasis::Prominent)
+            .default_action(true),
+            button(
+                Answer::Cancel,
+                CANCEL,
+                ModalActionRole::Cancel,
+                "update-explain-cancel",
+            ),
+        ],
+        None => vec![
+            button(
+                Answer::Proceed,
+                OK,
                 ModalActionRole::Affirmative,
                 "update-explain-ok",
             )
             .with_emphasis(ModalActionEmphasis::Prominent)
             .default_action(true),
         ],
+    };
+    Alert::new(
+        ModalId::new("update-explain"),
+        explanation.title.clone(),
+        explanation.title.clone(),
+        explanation.message.clone(),
+        actions,
     )
-    .intent(AlertIntent::Informational)
+    .intent(AlertIntent::Warning)
 }
 
+/// The follow-up runs on its button. OK and Cancel dismiss the failure's title-bar step.
 fn explain(explanation: Explanation, presenter: Presenter, cx: &mut App) {
     let alert = explanation_alert(&explanation);
-    let then = explanation.then;
     let next = presenter.clone();
     present_in(
         presenter,
         alert,
         move |answer, cx| {
-            if answer == Answer::Proceed
-                && let Some(then) = then
-            {
-                perform(*then, next, cx);
+            if let Some(command) = explanation.answer(answer == Answer::Proceed) {
+                perform(command, next, cx);
             }
         },
         cx,
     );
 }
 
-/// Explains each Machine action a window performed that did not succeed, in the front Workspace
-/// Window. A confirmation that went stale asks again with the current facts.
+/// D5: the alert for a restart a Machine refused at its preview, while the person waits on the
+/// click. An action that already ran reports through the title bar's failure or not-confirmed
+/// step instead, whatever its outcome.
+pub(super) fn refusal(notice: &MachineUpdatesNotice) -> Option<Explanation> {
+    if notice.action != MachineAction::Restart {
+        return None;
+    }
+    let (title, message) = notice.unasked_alert()?;
+    Some(Explanation::ok(title, message))
+}
+
+/// Answers a Machine action a window performed that did not succeed. A confirmation that went
+/// stale asks again with the current facts.
 pub(super) fn receive_failure(notice: &MachineUpdatesNotice, cx: &mut App) {
     let (Surface::Window, Err(failure)) = (notice.surface, notice.outcome) else {
         return;
     };
-    // The Core refused its preview: the sessions or the Pending Version changed since. The
-    // window previews again and always asks, so nothing runs again by itself.
     // The Core starts nothing that is off in Login Items, so Start opens that list, where the
     // person turns it on. Nothing starts by itself: the window offers Start again.
     if failure == ActionFailure::LoginItemOff {
         crate::local_startup::open_login_items();
         return;
     }
+    // The Core refused its preview: the sessions or the Pending Version changed since. The
+    // window previews again and always asks, so nothing runs again by itself.
     if failure == ActionFailure::Changed {
         if matches!(notice.action, MachineAction::Restart | MachineAction::Stop) {
             request(
@@ -236,31 +268,22 @@ pub(super) fn receive_failure(notice: &MachineUpdatesNotice, cx: &mut App) {
         }
         return;
     }
-    let Some((title, message)) =
-        presentation::action_failure(&notice.name, notice.local, &notice.action, failure)
-    else {
-        return;
-    };
-    let explanation = Explanation {
-        title,
-        message,
-        then: None,
-    };
-    perform(Command::Explain(explanation), Presenter::Front, cx);
+    if let Some(explanation) = refusal(notice) {
+        perform(Command::Explain(explanation), Presenter::Front, cx);
+    }
 }
 
-/// The person clicked the overdue notification about `key`: bring a Workspace Window forward with
-/// the click's activation `token`, and do what the item's control does now, which asks first
-/// wherever the control asks.
-pub(super) fn reminder_clicked(key: ItemKey, token: Option<&str>, cx: &mut App) {
+/// The person clicked the reminder about `key`: bring a Workspace Window forward with the click's
+/// activation `token`, and perform the step. SpaceTerm relaunches; a Core opens its confirmation.
+pub(super) fn reminder_clicked(key: Target, token: Option<&str>, cx: &mut App) {
     crate::app::activate_default_window(cx, token);
     cx.activate(true);
-    let command = presentation::current(cx)
-        .items()
-        .into_iter()
-        .find(|item| item.key == key)
-        .and_then(|item| item.command);
-    if let Some(command) = command {
-        perform(command, Presenter::Front, cx);
+    let view = state::current(cx);
+    let row = match key {
+        Target::App => Some(view.app_row()),
+        Target::Machine(machine) => view.machine_row(machine),
+    };
+    if let Some(action) = row.and_then(|row| row.action) {
+        perform(action.command, Presenter::Front, cx);
     }
 }

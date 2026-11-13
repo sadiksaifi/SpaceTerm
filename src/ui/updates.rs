@@ -1,6 +1,6 @@
-//! Update presentation: the title-bar update control, its alerts, menu commands and prompts.
-//! [`crate::updates`] owns update policy and state, and
-//! [`crate::updates::presentation`] owns what every update surface says.
+//! Update presentation: the title-bar split pill, its alerts, menu commands and prompts.
+//! [`crate::updates`] owns update policy, and [`crate::updates::state`] owns the one update view
+//! every surface renders. Only a check the person asked for answers with an alert.
 
 pub(crate) mod commands;
 mod control;
@@ -12,14 +12,14 @@ use gpui::{
     App, BorrowAppContext, Context, Entity, Global, Subscription, Window, WindowHandle, actions,
 };
 use spaceterm_ui::{
-    Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionIntent,
-    ModalActionRole, ModalId,
+    Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionRole, ModalId,
 };
 
 use super::WorkspaceManager;
-use crate::desktop_profile::{DesktopPresentation, DesktopWording};
+use crate::updates::copy::dialogs;
 use crate::updates::machines::store::{MachineUpdates, MachineUpdatesNotice};
 use crate::updates::reminders::{ReminderActivated, UpdateReminders};
+use crate::updates::state::{self, Command};
 use crate::updates::{ApplicationUpdates, UpdateError, UpdateNotice, UpdateService, UpdateState};
 
 actions!(spaceterm, [CheckForUpdates]);
@@ -126,19 +126,13 @@ impl CheckResults {
         }
     }
 
-    /// An unrequested failure is presented too, because it interrupts a download the user began.
+    /// Only a check the person asked for hears its result. A failure nobody waits on shows once
+    /// in the title bar instead.
     fn notice(&mut self, notice: UpdateNotice, state: &UpdateState) -> Option<UpdateState> {
-        let unawaited = match notice {
-            UpdateNotice::CheckFinished => false,
-            UpdateNotice::Failed => !matches!(
-                state,
-                UpdateState::Failed {
-                    error: UpdateError::Check
-                }
-            ),
-            UpdateNotice::ReadyToInstall => return None,
-        };
-        if !(self.awaiting || unawaited) || self.presented.as_ref() == Some(state) {
+        if matches!(notice, UpdateNotice::ReadyToInstall)
+            || !self.awaiting
+            || self.presented.as_ref() == Some(state)
+        {
             return None;
         }
         self.claim(state)
@@ -201,6 +195,19 @@ fn check_for_updates(cx: &mut App) {
         return;
     }
     let state = updates.read(cx).state().clone();
+    // A download failure the row shows answers with its own D6, as `Update Failed` does, so the
+    // alert never reports a retry the pill and the row don't show. Its Try Again checks and
+    // downloads again.
+    if matches!(state, UpdateState::Failed { .. })
+        && let Some(explanation) = download_failure(cx)
+    {
+        commands::perform(
+            Command::Explain(explanation),
+            commands::Presenter::Front,
+            cx,
+        );
+        return;
+    }
     match state {
         UpdateState::Unavailable => present_in_front_window(cx, |window, cx| {
             present_failure(UpdateError::Unavailable, window, cx)
@@ -217,10 +224,11 @@ fn check_for_updates(cx: &mut App) {
         UpdateState::Available { version } => present_in_front_window(cx, move |window, cx| {
             present_available(&version, window, cx)
         }),
+        // The same answer a check gives once it finds the download under way.
         UpdateState::Downloading { version, .. } | UpdateState::Verifying { version } => {
             if !updates.read(cx).is_cancelling() {
                 present_in_front_window(cx, move |window, cx| {
-                    present_stop_download(&version, window, cx)
+                    present_downloading(&version, window, cx)
                 });
             }
         }
@@ -228,6 +236,14 @@ fn check_for_updates(cx: &mut App) {
         // SpaceTerm is relaunching. The relaunch deadline reports it if it doesn't quit.
         UpdateState::Installing { .. } => {}
     }
+}
+
+/// D6 for the failed download SpaceTerm's row shows, if it shows one.
+fn download_failure(cx: &App) -> Option<state::Explanation> {
+    let app = state::current(cx).app;
+    matches!(app.stage, state::AppStage::DownloadFailed { .. })
+        .then(|| dialogs::app_failure(&app))
+        .flatten()
 }
 
 fn request_install(updates: &Entity<ApplicationUpdates>, request: InstallRequest, cx: &mut App) {
@@ -288,9 +304,17 @@ fn present_result(state: UpdateState, cx: &mut App) {
         }
         UpdateState::Ready { .. } => present_in_front_window(cx, present_install),
         UpdateState::Failed { error } if error.relaunch_failed() => present_relaunch_failure(cx),
-        UpdateState::Failed { error } => {
-            present_in_front_window(cx, move |window, cx| present_failure(error, window, cx))
-        }
+        // A failure the person can act on opens the same alert as `Update Failed`.
+        UpdateState::Failed { error } => match dialogs::app_failure(&state::current(cx).app) {
+            Some(explanation) => commands::perform(
+                Command::Explain(explanation),
+                commands::Presenter::Front,
+                cx,
+            ),
+            None => {
+                present_in_front_window(cx, move |window, cx| present_failure(error, window, cx))
+            }
+        },
         _ => {}
     }
 }
@@ -329,8 +353,6 @@ enum PromptAction {
     Later,
     ReleaseNotes,
     TryAgain,
-    StopDownload,
-    KeepDownloading,
     Relaunch,
 }
 
@@ -369,7 +391,7 @@ fn up_to_date_alert() -> Alert<PromptAction> {
         ModalId::new("update-up-to-date"),
         "SpaceTerm is up to date",
         "SpaceTerm Is Up to Date",
-        format!("Version {CURRENT_VERSION} is the latest release."),
+        format!("{CURRENT_VERSION} is the newest version."),
         vec![action(
             PromptAction::Acknowledge,
             "OK",
@@ -388,7 +410,7 @@ fn available_alert(version: &str) -> Alert<PromptAction> {
         ModalId::new("update-available"),
         "Update available",
         format!("SpaceTerm {version} Is Available"),
-        format!("You have version {CURRENT_VERSION}."),
+        format!("You have {CURRENT_VERSION}."),
         vec![
             action(
                 PromptAction::Download,
@@ -436,10 +458,8 @@ fn downloading_alert(version: &str) -> Alert<PromptAction> {
     Alert::new(
         ModalId::new("update-downloading"),
         "Update downloading",
-        format!("SpaceTerm {version} Is Available"),
-        format!(
-            "You have version {CURRENT_VERSION}. SpaceTerm is downloading it. Relaunch when it is ready."
-        ),
+        format!("SpaceTerm {version} Is Downloading"),
+        format!("You have {CURRENT_VERSION}."),
         vec![
             action(
                 PromptAction::Acknowledge,
@@ -476,46 +496,18 @@ fn put_off(cx: &mut App) {
     }
 }
 
-/// Only the read-only failure names a remedy, which the desktop wording supplies.
-pub(crate) fn failure_message(error: UpdateError, wording: DesktopWording) -> String {
-    match error {
-        UpdateError::ReadOnly => wording.read_only_update.1.to_owned(),
-        error => error.to_string(),
-    }
-}
-
-fn failure_alert(error: UpdateError, wording: DesktopWording) -> Alert<PromptAction> {
+/// The alert for a check that could not run or finish. Every update failure the person can act
+/// on opens its shared alert instead (D6 to D8, from `copy::dialogs`).
+fn failure_alert(error: UpdateError) -> Alert<PromptAction> {
     let (title, retry, intent) = match error {
         UpdateError::Unavailable => ("Updates Unavailable", false, AlertIntent::Informational),
-        UpdateError::Check => ("Couldn’t Check for Updates", true, AlertIntent::Warning),
-        UpdateError::Download => (
-            "Couldn\u{2019}t Download the Update",
-            true,
-            AlertIntent::Warning,
-        ),
-        UpdateError::Verification => (
-            "Couldn\u{2019}t Verify the Update",
-            true,
-            AlertIntent::Warning,
-        ),
-        UpdateError::Installation => (
-            "Couldn\u{2019}t Install the Update",
-            true,
-            AlertIntent::Warning,
-        ),
-        UpdateError::DiskFull => (
-            "Not Enough Disk Space for the Update",
-            true,
-            AlertIntent::Warning,
-        ),
         UpdateError::SystemTooOld => (
             "Update Needs a Newer System",
             false,
             AlertIntent::Informational,
         ),
-        UpdateError::ReadOnly => (wording.read_only_update.0, false, AlertIntent::Warning),
-        UpdateError::Relaunch | UpdateError::SettingsUnsaved => (
-            "Couldn\u{2019}t Relaunch SpaceTerm",
+        _ => (
+            "Couldn\u{2019}t Check for Updates",
             true,
             AlertIntent::Warning,
         ),
@@ -543,67 +535,25 @@ fn failure_alert(error: UpdateError, wording: DesktopWording) -> Alert<PromptAct
         ModalId::new("update-failure"),
         title,
         title,
-        failure_message(error, wording),
+        error.to_string(),
         actions,
     )
     .intent(intent)
 }
 
 fn present_failure<T: 'static>(error: UpdateError, window: &mut Window, cx: &mut Context<T>) {
-    let wording = DesktopPresentation::get(cx).wording();
-    present(failure_alert(error, wording), window, cx, |action, cx| {
+    present(failure_alert(error), window, cx, |action, cx| {
         if action == Some(PromptAction::TryAgain) {
             check_for_updates(cx);
         }
     });
 }
 
-/// `unsaved` names a relaunch that failed because Settings couldn't be saved.
-fn relaunch_failure_alert(version: &str, unsaved: bool) -> Alert<PromptAction> {
-    Alert::new(
-        ModalId::new("update-relaunch-failure"),
-        "Couldn\u{2019}t relaunch SpaceTerm",
-        "Couldn\u{2019}t Relaunch SpaceTerm",
-        if unsaved {
-            format!(
-                "SpaceTerm {version} is downloaded, but SpaceTerm couldn\u{2019}t save Settings, \
-                 so it didn\u{2019}t relaunch. Your Terminal Sessions are still running."
-            )
-        } else {
-            format!(
-                "SpaceTerm {version} is downloaded, but SpaceTerm couldn\u{2019}t quit to install \
-                 it. Your Terminal Sessions are still running."
-            )
-        },
-        vec![
-            action(
-                PromptAction::TryAgain,
-                "Try Again",
-                ModalActionRole::Affirmative,
-                "update-relaunch-failure-try-again",
-            )
-            .with_emphasis(ModalActionEmphasis::Prominent)
-            .default_action(true),
-            action(
-                PromptAction::Later,
-                "Later",
-                ModalActionRole::Cancel,
-                "update-relaunch-failure-later",
-            ),
-        ],
-    )
-    .intent(AlertIntent::Warning)
-}
-
 /// The person chose Relaunch and is waiting for SpaceTerm to quit, so the failure appears even
 /// with no Workspace Window open: SpaceTerm opens one to show it, as its relaunch would have.
 fn present_relaunch_failure(cx: &mut App) {
     let Some(updates) = service(cx) else { return };
-    let version = updates
-        .read(cx)
-        .pending_version()
-        .unwrap_or_default()
-        .to_owned();
+    let version = updates.read(cx).pending_version().map(str::to_owned);
     let unsaved = matches!(
         updates.read(cx).state(),
         UpdateState::Failed {
@@ -614,68 +564,25 @@ fn present_relaunch_failure(cx: &mut App) {
         crate::app::activate_default_window(cx, None);
         cx.activate(true);
     }
-    present_in_front_window(cx, move |window, cx| {
-        present(
-            relaunch_failure_alert(&version, unsaved),
-            window,
-            cx,
-            |action, cx| match action {
-                Some(PromptAction::TryAgain) => {
-                    if let Some(updates) = service(cx) {
-                        updates.update(cx, |updates, cx| updates.relaunch(cx));
-                    }
-                }
-                Some(PromptAction::Later) => put_off(cx),
-                _ => {}
-            },
-        );
-    });
-}
-
-fn stop_download_alert(version: &str) -> Alert<PromptAction> {
-    Alert::new(
-        ModalId::new("update-stop-download"),
-        "Stop update download",
-        format!("Stop Downloading SpaceTerm {version}?"),
-        "You can download it again later.",
-        vec![
-            action(
-                PromptAction::StopDownload,
-                "Stop Download",
-                ModalActionRole::Affirmative,
-                "update-stop-download-stop",
-            )
-            .with_intent(ModalActionIntent::Destructive),
-            action(
-                PromptAction::KeepDownloading,
-                "Keep Downloading",
-                ModalActionRole::Cancel,
-                "update-stop-download-keep",
-            ),
-        ],
-    )
-}
-
-fn present_stop_download<T: 'static>(version: &str, window: &mut Window, cx: &mut Context<T>) {
-    present(stop_download_alert(version), window, cx, |action, cx| {
-        if action == Some(PromptAction::StopDownload)
-            && let Some(updates) = service(cx)
-        {
-            updates.update(cx, |updates, cx| updates.cancel(cx));
-        }
-    });
+    let explanation = dialogs::relaunch_failure(version.as_deref(), unsaved);
+    commands::perform(
+        Command::Explain(explanation),
+        commands::Presenter::Front,
+        cx,
+    );
 }
 
 fn install_alert(version: &str) -> Alert<PromptAction> {
+    let (label, title, message) = dialogs::downloaded(version);
     Alert::new(
         ModalId::new("update-install"),
-        "Update ready",
-        format!("SpaceTerm {version} Is Ready"),
-        "Relaunching installs it. Your Terminal Sessions keep running.",
+        label,
+        title,
+        message,
         vec![
             action(
                 PromptAction::Relaunch,
-                "Relaunch",
+                crate::updates::copy::title_bar::RELAUNCH_TO_UPDATE,
                 ModalActionRole::Affirmative,
                 "update-install-relaunch",
             )
@@ -735,10 +642,6 @@ mod tests {
     use crate::appearance::{Appearance, builtin_chrome_base};
 
     mod control_tests;
-
-    fn testing_wording() -> DesktopWording {
-        crate::desktop_profile::testing_presentation().wording()
-    }
 
     fn version() -> String {
         "0.4.2".to_owned()
@@ -847,7 +750,7 @@ mod tests {
                 "{order}"
             );
 
-            // A download failure interrupts the user once even though no check awaits it.
+            // A download failure that no check awaits shows in the title bar, not an alert.
             let available = UpdateState::Available {
                 version: "0.4.2".to_owned(),
             };
@@ -870,7 +773,7 @@ mod tests {
                     Some(UpdateNotice::Failed),
                     observer_first
                 ),
-                std::slice::from_ref(&download_failed),
+                [],
                 "{order}"
             );
 
@@ -950,11 +853,8 @@ mod tests {
         let mut alerts = vec![
             up_to_date_alert(),
             available_alert("0.4.2"),
-            stop_download_alert("0.4.2"),
             install_alert("0.4.2"),
             downloading_alert("0.4.2"),
-            relaunch_failure_alert("0.4.2", false),
-            relaunch_failure_alert("0.4.2", true),
         ];
         alerts.extend(
             [
@@ -969,31 +869,43 @@ mod tests {
                 UpdateError::Relaunch,
                 UpdateError::SettingsUnsaved,
             ]
-            .map(|error| failure_alert(error, testing_wording())),
+            .map(failure_alert),
         );
         for alert in alerts {
             assert_eq!(alert.validate(&policy), Ok(()));
         }
-        let confirmation = crate::updates::presentation::Confirmation {
+        let confirmation = crate::updates::confirm::Confirmation {
             title: "Restart SpaceTerm Core on penguin?".into(),
-            message: "This will close your 3 running sessions.".into(),
-            button: "Restart".into(),
+            message: "SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 3 Terminal Sessions. Workspaces, Tabs and Panes stay.".into(),
+            button: "Restart Core".into(),
+            cancel: "Remind Me Tomorrow".into(),
             actions: Vec::new(),
-            approval: crate::updates::presentation::Approval::default(),
+            approval: crate::updates::confirm::Approval::default(),
         };
         assert_eq!(
             commands::confirmation_alert(&confirmation).validate(&policy),
             Ok(())
         );
-        let explanation = crate::updates::presentation::Explanation {
-            title: "Couldn't restart SpaceTerm Core on penguin".into(),
-            message: "SpaceTerm can't reach penguin. Try again when it is connected.".into(),
-            then: None,
-        };
-        assert_eq!(
-            commands::explanation_alert(&explanation).validate(&policy),
-            Ok(())
-        );
+        let failure =
+            |then: Option<crate::updates::state::Command>| crate::updates::confirm::Explanation {
+                title: "Couldn't Restart SpaceTerm Core on penguin".into(),
+                message: "SpaceTerm can't reach penguin. Try again when it's connected.".into(),
+                then: then.map(Box::new),
+                proceed: None,
+                dismiss: None,
+            };
+        for then in [
+            None,
+            Some(crate::updates::state::Command::Machine(
+                [2; 32],
+                crate::updates::machines::MachineAction::CheckAgain,
+            )),
+        ] {
+            assert_eq!(
+                commands::explanation_alert(&failure(then)).validate(&policy),
+                Ok(())
+            );
+        }
     }
 
     /// Presents `alert` on its own window and reads what assistive technology reads.
@@ -1026,31 +938,17 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_ready_alert_relaunches_and_keeps_terminal_sessions_running(
+    fn the_downloaded_alert_relaunches_to_update_and_keeps_terminal_sessions_running(
         cx: &mut gpui::TestAppContext,
     ) {
         let tree = presented(install_alert("0.4.2"), cx);
-        tree.text("SpaceTerm 0.4.2 Is Ready");
-        for action in ["Relaunch", "Release Notes", "Later"] {
+        tree.text("SpaceTerm 0.4.2 Is Downloaded");
+        for action in ["Relaunch to Update", "Release Notes", "Later"] {
             tree.node(action);
         }
-        tree.text("Relaunching installs it. Your Terminal Sessions keep running.");
-        let alert = tree.node("Update ready");
+        tree.text("Relaunching keeps Terminal Sessions running.");
+        let alert = tree.node("Update downloaded");
         assert_eq!(alert["aria"]["role"], "AlertDialog");
         assert_eq!(tree.with_role("Button").len(), 3);
-    }
-
-    #[gpui::test]
-    fn the_relaunch_failure_alert_offers_try_again_and_later(cx: &mut gpui::TestAppContext) {
-        let tree = presented(relaunch_failure_alert("0.4.2", false), cx);
-        tree.text("Couldn\u{2019}t Relaunch SpaceTerm");
-        tree.text(
-            "SpaceTerm 0.4.2 is downloaded, but SpaceTerm couldn\u{2019}t quit to install it. \
-             Your Terminal Sessions are still running.",
-        );
-        for action in ["Try Again", "Later"] {
-            tree.node(action);
-        }
-        assert_eq!(tree.with_role("Button").len(), 2);
     }
 }

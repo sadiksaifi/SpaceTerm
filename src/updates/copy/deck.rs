@@ -1,0 +1,638 @@
+//! The copy deck: every update string the desktop renders, for every generated state and ladder
+//! stage, for This Mac, This Computer and penguin. `deck.txt` is generated from the copy module
+//! and compared byte for byte, so a wording change is one reviewed diff. Regenerate it with
+//! `SPACETERM_WRITE_COPY_DECK=1 mise run test:desktop updates::copy::deck`.
+//!
+//! The lint refuses words design 4.4 bans in person-facing update text. The grep test refuses
+//! update string literals in update UI modules outside `copy/`.
+use std::collections::BTreeSet;
+use std::path::Path;
+
+use spaceterm_core::protocol::capability::Unavailable;
+use spaceterm_core::update::facts::Version;
+use spaceterm_core::update::ordering::Floor;
+
+use crate::updates::UpdateState;
+use crate::updates::confirm::previewed;
+use crate::updates::copy::{Platform, dialogs, pane, rows};
+use crate::updates::ladder::Stage;
+use crate::updates::machines::{ActionFailure, MachineAction, MachinePreview};
+use crate::updates::state::tests::{
+    LOCAL, NOW, PENGUIN, app, app_states, machine_variants, waiting,
+};
+use crate::updates::state::{Command, Dismissed, Marks, RowView, UpdateView};
+
+const DECK: &str = "src/updates/copy/deck.txt";
+
+/// What a rendered field is, for the lint: only a label may be one of the three `Core` labels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Role {
+    /// A pill label, a row action or an alert button.
+    Label,
+    /// A status, description, tooltip, alert title or body, or accessibility text.
+    Text,
+}
+
+#[derive(Default)]
+struct Deck {
+    pill: BTreeSet<String>,
+    rows: BTreeSet<String>,
+    dialogs: BTreeSet<String>,
+    /// What a Pane says after a restart ended or spared its Terminal Session.
+    pane: BTreeSet<String>,
+    /// Every rendered field, with its role and the Machines named in its view.
+    fields: Vec<(Role, Vec<String>, String)>,
+    /// The Machines of the view being rendered.
+    names: Vec<String>,
+}
+
+impl Deck {
+    fn field(&mut self, role: Role, text: &str) {
+        self.fields
+            .push((role, self.names.clone(), text.to_owned()));
+    }
+
+    fn row(&mut self, row: RowView) {
+        self.field(Role::Text, row.status.as_deref().unwrap_or_default());
+        if let Some(description) = &row.description {
+            self.field(Role::Text, description);
+        }
+        self.field(Role::Text, &row.accessibility);
+        if let Some(action) = &row.action {
+            self.field(Role::Label, &action.label);
+            if let Some(subtitle) = &action.subtitle {
+                self.field(Role::Text, subtitle);
+            }
+        }
+        let mut line = format!("{} | {}", row.name, row.status.unwrap_or_default());
+        if let Some(action) = &row.action {
+            line.push_str(&format!(" \u{b7} {}", action.label));
+            if let Some(subtitle) = &action.subtitle {
+                line.push_str(&format!(" ({subtitle})"));
+            }
+        }
+        if let Some(description) = &row.description {
+            line.push_str(&format!(" | {description}"));
+        }
+        line.push_str(&format!(" | a11y: {}", row.accessibility));
+        self.rows.insert(line);
+        if let Some(action) = row.action
+            && let Command::Explain(alert) = action.command
+        {
+            self.alert(&alert);
+        }
+    }
+
+    fn alert(&mut self, alert: &crate::updates::confirm::Explanation) {
+        self.field(Role::Text, &alert.title);
+        self.field(Role::Text, &alert.message);
+        if let Some(proceed) = &alert.proceed {
+            self.field(Role::Label, proceed);
+        }
+        let proceed = alert
+            .proceed
+            .as_ref()
+            .map_or("OK".to_owned(), |label| format!("{label}, Cancel"));
+        let dismisses = if alert.dismiss.is_some() {
+            " (dismisses the step)"
+        } else {
+            ""
+        };
+        self.dialogs.insert(format!(
+            "{} | {} | {proceed}{dismisses}",
+            alert.title, alert.message
+        ));
+    }
+
+    fn view(&mut self, view: &UpdateView) {
+        self.names = view
+            .machines
+            .iter()
+            .map(|row| row.name.to_string())
+            .collect();
+        self.row(view.app_row());
+        view.machine_rows()
+            .into_iter()
+            .for_each(|row| self.row(row));
+        if let Some(pill) = view.pill() {
+            self.field(Role::Label, &pill.label);
+            self.field(Role::Text, &pill.tooltip);
+            self.pill.insert(format!(
+                "{} | {:?} | {}",
+                pill.label, pill.emphasis, pill.tooltip
+            ));
+            if let Command::Explain(alert) = &pill.main {
+                self.alert(alert);
+            }
+        }
+    }
+
+    /// The deck as text, each line passed through [`normalize`] before it is sorted.
+    fn text(&self) -> String {
+        let mut out = String::from(
+            "# SpaceTerm update copy deck\n\nGenerated by src/updates/copy/deck.rs. Do not edit by hand.\n",
+        );
+        for (heading, lines, section) in [
+            (
+                "Split pill: label | emphasis | tooltip",
+                &self.pill,
+                Section::Alert,
+            ),
+            (
+                "Rows: name | status \u{b7} action (subtitle) | description | accessibility",
+                &self.rows,
+                Section::Row,
+            ),
+            (
+                "Dialogs: title | body | buttons",
+                &self.dialogs,
+                Section::Alert,
+            ),
+            (
+                "Pane after a restart: title | detail, status or button",
+                &self.pane,
+                Section::Alert,
+            ),
+        ] {
+            out.push_str(&format!("\n## {heading}\n\n"));
+            let lines: BTreeSet<String> =
+                lines.iter().map(|line| normalize(line, section)).collect();
+            for line in lines {
+                out.push_str(&line);
+                out.push('\n');
+            }
+        }
+        out
+    }
+}
+
+/// The deck, the same on every host: each platform-dependent string reads as its token, and a
+/// last section gives each token's text on every platform.
+fn generate() -> String {
+    let mut text = build().text();
+    text.push_str("\n## Platform strings: token | macOS | Linux\n\n");
+    for (token, render) in PLATFORM_STRINGS {
+        text.push_str(&format!(
+            "{token} | {} | {}\n",
+            render(Platform::Mac),
+            render(Platform::Linux)
+        ));
+    }
+    text
+}
+
+/// Renders one platform-dependent string.
+type PlatformString = fn(Platform) -> String;
+
+/// Each platform-dependent string and its token. On Linux the D8 body is the row status with a
+/// period, so [`normalize`] picks the order by section.
+const PLATFORM_STRINGS: [(&str, PlatformString); 4] = [
+    ("{cant-replace-message}", |p| {
+        dialogs::cant_replace_message(p).to_owned()
+    }),
+    ("{cant-replace-title}", |p| {
+        dialogs::cant_replace_title(p).to_owned()
+    }),
+    ("{cant-replace-status}", |p| {
+        rows::cant_replace(p).to_owned()
+    }),
+    ("{newer-system}", |p| format!("newer {}", rows::system(p))),
+];
+
+/// Which strings a deck line holds: a row holds the row status and never an alert body, and the
+/// pill and the dialogs hold alert bodies and never a row status.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Section {
+    Row,
+    Alert,
+}
+
+/// `line` with this host's platform-dependent strings as their tokens. The section's own string
+/// goes first, so the same line reads the same on every platform.
+fn normalize(line: &str, section: Section) -> String {
+    let mut strings = PLATFORM_STRINGS.to_vec();
+    if section == Section::Row {
+        strings.sort_by_key(|(token, _)| *token != "{cant-replace-status}");
+    }
+    strings
+        .into_iter()
+        .fold(line.to_owned(), |line, (token, render)| {
+            line.replace(&render(Platform::HOST), token)
+        })
+}
+
+fn build() -> Deck {
+    let mut deck = Deck::default();
+    let dismissed = Dismissed::new();
+    let deferred = Default::default();
+    let marks = Marks {
+        dismissed: &dismissed,
+        deferred: &deferred,
+        pushes_held: false,
+    };
+    let fleets: Vec<Vec<_>> = [
+        (LOCAL, "This Mac"),
+        (LOCAL, "This Computer"),
+        (PENGUIN, "penguin"),
+    ]
+    .into_iter()
+    .flat_map(|(id, name)| machine_variants(id, name).into_iter().map(|one| vec![one]))
+    .collect();
+    for (state, pending, asked, retrying, whats_new) in app_states() {
+        for ladder in [Stage::Offer, Stage::Ask, Stage::Insist] {
+            let mut facts = app(&state);
+            facts.pending = pending;
+            facts.download_asked = asked;
+            facts.retrying = retrying;
+            facts.whats_new = whats_new;
+            facts.ladder = ladder;
+            facts.waited = match ladder {
+                Stage::Offer => 0,
+                Stage::Ask => 2,
+                Stage::Insist => 7,
+            };
+            deck.view(&UpdateView::new(facts, &[], marks, NOW));
+        }
+    }
+    // A scheduled check downloads a release again in place of the downloaded one.
+    let replacing = UpdateState::Downloading {
+        version: "0.11.5".to_owned(),
+        received: 1,
+        total: 2,
+    };
+    let mut facts = app(&replacing);
+    facts.pending = Some("0.11.5");
+    facts.replacing = Some("0.11.5");
+    deck.view(&UpdateView::new(facts, &[], marks, NOW));
+    let state = UpdateState::UpToDate;
+    for fleet in &fleets {
+        deck.view(&UpdateView::new(app(&state), fleet, marks, NOW));
+    }
+    let version = |text| Version::parse(text).unwrap();
+    for (id, name) in [(LOCAL, "This Mac"), (PENGUIN, "penguin")] {
+        for sessions in [0, 1, 3] {
+            for breaking in [false, true] {
+                let mut update = waiting(id, name, sessions, breaking, NOW);
+                if breaking && sessions == 3 {
+                    update
+                        .facts
+                        .as_mut()
+                        .unwrap()
+                        .pending
+                        .as_mut()
+                        .unwrap()
+                        .stranded = vec![spaceterm_core::update::facts::StrandedDevice {
+                        pairing: Default::default(),
+                        name: "iPad".into(),
+                    }];
+                }
+                for (action, target) in [
+                    (MachineAction::Restart, Some(version("0.11.4"))),
+                    (MachineAction::Restart, None),
+                    (MachineAction::Stop, None),
+                ] {
+                    let preview = MachinePreview {
+                        machine: id,
+                        action,
+                        sessions,
+                        running: Some(version("0.11.3")),
+                        target,
+                        id: 1,
+                    };
+                    deck.names = vec![name.to_owned()];
+                    // At Offer and at Ask, where the other button hides the step for a day.
+                    for now in [NOW, NOW + 3 * 86_400] {
+                        let Some(confirmation) = previewed(
+                            std::slice::from_ref(&update),
+                            std::slice::from_ref(&preview),
+                            true,
+                        ) else {
+                            continue;
+                        };
+                        let confirmation = confirmation
+                            .defers(|_| crate::updates::state::cancel_defers(&update, marks, now));
+                        deck.field(Role::Text, &confirmation.title);
+                        deck.field(Role::Text, &confirmation.message);
+                        deck.field(Role::Label, &confirmation.button);
+                        deck.field(Role::Label, &confirmation.cancel);
+                        deck.dialogs.insert(format!(
+                            "{} | {} | {}, {}",
+                            confirmation.title,
+                            confirmation.message,
+                            confirmation.button,
+                            confirmation.cancel
+                        ));
+                    }
+                }
+            }
+        }
+        let floor = Floor::parse("0.12.0").unwrap();
+        for action in [
+            MachineAction::Install,
+            MachineAction::Restart,
+            MachineAction::CheckAgain,
+            MachineAction::Start,
+            MachineAction::Stop,
+        ] {
+            for failure in [
+                ActionFailure::Unavailable(Unavailable::CoreTooOld),
+                ActionFailure::Unavailable(Unavailable::ClientTooOld),
+                ActionFailure::Unavailable(Unavailable::NotConnected),
+                ActionFailure::Unreachable,
+                ActionFailure::Busy,
+                ActionFailure::DiskFull,
+                ActionFailure::RelaunchRequired,
+                ActionFailure::ClockBehind,
+                ActionFailure::SteppingStoneSkipped([0, 12, 0]),
+                ActionFailure::NeedsFloor(floor),
+                ActionFailure::Failed,
+            ] {
+                if let Some((title, message)) = dialogs::action_failure(name, &action, failure) {
+                    deck.field(Role::Text, &title);
+                    deck.field(Role::Text, &message);
+                    deck.dialogs.insert(format!("{title} | {message} | OK"));
+                }
+            }
+        }
+    }
+    let to = version("0.11.4");
+    for detail in [
+        pane::restarted_into(&to),
+        pane::restarted_into_while_idle(&to),
+        pane::could_not_restart_into(&to),
+        pane::RESTARTED.to_owned(),
+    ] {
+        for detail in [
+            detail.clone(),
+            pane::with_typed_input(&detail, true),
+            pane::with_typed_input(&detail, false),
+        ] {
+            deck.field(Role::Text, pane::SESSION_ENDED);
+            deck.field(Role::Text, &detail);
+            deck.pane
+                .insert(format!("{} | {detail}", pane::SESSION_ENDED));
+        }
+    }
+    for (after_restart, not_sent) in [(true, true), (true, false), (false, false)] {
+        let status = pane::reattached_input(after_restart, not_sent);
+        deck.field(Role::Text, status);
+        deck.pane.insert(format!("Status | {status}"));
+    }
+    for incompatible in [
+        spaceterm_core::protocol::version::Incompatible::ListenerTooOld,
+        spaceterm_core::protocol::version::Incompatible::CallerTooOld,
+    ] {
+        let (title, detail) = (
+            pane::blocked_title(incompatible),
+            pane::blocked_unnamed(incompatible),
+        );
+        deck.field(Role::Text, title);
+        deck.field(Role::Text, detail);
+        deck.pane.insert(format!("Blocked | {title} | {detail}"));
+    }
+    deck.field(Role::Label, pane::COPY_TYPED_TEXT);
+    deck.field(Role::Text, pane::COPY_TYPED_TEXT_DESCRIPTION);
+    deck.pane.insert(format!(
+        "Button | {} | {}",
+        pane::COPY_TYPED_TEXT,
+        pane::COPY_TYPED_TEXT_DESCRIPTION
+    ));
+    deck
+}
+
+/// The copy deck matches the copy module byte for byte.
+#[test]
+fn the_copy_deck_matches_the_copy_module() {
+    let generated = generate();
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DECK);
+    if std::env::var_os("SPACETERM_WRITE_COPY_DECK").is_some() {
+        std::fs::write(&path, &generated).unwrap();
+    }
+    let committed = std::fs::read_to_string(&path).unwrap_or_default();
+    assert!(
+        committed == generated,
+        "{DECK} differs from the copy module; regenerate it with SPACETERM_WRITE_COPY_DECK=1"
+    );
+}
+
+/// The three labels in which "Core" may stand without "SpaceTerm".
+const CORE_LABELS: [&str; 3] = [
+    "Restart Core\u{2026}",
+    "Restarting Core\u{2026}",
+    "Restart Core",
+];
+
+/// Why `text`, a field of `role` in a view naming `machines`, breaks the update vocabulary of
+/// design 4.4, if it does.
+pub(crate) fn lint(text: &str, role: Role, machines: &[String]) -> Option<&'static str> {
+    let lower = text.to_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .collect();
+    for (word, why) in [
+        ("installed", "\"installed\" for a downloaded version"),
+        ("ready", "\"ready\""),
+        ("idle", "\"idle\" in person-facing text"),
+    ] {
+        if words.contains(&word) {
+            return Some(why);
+        }
+    }
+    for machine in machines
+        .iter()
+        .map(String::as_str)
+        .chain(["this mac", "this computer"])
+    {
+        if lower.contains(&format!("update {}", machine.to_lowercase())) {
+            return Some("an \"Update {Machine}\" form");
+        }
+    }
+    if text.contains('\'') {
+        return Some(
+            "a straight apostrophe: update text uses \u{2019}, as the rest of the app does",
+        );
+    }
+    if text
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|word| word == "machine")
+        || text.contains("in Progress")
+    {
+        return Some("lowercase \"machine\" or \"in Progress\"");
+    }
+    if words.windows(2).any(|w| w[0] == "0" && w[1] == "terminal") {
+        return Some("a zero count");
+    }
+    if role == Role::Label && CORE_LABELS.contains(&text) {
+        return None;
+    }
+    let mut rest = text;
+    while let Some(at) = rest.find("Core") {
+        if !rest[..at].ends_with("SpaceTerm ") {
+            return Some("\"Core\" alone outside the three allowed labels");
+        }
+        rest = &rest[at + 4..];
+    }
+    None
+}
+
+/// Every rendered field of the copy deck passes the lint.
+#[test]
+fn every_copy_deck_field_passes_the_lint() {
+    for (role, machines, text) in build().fields {
+        if let Some(why) = lint(&text, role, &machines) {
+            panic!("{why}: {text}");
+        }
+    }
+}
+
+#[test]
+fn the_lint_refuses_the_banned_forms() {
+    let machines = vec!["penguin".to_owned(), "studio".to_owned()];
+    for (text, role, refused) in [
+        (
+            "SpaceTerm Core 0.11.4 is installed on This Mac.",
+            Role::Text,
+            true,
+        ),
+        ("Installed", Role::Text, true),
+        ("Update ready", Role::Text, true),
+        ("Update This Mac\u{2026}", Role::Label, true),
+        ("Update studio\u{2026}", Role::Label, true),
+        ("Nothing Idle", Role::Text, true),
+        ("It can't", Role::Text, true),
+        ("It can\u{2019}t", Role::Text, false),
+        ("Core restarts", Role::Text, true),
+        ("Restart Core failed.", Role::Text, true),
+        ("Restart Core failed.", Role::Label, true),
+        ("Restart Core\u{2026}", Role::Text, true),
+        ("1 machine", Role::Text, true),
+        ("0 Terminal Sessions", Role::Text, true),
+        ("Restart Core\u{2026}", Role::Label, false),
+        ("Restarting Core\u{2026}", Role::Label, false),
+        ("Restart Core", Role::Label, false),
+        (
+            "SpaceTerm Core on penguin can\u{2019}t restart.",
+            Role::Text,
+            false,
+        ),
+        (
+            "Restarts into 0.11.4 when 10 Terminal Sessions end",
+            Role::Text,
+            false,
+        ),
+    ] {
+        assert_eq!(
+            lint(text, role, &machines).is_some(),
+            refused,
+            "{text} as {role:?}"
+        );
+    }
+}
+
+/// Update UI modules hold no update string of their own: their text comes from `copy/`.
+#[test]
+fn update_ui_modules_hold_no_update_strings() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let phrases = [
+        "Terminal Session",
+        "Restart Core",
+        "Relaunch to Update",
+        "downloaded",
+        "Update Failed",
+        "Restart Not Confirmed",
+        "Download Update",
+        "An update has waited",
+        "installed",
+    ];
+    let mut found = Vec::new();
+    for file in UPDATE_UI_MODULES {
+        for (number, literal) in literals(root, file) {
+            // The Core service's own state, not an update's.
+            if literal == "Not installed" {
+                continue;
+            }
+            if phrases.iter().any(|phrase| literal.contains(phrase)) {
+                found.push(format!("{file}:{number}: {literal}"));
+            }
+        }
+    }
+    assert!(found.is_empty(), "update strings outside copy/: {found:#?}");
+}
+
+/// The update UI modules, whose text comes from `copy/`.
+const UPDATE_UI_MODULES: [&str; 12] = [
+    "src/updates/state.rs",
+    "src/updates/confirm.rs",
+    "src/updates/machines/store.rs",
+    "src/ui/updates.rs",
+    "src/ui/updates/commands.rs",
+    "src/ui/updates/control.rs",
+    "src/ui/updates/whats_new.rs",
+    "src/status_menu/model.rs",
+    "src/status_menu/controller.rs",
+    "src/ui/settings_window/updates.rs",
+    "src/ui/settings_window/machine_card.rs",
+    "src/ui/settings_window/core_update.rs",
+];
+
+/// Every string literal in `file`'s production code, with its line number. An inline test module
+/// ends the production code, and comments are skipped.
+fn literals(root: &Path, file: &str) -> Vec<(usize, String)> {
+    let text = std::fs::read_to_string(root.join(file)).unwrap();
+    let text = text
+        .split("#[cfg(test)]\nmod tests {")
+        .next()
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for (number, line) in text.lines().enumerate() {
+        let code = line.trim_start();
+        if code.starts_with("//") {
+            continue;
+        }
+        for literal in code.split('"').skip(1).step_by(2) {
+            out.push((number + 1, literal.to_owned()));
+        }
+    }
+    out
+}
+
+/// Update text uses the curly apostrophe U+2019 on every surface, as the rest of the app and
+/// Apple's own copy do, including the updater's own error messages, which no copy deck field
+/// renders. The CLI keeps its own rule (ADR 0055).
+#[test]
+fn update_text_uses_curly_apostrophes() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let copy = std::fs::read_dir(root.join("src/updates/copy"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+        .filter(|path| !path.ends_with("deck.rs"))
+        .map(|path| {
+            path.strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    let mut found = Vec::new();
+    for file in UPDATE_UI_MODULES
+        .iter()
+        .copied()
+        .chain([
+            "src/updates.rs",
+            "src/updates/release_notes.rs",
+            "src/ui/updates/whats_new.rs",
+        ])
+        .chain(copy.iter().map(String::as_str))
+    {
+        for (number, literal) in literals(root, file) {
+            if literal.contains('\'') {
+                found.push(format!("{file}:{number}: {literal}"));
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "straight apostrophes in update text: {found:#?}"
+    );
+}

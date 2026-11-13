@@ -117,10 +117,9 @@ fn perform(identity: &str, record: &Record) -> Result<State, CoreError> {
                 version,
                 commit,
             };
-            let Some(approval) = service.prepare_activation(&candidate)? else {
-                return Ok(State::Done);
-            };
-            service.activate(approval)?.phase
+            activate_pending(&service, &candidate, record, |record| {
+                grant_stop(identity, record)
+            })?
         }
         Action::Uninstall => {
             controller.confirm(controller.prepare(ControlAction::Stop)?)?;
@@ -131,6 +130,83 @@ fn perform(identity: &str, record: &Record) -> Result<State, CoreError> {
         Action::Network(_) => return Err(CoreError::Unsupported),
     };
     Ok(activation_outcome(phase))
+}
+
+/// The helper's update path. Native Stop authority is created only after its final grant.
+pub(super) fn activate_pending(
+    service: &Service,
+    candidate: &super::RetainedInstallation,
+    record: &Record,
+    grant: impl FnMut(&Record) -> Result<(), CoreError>,
+) -> Result<super::activation::ActivationPhase, CoreError> {
+    let Some(approval) = service.prepare_activation(candidate)? else {
+        return Ok(super::activation::ActivationPhase::Completed {
+            running: service.status()?.running,
+        });
+    };
+    let status = if record.actor == super::operations::Actor::CORE {
+        let grant = std::cell::RefCell::new(grant);
+        service.activate_after_grant(
+            approval,
+            || grant.borrow_mut()(record),
+            || grant.borrow_mut()(record),
+        )?
+    } else {
+        service.activate(approval)?
+    };
+    Ok(status.phase)
+}
+
+/// The first request freezes and grants; the second verifies that same grant before Stop.
+fn grant_stop(identity: &str, record: &Record) -> Result<(), CoreError> {
+    let paths = crate::host::Paths::for_identity(identity)?;
+    let mut stream = crate::host::connect(&paths)?;
+    grant_stop_over(&mut stream, identity, record)
+}
+
+/// The connected account-local transport, including version negotiation and the exact grant reply.
+pub(super) fn grant_stop_over(
+    stream: &mut dyn crate::protocol::Preamble,
+    identity: &str,
+    record: &Record,
+) -> Result<(), CoreError> {
+    use super::lane::{LaneReply, LaneRequest};
+    let client = crate::protocol::random()?;
+    let name = "SpaceTerm Core".into();
+    let negotiated = crate::protocol::admit_service_lane(
+        stream,
+        crate::protocol::Caller {
+            client: &client,
+            name: &name,
+            agent: None,
+        },
+        &record.core,
+        identity,
+    )?;
+    let encode = |bytes: &[u8]| {
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let request = LaneRequest::GrantStop {
+        operation: record.id.to_string(),
+        boot: encode(&record.boot),
+        candidate: encode(&record.candidate.ok_or(CoreError::CandidateMissing)?),
+    };
+    if negotiated.selected < request.since() {
+        return Err(CoreError::Unsupported);
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let bytes = serde_json::to_vec(&request).map_err(|_| CoreError::Protocol)?;
+    stream.send(&bytes, deadline)?;
+    let bytes = stream.receive(super::lane::MAX_FRAME, deadline)?;
+    let reply: LaneReply = serde_json::from_slice(&bytes).map_err(|_| CoreError::Protocol)?;
+    if matches!(reply, LaneReply::StopGranted {}) {
+        Ok(())
+    } else {
+        Err(CoreError::Changed)
+    }
 }
 
 /// The ledger outcome an activation phase proves.

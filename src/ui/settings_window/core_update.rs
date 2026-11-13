@@ -16,8 +16,8 @@ use crate::machine_connection::CoreError;
 use crate::machine_connection::service::activation::{ActivationStatus, is_released_downgrade};
 use crate::machine_connection::service::{RetainedInstallation, Service, ServiceStatus};
 use crate::updates::machines::store::{self, MachineUpdates, Surface};
-use crate::updates::machines::{ActionFailure, MachineAction};
-use crate::updates::presentation::{self, Command, Confirmation, MachineView};
+use crate::updates::machines::{ActionFailure, MachineAction, MachineId, MachineUpdate};
+use crate::updates::state::{self, Command, Confirmation, Explanation, RowView};
 
 pub(super) const UPDATE_SELECTOR: &str = "settings-server-update";
 pub(super) const UPDATE_CONFIRM_SELECTOR: &str = "settings-server-update-confirm";
@@ -97,15 +97,6 @@ fn read_facts(
     })
 }
 
-/// Whether an installed bundle offers a newer Core. This read stages and starts nothing.
-pub(crate) fn update_offered(service: &Service) -> bool {
-    CoreUpdateControl::read(service).is_ok_and(|facts| {
-        facts
-            .included
-            .is_ok_and(|included| !included.approved && !included.earlier)
-    })
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum UpdateStep {
     Check,
@@ -134,6 +125,14 @@ impl MachineUpdateRow {
             _operation: None,
         }
     }
+}
+
+/// Whether a Pending Version waits on `update`'s Core.
+pub(super) fn pending(update: &MachineUpdate) -> bool {
+    update
+        .facts
+        .as_ref()
+        .is_some_and(|facts| facts.pending.is_some())
 }
 
 impl SettingsWindow {
@@ -185,47 +184,37 @@ impl SettingsWindow {
         }
     }
 
-    /// The same Machine presentation that the title bar reads. Saved route identity, rather
+    /// The Machine `choice` names in the shared Machine updates. Saved route identity, rather
     /// than its editable label, selects a paired Machine.
-    pub(super) fn machine_update_view(
-        &self,
-        choice: &MachineChoice,
-        cx: &App,
-    ) -> Option<MachineView> {
-        let shared = presentation::current(cx);
-        match choice {
-            MachineChoice::Local => shared.machines.into_iter().find(|view| view.local),
-            MachineChoice::Direct(route) => {
-                let machine = self
-                    .direct_routes
+    pub(super) fn machine_update(&self, choice: &MachineChoice, cx: &App) -> Option<MachineUpdate> {
+        let id = match choice {
+            MachineChoice::Local => None,
+            MachineChoice::Direct(route) => Some(
+                self.direct_routes
                     .as_ref()?
                     .connections
                     .route(route)?
                     .paired
                     .pin
-                    .core;
-                shared
-                    .machines
-                    .into_iter()
-                    .find(|view| view.machine == machine)
-            }
-        }
+                    .core,
+            ),
+        };
+        MachineUpdates::global(cx)?
+            .read(cx)
+            .machines()
+            .iter()
+            .find(|update| match id {
+                None => update.local,
+                Some(id) => update.machine == id,
+            })
+            .cloned()
     }
 
-    pub(crate) fn request_core_update(&mut self, cx: &mut Context<Self>) {
-        let window = self.update_window;
-        let Some(view) = self.machine_update_view(&MachineChoice::Local, cx) else {
-            return;
-        };
-        if matches!(
-            view.state,
-            presentation::MachineState::Ready { .. }
-                | presentation::MachineState::Overdue { .. }
-                | presentation::MachineState::CoreTooOld { .. }
-        ) && let Some(button) = view.settings_row().button
-        {
-            self.perform_update_command(button.command, window, cx);
-        }
+    /// The update row `choice` shows, the same row the title-bar list and the menu bar extra
+    /// show. Reading it opens no connection.
+    pub(super) fn machine_update_row(&self, choice: &MachineChoice, cx: &App) -> Option<RowView> {
+        let machine = self.machine_update(choice, cx)?.machine;
+        state::current(cx).machine_row(machine)
     }
 
     pub(super) fn request_machine_restart(
@@ -234,14 +223,23 @@ impl SettingsWindow {
         window: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
-        let Some(view) = self.machine_update_view(choice, cx) else {
+        let Some(update) = self.machine_update(choice, cx) else {
             return;
         };
         self.perform_update_command(
-            Command::Machine(view.machine, MachineAction::Restart),
+            Command::Machine(update.machine, MachineAction::Restart),
             window,
             cx,
         );
+    }
+
+    /// Asks `machine`'s SpaceTerm Core to check its feed, over the connection SpaceTerm holds.
+    pub(super) fn ask_core_to_check(&self, machine: MachineId, cx: &mut Context<Self>) {
+        if let Some(store) = MachineUpdates::global(cx) {
+            store.update(cx, |store, cx| {
+                store.perform(machine, MachineAction::CheckAgain, Surface::Settings, cx);
+            });
+        }
     }
 
     pub(super) fn perform_update_command(
@@ -265,9 +263,6 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) {
         match command {
-            Command::Confirm(confirmation) => {
-                self.request_machine_actions(confirmation.actions, false, window, cx)
-            }
             Command::Machine(machine, action @ (MachineAction::Restart | MachineAction::Stop)) => {
                 self.request_machine_actions(vec![(machine, action)], false, window, cx)
             }
@@ -283,6 +278,8 @@ impl SettingsWindow {
                 crate::ui::updates::commands::Presenter::Front,
                 cx,
             ),
+            // Only the title bar opens its list.
+            Command::ShowList => {}
             Command::Explain(explanation) => {
                 // This runs inside an update of Settings, which the alert must update again.
                 let owner = cx.weak_entity();
@@ -318,7 +315,7 @@ impl SettingsWindow {
                             .with_emphasis(ModalActionEmphasis::Prominent),
                             ModalAction::new(
                                 false,
-                                "Cancel",
+                                confirmation.cancel,
                                 ModalActionRole::Cancel,
                                 UPDATE_CANCEL_SELECTOR,
                             ),
@@ -365,15 +362,9 @@ impl SettingsWindow {
                 );
             } else if failure == ActionFailure::LoginItemOff {
                 crate::local_startup::open_login_items();
-            } else if let Some((title, message)) =
-                presentation::action_failure(&notice.name, notice.local, &notice.action, failure)
-            {
+            } else if let Some((title, message)) = notice.unasked_alert() {
                 settings.perform_update_command(
-                    Command::Explain(presentation::Explanation {
-                        title,
-                        message,
-                        then: None,
-                    }),
+                    Command::Explain(Explanation::ok(title, message)),
                     window,
                     cx,
                 );
@@ -386,7 +377,7 @@ impl SettingsWindow {
 /// Presents `explanation` over Settings, outside any update of it.
 fn present_explanation(
     owner: gpui::WeakEntity<SettingsWindow>,
-    explanation: presentation::Explanation,
+    explanation: Explanation,
     window: AnyWindowHandle,
     cx: &mut App,
 ) {
@@ -394,31 +385,50 @@ fn present_explanation(
         return;
     };
     let handle = window;
+    // A follow-up offers its button and Cancel; an alert without one offers only OK.
+    let actions = match explanation.follow_up() {
+        Some(label) => vec![
+            ModalAction::new(
+                true,
+                label,
+                ModalActionRole::Affirmative,
+                "settings-update-explanation-proceed",
+            )
+            .with_emphasis(ModalActionEmphasis::Prominent),
+            ModalAction::new(
+                false,
+                "Cancel",
+                ModalActionRole::Cancel,
+                "settings-update-explanation-cancel",
+            ),
+        ],
+        None => vec![ModalAction::new(
+            true,
+            "OK",
+            ModalActionRole::Affirmative,
+            "settings-update-explanation-ok",
+        )],
+    };
     let _ = window.update(cx, |_, window, cx| {
         presenter.update(cx, |_, cx| {
             let _ = Alert::new(
                 ModalId::new("settings-update-explanation"),
                 explanation.title.clone(),
-                explanation.title,
-                explanation.message,
-                vec![ModalAction::new(
-                    true,
-                    "OK",
-                    ModalActionRole::Affirmative,
-                    "settings-update-explanation-ok",
-                )],
+                explanation.title.clone(),
+                explanation.message.clone(),
+                actions,
             )
             .present(window, cx, move |outcome, cx| {
-                if matches!(
+                let proceeded = matches!(
                     outcome,
                     AlertOutcome::Activated {
                         action_id: true,
                         ..
                     }
-                ) && let Some(then) = explanation.then
-                {
+                );
+                if let Some(command) = explanation.answer(proceeded) {
                     let _ = owner.update(cx, |settings, cx| {
-                        settings.perform_update_command(*then, handle, cx)
+                        settings.perform_update_command(command, handle, cx)
                     });
                 }
             });

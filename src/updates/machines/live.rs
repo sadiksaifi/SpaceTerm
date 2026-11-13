@@ -64,6 +64,8 @@ pub(crate) struct Observed {
     /// The Core run the facts belong to.
     pub(crate) boot: String,
     pub(crate) facts: UpdateFacts,
+    /// The detailed facts `facts` came in, from a Core whose service lane offers them.
+    pub(crate) detailed: Option<spaceterm_core::update::DetailedUpdateFacts>,
 }
 
 /// A confirmed change the lane previews and executes.
@@ -88,8 +90,9 @@ pub(crate) trait MachineLane: Send + Sync {
     ) -> Result<Observed, ActionFailure>;
     /// `Check`.
     fn check(&self) -> Result<(), ActionFailure>;
-    /// Pushes `build` when supplied, otherwise fetches from the Core's feed.
-    fn install(&self, build: Option<&EmbeddedCore>) -> Result<(), ActionFailure>;
+    /// Pushes `build` when supplied, otherwise fetches from the Core's feed. Answers with the
+    /// Core's facts after it. A feed that names nothing newer downloads nothing.
+    fn install(&self, build: Option<&EmbeddedCore>) -> Result<UpdateFacts, ActionFailure>;
     /// `Preview` of `change`: the Core's token and what it affects.
     fn preview(&self, change: LaneChange) -> Result<admin::Preview, ActionFailure>;
     /// `Execute` of exactly `preview`, followed until it settles.
@@ -428,15 +431,17 @@ fn act(target: &Target, action: &MachineAction) -> Result<(), ActionFailure> {
         };
     };
     match action {
-        MachineAction::Install => {
-            lane.install(target.push.as_deref())
-                .map_err(|failure| match (target.floor, failure) {
-                    (Some(floor), ActionFailure::Failed | ActionFailure::Unreachable) => {
-                        ActionFailure::NeedsFloor(floor)
-                    }
-                    _ => failure,
-                })
-        }
+        // Below the floor, Install asks the Core to fetch the Stepping Stone. The Core has it
+        // when its answer shows it downloaded, whether this fetch or its own check fetched it.
+        MachineAction::Install => match (lane.install(target.push.as_deref()), target.floor) {
+            (Ok(facts), Some(floor)) if !super::has_floor_progress(floor, &facts) => {
+                Err(ActionFailure::NeedsFloor(floor))
+            }
+            (Err(ActionFailure::Failed | ActionFailure::Unreachable), Some(floor)) => {
+                Err(ActionFailure::NeedsFloor(floor))
+            }
+            (result, _) => result.map(drop),
+        },
         _ => lane.check(),
     }
 }
@@ -583,10 +588,11 @@ impl Shared {
         Some(Target {
             known: entry.known.clone(),
             facts: entry.update.facts.clone(),
-            floor: entry.update.facts.as_ref().and_then(|facts| {
-                let floor = self.embedded.build(facts.platform)?.candidate.floor()?;
-                (!floor.admits(&facts.running)).then_some(floor)
-            }),
+            floor: entry
+                .update
+                .bundled
+                .as_ref()
+                .and_then(|bundled| bundled.floor),
             push: entry.update.facts.as_ref().and_then(|facts| {
                 entry.update.push.as_ref()?;
                 self.embedded.build(facts.platform)
@@ -690,6 +696,7 @@ impl Shared {
                 let wake = Arc::new(Wake::default());
                 let entry = Entry {
                     update: MachineUpdate {
+                        detailed: None,
                         machine: machine.id,
                         name: machine.name.clone(),
                         local: machine.local,
@@ -700,7 +707,6 @@ impl Shared {
                         bundled: None,
                         failed_push: None,
                         asked: None,
-                        retrying_since: None,
                     },
                     known: machine.clone(),
                     wake: Arc::clone(&wake),
@@ -764,6 +770,7 @@ impl Shared {
             };
             entry.update.capabilities = reached(work);
             entry.update.facts = Some(observed.facts.clone());
+            entry.update.detailed = observed.detailed.clone();
             entry.boot = Some(observed.boot.clone());
             let restarting = match &observed.facts.operation {
                 Some(Operation::Restarting { to }) => Some(Some(to.clone())),
@@ -802,6 +809,7 @@ impl Shared {
             entry.update.link = MachineLink::Unreported;
             entry.update.capabilities = reached(work);
             entry.update.facts = None;
+            entry.update.detailed = None;
             entry.update.push = None;
             entry.update.bundled = None;
             entry.restart = None;
@@ -814,6 +822,8 @@ impl Shared {
             entry.update.link = MachineLink::Stopped;
             entry.update.capabilities = unconnected();
             entry.restart = None;
+            // A stopped Core runs no engine, so nothing of its last detailed answer still holds.
+            entry.update.detailed = None;
             if let Some(facts) = &mut entry.update.facts {
                 facts.sessions = 0;
                 facts.operation = None;

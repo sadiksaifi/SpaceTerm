@@ -42,16 +42,16 @@ impl Supervisor for Untouched {
     }
 }
 
-/// The restarts a running server was asked to admit, as `(candidate, silent)`.
+/// The restarts a running server was asked to admit, as `(candidate, fence)`.
 #[derive(Default)]
-struct Admitted(Mutex<Vec<(Option<[u8; 32]>, bool)>>);
+struct Admitted(Mutex<Vec<(Option<[u8; 32]>, Fence)>>);
 impl Restarter for Admitted {
     fn restart(
         self: Arc<Self>,
         candidate: Option<[u8; 32]>,
-        silent: bool,
+        fence: Fence,
     ) -> Result<Launch, RestartRefusal> {
-        self.0.lock().unwrap().push((candidate, silent));
+        self.0.lock().unwrap().push((candidate, fence));
         Ok(Box::new(|| {}))
     }
 }
@@ -163,6 +163,7 @@ fn sessions(sessions: u32) -> Activity {
     Activity {
         sessions,
         requested: false,
+        working: sessions,
     }
 }
 
@@ -931,6 +932,7 @@ fn a_silent_restart_waits_for_a_quiet_grace_period_and_tries_each_pending_versio
         let requested = Activity {
             sessions: 0,
             requested: true,
+            working: 0,
         };
         updates.observe(requested, start + SILENT_GRACE - Duration::from_secs(1));
         updates.observe(sessions(0), start + SILENT_GRACE);
@@ -945,7 +947,10 @@ fn a_silent_restart_waits_for_a_quiet_grace_period_and_tries_each_pending_versio
         );
         let data = Directory::open(&machine.fixture.paths.data, false).unwrap();
         let digest = digest_bytes(&pending_digest(&data).unwrap().unwrap()).unwrap();
-        assert_eq!(*admitted.0.lock().unwrap(), [(Some(digest), true)]);
+        assert_eq!(
+            *admitted.0.lock().unwrap(),
+            [(Some(digest), Fence::NoSessions)]
+        );
         assert_eq!(
             updates.facts().operation,
             Some(Operation::Restarting {
@@ -966,14 +971,14 @@ fn a_silent_restart_waits_for_a_quiet_grace_period_and_tries_each_pending_versio
             updates.restart(Restart::Asked).map(|r| r.to),
             Ok(version("1.1.0"))
         );
-        assert_eq!(admitted.0.lock().unwrap()[1], (Some(digest), false));
+        assert_eq!(admitted.0.lock().unwrap()[1], (Some(digest), Fence::Any));
     });
 }
 
 /// The fence refuses every restart its admission finds sessions for.
 struct Refusing;
 impl Restarter for Refusing {
-    fn restart(self: Arc<Self>, _: Option<[u8; 32]>, _: bool) -> Result<Launch, RestartRefusal> {
+    fn restart(self: Arc<Self>, _: Option<[u8; 32]>, _: Fence) -> Result<Launch, RestartRefusal> {
         Err(RestartRefusal::SessionsOpen)
     }
 }
@@ -986,7 +991,7 @@ struct StopsAtOnce {
     heard: Mutex<Option<Option<Operation>>>,
 }
 impl Restarter for StopsAtOnce {
-    fn restart(self: Arc<Self>, _: Option<[u8; 32]>, _: bool) -> Result<Launch, RestartRefusal> {
+    fn restart(self: Arc<Self>, _: Option<[u8; 32]>, _: Fence) -> Result<Launch, RestartRefusal> {
         Ok(Box::new(move || {
             let updates = self.updates.get().unwrap();
             *self.heard.lock().unwrap() = Some(updates.facts().operation);
@@ -1321,5 +1326,308 @@ fn a_second_engine_refuses_an_older_release_than_one_another_engine_installed() 
             Err(InstallError::NotNewer)
         );
         assert_eq!(installations(&machine), ["1.0.0", "1.2.0"]);
+    });
+}
+
+/// The server reports `sessions` live Terminal Sessions, `working` of them with work going on.
+fn working(sessions: u32, working: u32) -> Activity {
+    Activity {
+        sessions,
+        requested: false,
+        working,
+    }
+}
+
+/// Moves the Pending Version's install time `by` seconds into the past, as a reopened engine
+/// reads it.
+fn backdate(machine: &Machine, by: u64) {
+    let data = Directory::open(&machine.fixture.paths.data, false).unwrap();
+    change(&data, |record| {
+        let pending = record.pending.as_mut().unwrap();
+        pending.installed_at = pending.installed_at.saturating_sub(by);
+    })
+    .unwrap();
+}
+
+/// An engine of `machine` that follows a server whose restarts `admitted` records.
+fn following(machine: &Machine, admitted: &Arc<Admitted>) -> (Updates, Arc<dyn Restarter>) {
+    let updates = Updates::open(machine.service.clone()).unwrap();
+    let restarter: Arc<dyn Restarter> = admitted.clone();
+    updates
+        .run(Arc::downgrade(&restarter), Arc::new(|_| Vec::new()), || {
+            None
+        })
+        .unwrap();
+    (updates, restarter)
+}
+
+#[test]
+fn an_ask_stage_core_restarts_when_every_session_has_no_work() {
+    with_fixture_trust(|| {
+        let machine = machine("1.0.0");
+        let updates = Updates::open(machine.service.clone()).unwrap();
+        install(
+            &updates,
+            &machine,
+            "1.1.0",
+            Protocols::CURRENT,
+            Source::Feed,
+        )
+        .unwrap();
+        // The update waited a week, and no Terminal Session has had work for a day.
+        backdate(&machine, 7 * 86_400);
+        let admitted = Arc::new(Admitted::default());
+        let (updates, _restarter) = following(&machine, &admitted);
+        let start = Instant::now();
+        updates.observe(working(2, 0), start);
+        updates.observe(working(2, 0), start + 24 * IDLE_PERIOD);
+        assert_eq!(admitted.0.lock().unwrap().len(), 1);
+        assert_eq!(
+            updates.detailed().restart,
+            Some(RestartCause::NothingRunning)
+        );
+        assert_eq!(updates.restart(Restart::Silent), Err(RestartRefusal::Busy));
+    });
+}
+
+#[test]
+fn only_a_nonbreaking_ask_stage_update_probes_work_and_reports_the_idle_continuation() {
+    with_fixture_trust(|| {
+        for (age, breaking, probes, continuation) in [
+            (0, false, false, Continuation::WhenSessionsEnd),
+            (
+                IDLE_RESTART_AFTER - 60,
+                false,
+                false,
+                Continuation::WhenSessionsEnd,
+            ),
+            (
+                IDLE_RESTART_AFTER,
+                false,
+                true,
+                Continuation::WhenNothingRuns,
+            ),
+            (
+                IDLE_RESTART_AFTER,
+                true,
+                false,
+                Continuation::NeedsConfirmation,
+            ),
+        ] {
+            let machine = machine("1.0.0");
+            let updates = Updates::open(machine.service.clone()).unwrap();
+            assert!(!updates.probes_work());
+            let protocols = if breaking {
+                with_major(
+                    Protocols::CURRENT.work.major + 1,
+                    Protocols::CURRENT.service.major,
+                )
+            } else {
+                Protocols::CURRENT
+            };
+            install(&updates, &machine, "1.1.0", protocols, Source::Feed).unwrap();
+            backdate(&machine, age);
+            let admitted = Arc::new(Admitted::default());
+            let (updates, _restarter) = following(&machine, &admitted);
+            updates.observe(working(2, 2), Instant::now());
+            assert_eq!(updates.probes_work(), probes);
+            assert_eq!(updates.detailed().continuation, Some(continuation));
+            updates.observe(working(2, 0), Instant::now() + IDLE_PERIOD);
+            assert_eq!(admitted.0.lock().unwrap().len(), usize::from(probes));
+            if probes {
+                assert!(!updates.probes_work());
+            }
+        }
+    });
+}
+
+#[test]
+fn an_aborted_idle_helper_waits_another_hour_before_retrying() {
+    with_fixture_trust(|| {
+        let machine = machine("1.0.0");
+        let updates = Updates::open(machine.service.clone()).unwrap();
+        install(
+            &updates,
+            &machine,
+            "1.1.0",
+            Protocols::CURRENT,
+            Source::Feed,
+        )
+        .unwrap();
+        backdate(&machine, IDLE_RESTART_AFTER);
+        let admitted = Arc::new(Admitted::default());
+        let (updates, _restarter) = following(&machine, &admitted);
+        updates.observe(working(1, 0), Instant::now());
+        assert_eq!(admitted.0.lock().unwrap().len(), 1);
+        updates.operations_settled();
+        let start = Instant::now();
+        updates.observe(working(1, 0), start + IDLE_PERIOD / 2);
+        assert_eq!(admitted.0.lock().unwrap().len(), 1);
+        updates.observe(working(1, 0), start + IDLE_PERIOD);
+        assert_eq!(admitted.0.lock().unwrap().len(), 2);
+    });
+}
+
+/// Every update record a released Core can reach, at 0 and 2 live Terminal Sessions: the
+/// engine's silent-restart admission agrees with `continuation()` on the facts it reports.
+/// Listed exceptions, from design 6.1:
+/// - `Unknown`: a newer install failure hides whether a start failed.
+/// - A start failure of the Pending Version recorded without this boot's silent attempt (after a
+///   reboot, or after a confirmed restart failed): the facts say `StartFailed`, the engine would
+///   try again. Conservative.
+/// - This boot's silent attempt with no start failure after it (the Core crashed between
+///   recording the attempt and the helper stopping the server): the facts promise a restart
+///   the engine no longer tries.
+#[test]
+fn the_silent_restart_admission_agrees_with_the_continuation_of_the_facts() {
+    with_fixture_trust(|| {
+        let machine = machine("1.0.0");
+        let updates = Updates::open(machine.service.clone()).unwrap();
+        let protocols = updates.shared.protocols;
+        let boot = boot().unwrap();
+        let stored = |protocols: Protocols| Stored {
+            digest: "a".repeat(64),
+            version: version("1.1.0"),
+            protocols,
+            installed_at: now(),
+        };
+        let failure = |id, text: &str, kind| UpdateFailure {
+            id,
+            at: 1,
+            version: version(text),
+            kind,
+        };
+        let breaking = with_major(protocols.work.major + 1, protocols.service.major);
+        let pendings = [None, Some(stored(protocols)), Some(stored(breaking))];
+        let failures = [
+            None,
+            Some(failure(
+                1,
+                "1.1.0",
+                FailureKind::Install(InstallFailure::Download),
+            )),
+            Some(failure(
+                1,
+                "1.1.0",
+                FailureKind::Start(StartFailure::PortInUse),
+            )),
+            Some(failure(
+                1,
+                "1.0.5",
+                FailureKind::Start(StartFailure::DiskFull),
+            )),
+        ];
+        let interruptions = [
+            None,
+            Some(Interruption {
+                activation: [1; 32],
+                failure: failure(2, "1.1.0", FailureKind::Start(StartFailure::Interrupted)),
+            }),
+        ];
+        let attempts = [
+            None,
+            Some(Attempt {
+                boot: boot.clone(),
+                digest: "a".repeat(64),
+            }),
+            Some(Attempt {
+                boot: "another-boot".into(),
+                digest: "a".repeat(64),
+            }),
+            Some(Attempt {
+                boot: boot.clone(),
+                digest: "b".repeat(64),
+            }),
+        ];
+        let mut checked = 0;
+        for pending in &pendings {
+            for last_failure in &failures {
+                for interrupted in &interruptions {
+                    for silent in &attempts {
+                        for sessions in [0, 2] {
+                            let record = Record {
+                                pending: pending.clone(),
+                                last_failure: last_failure.clone(),
+                                interrupted: interrupted.clone(),
+                                silent: silent.clone(),
+                                failures: 2,
+                                ..Record::default()
+                            };
+                            let facts = {
+                                let mut live = updates.shared.lock();
+                                live.record = record.clone();
+                                live.sessions = sessions;
+                                updates.shared.compose(&live, 1, now())
+                            };
+                            let derived = crate::update::continuation(&facts);
+                            let admission = silent_admission(
+                                &record,
+                                &protocols,
+                                &boot,
+                                sessions,
+                                now(),
+                                false,
+                            );
+                            let expected = match admission {
+                                Ok(RestartCause::NoSessions) => Some(Continuation::Soon),
+                                Err(RestartRefusal::SessionsOpen) => {
+                                    Some(Continuation::WhenSessionsEnd)
+                                }
+                                Err(RestartRefusal::Breaking) => {
+                                    Some(Continuation::NeedsConfirmation)
+                                }
+                                Err(RestartRefusal::NothingPending) if pending.is_some() => {
+                                    Some(Continuation::StartFailed)
+                                }
+                                Err(RestartRefusal::NothingPending) => None,
+                                other => panic!("unexpected admission {other:?}"),
+                            };
+                            let attempted = silent.as_ref().is_some_and(|attempt| {
+                                attempt.boot == boot && attempt.digest == "a".repeat(64)
+                            });
+                            // The failure the facts show, against the version that waits.
+                            let shown = facts.last_failure.as_ref();
+                            let install_shown =
+                                shown.is_some_and(|f| matches!(f.kind, FailureKind::Install(_)));
+                            let start_of_pending = shown.is_some_and(|f| {
+                                matches!(f.kind, FailureKind::Start(_))
+                                    && pending.as_ref().is_some_and(|p| p.version == f.version)
+                            });
+                            let not_breaking = expected != Some(Continuation::NeedsConfirmation);
+                            let waiting = Some(if sessions == 0 {
+                                Continuation::Soon
+                            } else {
+                                Continuation::WhenSessionsEnd
+                            });
+                            let listed = match (derived, expected) {
+                                // A visible install failure hides whether a start failed.
+                                (Some(Continuation::Unknown), _) => install_shown && not_breaking,
+                                // A start failure of this version without this boot's attempt:
+                                // after a reboot or a failed confirmed restart. Conservative.
+                                (Some(Continuation::StartFailed), engine) => {
+                                    start_of_pending && !attempted && engine == waiting
+                                }
+                                // This boot's attempt with no start failure after it: the Core
+                                // crashed between recording it and the helper stopping it.
+                                (derived, Some(Continuation::StartFailed)) => {
+                                    attempted
+                                        && !start_of_pending
+                                        && !install_shown
+                                        && derived == waiting
+                                }
+                                _ => false,
+                            };
+                            assert!(
+                                derived == expected || listed,
+                                "{record:?} at {sessions} sessions: the facts say {derived:?}, \
+                                 the engine {expected:?}"
+                            );
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 3 * 4 * 2 * 4 * 2);
     });
 }

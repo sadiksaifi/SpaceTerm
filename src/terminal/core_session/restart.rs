@@ -1,32 +1,50 @@
-//! A Core restart's bounded wait and shared progress wording.
-use spaceterm_core::update::facts::{Operation, UpdateFacts};
+//! A Core restart's bounded wait.
+use spaceterm_core::update::facts::{
+    DetailedUpdateFacts, Operation, RestartCause, UpdateFacts, Version,
+};
 use std::time::Duration;
 
 pub(crate) type PaneRestartCauses =
     std::sync::Arc<std::sync::Mutex<Vec<spaceterm_core::client_view::PaneRestart>>>;
 
+/// How long an announced restart may keep a Machine's connections away before SpaceTerm treats
+/// it as an ordinary connection loss.
 pub(crate) const RECONNECT_LIMIT: Duration = Duration::from_secs(180);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CoreRestart {
-    Updating,
-    Restarting,
+/// A restart the Machine's SpaceTerm Core announced in its update facts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CoreRestart {
+    /// The version the Core restarts into, or `None` for a restart without updating.
+    pub(crate) to: Option<Version>,
+    /// The Core restarts by itself because no Terminal Session had work going on. Only the
+    /// detailed update facts of work and service 1.2 report it (`RestartCause::NothingRunning`);
+    /// the update facts every released Core sends never do.
+    pub(crate) while_idle: bool,
 }
 
 impl CoreRestart {
     pub(crate) fn of(facts: &UpdateFacts) -> Option<Self> {
-        match facts.operation {
-            Some(Operation::Restarting { .. }) => Some(Self::Updating),
-            Some(Operation::RestartingSameVersion) => Some(Self::Restarting),
+        match &facts.operation {
+            // A Core that selected minor 0 reports a same-version restart as one to its running
+            // version.
+            Some(Operation::Restarting { to }) if *to != facts.running => Some(Self {
+                to: Some(to.clone()),
+                while_idle: false,
+            }),
+            Some(Operation::Restarting { .. } | Operation::RestartingSameVersion) => Some(Self {
+                to: None,
+                while_idle: false,
+            }),
             _ => None,
         }
     }
 
-    pub(crate) fn label(self, machine: &str) -> String {
-        match self {
-            Self::Updating => format!("Updating {machine}…"),
-            Self::Restarting => format!("Restarting {machine}…"),
-        }
+    /// The restart a Core of work minor 2 or later announces, with why it began.
+    pub(crate) fn of_detailed(detailed: &DetailedUpdateFacts) -> Option<Self> {
+        Self::of(&detailed.facts).map(|restart| Self {
+            while_idle: detailed.restart == Some(RestartCause::NothingRunning),
+            ..restart
+        })
     }
 }
 
@@ -80,6 +98,35 @@ mod tests {
     use super::*;
     use crate::ui::workspaces::tests::{inventory, pane, tab};
     use spaceterm_core::{hierarchy::Axis, update::facts::Version};
+
+    #[test]
+    fn only_a_restart_the_core_began_because_nothing_ran_counts_as_idle() {
+        use spaceterm_core::update::facts::{Platform, UpdateCheck};
+        let detailed = |restart| DetailedUpdateFacts {
+            facts: UpdateFacts {
+                revision: 1,
+                platform: Platform::HOST,
+                running: Version::parse("0.11.4").unwrap(),
+                pending: None,
+                sessions: 2,
+                operation: Some(Operation::Restarting {
+                    to: Version::parse("0.11.5").unwrap(),
+                }),
+                check: UpdateCheck::Disabled,
+                skipped: None,
+                last_failure: None,
+            },
+            continuation: None,
+            working: 0,
+            restart,
+        };
+        let idle =
+            |cause| CoreRestart::of_detailed(&detailed(cause)).map(|restart| restart.while_idle);
+        assert_eq!(idle(Some(RestartCause::NothingRunning)), Some(true));
+        assert_eq!(idle(Some(RestartCause::Asked)), Some(false));
+        assert_eq!(idle(Some(RestartCause::NoSessions)), Some(false));
+        assert_eq!(idle(None), Some(false));
+    }
 
     #[test]
     fn a_panes_update_cause_survives_relaunch_and_ends_with_a_new_session() {

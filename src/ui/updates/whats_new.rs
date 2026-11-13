@@ -1,10 +1,10 @@
-//! The What's new sheet: this build's release notes, embedded at build time, ending with a link
-//! to the release on GitHub. The notes count as read once the sheet opens, not while it waits
-//! behind another modal.
+//! The What's New sheet, titled "What's New in SpaceTerm {v}": this build's release notes,
+//! embedded at build time, ending with a link to the release on GitHub. The notes count as read
+//! once the sheet opens, not while it waits behind another modal.
 //!
-//! The title-bar update control and the menu-bar menu offer the sheet while
-//! [`release_notes_unread`] holds, and open it with [`open_whats_new`]. Both read the
-//! [`crate::updates::UpdateService`] entity, so observing it reports changes to the flag.
+//! Opening the sheet from anywhere, the title-bar step, Help or the menu-bar menu, ends the title
+//! bar's What's New step, because the step lasts while the notes are unread. Every surface opens
+//! it with [`open_whats_new`].
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -28,7 +28,7 @@ actions!(spaceterm, [OpenWhatsNew]);
     not(target_os = "macos"),
     allow(dead_code, reason = "only the native application menu names it")
 )]
-pub(crate) const WHATS_NEW_TITLE: &str = "What's New in SpaceTerm";
+pub(crate) const WHATS_NEW_TITLE: &str = "What\u{2019}s New in SpaceTerm";
 const MODAL_ID: &str = "whats-new";
 /// The link below the notes that opens this version's release on GitHub.
 const RELEASE_LINK: &str = "View release on GitHub";
@@ -51,7 +51,7 @@ pub(super) fn init(cx: &mut App) {
 /// build without release notes.
 #[expect(
     dead_code,
-    reason = "the menu-bar menu names its What's new command with this"
+    reason = "the menu-bar menu names its What\u{2019}s new command with this"
 )]
 pub(crate) fn whats_new_menu_title() -> Option<String> {
     release_notes::embedded().map(ReleaseNotes::menu_title)
@@ -87,7 +87,7 @@ fn sheet(
     this_year: i32,
     body: gpui::Entity<NotesBody>,
 ) -> Dialog<SheetAction> {
-    let title = notes.title();
+    let title = notes.menu_title();
     let dialog = Dialog::new(
         ModalId::new(MODAL_ID),
         title.clone(),
@@ -145,7 +145,7 @@ fn present<T: 'static>(
     if presented {
         cx.set_global(OpenSheet);
     } else {
-        eprintln!("failed to present the What's new sheet");
+        eprintln!("failed to present the What\u{2019}s new sheet");
     }
     presented
 }
@@ -268,7 +268,7 @@ mod tests {
         visual.run_until_parked();
 
         let tree = A11yTree::read(visual);
-        tree.node(&release_notes::embedded().unwrap().title());
+        tree.node(&release_notes::embedded().unwrap().menu_title());
         tree.node("View release on GitHub");
         tree.node("Done");
     }
@@ -299,7 +299,7 @@ mod tests {
 
         let tree = A11yTree::read(cx);
         for text in [
-            "What's new in SpaceTerm 0.9.0",
+            "What\u{2019}s New in SpaceTerm 0.9.0",
             "Released 3 November",
             "panes: Let panes swap places",
             "SpaceTerm uses less energy while idle",

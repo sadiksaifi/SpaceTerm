@@ -27,6 +27,16 @@ impl TerminalEmulator {
         self.metadata.note_input(bytes);
     }
 
+    /// Whether the owning shell waits at its own empty prompt, which Run admission also requires.
+    /// A shell without prompt markers never does.
+    pub(crate) fn at_empty_prompt(&self) -> bool {
+        let prompt = self.metadata.owned_prompt();
+        matches!(
+            prompt.zone,
+            Some(PromptZone::Prompt | PromptZone::CommandInput)
+        ) && prompt.input_bytes == 0
+    }
+
     /// Accepts `command` only at an empty prompt of the owning shell with bracketed paste on,
     /// and returns it as one bracketed paste followed by Return. From then on the markers the
     /// run follows are kept for [`Self::take_run_observations`].

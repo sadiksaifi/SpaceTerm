@@ -10,6 +10,118 @@ use crate::platform::unix_pty::{
 pub(super) struct LinuxPtyHost;
 
 impl UnixPtyHost for LinuxPtyHost {
+    fn process_image(&self, identity: ProcessIdentity) -> io::Result<std::path::PathBuf> {
+        if self.observe_exactly(identity.process)?.map(|p| p.identity) != Some(identity) {
+            return Err(io::Error::other("process identity changed"));
+        }
+        let image = std::fs::read_link(format!("/proc/{}/exe", identity.process))?;
+        if self.observe_exactly(identity.process)?.map(|p| p.identity) != Some(identity) {
+            return Err(io::Error::other("process identity changed"));
+        }
+        Ok(image)
+    }
+
+    fn cpu_time(&self, identity: ProcessIdentity) -> io::Result<std::time::Duration> {
+        let stat = std::fs::read(format!("/proc/{}/stat", identity.process))?;
+        if exact_stat(identity.process, &stat)?.map(|p| p.identity) != Some(identity) {
+            return Err(io::Error::other("process identity changed"));
+        }
+        let end = stat
+            .iter()
+            .rposition(|b| *b == b')')
+            .ok_or_else(|| io::Error::other("unreadable CPU time"))?;
+        let fields = std::str::from_utf8(&stat[end + 1..])
+            .map_err(|_| io::Error::other("unreadable CPU time"))?
+            .split_ascii_whitespace()
+            .collect::<Vec<_>>();
+        let ticks = fields
+            .get(11)
+            .and_then(|n| n.parse::<u64>().ok())
+            .zip(fields.get(12).and_then(|n| n.parse::<u64>().ok()))
+            .and_then(|(u, s)| u.checked_add(s))
+            .ok_or_else(|| io::Error::other("unreadable CPU time"))?;
+        // SAFETY: sysconf reads the kernel's clock-tick frequency.
+        let frequency = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        if frequency <= 0 {
+            return Err(io::Error::other("CPU tick frequency is unavailable"));
+        }
+        let nanos = u64::try_from(u128::from(ticks) * 1_000_000_000 / (frequency as u128))
+            .map_err(|_| io::Error::other("CPU time overflow"))?;
+        Ok(std::time::Duration::from_nanos(nanos))
+    }
+    fn prompt_waiting(
+        &self,
+        identity: ProcessIdentity,
+        slave: &std::path::Path,
+        _frozen: bool,
+    ) -> io::Result<bool> {
+        if self.observe_exactly(identity.process)?.map(|p| p.identity) != Some(identity) {
+            return Err(io::Error::other("process identity changed"));
+        }
+        let waiting = terminal_read_wait(identity.process, slave)?;
+        if self.observe_exactly(identity.process)?.map(|p| p.identity) != Some(identity) {
+            return Err(io::Error::other("process identity changed"));
+        }
+        Ok(waiting)
+    }
+
+    fn pin_process(
+        &self,
+        identity: ProcessIdentity,
+    ) -> io::Result<Box<dyn super::unix_pty::ProcessControl>> {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        // SAFETY: pidfd_open returns an owned descriptor for this process instance.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, identity.process, 0) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the successful syscall returned a new owned descriptor.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+        if self.observe_exactly(identity.process)?.map(|p| p.identity) != Some(identity) {
+            return Err(io::Error::other("process identity changed"));
+        }
+        Ok(Box::new(PinnedProcess { identity, fd }))
+    }
+
+    fn complete_process_ids(&self) -> io::Result<Vec<i32>> {
+        self.session_candidates(0)
+    }
+    fn holds_slave(&self, pid: i32, slave: &std::path::Path) -> io::Result<bool> {
+        let directory = format!("/proc/{pid}/fd");
+        let list = || -> io::Result<Vec<std::path::PathBuf>> {
+            let mut entries = std::fs::read_dir(&directory)?
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<io::Result<Vec<_>>>()?;
+            entries.sort();
+            Ok(entries)
+        };
+        let mut entries = Vec::new();
+        let mut found = false;
+        // Keep read_dir alive while inspecting its entries. For this Core's own PID that
+        // directory descriptor is itself in the list; closing it early would make it unreadable.
+        for entry in std::fs::read_dir(&directory)? {
+            let path = entry?.path();
+            let target = std::fs::read_link(&path)?;
+            // An open /dev/tty keeps its original terminal after setsid. Its symlink
+            // names the alias, so it cannot prove which slave it addresses without
+            // following a target. An unresolved alias counts as work.
+            if target == std::path::Path::new("/dev/tty")
+                || target == std::path::Path::new("/dev/tty (deleted)")
+            {
+                return Err(io::Error::other("an alias terminal holder is unresolved"));
+            }
+            if target == slave {
+                found = true;
+            }
+            entries.push(path);
+        }
+        entries.sort();
+        if list()? != entries {
+            return Err(io::Error::other("process descriptors changed"));
+        }
+        Ok(found)
+    }
+
     fn observe_process(&self, process: i32) -> Option<ProcessObservation> {
         let stat = read_process_stat(process)?;
         (!stat.exited).then_some(stat.observation)
@@ -17,6 +129,19 @@ impl UnixPtyHost for LinuxPtyHost {
 
     fn observe_spawned_child(&self, process: i32) -> Option<ProcessObservation> {
         read_process_stat(process).map(|stat| stat.observation)
+    }
+
+    fn observe_exactly(&self, process: i32) -> io::Result<Option<ProcessObservation>> {
+        if process < 1 {
+            return Ok(None);
+        }
+        let stat = match std::fs::read(format!("/proc/{process}/stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        exact_stat(process, &stat)
     }
 
     fn process_ids(&self) -> io::Result<Vec<i32>> {
@@ -30,6 +155,35 @@ impl UnixPtyHost for LinuxPtyHost {
         Ok(processes)
     }
 
+    fn session_candidates(&self, _leader: i32) -> io::Result<Vec<i32>> {
+        // hidepid can omit a member entirely, rather than making its stat read fail.
+        // Cleanup keeps its best-effort process list; work observations require visibility.
+        let mounts = std::fs::read_to_string("/proc/mounts")?;
+        let mut visible = false;
+        for line in mounts.lines() {
+            let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
+            if fields.get(1) != Some(&"/proc") {
+                continue;
+            }
+            let readable = fields.get(2) == Some(&"proc")
+                && fields.get(3).is_some_and(|options| {
+                    options.split(',').all(|option| {
+                        option
+                            .strip_prefix("hidepid=")
+                            .is_none_or(|mode| matches!(mode, "0" | "off"))
+                    })
+                });
+            if !readable {
+                return Err(io::Error::other("process membership is not visible"));
+            }
+            visible = true;
+        }
+        if !visible {
+            return Err(io::Error::other("process membership is not visible"));
+        }
+        self.process_ids()
+    }
+
     fn master_read_error(&self, error: &io::Error) -> MasterReadError {
         if error.raw_os_error() == Some(libc::EIO) {
             MasterReadError::Hangup
@@ -37,6 +191,173 @@ impl UnixPtyHost for LinuxPtyHost {
             MasterReadError::Failure
         }
     }
+}
+
+/// Inspect only syscall arguments and the bounded read descriptor set. Never read the
+/// terminal's input buffer or follow any descriptor target into a filesystem.
+fn terminal_read_wait(pid: i32, slave: &std::path::Path) -> io::Result<bool> {
+    use std::os::unix::fs::FileExt;
+    let syscall = std::fs::read_to_string(format!("/proc/{pid}/syscall"))?;
+    let fields = syscall.split_ascii_whitespace().collect::<Vec<_>>();
+    let Some(number) = fields.first().and_then(|n| n.parse::<i64>().ok()) else {
+        return Ok(false);
+    };
+    if number < 0 {
+        return Ok(false);
+    }
+    let arg = |index: usize| -> io::Result<u64> {
+        fields
+            .get(index + 1)
+            .and_then(|s| s.strip_prefix("0x"))
+            .and_then(|s| u64::from_str_radix(s, 16).ok())
+            .ok_or_else(|| io::Error::other("unreadable syscall arguments"))
+    };
+    let is_terminal = |fd: i32| -> io::Result<bool> {
+        Ok(std::fs::read_link(format!("/proc/{pid}/fd/{fd}"))? == slave)
+    };
+    if number == libc::SYS_read || number == libc::SYS_readv {
+        return is_terminal(
+            i32::try_from(arg(0)?).map_err(|_| io::Error::other("invalid read descriptor"))?,
+        );
+    }
+    let select = number == libc::SYS_pselect6;
+    #[cfg(target_arch = "x86_64")]
+    let select = select || number == libc::SYS_select;
+    if select {
+        let count = arg(0)?;
+        let address = arg(1)?;
+        if count == 0 || count > 1024 || address == 0 {
+            return Ok(false);
+        }
+        let mut descriptors = vec![0_u8; (count as usize).div_ceil(64) * 8];
+        std::fs::File::open(format!("/proc/{pid}/mem"))?
+            .read_exact_at(&mut descriptors, address)?;
+        for fd in 0..count as usize {
+            if descriptors[fd / 8] & (1 << (fd % 8)) != 0 && is_terminal(fd as i32)? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+    let polling = number == libc::SYS_ppoll;
+    #[cfg(target_arch = "x86_64")]
+    let polling = polling || number == libc::SYS_poll;
+    if polling {
+        let count = arg(1)?;
+        if count == 0 || count > 64 {
+            return Ok(false);
+        }
+        let mut descriptors = vec![0_u8; count as usize * 8];
+        std::fs::File::open(format!("/proc/{pid}/mem"))?
+            .read_exact_at(&mut descriptors, arg(0)?)?;
+        for entry in descriptors.chunks_exact(8) {
+            let fd = i32::from_ne_bytes(entry[..4].try_into().expect("poll descriptor"));
+            let events = i16::from_ne_bytes(entry[4..6].try_into().expect("poll events"));
+            if fd >= 0 && events & libc::POLLIN != 0 && is_terminal(fd)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+struct PinnedProcess {
+    identity: ProcessIdentity,
+    fd: std::os::fd::OwnedFd,
+}
+impl super::unix_pty::ProcessControl for PinnedProcess {
+    fn identity(&self) -> ProcessIdentity {
+        self.identity
+    }
+    fn stopped(&self) -> io::Result<bool> {
+        if LinuxPtyHost
+            .observe_exactly(self.identity.process)?
+            .map(|p| p.identity)
+            != Some(self.identity)
+        {
+            return Err(io::Error::other("process identity changed"));
+        }
+        let directory = format!("/proc/{}/task", self.identity.process);
+        let list = || -> io::Result<Vec<std::path::PathBuf>> {
+            let mut paths = std::fs::read_dir(&directory)?
+                .map(|e| e.map(|e| e.path()))
+                .collect::<io::Result<Vec<_>>>()?;
+            paths.sort();
+            Ok(paths)
+        };
+        let threads = list()?;
+        if threads.is_empty() {
+            return Err(io::Error::other("the process has no readable threads"));
+        }
+        for thread in &threads {
+            let stat = std::fs::read(thread.join("stat"))?;
+            let end = stat
+                .iter()
+                .rposition(|byte| *byte == b')')
+                .ok_or_else(|| io::Error::other("unreadable thread"))?;
+            let state = stat[end + 1..]
+                .split(|b| b.is_ascii_whitespace())
+                .find(|s| !s.is_empty());
+            if !matches!(state, Some(b"T" | b"t")) {
+                return Ok(false);
+            }
+        }
+        Ok(list()? == threads)
+    }
+    fn signal(&self, signal: i32) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+        // SAFETY: the pidfd identifies exactly the captured process, including after PID reuse.
+        if unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                self.fd.as_raw_fd(),
+                signal,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        } == 0
+        {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+}
+
+/// A `/proc/<pid>/stat` record for a decision that must not miss a process: a dead record
+/// (`X`) is gone, a zombie still counts, a kernel thread belongs to session 0, and a record
+/// that does not parse is an error.
+fn exact_stat(process: i32, stat: &[u8]) -> io::Result<Option<ProcessObservation>> {
+    let unreadable = || io::Error::other("the process record could not be read");
+    let name_end = stat
+        .iter()
+        .rposition(|byte| *byte == b')')
+        .ok_or_else(unreadable)?;
+    let fields = std::str::from_utf8(&stat[name_end + 1..]).map_err(|_| unreadable())?;
+    let fields = fields.split_ascii_whitespace().collect::<Vec<_>>();
+    let state = *fields.first().ok_or_else(unreadable)?;
+    if matches!(state, "X" | "x") {
+        return Ok(None);
+    }
+    let number = |index: usize| {
+        fields
+            .get(index)
+            .and_then(|field| field.parse::<i64>().ok())
+    };
+    let (Some(group), Some(session), Some(start)) = (number(2), number(3), number(19)) else {
+        return Err(unreadable());
+    };
+    Ok(Some(ProcessObservation {
+        identity: ProcessIdentity {
+            process,
+            start: ProcessStart {
+                coarse: u64::try_from(start).map_err(|_| unreadable())?,
+                fine: 0,
+            },
+        },
+        process_group: i32::try_from(group).map_err(|_| unreadable())?,
+        session: i32::try_from(session).map_err(|_| unreadable())?,
+    }))
 }
 
 struct ProcessStat {
@@ -87,6 +408,21 @@ fn parse_process_stat(process: i32, stat: &[u8]) -> Option<ProcessStat> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_process_image_matches_the_native_executable() {
+        use crate::platform::unix_pty::UnixPtyHost;
+        let host = super::LinuxPtyHost;
+        let identity = host
+            .observe_exactly(std::process::id() as i32)
+            .unwrap()
+            .unwrap()
+            .identity;
+        assert_eq!(
+            host.process_image(identity).unwrap(),
+            std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap()
+        );
+    }
+
     use super::*;
 
     fn stat(name: &str, state: &str, group: i32, session: i32, start: u64) -> Vec<u8> {
@@ -128,6 +464,58 @@ mod tests {
         assert!(parse_process_stat(1, b"1 (short) S 1 2").is_none());
     }
 
+    #[test]
+    fn an_exact_read_tells_a_dead_record_from_one_it_cannot_read() {
+        let member = exact_stat(4242, &stat("sleep", "T", 4243, 4240, 9))
+            .unwrap()
+            .unwrap();
+        assert_eq!((member.process_group, member.session), (4243, 4240));
+        let zombie = exact_stat(4242, &stat("sleep", "Z", 4243, 4240, 9)).unwrap();
+        assert_eq!(
+            zombie.map(|z| z.session),
+            Some(4240),
+            "a zombie still counts"
+        );
+        let kernel = exact_stat(2, &stat("kthreadd", "S", 0, 0, 1)).unwrap();
+        assert_eq!(kernel.map(|k| k.session), Some(0));
+        assert_eq!(
+            exact_stat(4242, &stat("sleep", "X", 1, 1, 1)).unwrap(),
+            None
+        );
+        assert!(exact_stat(4242, b"4242 (truncated").is_err());
+        assert!(exact_stat(4242, b"4242 (short) S 1 2").is_err());
+        assert_eq!(LinuxPtyHost.observe_exactly(i32::MAX).unwrap(), None);
+    }
+
+    #[cfg(feature = "native-tests")]
+    #[test]
+    fn a_dead_pidfd_never_signals_the_live_pid_in_its_metadata() {
+        use crate::platform::unix_pty::ProcessControl;
+        use std::os::fd::{FromRawFd, OwnedFd};
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        // SAFETY: the child is unreaped, so pidfd_open binds its exact process instance.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id() as i32, 0) };
+        assert!(fd >= 0);
+        // SAFETY: this is the newly owned successful syscall result.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+        child.wait().unwrap();
+        let current = LinuxPtyHost
+            .observe_exactly(std::process::id() as i32)
+            .unwrap()
+            .unwrap()
+            .identity;
+        let dead = PinnedProcess {
+            fd,
+            identity: current,
+        };
+        assert_eq!(
+            dead.signal(0).unwrap_err().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
     #[cfg(feature = "native-tests")]
     #[test]
     fn linux_host_retains_an_exited_owned_child_without_reporting_it_alive() {

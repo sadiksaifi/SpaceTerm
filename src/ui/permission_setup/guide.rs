@@ -101,15 +101,20 @@ pub(super) fn open(
         |window, cx| {
             window.set_window_title("Setup Guide");
             let glass = host.configure_window(window, RadiusRole::SurfaceLarge.pixels());
-            cx.new(|_| SetupGuide {
-                presentation,
-                holder,
-                bundle,
-                setup,
-                host,
-                glass,
-                nudges: 0,
-                row_bounds: Rc::default(),
+            cx.new(|cx| {
+                // A reminder that came due while this window was in front posts once the person
+                // leaves.
+                crate::updates::reminders::watch_activation(window, cx);
+                SetupGuide {
+                    presentation,
+                    holder,
+                    bundle,
+                    setup,
+                    host,
+                    glass,
+                    nudges: 0,
+                    row_bounds: Rc::default(),
+                }
             })
         },
     );

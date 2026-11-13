@@ -54,6 +54,8 @@ pub const MAX_INVENTORY_BYTES: usize =
 pub const MAX_UPDATE_FACTS_BYTES: usize = crate::update::facts::MAX_STRANDED
     * (32 + 2 + crate::update::facts::MAX_DEVICE_NAME_BYTES)
     + 4096;
+/// Largest `DetailedUpdateFacts` message: its `UpdateFacts` and 64 bytes for the rest.
+pub const MAX_DETAILED_UPDATE_FACTS_BYTES: usize = MAX_UPDATE_FACTS_BYTES + 64;
 
 /// Requests one client keeps in flight on one connection.
 pub const MAX_REQUESTS_IN_FLIGHT: usize = 64;

@@ -5,13 +5,10 @@
 //! menu bar, and only its Quit, or the system's own termination, exits the client.
 use super::macos_alert::{AlertActivation, AlertSeverity, application_alert, run_modal_alert};
 use crate::status_menu::{
-    self, Alert, StatusHost, StatusMenu,
-    model::{
-        Command, HEADER_TITLE, MachineKind, MachineRow, Menu, QUIT_TITLE, RECENT_TITLE,
-        SETTINGS_TITLE,
-    },
+    self, Alert, AlertButtons, StatusHost, StatusMenu,
+    model::{Command, Item, MachineKind, MachineRow, Menu},
 };
-use crate::updates::presentation::{ExtraItem, ExtraTile, Tone};
+use crate::updates::copy::settings as copy;
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, MainThreadBound};
 use gpui::App;
@@ -24,8 +21,8 @@ use objc2::{
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy, NSColor,
     NSEvent, NSEventMask, NSEventModifierFlags, NSFont, NSFontAttributeName,
-    NSForegroundColorAttributeName, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
-    NSVariableStatusItemLength,
+    NSForegroundColorAttributeName, NSImage, NSMenu, NSMenuItem, NSModalResponse, NSStatusBar,
+    NSStatusItem, NSVariableStatusItemLength,
 };
 use objc2_foundation::{NSData, NSMutableAttributedString, NSRange, NSString, ns_string};
 use std::{
@@ -36,11 +33,8 @@ use std::{
 
 type Sender = async_channel::Sender<Command>;
 
-/// The section label over the Machine rows, as Bluetooth labels "Devices".
-const MACHINES_TITLE: &str = "Machines";
-
-/// The brand's 16-point menu bar glyph, and the variant that marks the outer orbit when an item
-/// needs attention. Both are templates, so AppKit tints them for the menu bar's appearance.
+/// The brand's 16-point menu bar glyph, and the variant that marks the outer orbit with a dot
+/// from the Insist stage. Both are templates, so AppKit tints them for the menu bar's appearance.
 const GLYPH: &[u8] = include_bytes!("../../assets/brand/macos/menu-bar/SpaceTermTemplate.svg");
 const ATTENTION_GLYPH: &[u8] =
     include_bytes!("../../assets/brand/macos/menu-bar/SpaceTermAttentionTemplate.svg");
@@ -150,8 +144,15 @@ impl StatusHost for StatusItem {
         answered: Box<dyn FnOnce(bool) + Send>,
         cx: &mut App,
     ) {
+        let responses = responses(&alert.buttons);
         let alert = native_alert(&alert, self.mtm);
-        present(alert, self.activation, cx.windows().is_empty(), answered);
+        present(
+            alert,
+            responses,
+            self.activation,
+            cx.windows().is_empty(),
+            answered,
+        );
     }
 }
 
@@ -165,22 +166,15 @@ struct Builder<'a> {
 impl Builder<'_> {
     fn build(mut self, menu: &NSMenu, presentation: &Menu) -> Vec<Command> {
         menu.removeAllItems();
-        let header = &presentation.header;
-        menu.addItem(
-            &self.line_row(
-                HEADER_TITLE,
-                &header.line,
-                header
-                    .state
-                    .as_deref()
-                    .filter(|_| header.tone == Tone::Problem),
-                true,
-            ),
-        );
+        menu.addItem(&self.line_row(copy::SPACETERM, &presentation.header, true));
+        if let Some(step) = &presentation.step {
+            menu.addItem(&self.item(step));
+        }
         if !presentation.machines.is_empty() {
             menu.addItem(&NSMenuItem::separatorItem(self.mtm));
+            // The section label over the Machine rows, as Bluetooth labels "Devices".
             menu.addItem(&NSMenuItem::sectionHeaderWithTitle(
-                &NSString::from_str(MACHINES_TITLE),
+                &NSString::from_str(copy::CORE_HEADING),
                 self.mtm,
             ));
             for machine in &presentation.machines {
@@ -188,38 +182,17 @@ impl Builder<'_> {
                 menu.addItem(&item);
             }
         }
-        if !presentation.recent.is_empty() {
-            menu.addItem(&NSMenuItem::separatorItem(self.mtm));
-            menu.addItem(&self.recent(&presentation.recent));
-        }
-        if !presentation.actions.is_empty() {
-            menu.addItem(&NSMenuItem::separatorItem(self.mtm));
-            self.items(menu, &presentation.actions);
-        }
         menu.addItem(&NSMenuItem::separatorItem(self.mtm));
-        menu.addItem(&self.action(SETTINGS_TITLE, None, Command::Settings));
-        let quit = self.action(QUIT_TITLE, None, Command::Quit);
+        menu.addItem(&self.action(copy::SETTINGS, None, Command::Settings));
+        let quit = self.action(copy::QUIT, None, Command::Quit);
         quit.setKeyEquivalent(ns_string!("q"));
         quit.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
         menu.addItem(&quit);
         self.commands
     }
 
-    fn items(&mut self, menu: &NSMenu, items: &[ExtraItem]) {
-        for item in items {
-            match item {
-                ExtraItem::Action {
-                    title,
-                    subtitle,
-                    command,
-                } => menu.addItem(&self.action(
-                    title,
-                    subtitle.as_deref(),
-                    Command::Update(command.clone()),
-                )),
-                ExtraItem::Separator => menu.addItem(&NSMenuItem::separatorItem(self.mtm)),
-            }
-        }
+    fn item(&mut self, item: &Item) -> Retained<NSMenuItem> {
+        self.action(&item.title, item.subtitle.as_deref(), item.command.clone())
     }
 
     /// A row that performs `command` through the target, by its tag.
@@ -255,64 +228,38 @@ impl Builder<'_> {
         item
     }
 
-    /// A title over its status line. `warning` is the state word drawn in orange.
-    fn line_row(
-        &self,
-        title: &str,
-        line: &str,
-        warning: Option<&str>,
-        bold: bool,
-    ) -> Retained<NSMenuItem> {
+    /// A title over its status line.
+    fn line_row(&self, title: &str, line: &str, bold: bool) -> Retained<NSMenuItem> {
         let item = NSMenuItem::new(self.mtm);
         item.setTitle(&NSString::from_str(title));
-        item.setAttributedTitle(Some(&attributed_line(title, line, warning, bold)));
+        item.setAttributedTitle(Some(&attributed_line(title, line, bold)));
         item
     }
 
     fn machine_row(&mut self, machine: &MachineRow) -> Retained<NSMenuItem> {
-        let row = &machine.row;
-        let warning = (row.tone == Tone::Problem).then_some(row.state.as_ref());
-        let item = self.line_row(&row.name, &row.line, warning, false);
+        let item = self.line_row(&machine.name, &machine.line, false);
         item.setImage(symbol(machine).as_deref());
-        item.setToolTip(Some(&NSString::from_str(&row.sentence)));
-        // An offline Machine offers nothing, so its row dims.
-        item.setEnabled(row.tile != ExtraTile::Offline);
-        if let Some(items) = &row.items {
+        item.setToolTip(Some(&NSString::from_str(&machine.accessibility)));
+        item.setEnabled(!machine.offline);
+        if !machine.items.is_empty() {
             let menu =
-                NSMenu::initWithTitle(NSMenu::alloc(self.mtm), &NSString::from_str(&row.name));
+                NSMenu::initWithTitle(NSMenu::alloc(self.mtm), &NSString::from_str(&machine.name));
             menu.setAutoenablesItems(false);
-            if let Some(info) = &row.info {
-                menu.addItem(&self.text(info));
+            if let Some(description) = &machine.description {
+                menu.addItem(&self.text(description));
                 menu.addItem(&NSMenuItem::separatorItem(self.mtm));
             }
-            self.items(&menu, items);
+            for entry in &machine.items {
+                menu.addItem(&self.item(entry));
+            }
             item.setSubmenu(Some(&menu));
         }
         item
     }
-
-    fn recent(&self, recent: &[String]) -> Retained<NSMenuItem> {
-        let item = NSMenuItem::new(self.mtm);
-        item.setTitle(&NSString::from_str(RECENT_TITLE));
-        let menu =
-            NSMenu::initWithTitle(NSMenu::alloc(self.mtm), &NSString::from_str(RECENT_TITLE));
-        menu.setAutoenablesItems(false);
-        for line in recent {
-            menu.addItem(&self.text(line));
-        }
-        item.setSubmenu(Some(&menu));
-        item
-    }
 }
 
-/// `title` in the menu font, then `line` in the smaller secondary style. A warning colors only
-/// its state word, which ends the line.
-fn attributed_line(
-    title: &str,
-    line: &str,
-    warning: Option<&str>,
-    bold: bool,
-) -> Retained<NSMutableAttributedString> {
+/// `title` in the menu font, then `line` in the smaller secondary style.
+fn attributed_line(title: &str, line: &str, bold: bool) -> Retained<NSMutableAttributedString> {
     let string = NSMutableAttributedString::initWithString(
         NSMutableAttributedString::alloc(),
         &NSString::from_str(&format!("{title}\n{line}")),
@@ -338,69 +285,85 @@ fn attributed_line(
             &NSColor::secondaryLabelColor(),
             line_range,
         );
-        if let Some(state) = warning.filter(|state| line.ends_with(state)) {
-            let state_range = NSRange::new(line_start + utf16(line) - utf16(state), utf16(state));
-            string.addAttribute_value_range(
-                NSForegroundColorAttributeName,
-                &NSColor::systemOrangeColor(),
-                state_range,
-            );
-        }
     }
     string
 }
 
-/// The SF Symbol for a Machine row: a spinner while busy, otherwise its kind of computer.
+/// The SF Symbol for a Machine row: its kind of computer.
 fn symbol(machine: &MachineRow) -> Option<Retained<NSImage>> {
-    let name = if machine.row.tile == ExtraTile::Busy {
-        ns_string!("progress.indicator")
-    } else {
-        match machine.kind {
-            MachineKind::Local => ns_string!("laptopcomputer"),
-            MachineKind::Mac => ns_string!("macmini"),
-            MachineKind::Linux => ns_string!("server.rack"),
-        }
+    let name = match machine.kind {
+        MachineKind::Local => ns_string!("laptopcomputer"),
+        MachineKind::Mac => ns_string!("macmini"),
+        MachineKind::Linux => ns_string!("server.rack"),
     };
     let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(name, None)?;
     image.setTemplate(true);
     Some(image)
 }
 
+/// The responses of an alert's yes button and its Cancel, by button position.
+#[derive(Clone, Copy, Debug)]
+struct Responses {
+    proceed: NSModalResponse,
+    cancel: NSModalResponse,
+}
+
+/// The responses of the alert [`native_alert`] builds for `buttons`, or None for a report.
+fn responses(buttons: &AlertButtons) -> Option<Responses> {
+    let first = NSAlertFirstButtonReturn;
+    match buttons {
+        AlertButtons::Ok => None,
+        AlertButtons::Destructive { .. } => Some(Responses {
+            proceed: first + 1,
+            cancel: first,
+        }),
+        AlertButtons::FollowUp(_) => Some(Responses {
+            proceed: first,
+            cancel: first + 1,
+        }),
+    }
+}
+
 /// Builds the alert for `alert`. A confirmation offers Cancel, then its destructive button; a
-/// report offers OK.
+/// failure's follow-up offers that button, then Cancel; a report offers OK.
 fn native_alert(alert: &Alert, mtm: MainThreadMarker) -> Retained<NSAlert> {
-    // Restart and Stop, the only confirmations, close Terminal Sessions and the programs in
-    // them. A failure report loses nothing more.
+    // Restart and Stop, the only destructive choices, close Terminal Sessions and the programs
+    // in them. A follow-up such as Try Again or a failure report loses nothing more.
     let native = application_alert(
-        if alert.confirm.is_some() {
-            AlertSeverity::Caution
-        } else {
-            AlertSeverity::Standard
+        match alert.buttons {
+            AlertButtons::Destructive { .. } => AlertSeverity::Caution,
+            AlertButtons::FollowUp(_) | AlertButtons::Ok => AlertSeverity::Standard,
         },
         mtm,
     );
     native.setMessageText(&NSString::from_str(&alert.title));
     native.setInformativeText(&NSString::from_str(&alert.message));
-    match &alert.confirm {
-        Some(label) => {
-            native.addButtonWithTitle(ns_string!("Cancel"));
+    match &alert.buttons {
+        AlertButtons::Destructive { proceed, cancel } => {
+            native.addButtonWithTitle(&NSString::from_str(cancel));
             native
-                .addButtonWithTitle(&NSString::from_str(label))
+                .addButtonWithTitle(&NSString::from_str(proceed))
                 .setHasDestructiveAction(true);
         }
-        None => {
+        AlertButtons::FollowUp(label) => {
+            native.addButtonWithTitle(&NSString::from_str(label));
+            native.addButtonWithTitle(ns_string!("Cancel"));
+        }
+        AlertButtons::Ok => {
             native.addButtonWithTitle(ns_string!("OK"));
         }
     }
     native
 }
 
-/// Shows `alert` one at a time and passes `answered` whether the person chose a confirmation's
-/// destructive button. The alert runs its own modal loop, so it starts from the run loop rather
-/// than inside the application's event handling. It takes the keyboard through `activation`
-/// first. A windowless client hides afterwards, returning focus to the app the person was using.
+/// Shows `alert` one at a time and passes `answered` whether the person chose the button
+/// `responses` names as yes. The alert runs its own modal loop, so it starts from the run loop
+/// rather than inside the application's event handling. It takes the keyboard through
+/// `activation` first. A windowless client hides afterwards, returning focus to the app the
+/// person was using.
 fn present(
     alert: Retained<NSAlert>,
+    responses: Option<Responses>,
     activation: AlertActivation,
     windowless: bool,
     answered: impl FnOnce(bool) + Send + 'static,
@@ -415,10 +378,8 @@ fn present(
             return answered(false);
         }
         let alert = alert.get(mtm);
-        // A confirmation offers Cancel and its destructive button; a report offers only OK.
-        let confirming = alert.buttons().count() > 1;
         let application = NSApplication::sharedApplication(mtm);
-        let escape = confirming.then(cancel_on_escape).flatten();
+        let escape = responses.and_then(|responses| cancel_on_escape(responses.cancel));
         let response = run_modal_alert(alert, activation, bind_alert_keys);
         if let Some(escape) = escape {
             // SAFETY: The monitor came from addLocalMonitorForEventsMatchingMask and is removed
@@ -429,12 +390,12 @@ fn present(
             application.hide(None);
         }
         ALERTING.with(|alerting| alerting.set(false));
-        answered(confirming && response == NSAlertFirstButtonReturn + 1);
+        answered(responses.is_some_and(|responses| response == responses.proceed));
     });
 }
 
-/// Return chooses the first button, Cancel or OK. A confirmation's destructive button has no
-/// key, so it needs a deliberate click or Space.
+/// Return chooses the first button: Cancel on a confirmation, the follow-up on a failure, or
+/// OK. A confirmation's destructive button has no key, so it needs a deliberate click or Space.
 fn bind_alert_keys(alert: &NSAlert) {
     for (index, button) in alert.buttons().iter().enumerate() {
         button.setKeyEquivalent(if index == 0 {
@@ -445,16 +406,17 @@ fn bind_alert_keys(alert: &NSAlert) {
     }
 }
 
-/// A button holds one key equivalent and Cancel holds Return, so Escape stops the modal alert
-/// with Cancel's response through a monitor that lasts only while the alert is open.
-fn cancel_on_escape() -> Option<Retained<AnyObject>> {
+/// A button holds one key equivalent and the first button holds Return, so Escape stops the
+/// modal alert with Cancel's response `cancel` through a monitor that lasts only while the alert
+/// is open.
+fn cancel_on_escape(cancel: NSModalResponse) -> Option<Retained<AnyObject>> {
     const ESCAPE: u16 = 53;
-    let handler = RcBlock::new(|event: NonNull<NSEvent>| -> *mut NSEvent {
+    let handler = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
         // SAFETY: AppKit passes a live event for the duration of the call.
         let key = unsafe { event.as_ref() }.keyCode();
         match MainThreadMarker::new() {
             Some(mtm) if key == ESCAPE => {
-                NSApplication::sharedApplication(mtm).stopModalWithCode(NSAlertFirstButtonReturn);
+                NSApplication::sharedApplication(mtm).stopModalWithCode(cancel);
                 std::ptr::null_mut()
             }
             _ => event.as_ptr(),
@@ -517,11 +479,6 @@ pub(in crate::platform) mod tests {
         settle_pending_checks,
     };
     use super::*;
-    use crate::updates::UpdateState;
-    use crate::updates::machines::{MachineLink, MachineUpdate};
-    use crate::updates::presentation::{DesktopFacts, Dismissed, Presentation};
-    use spaceterm_core::protocol::capability::{Capabilities, Capability};
-    use spaceterm_core::update::facts::{Platform, UpdateCheck, UpdateFacts, Version};
 
     /// AppKit decodes both embedded glyphs as 16-point templates, which the menu bar tints for
     /// its appearance. An undecodable glyph would leave the status item without an image.
@@ -549,46 +506,28 @@ pub(in crate::platform) mod tests {
     /// NSMenu back: Settings and Quit end it, Quit answers Command-Q, and no row opens a window.
     pub(in crate::platform) fn the_native_menu_ends_with_settings_and_quit_and_offers_no_open() {
         let mtm = MainThreadMarker::new().expect("native test must run on the main thread");
-        let machine = |id: u8, name: &'static str| MachineUpdate {
+        let machine = |id: u8, name: &'static str| MachineRow {
             machine: [id; 32],
-            name: name.into(),
-            local: id == 1,
-            link: MachineLink::Connected,
-            facts: Some(UpdateFacts {
-                revision: 1,
-                platform: Platform::LinuxX86_64,
-                running: Version::parse("0.9.0").unwrap(),
-                pending: None,
-                sessions: 2,
-                operation: None,
-                check: UpdateCheck::Never,
-                skipped: None,
-                last_failure: None,
-            }),
-            capabilities: Capabilities::fake(&Capability::ALL),
-            push: None,
-            bundled: None,
-            failed_push: None,
-            asked: None,
-            retrying_since: None,
-        };
-        let machines = [machine(1, "This Mac"), machine(2, "penguin")];
-        let update = Presentation::new(
-            DesktopFacts {
-                state: &UpdateState::UpToDate,
-                pending: None,
-                stage: Default::default(),
-                notes_unread: false,
-                running: env!("SPACETERM_VERSION"),
-                relaunch_held: false,
-                download_asked: false,
-                retrying: false,
+            kind: if id == 1 {
+                MachineKind::Local
+            } else {
+                MachineKind::Linux
             },
-            &machines,
-            &Dismissed::new(),
-            crate::updates::now(),
-        );
-        let presentation = Menu::new(&update, &machines, Vec::new());
+            name: name.into(),
+            line: "0.9.0 \u{b7} 2 Terminal Sessions".to_owned(),
+            status: None,
+            accessibility: name.into(),
+            description: None,
+            offline: false,
+            items: Vec::new(),
+        };
+        let presentation = Menu {
+            summary: "SpaceTerm, 0.9.0".to_owned(),
+            attention: false,
+            header: "0.9.0".to_owned(),
+            step: None,
+            machines: vec![machine(1, "This Mac"), machine(2, "penguin")],
+        };
         let (sender, _commands) = async_channel::unbounded();
         let target = MenuTarget::new(mtm, sender);
         let menu = NSMenu::new(mtm);
@@ -627,19 +566,40 @@ pub(in crate::platform) mod tests {
         );
     }
 
+    /// An alert's buttons, as [`AlertButtons`] with a static label.
+    #[derive(Clone, Copy, Debug)]
+    enum Buttons {
+        Destructive(&'static str),
+        FollowUp(&'static str),
+        Ok,
+    }
+
+    impl Buttons {
+        fn alert(self) -> AlertButtons {
+            match self {
+                Self::Destructive(label) => AlertButtons::Destructive {
+                    proceed: label.to_owned(),
+                    cancel: "Cancel".to_owned(),
+                },
+                Self::FollowUp(label) => AlertButtons::FollowUp(label.to_owned()),
+                Self::Ok => AlertButtons::Ok,
+            }
+        }
+    }
+
     /// Each alert's button keys and focused button, and whether each answer approves it. Return
-    /// chooses Cancel or OK, focus rests on it for Space, and Escape cancels a confirmation.
-    /// `None` leaves the alert open.
+    /// chooses the first button: Cancel, the follow-up or OK. AppKit rests focus on Cancel for
+    /// Space, and Escape cancels. `None` leaves the alert open.
     type AnswerCase = (
-        Option<&'static str>,
+        Buttons,
         &'static [(&'static str, &'static str)],
         usize,
         &'static [(Answering, Option<bool>)],
     );
 
-    const ANSWER_CASES: [AnswerCase; 3] = [
+    const ANSWER_CASES: [AnswerCase; 4] = [
         (
-            Some("Stop"),
+            Buttons::Destructive("Stop"),
             &[("Cancel", "\r"), ("Stop", "")],
             0,
             &[
@@ -652,7 +612,7 @@ pub(in crate::platform) mod tests {
             ],
         ),
         (
-            Some("Restart"),
+            Buttons::Destructive("Restart"),
             &[("Cancel", "\r"), ("Restart", "")],
             0,
             &[
@@ -665,7 +625,20 @@ pub(in crate::platform) mod tests {
             ],
         ),
         (
-            None,
+            Buttons::FollowUp("Try Again"),
+            &[("Try Again", "\r"), ("Cancel", "")],
+            1,
+            &[
+                (Answering::Click(0), Some(true)),
+                (Answering::Click(1), Some(false)),
+                (Answering::Key("\r", 36), Some(true)),
+                (Answering::Key(" ", 49), Some(false)),
+                (Answering::PostedKey("\u{1b}", 53), Some(false)),
+                (Answering::Stop, Some(false)),
+            ],
+        ),
+        (
+            Buttons::Ok,
             &[("OK", "\r")],
             0,
             &[
@@ -676,30 +649,38 @@ pub(in crate::platform) mod tests {
         ),
     ];
 
-    /// Presents the Stop and Restart confirmations and a failure report as the status item does:
-    /// queued on the main queue, with the test driving the run loop until the alert returns. Each
-    /// alert asks for the keyboard before its modal loop starts. The test records that request
-    /// instead of activating, so the test process never takes the keyboard. Inside each alert's
-    /// modal loop the test answers it by a click or a key. The alert stays transparent, so
-    /// nothing appears on screen.
+    /// Presents the Stop and Restart confirmations, a failure's follow-up and a failure report as
+    /// the status item does: queued on the main queue, with the test driving the run loop until
+    /// the alert returns. Each alert asks for the keyboard before its modal loop starts. The test
+    /// records that request instead of activating, so the test process never takes the keyboard.
+    /// Inside each alert's modal loop the test answers it by a click or a key. The alert stays
+    /// transparent, so nothing appears on screen.
     pub(in crate::platform) fn machine_alerts_take_the_keyboard_and_bind_their_keys() {
         let mtm = MainThreadMarker::new().expect("native test must run on the main thread");
         for (confirm, keys, focused, answers) in ANSWER_CASES {
             for &(answering, expected) in answers {
+                let buttons = confirm.alert();
+                let responses = responses(&buttons);
                 let alert = native_alert(
                     &Alert {
                         title: "Restart SpaceTerm Core on penguin?".to_owned(),
                         message: "This will close your 3 running sessions.".to_owned(),
-                        confirm: confirm.map(str::to_owned),
+                        buttons,
                     },
                     mtm,
                 );
                 alert.window().setAlphaValue(0.0);
                 let (answered, approvals) = std::sync::mpsc::channel();
                 let asking = answer_inside_modal_loop(&alert, answering, || {
-                    present(alert.clone(), RECORDED_ACTIVATION, false, move |approved| {
-                        let _ = answered.send(approved);
-                    });
+                    present(
+                        alert.clone(),
+                        responses,
+                        RECORDED_ACTIVATION,
+                        false,
+                        move |approved| {
+                            let _ = answered.send(approved);
+                        },
+                    );
                 });
                 assert!(asking.modal, "the alert runs its own modal loop");
                 assert_eq!(

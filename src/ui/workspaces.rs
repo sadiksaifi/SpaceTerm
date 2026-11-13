@@ -732,22 +732,17 @@ mod core_workspaces {
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub(crate) struct WorkspaceRowStatus {
         pub(crate) text: &'static str,
-        machine: Option<SharedString>,
         /// Whether the status reports a problem, rather than work in progress.
         pub(crate) warning: bool,
     }
 
     impl WorkspaceRowStatus {
         pub(crate) fn label(&self) -> SharedString {
-            self.machine.as_ref().map_or_else(
-                || self.text.into(),
-                |machine| format!("{} {machine}…", self.text).into(),
-            )
+            self.text.into()
         }
         const fn progress(text: &'static str) -> Self {
             Self {
                 text,
-                machine: None,
                 warning: false,
             }
         }
@@ -1390,7 +1385,7 @@ mod core_workspaces {
             self.opened
                 .insert(pane_id, Some(self.sessions.generation()));
             let mut view = CorePaneView::new(state);
-            view.retain_restart_cause(core, Arc::clone(&self.sessions.restart_causes));
+            view.observe_deadlines(self.changes.0.clone());
             view.set_machine_name(self.sessions.machine_name());
             self.views.insert(pane_id, view);
             self.screen_focus.insert(pane_id, screen_focus);
@@ -1558,6 +1553,11 @@ mod core_workspaces {
 
         pub(crate) fn view_mut(&mut self, pane_id: PaneId) -> Option<&mut CorePaneView> {
             self.views.get_mut(&pane_id)
+        }
+
+        /// Whether a protocol refusal blocks any registered Pane.
+        pub(crate) fn any_pane_blocked(&self) -> bool {
+            self.views.values().any(|view| view.blocked().is_some())
         }
 
         pub(crate) fn pane_ids(&self) -> Vec<PaneId> {
@@ -2371,22 +2371,13 @@ mod core_workspaces {
         ///
         /// Ordinary name and pin edits project their values immediately. Worktree operations
         /// retain their progress, "Stopped" follows the person's Stop, and "Not connected" waits
-        /// for an established connection loss.
+        /// for an established connection loss. An announced SpaceTerm Core restart shows
+        /// nothing, because the title bar owns update progress.
         pub(crate) fn row_status(
             &self,
             workspace: Id,
             repository: Option<&Path>,
         ) -> Option<WorkspaceRowStatus> {
-            if let Some(restart) = self.edits.restart_progress() {
-                return Some(WorkspaceRowStatus {
-                    text: match restart {
-                        CoreRestart::Updating => "Updating",
-                        CoreRestart::Restarting => "Restarting",
-                    },
-                    machine: Some(self.sessions.machine_name()),
-                    warning: false,
-                });
-            }
             if let Some(text) = self.worktree_status(workspace, repository) {
                 return Some(WorkspaceRowStatus::progress(text));
             }
@@ -2402,7 +2393,6 @@ mod core_workspaces {
                 {
                     Some(WorkspaceRowStatus {
                         text: "Not connected",
-                        machine: None,
                         warning: true,
                     })
                 }
@@ -3617,6 +3607,8 @@ mod core_workspaces {
             changes: crate::terminal::changes::Changes,
             /// Whether the connection reaches its Terminal Session once its Pane observes it.
             connect_when_observed: std::sync::atomic::AtomicBool,
+            running_version: Mutex<Option<spaceterm_core::update::facts::Version>>,
+            unsent: Mutex<Option<crate::terminal::core_session::unsent::UnsentInput>>,
         }
 
         impl ScriptedPane {
@@ -3634,7 +3626,25 @@ mod core_workspaces {
                     retries: std::sync::atomic::AtomicUsize::new(0),
                     changes: crate::terminal::changes::Changes::default(),
                     connect_when_observed: std::sync::atomic::AtomicBool::new(false),
+                    running_version: Mutex::default(),
+                    unsent: Mutex::default(),
                 })
+            }
+
+            /// The Core reports running `version`.
+            pub(crate) fn set_running_version(&self, version: &str) {
+                *self.running_version.lock().expect("version") =
+                    Some(spaceterm_core::update::facts::Version::parse(version).unwrap());
+                self.changes.publish();
+            }
+
+            /// The connection kept what the person typed and the Core refused or never confirmed.
+            pub(crate) fn keep_unsent(
+                &self,
+                unsent: Option<crate::terminal::core_session::unsent::UnsentInput>,
+            ) {
+                *self.unsent.lock().expect("unsent") = unsent;
+                self.changes.publish();
             }
 
             pub(crate) fn set(&self, status: crate::terminal::core_session::CorePaneStatus) {
@@ -3718,6 +3728,14 @@ mod core_workspaces {
         impl crate::ui::core_pane::MachinePaneConnection for ScriptedPane {
             fn status(&self) -> crate::terminal::core_session::CorePaneStatus {
                 *self.status.lock().expect("status")
+            }
+
+            fn running_version(&self) -> Option<spaceterm_core::update::facts::Version> {
+                self.running_version.lock().expect("version").clone()
+            }
+
+            fn unsent_input(&self) -> Option<crate::terminal::core_session::unsent::UnsentInput> {
+                self.unsent.lock().expect("unsent").clone()
             }
 
             fn startup_pending(&self) -> bool {
@@ -4398,7 +4416,11 @@ mod restart_tests {
                 "no new operation crosses the restart fence"
             );
             assert!(binding.take_close_intent().is_none());
-            assert!(!binding.row_status([1; 32], None).unwrap().warning);
+            assert_eq!(
+                binding.row_status([1; 32], None),
+                None,
+                "the sidebar shows no update status while the Core restarts"
+            );
             publish(&link, None);
             edits.reconnect();
             binding.poll();

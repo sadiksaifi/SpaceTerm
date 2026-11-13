@@ -314,8 +314,6 @@ impl TerminalRuntime {
         let command_rx = WorkerCommands::new(command_rx, counters);
         let (clipboard, clipboard_requests) = WorkerClipboard::connect(command_tx.clone());
         let clipboard_authority = Arc::clone(&clipboard.authority);
-        let reader_transport =
-            ReaderTransport::new(command_tx.clone(), Arc::clone(&clipboard_authority));
         let schedule_input = ScheduleInput::default();
         let worker_schedule_input = schedule_input.clone();
         let metadata_state = TerminalSessionMetadataState::default();
@@ -323,6 +321,11 @@ impl TerminalRuntime {
         let (event_tx, event_rx) = async_channel::bounded(2);
         clipboard_authority.observe_subscription(event_tx.clone());
         let event_tx = TerminalEventPublisher::from(event_tx);
+        let reader_transport = ReaderTransport::new(
+            command_tx.clone(),
+            Arc::clone(&clipboard_authority),
+            event_tx.receipt_activity(),
+        );
         let (accessibility_tx, accessibility_rx) = async_channel::bounded(1);
         let native_pty_close = NativePtyCloseHandle::default();
         let worker_native_pty_close = native_pty_close.clone();

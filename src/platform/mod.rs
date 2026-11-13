@@ -57,6 +57,9 @@ mod macos_keyboard_layout;
 mod macos_launch_alerts;
 #[cfg(target_os = "macos")]
 #[cfg(feature = "desktop")]
+pub(crate) mod macos_presence;
+#[cfg(target_os = "macos")]
+#[cfg(feature = "desktop")]
 mod macos_quick_look_window;
 #[cfg(target_os = "macos")]
 #[cfg(feature = "desktop")]

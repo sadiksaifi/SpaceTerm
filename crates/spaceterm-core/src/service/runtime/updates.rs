@@ -8,10 +8,11 @@
 use super::super::{RetainedInstallation, Service, State, boot};
 use crate::CoreError;
 use crate::storage::Directory;
+use crate::update::continuation::Continuation;
 use crate::update::facts::{
-    CheckFailure, FailureKind, InstallFailure, OVERDUE_AFTER, OVERDUE_SINCE_AFTER, Operation,
-    PendingVersion, Platform, Protocols, StartFailure, StrandedDevice, UpdateCheck, UpdateFacts,
-    UpdateFailure, Version,
+    CheckFailure, DetailedUpdateFacts, FailureKind, InstallFailure, OVERDUE_AFTER,
+    OVERDUE_SINCE_AFTER, Operation, PendingVersion, Platform, Protocols, RestartCause,
+    StartFailure, StrandedDevice, UpdateCheck, UpdateFacts, UpdateFailure, Version,
 };
 use crate::update::ordering::{self, Candidate, Floor};
 use crate::update::source::FactsSource;
@@ -28,6 +29,11 @@ const WATCH_INTERVAL: Duration = Duration::from_secs(1);
 /// How long a Core has no live Terminal Session and no session request before it restarts by
 /// itself into a Pending Version. Each session request starts it again.
 pub const SILENT_GRACE: Duration = Duration::from_secs(10);
+/// The idle period of ADR 0065: one hour. A Terminal Session has no work going on only after
+/// this long with no input and no output. The detailed facts count Terminal Sessions by it.
+/// Admission requires the receipt-generation lease and final Stop grant of ADR 0065.
+pub const IDLE_PERIOD: Duration = Duration::from_secs(3_600);
+pub const IDLE_RESTART_AFTER: u64 = 2 * 86_400;
 /// Free space an install needs beyond its archive, for the unpacked files.
 const INSTALL_MARGIN: u64 = 64 * 1024 * 1024;
 
@@ -83,9 +89,8 @@ pub enum Restart {
     /// Without a Pending Version the server restarts into the running version.
     Asked,
     /// The Core decided on its own. It goes ahead only into a Pending Version that is not
-    /// breaking, and only at zero Terminal Sessions, at most once per Pending Version and boot.
-    /// The engine asks for it once [`SILENT_GRACE`] passed with no session and no session
-    /// request.
+    /// breaking, at most once per Pending Version and boot. It requires zero sessions for
+    /// [`SILENT_GRACE`], or from Ask every session with no work for [`IDLE_PERIOD`].
     Silent,
 }
 
@@ -95,7 +100,8 @@ pub enum RestartRefusal {
     /// A silent restart found no Pending Version, or already tried this one in this boot.
     #[error("No SpaceTerm Core update is waiting.")]
     NothingPending,
-    /// A silent restart found open Terminal Sessions.
+    /// A silent restart found open Terminal Sessions, and some have work going on or the idle
+    /// restart does not apply yet.
     #[error("Terminal Sessions are open.")]
     SessionsOpen,
     /// A silent restart found a breaking Pending Version, which always asks.
@@ -119,14 +125,25 @@ pub struct Restarting {
 /// implements it.
 pub(crate) trait Restarter: Send + Sync {
     /// Admit a restart into the installation named by `candidate`, or into the running version.
-    /// `silent` refuses with SessionsOpen unless no Terminal Session is live under the fence.
-    /// The engine publishes the restart before it calls the returned launch, because the helper
-    /// may stop the server at once.
+    /// It refuses with SessionsOpen unless the live Terminal Sessions under the fence meet
+    /// `fence`. The engine publishes the restart before it calls the returned launch, because
+    /// the helper may stop the server at once.
     fn restart(
         self: Arc<Self>,
         candidate: Option<[u8; 32]>,
-        silent: bool,
+        fence: Fence,
     ) -> Result<Launch, RestartRefusal>;
+}
+
+/// What the live Terminal Sessions must meet under the membership fence for a restart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Fence {
+    /// Nothing: a person confirmed the restart.
+    Any,
+    /// No Terminal Session is live.
+    NoSessions,
+    /// Every live session has no work, confirmed by a revocable receipt-generation lease.
+    NothingRunning,
 }
 
 /// Launches the helper of an admitted restart.
@@ -140,6 +157,9 @@ pub(crate) struct Activity {
     /// A session request, such as a Pane claim or a Workspace edit, arrived since the last
     /// watch.
     pub(crate) requested: bool,
+    /// Live Terminal Sessions with work going on now. The host counts each one whose state it
+    /// cannot read.
+    pub(crate) working: u32,
 }
 
 /// The Paired Devices that cannot connect to a Core of a work major: those whose last admitted
@@ -432,11 +452,22 @@ struct Shared {
     changed: Condvar,
     restarter: OnceLock<Weak<dyn Restarter>>,
     stranded: OnceLock<Arc<Stranded>>,
+    /// This boot's ID, which the silent-restart attempt names. None when it cannot be read.
+    boot: Option<String>,
 }
 
 struct Live {
     record: Record,
     sessions: u32,
+    /// Live Terminal Sessions with work going on, at most `sessions`.
+    working: u32,
+    requested_at: Option<Instant>,
+    nothing_running: bool,
+    /// Why the restart that `operation` names began.
+    cause: Option<RestartCause>,
+    /// The engine's own continuation, `working` and `cause` as the detailed facts of the current
+    /// revision show them.
+    detail: Detail,
     operation: Option<Operation>,
     facts: UpdateFacts,
     /// Since when the server had no live Terminal Session and no session request. None while
@@ -463,6 +494,72 @@ impl Live {
     /// Whether an update operation runs or is being admitted.
     fn busy(&self) -> bool {
         self.operation.is_some() || self.reserved
+    }
+}
+
+/// What the detailed facts add to the facts of one revision.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Detail {
+    continuation: Option<Continuation>,
+    working: u32,
+    restart: Option<RestartCause>,
+}
+
+/// How the Pending Version in `record` finishes by this engine's own rule, for a server running
+/// `protocols` in boot `boot` with `sessions` live Terminal Sessions.
+/// [`crate::update::continuation::continuation`] derives the same from the facts alone, apart
+/// from the cases its conformance test lists.
+fn finishes(
+    record: &Record,
+    protocols: &Protocols,
+    boot: Option<&str>,
+    sessions: u32,
+    now: u64,
+) -> Option<Continuation> {
+    let pending = record.pending.as_ref()?;
+    if breaking(protocols, &pending.protocols) {
+        return Some(Continuation::NeedsConfirmation);
+    }
+    let Some(boot) = boot else {
+        return Some(Continuation::Unknown);
+    };
+    if record
+        .silent
+        .as_ref()
+        .is_some_and(|attempt| attempt.boot == boot && attempt.digest == pending.digest)
+    {
+        return Some(Continuation::StartFailed);
+    }
+    Some(if sessions == 0 {
+        Continuation::Soon
+    } else if now.saturating_sub(pending.installed_at) >= IDLE_RESTART_AFTER {
+        Continuation::WhenNothingRuns
+    } else {
+        Continuation::WhenSessionsEnd
+    })
+}
+
+/// Whether the engine's silent restart goes ahead now, and why: the silent-restart admission.
+/// `nothing_running` says that every live Terminal Session had no work going on and no session
+/// request arrived for [`IDLE_PERIOD`].
+fn silent_admission(
+    record: &Record,
+    protocols: &Protocols,
+    boot: &str,
+    sessions: u32,
+    now: u64,
+    nothing_running: bool,
+) -> Result<RestartCause, RestartRefusal> {
+    match finishes(record, protocols, Some(boot), sessions, now) {
+        None | Some(Continuation::StartFailed | Continuation::Unknown) => {
+            Err(RestartRefusal::NothingPending)
+        }
+        Some(Continuation::NeedsConfirmation) => Err(RestartRefusal::Breaking),
+        Some(Continuation::Soon) => Ok(RestartCause::NoSessions),
+        Some(Continuation::WhenNothingRuns) if nothing_running => Ok(RestartCause::NothingRunning),
+        Some(Continuation::WhenSessionsEnd | Continuation::WhenNothingRuns) => {
+            Err(RestartRefusal::SessionsOpen)
+        }
     }
 }
 
@@ -517,6 +614,11 @@ impl Updates {
             live: Mutex::new(Live {
                 record,
                 sessions: 0,
+                working: 0,
+                requested_at: None,
+                nothing_running: false,
+                cause: None,
+                detail: Detail::default(),
                 operation: None,
                 facts: placeholder(&running),
                 quiet_since: None,
@@ -532,10 +634,13 @@ impl Updates {
             changed: Condvar::new(),
             restarter: OnceLock::new(),
             stranded: OnceLock::new(),
+            boot: boot().ok(),
         };
         {
             let mut live = shared.lock();
-            live.facts = shared.compose(&live, 1, now());
+            let now = now();
+            live.facts = shared.compose(&live, 1, now);
+            live.detail = shared.detail(&live);
         }
         Ok(Self {
             shared: Arc::new(shared),
@@ -655,6 +760,31 @@ impl Updates {
         self.shared.lock().record.stepping_stone.as_ref() == Some(&self.shared.running)
     }
 
+    pub(crate) fn permits_automatic_stop(
+        &self,
+        candidate: [u8; 32],
+        idle: bool,
+    ) -> Result<(), CoreError> {
+        let live = self.shared.lock();
+        let record = load(&self.shared.data)?;
+        let pending = record.pending.as_ref().ok_or(CoreError::Changed)?;
+        if digest_bytes(&pending.digest)? != candidate
+            || breaking(&self.shared.protocols, &pending.protocols)
+            || (idle && now().saturating_sub(pending.installed_at) < IDLE_RESTART_AFTER)
+            || !matches!(live.operation, Some(Operation::Restarting { .. }))
+        {
+            return Err(CoreError::Changed);
+        }
+        Ok(())
+    }
+    pub(crate) fn probes_work(&self) -> bool {
+        let live = self.shared.lock();
+        live.record.pending.as_ref().is_some_and(|pending| {
+            !breaking(&self.shared.protocols, &pending.protocols)
+                && now().saturating_sub(pending.installed_at) >= IDLE_RESTART_AFTER
+        }) && !live.busy()
+    }
+
     /// Begin a restart. A restart into a Pending Version goes through a helper from the running
     /// runtime with a readiness deadline; a failed start restores the retained-state snapshot,
     /// returns to this version and skips the Pending Version unless the failure is transient.
@@ -662,13 +792,20 @@ impl Updates {
     /// # Errors
     /// Returns a [`RestartRefusal`] when the restart did not begin.
     pub fn restart(&self, request: Restart) -> Result<Restarting, RestartRefusal> {
+        self.restart_at(request, Instant::now())
+    }
+    fn restart_at(
+        &self,
+        request: Restart,
+        monotonic: Instant,
+    ) -> Result<Restarting, RestartRefusal> {
         let restarter = self
             .shared
             .restarter
             .get()
             .and_then(Weak::upgrade)
             .ok_or(RestartRefusal::Core(CoreError::NotRunning))?;
-        let (candidate, to, operation) = {
+        let (candidate, to, operation, fence, cause) = {
             let mut live = self.shared.lock();
             if live.busy() {
                 return Err(RestartRefusal::Busy);
@@ -676,23 +813,27 @@ impl Updates {
             // Another process, such as a local installer, may have changed the record.
             live.record = load(&self.shared.data).map_err(RestartRefusal::Core)?;
             let pending = live.record.pending.clone();
+            let (mut fence, mut cause) = (Fence::Any, RestartCause::Asked);
             if request == Restart::Silent {
                 let pending = pending.as_ref().ok_or(RestartRefusal::NothingPending)?;
-                if breaking(&self.shared.protocols, &pending.protocols) {
-                    return Err(RestartRefusal::Breaking);
-                }
-                if live.sessions > 0 {
-                    return Err(RestartRefusal::SessionsOpen);
-                }
                 let attempt = Attempt {
                     boot: boot().map_err(RestartRefusal::Core)?,
                     digest: pending.digest.clone(),
                 };
-                if live.record.silent.as_ref() == Some(&attempt)
-                    || live
-                        .silent_after
-                        .is_some_and(|after| Instant::now() < after)
-                {
+                cause = silent_admission(
+                    &live.record,
+                    &self.shared.protocols,
+                    &attempt.boot,
+                    live.sessions,
+                    now(),
+                    live.nothing_running,
+                )?;
+                fence = if cause == RestartCause::NothingRunning {
+                    Fence::NothingRunning
+                } else {
+                    Fence::NoSessions
+                };
+                if live.silent_after.is_some_and(|after| monotonic < after) {
                     return Err(RestartRefusal::NothingPending);
                 }
                 // Recorded before admission, so a start that fails returns to a runtime that
@@ -710,9 +851,9 @@ impl Updates {
                 .map_err(RestartRefusal::Core)?;
             // The facts show the restart only once the fence admitted it.
             live.reserved = true;
-            (candidate, to, operation)
+            (candidate, to, operation, fence, cause)
         };
-        let admitted = restarter.restart(candidate, request == Restart::Silent);
+        let admitted = restarter.restart(candidate, fence);
         let mut live = self.shared.lock();
         live.reserved = false;
         if let Err(refusal) = &admitted {
@@ -730,6 +871,7 @@ impl Updates {
             return Err(refusal);
         }
         live.operation = Some(operation);
+        live.cause = Some(cause);
         drop(live);
         self.refresh();
         // Every follower hears the restart before the helper can stop this server.
@@ -780,6 +922,7 @@ impl Updates {
         let mut live = self.shared.lock();
         live.reserved = false;
         if admitted.is_ok() {
+            live.cause = matches!(change, Confirmed::Restart { .. }).then_some(RestartCause::Asked);
             live.operation = Some(operation);
         }
         drop(live);
@@ -803,7 +946,13 @@ impl Updates {
         ) {
             return;
         }
+        let retry = if live.cause == Some(RestartCause::NothingRunning) {
+            IDLE_PERIOD
+        } else {
+            SILENT_RETRY
+        };
         live.operation = None;
+        live.cause = None;
         if live.record.silent.is_some()
             && let Ok(record) = change(&self.shared.data, |record| {
                 record.silent = None;
@@ -811,7 +960,7 @@ impl Updates {
             })
         {
             live.record = record;
-            live.silent_after = Some(Instant::now() + SILENT_RETRY);
+            live.silent_after = Some(Instant::now() + retry);
         }
         drop(live);
         self.refresh();
@@ -836,18 +985,37 @@ impl Updates {
 
     /// The server reported `activity` at `now`. Once it had no live Terminal Session and no
     /// session request for [`SILENT_GRACE`], a waiting Pending Version that is not breaking
-    /// restarts silently.
+    /// restarts silently. From Ask, an hour with no work in every live session also admits a lease.
     pub(crate) fn observe(&self, activity: Activity, now: Instant) {
         let due = {
             let mut live = self.shared.lock();
             live.sessions = activity.sessions;
+            live.working = activity.working.min(activity.sessions);
+            if activity.requested {
+                live.requested_at = Some(now);
+            }
             if activity.sessions > 0 {
                 live.quiet_since = None;
             } else if activity.requested || live.quiet_since.is_none() {
                 live.quiet_since = Some(now);
             }
-            live.quiet_since
-                .is_some_and(|since| now.saturating_duration_since(since) >= SILENT_GRACE)
+            live.nothing_running = live.sessions > 0
+                && live.working == 0
+                && live
+                    .requested_at
+                    .is_none_or(|at| now.saturating_duration_since(at) >= IDLE_PERIOD);
+            let quiet = live
+                .quiet_since
+                .is_some_and(|since| now.saturating_duration_since(since) >= SILENT_GRACE);
+            let idle = live.nothing_running
+                && finishes(
+                    &live.record,
+                    &self.shared.protocols,
+                    self.shared.boot.as_deref(),
+                    live.sessions,
+                    self::now(),
+                ) == Some(Continuation::WhenNothingRuns);
+            quiet || idle
         };
         self.refresh();
         // The activation that started this server has settled once its lock is free.
@@ -859,7 +1027,7 @@ impl Updates {
             self.retire_step();
         }
         if due {
-            let _ = self.restart(Restart::Silent);
+            let _ = self.restart_at(Restart::Silent, now);
         }
     }
 
@@ -873,14 +1041,48 @@ impl Updates {
 
     fn refresh(&self) {
         let mut live = self.shared.lock();
-        let next = self.shared.compose(&live, live.facts.revision, now());
-        if next != live.facts {
+        let now = now();
+        let next = self.shared.compose(&live, live.facts.revision, now);
+        let detail = self.shared.detail(&live);
+        if next != live.facts || detail != live.detail {
             live.facts = UpdateFacts {
                 revision: live.facts.revision + 1,
                 ..next
             };
+            live.detail = detail;
             self.shared.changed.notify_all();
         }
+    }
+
+    /// The facts with what only this engine knows, as one snapshot of one revision.
+    pub fn detailed(&self) -> DetailedUpdateFacts {
+        FactsSource::detailed(self)
+    }
+
+    fn detailed_now(&self) -> DetailedUpdateFacts {
+        self.refresh();
+        let live = self.shared.lock();
+        snapshot(&live)
+    }
+
+    /// The detailed facts once their revision differs from `revision`, or at `timeout` the
+    /// current ones. None once the server is stopping.
+    fn wait_detailed_now(&self, revision: u64, timeout: Duration) -> Option<DetailedUpdateFacts> {
+        let deadline = Instant::now() + timeout;
+        let mut live = self.shared.lock();
+        while live.facts.revision == revision && !live.stopped {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            live = self
+                .shared
+                .changed
+                .wait_timeout(live, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+        (!live.stopped).then(|| snapshot(&live))
     }
 
     /// Ends the update operation `owned` names, and leaves any other one.
@@ -1127,6 +1329,25 @@ impl Shared {
         })
     }
 
+    /// What the detailed facts add.
+    fn detail(&self, live: &Live) -> Detail {
+        let restarting = matches!(
+            live.operation,
+            Some(Operation::Restarting { .. } | Operation::RestartingSameVersion)
+        );
+        Detail {
+            continuation: finishes(
+                &live.record,
+                &self.protocols,
+                self.boot.as_deref(),
+                live.sessions,
+                now(),
+            ),
+            working: live.working.min(live.sessions),
+            restart: live.cause.filter(|_| restarting),
+        }
+    }
+
     fn compose(&self, live: &Live, revision: u64, now: u64) -> UpdateFacts {
         let pending = live.record.pending.as_ref().map(|stored| {
             let breaking = breaking(&self.protocols, &stored.protocols);
@@ -1300,6 +1521,14 @@ impl FactsSource for Updates {
         self.shared.lock().facts.clone()
     }
 
+    fn detailed(&self) -> DetailedUpdateFacts {
+        self.detailed_now()
+    }
+
+    fn wait_detailed(&self, revision: u64, timeout: Duration) -> Option<DetailedUpdateFacts> {
+        self.wait_detailed_now(revision, timeout)
+    }
+
     fn wait(&self, revision: u64, timeout: Duration) -> Option<UpdateFacts> {
         let deadline = Instant::now() + timeout;
         let mut live = self.shared.lock();
@@ -1316,6 +1545,16 @@ impl FactsSource for Updates {
                 .0;
         }
         (!live.stopped).then(|| live.facts.clone())
+    }
+}
+
+/// The detailed facts of the current revision.
+fn snapshot(live: &Live) -> DetailedUpdateFacts {
+    DetailedUpdateFacts {
+        facts: live.facts.clone(),
+        continuation: live.detail.continuation,
+        working: live.detail.working,
+        restart: live.detail.restart,
     }
 }
 

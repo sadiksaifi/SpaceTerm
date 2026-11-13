@@ -202,6 +202,8 @@ impl AboutWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        // A reminder that came due while this window was in front posts once the person leaves.
+        crate::updates::reminders::watch_activation(window, cx);
         window.set_window_title(&title);
         let mut window_appearance = super::appearance_runtime::WindowAppearanceOwner::default();
         window_appearance.apply(window, cx);

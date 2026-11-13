@@ -79,7 +79,7 @@ impl SettingsSectionId {
             Self::Privacy => "Notifications and clipboard access.",
             Self::Git => "Repository Status, Pull Requests, and Worktrees.",
             Self::Machines => "Machines run Workspaces and Terminal Sessions.",
-            Self::Updates => "SpaceTerm updates in the background.",
+            Self::Updates => crate::updates::copy::settings::UPDATES_DESCRIPTION,
             Self::Advanced => {
                 "Every setting at once: edit them as JSON, export or import them, or start over."
             }
@@ -166,8 +166,12 @@ pub(super) enum SettingsRowId {
     MachineWorktreeLocation,
     /// The installed version, the latest check, and the next step the update service offers.
     UpdateStatus,
+    /// One row per Machine under `SpaceTerm Core`, after the SpaceTerm row.
+    CoreUpdates,
     AutomaticUpdateDownloads,
     UpdateCheckInterval,
+    /// Check Now, after the interval: SpaceTerm and each connected Machine check.
+    UpdateCheckNow,
     /// The Keybinding of one Command.
     Shortcut(Command),
     /// The settings file, shown read-only and edited in the person's own editor.
@@ -232,8 +236,10 @@ impl SettingsRowId {
             | Self::AddMachine
             | Self::CommandLineTool
             | Self::UpdateStatus
+            | Self::CoreUpdates
             | Self::AutomaticUpdateDownloads
             | Self::UpdateCheckInterval
+            | Self::UpdateCheckNow
             // Keybindings live outside the appearance preferences and reset through the keymap
             // profile, which returns a displaced default to its Command.
             | Self::Shortcut(_)
@@ -917,9 +923,9 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
     SettingsRowDescriptor {
         id: SettingsRowId::UpdateStatus,
         section: SettingsSectionId::Updates,
-        // The installed version leads the page and needs no title: it is what the page is about.
+        // SpaceTerm's own row leads the page and needs no title: it is what the page is about.
         group: "",
-        label: super::updates::CURRENT_VERSION_LABEL,
+        label: super::updates::SPACETERM_LABEL,
         keywords: &[
             "version",
             "check",
@@ -936,10 +942,27 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-update-status",
     },
     SettingsRowDescriptor {
+        id: SettingsRowId::CoreUpdates,
+        section: SettingsSectionId::Updates,
+        group: crate::updates::copy::settings::CORE_HEADING,
+        label: crate::updates::copy::settings::CORE_HEADING,
+        keywords: &[
+            "core",
+            "machine",
+            "machines",
+            "server",
+            "restart",
+            "restart core",
+            "version",
+            "update",
+        ],
+        selector: "settings-row-core-updates",
+    },
+    SettingsRowDescriptor {
         id: SettingsRowId::AutomaticUpdateDownloads,
         section: SettingsSectionId::Updates,
         group: "Automatic updates",
-        label: "Download updates automatically",
+        label: crate::updates::copy::settings::AUTOMATIC_DOWNLOADS,
         keywords: &["automatic", "background", "download", "update", "auto"],
         selector: "settings-row-automatic-update-downloads",
     },
@@ -957,6 +980,14 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
             "update",
         ],
         selector: "settings-row-update-check-interval",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::UpdateCheckNow,
+        section: SettingsSectionId::Updates,
+        group: "Automatic updates",
+        label: crate::updates::copy::settings::CHECK_NOW,
+        keywords: &["check", "check now", "check for updates", "machine", "core"],
+        selector: "settings-row-update-check-now",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::SettingsFile,
@@ -1214,8 +1245,10 @@ mod tests {
         CommandLineTool,
         MachineWorktreeLocation,
         UpdateStatus,
+        CoreUpdates,
         AutomaticUpdateDownloads,
         UpdateCheckInterval,
+        UpdateCheckNow,
         SettingsFile,
         ExportSettings,
         ImportSettings,

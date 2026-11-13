@@ -462,6 +462,14 @@ run = "tagsmith validate --tag {{usage.tag | quote}} --github-output"
 description = "Preview release notes for changes since the last release"
 run = "git-cliff --config cliff.toml --unreleased --offline --strip all"
 
+[tasks."release:rehearsal:macos"]
+description = "Print the live update rehearsal of ADR 0065 and capture the title bar's trailing corner once a second for 60 seconds after the relaunch"
+usage = '''
+arg "<folder>" help="New or empty folder for the frames"
+flag "--app <name>" help="Application to capture" default="SpaceTerm"
+'''
+run = "python -m spaceterm_tasks.release_rehearsal {{usage.folder | quote}} --app {{usage.app | quote}}"
+
 [tasks."core:test"]
 description = "Test SpaceTerm Core account admission and private storage"
 run = "cargo test --package spaceterm-core --package spaceterm-cli --package spaceterm-directories --all-features --locked"

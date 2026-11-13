@@ -19,9 +19,10 @@ use thiserror::Error;
 use crate::platform::native_pty::{
     NativePtyAdapter, NativePtyAdapterConstructionFailure, NativePtyAdapterFactory,
     NativePtyAdapterParts, NativePtyExit, NativePtyOperationFailure, NativePtySize,
-    NativePtyTermination, NativePtyWaitFailure,
+    NativePtyTermination, NativePtyWaitFailure, SessionProbe,
 };
 use crate::platform::shell_launch::PreparedShellLaunch;
+mod freeze;
 #[cfg(all(test, feature = "native-tests"))]
 use crate::platform::shell_launch::ShellLaunchPlanner;
 
@@ -94,6 +95,100 @@ struct TerminationTarget {
 /// Operating-System process facts that the shared POSIX PTY owner needs to supervise a Shell
 /// Process session without trusting reusable process identifiers.
 pub(super) trait UnixPtyHost: Send + Sync + 'static {
+    fn process_image(&self, _identity: ProcessIdentity) -> io::Result<std::path::PathBuf> {
+        Err(io::Error::other("the process image is unavailable"))
+    }
+    fn cpu_time(&self, _identity: ProcessIdentity) -> io::Result<Duration> {
+        Err(io::Error::other("native CPU time is unavailable"))
+    }
+    fn prompt_waiting(
+        &self,
+        _identity: ProcessIdentity,
+        _slave: &std::path::Path,
+        _frozen: bool,
+    ) -> io::Result<bool> {
+        Err(io::Error::other("native prompt wait is unavailable"))
+    }
+    fn fence_slave(
+        &self,
+        slave: &std::path::Path,
+        master: &std::sync::Weak<OwnedFd>,
+    ) -> io::Result<Box<dyn SlaveFence>> {
+        Ok(Box::new(freeze::SlavePermissions::close(
+            slave,
+            master.clone(),
+        )?))
+    }
+    fn pin_process(&self, _identity: ProcessIdentity) -> io::Result<Box<dyn ProcessControl>> {
+        Err(io::Error::other("stable process signalling is unavailable"))
+    }
+    fn complete_process_ids(&self) -> io::Result<Vec<i32>> {
+        self.process_ids()
+    }
+    fn holds_slave(&self, _process: i32, _slave: &std::path::Path) -> io::Result<bool> {
+        Err(io::Error::other("PTY slave holders are unavailable"))
+    }
+    fn slave_holders(&self, slave: &std::path::Path) -> io::Result<Vec<ProcessIdentity>> {
+        let mut ids = self.complete_process_ids()?;
+        ids.sort_unstable();
+        let mut holders = Vec::new();
+        for &pid in &ids {
+            if pid < 1 {
+                continue;
+            }
+            let Some(before) = self.observe_exactly(pid)? else {
+                continue;
+            };
+            let holds = self.holds_slave(pid, slave)?;
+            if self.observe_exactly(pid)? != Some(before) {
+                return Err(io::Error::other(
+                    "process changed during descriptor enumeration",
+                ));
+            }
+            if holds {
+                holders.push(before.identity);
+            }
+        }
+        let mut after = self.complete_process_ids()?;
+        after.sort_unstable();
+        if ids != after {
+            return Err(io::Error::other("incomplete process enumeration"));
+        }
+        Ok(holders)
+    }
+    fn foreground(&self, master: RawFd) -> io::Result<i32> {
+        // SAFETY: the caller retains the live PTY master throughout this query.
+        let group = unsafe { libc::tcgetpgrp(master) };
+        if group > 0 {
+            Ok(group)
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+    fn pending_output(&self, master: RawFd) -> io::Result<bool> {
+        let mut count: libc::c_int = 0;
+        // SAFETY: master is live and count is writable ioctl storage.
+        if unsafe { libc::ioctl(master, libc::FIONREAD, &mut count) } != 0 || count < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if count != 0 {
+            return Ok(true);
+        }
+        // Darwin can report zero here while master output is already readable. Treat any
+        // readiness or hangup as work too; never read it past the receipt gate to find out.
+        let mut ready = libc::pollfd {
+            fd: master,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: master is retained and ready is writable storage for one descriptor.
+        let result = unsafe { libc::poll(&mut ready, 1, 0) };
+        if result < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(result != 0)
+        }
+    }
     /// Observe one live process. Returns `None` for a missing, exited, or unstable process.
     fn observe_process(&self, process: i32) -> Option<ProcessObservation>;
 
@@ -106,7 +201,34 @@ pub(super) trait UnixPtyHost: Send + Sync + 'static {
     /// List every process identifier currently visible to this user.
     fn process_ids(&self) -> io::Result<Vec<i32>>;
 
+    /// Observe one process for a decision that must not miss one. `Ok(None)` only when the
+    /// process is proven gone; an error when it could not be read or changed while it was read.
+    /// A host that cannot tell the two apart reports every process as unreadable.
+    fn observe_exactly(&self, _process: i32) -> io::Result<Option<ProcessObservation>> {
+        Err(io::Error::other("this host cannot prove a process gone"))
+    }
+
+    /// Every process that may belong to the session `leader` leads: a superset of its members
+    /// that [`Self::observe_exactly`] can read. By default every visible process.
+    fn session_candidates(&self, _leader: i32) -> io::Result<Vec<i32>> {
+        self.process_ids()
+    }
+
     fn master_read_error(&self, error: &io::Error) -> MasterReadError;
+}
+pub(super) trait SlaveFence: Send + Sync {
+    /// This snapshot must not retain the permission owner: timeout cleanup can restore the
+    /// node even while its validation is stalled in a native query.
+    fn verification(&self) -> Box<dyn FnOnce() -> io::Result<()> + Send> {
+        Box::new(|| Ok(()))
+    }
+}
+
+/// An OS-bound process identity. Signals must never fall back to a reusable PID.
+pub(super) trait ProcessControl: Send + Sync {
+    fn identity(&self) -> ProcessIdentity;
+    fn stopped(&self) -> io::Result<bool>;
+    fn signal(&self, signal: i32) -> io::Result<()>;
 }
 
 /// How the shared PTY reader treats an Operating-System read failure on the PTY master.
@@ -379,6 +501,116 @@ fn process_group_is_alive(process_group: i32) -> io::Result<bool> {
     }
 }
 
+/// The shell's terminal session, read through the host's process facts.
+struct ShellSession {
+    host: Arc<dyn UnixPtyHost>,
+    session: ProcessSessionIdentity,
+    foreground: std::sync::Weak<OwnedFd>,
+    activity: Arc<Mutex<Option<spaceterm_core::idle_restart::Activity>>>,
+    slave: Option<std::path::PathBuf>,
+    frozen: Mutex<Option<freeze::Teardown>>,
+    checkpoint: Mutex<Option<freeze::Checkpoint>>,
+    image: Option<std::path::PathBuf>,
+}
+
+impl SessionProbe for ShellSession {
+    fn checkpoint(&self) -> io::Result<()> {
+        let slave = self
+            .slave
+            .as_deref()
+            .ok_or_else(|| io::Error::other("the slave is unknown"))?;
+        let checkpoint = freeze::checkpoint(
+            self.host.as_ref(),
+            self.session,
+            slave,
+            self.image
+                .as_deref()
+                .ok_or_else(|| io::Error::other("the owning shell image is unknown"))?,
+        )?;
+        let record = || {
+            *self.checkpoint.lock().unwrap_or_else(|e| e.into_inner()) = Some(checkpoint);
+        };
+        if let Some(activity) = self.activity() {
+            activity
+                .record_idle_observation(record)
+                .map_err(|_| io::Error::other("an idle lease owns the native observation"))?;
+        } else {
+            record();
+        }
+        Ok(())
+    }
+    fn freeze(&self) -> io::Result<Box<dyn spaceterm_core::idle_restart::Frozen>> {
+        let master = self
+            .foreground
+            .upgrade()
+            .ok_or_else(|| io::Error::other("the PTY is gone"))?;
+        let slave = self
+            .slave
+            .as_deref()
+            .ok_or_else(|| io::Error::other("the PTY slave is unknown"))?;
+        let population = freeze::Population::capture(
+            self.host.clone(),
+            self.session,
+            &master,
+            slave,
+            Instant::now() + Duration::from_millis(250),
+            self.checkpoint
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .ok_or_else(|| io::Error::other("no idle CPU checkpoint"))?,
+        )?;
+        *self.frozen.lock().unwrap_or_else(|e| e.into_inner()) = Some(population.teardown());
+        Ok(Box::new(population))
+    }
+    fn activity(&self) -> Option<spaceterm_core::idle_restart::Activity> {
+        self.activity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn shell_foreground(&self) -> io::Result<bool> {
+        let descriptor = self
+            .foreground
+            .upgrade()
+            .ok_or_else(|| io::Error::other("the PTY foreground is unavailable"))?;
+        // SAFETY: the probe owns this live PTY master descriptor.
+        let foreground = unsafe { libc::tcgetpgrp(descriptor.as_raw_fd()) };
+        if foreground < 1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(foreground == self.session.leader.process)
+    }
+
+    /// Reads every visible process exactly, unlike cleanup's best-effort enumeration: a
+    /// process that could not be read is an error, never a process that is not there.
+    fn others(&self) -> io::Result<bool> {
+        let leader = self
+            .host
+            .observe_exactly(self.session.session)?
+            .ok_or_else(|| io::Error::other("the shell process is gone"))?;
+        if leader.identity != self.session.leader || leader.session != self.session.session {
+            return Err(io::Error::other("shell process ownership is unresolved"));
+        }
+        for process in self.host.session_candidates(self.session.session)? {
+            if process < 1 || process == self.session.leader.process {
+                continue;
+            }
+            match self.host.observe_exactly(process)? {
+                Some(observation) if observation.session == self.session.session => {
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+        if self.host.observe_exactly(self.session.session)? != Some(leader) {
+            return Err(io::Error::other("shell process ownership changed"));
+        }
+        Ok(false)
+    }
+}
+
 fn process_groups_in_session(
     host: &dyn UnixPtyHost,
     session: &ProcessSessionIdentity,
@@ -413,6 +645,104 @@ fn process_groups_in_session(
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
+
+    /// Process facts by PID: `Ok(None)` gone, `Err(())` unreadable.
+    struct Facts(Vec<(i32, Result<Option<ProcessObservation>, ()>)>);
+    impl UnixPtyHost for Facts {
+        fn observe_process(&self, _: i32) -> Option<ProcessObservation> {
+            panic!("the session probe reads processes exactly")
+        }
+        fn process_ids(&self) -> io::Result<Vec<i32>> {
+            Ok(self.0.iter().map(|(process, _)| *process).collect())
+        }
+        fn observe_exactly(&self, process: i32) -> io::Result<Option<ProcessObservation>> {
+            match self.0.iter().find(|(id, _)| *id == process) {
+                Some((_, Ok(observation))) => Ok(*observation),
+                Some((_, Err(()))) => Err(io::Error::other("unreadable")),
+                None => Ok(None),
+            }
+        }
+        fn master_read_error(&self, _: &io::Error) -> MasterReadError {
+            MasterReadError::Failure
+        }
+    }
+
+    fn observed(process: i32, process_group: i32, session: i32) -> ProcessObservation {
+        ProcessObservation {
+            identity: ProcessIdentity {
+                process,
+                start: ProcessStart { coarse: 1, fine: 0 },
+            },
+            process_group,
+            session,
+        }
+    }
+
+    fn probe(others: Vec<(i32, Result<Option<ProcessObservation>, ()>)>) -> io::Result<bool> {
+        let shell = observed(100, 100, 100);
+        let mut facts = vec![(100, Ok(Some(shell)))];
+        facts.extend(others);
+        ShellSession {
+            host: Arc::new(Facts(facts)),
+            foreground: std::sync::Weak::new(),
+            activity: Arc::default(),
+            slave: None,
+            frozen: Mutex::new(None),
+            checkpoint: Mutex::new(None),
+            image: None,
+            session: ProcessSessionIdentity {
+                session: 100,
+                leader: shell.identity,
+            },
+        }
+        .others()
+    }
+
+    #[test]
+    fn a_readable_shell_with_an_unreadable_process_beside_it_is_not_alone() {
+        assert!(probe(vec![(7, Err(()))]).is_err());
+        assert!(probe(vec![(200, Ok(Some(observed(200, 200, 200)))), (7, Err(()))]).is_err());
+    }
+
+    #[test]
+    fn the_session_probe_finds_members_in_every_process_group_of_the_session() {
+        assert!(!probe(vec![(200, Ok(Some(observed(200, 200, 200))))]).unwrap());
+        assert!(
+            !probe(vec![(201, Ok(None))]).unwrap(),
+            "a process proven gone"
+        );
+        // A stopped or background job in its own process group, as job control places it.
+        assert!(probe(vec![(101, Ok(Some(observed(101, 101, 100))))]).unwrap());
+        assert!(probe(vec![(102, Ok(Some(observed(102, 100, 100))))]).unwrap());
+    }
+
+    #[test]
+    fn a_shell_that_is_gone_or_replaced_is_not_alone() {
+        let shell = observed(100, 100, 100);
+        let reused = ProcessObservation {
+            identity: ProcessIdentity {
+                start: ProcessStart { coarse: 2, fine: 0 },
+                ..shell.identity
+            },
+            ..shell
+        };
+        for leader in [Ok(None), Ok(Some(reused)), Err(())] {
+            let probe = ShellSession {
+                host: Arc::new(Facts(vec![(100, leader)])),
+                foreground: std::sync::Weak::new(),
+                activity: Arc::default(),
+                slave: None,
+                frozen: Mutex::new(None),
+                checkpoint: Mutex::new(None),
+                image: None,
+                session: ProcessSessionIdentity {
+                    session: 100,
+                    leader: shell.identity,
+                },
+            };
+            assert!(probe.others().is_err());
+        }
+    }
     struct ReusedLeader(ProcessObservation);
     impl UnixPtyHost for ReusedLeader {
         fn observe_process(&self, _: i32) -> Option<ProcessObservation> {
@@ -511,10 +841,15 @@ struct SpawnedPty {
     master: Box<dyn MasterPty + Send>,
     reader: Option<Box<dyn Read + Send>>,
     writer: Box<dyn Write + Send>,
+    reader_stop: Option<OwnedFd>,
+    closing: Arc<AtomicBool>,
     /// The shell's process group, which leads its own session.
     shell_process_group: libc::pid_t,
-    // Fields drop in declaration order. Close the PTY handles before waiting for a child whose
-    // kernel exit can be waiting for terminal teardown.
+    probe: Arc<ShellSession>,
+    /// The probe borrows this descriptor. It closes before waiting for PTY teardown, even
+    /// when an observer retains the probe after the owner ends.
+    _foreground: Option<Arc<OwnedFd>>,
+    // Closing masters must precede the final potentially blocking reap.
     process: SpawnedChild,
 }
 
@@ -524,8 +859,11 @@ struct SpawnedChild {
 }
 
 struct PtyReader {
+    activity: Arc<Mutex<Option<spaceterm_core::idle_restart::Activity>>>,
     reader: MasterReader,
     readiness: OwnedFd,
+    stop: OwnedFd,
+    closing: Arc<AtomicBool>,
     /// Counts every native read, including each one retried after it would block.
     counters: Arc<TerminalCounters>,
 }
@@ -533,26 +871,70 @@ struct PtyReader {
 impl Read for PtyReader {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         loop {
-            let read = self.reader.read(buffer);
-            self.counters.record_pty_read(&read);
-            match read {
+            if self.closing.load(Ordering::Acquire) {
+                return Ok(0);
+            }
+            let activity = self
+                .activity
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let mut read = || {
+                let result = self.reader.read(buffer);
+                self.counters.record_pty_read(&result);
+                result
+            };
+            let result = match activity {
+                Some(activity) => activity.read(read),
+                None => read(),
+            };
+            match result {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    let mut poll = libc::pollfd {
-                        fd: self.readiness.as_raw_fd(),
-                        events: libc::POLLIN,
-                        revents: 0,
-                    };
-                    // SAFETY: readiness owns a live descriptor and poll points to one initialized entry.
-                    if unsafe { libc::poll(&mut poll, 1, -1) } == -1 {
+                    let mut descriptors = [
+                        libc::pollfd {
+                            fd: self.readiness.as_raw_fd(),
+                            events: libc::POLLIN,
+                            revents: 0,
+                        },
+                        libc::pollfd {
+                            fd: self.stop.as_raw_fd(),
+                            events: libc::POLLIN,
+                            revents: 0,
+                        },
+                    ];
+                    // SAFETY: both descriptors are owned and the result array is writable.
+                    if unsafe { libc::poll(descriptors.as_mut_ptr(), 2, -1) } < 0 {
                         let error = io::Error::last_os_error();
                         if error.kind() != io::ErrorKind::Interrupted {
                             return Err(error);
                         }
+                    } else if descriptors[1].revents != 0 {
+                        return Ok(0);
                     }
                 }
                 result => return result,
             }
         }
+    }
+}
+
+impl Drop for SpawnedPty {
+    fn drop(&mut self) {
+        // Terminal teardown is the destructive Stop boundary. Kill the exact frozen processes
+        // before closing masters: kernel hangup can send SIGCONT along with SIGHUP.
+        if let Some(frozen) = self
+            .probe
+            .frozen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            frozen.end_if_frozen();
+        }
+        // Let ordinary close traps finish their bounded grace before reader cancellation.
+        self.process.wait_before_master_close();
+        self.closing.store(true, Ordering::Release);
+        drop(self.reader_stop.take());
     }
 }
 
@@ -586,6 +968,27 @@ impl SpawnedPty {
 }
 
 impl SpawnedChild {
+    fn wait_before_master_close(&mut self) {
+        if !self
+            .termination
+            .lock_target()
+            .as_ref()
+            .is_some_and(TerminationTarget::owns_process_group)
+        {
+            return;
+        }
+        let Some(child) = self.child.as_mut() else {
+            return;
+        };
+        if !self.termination.requested() {
+            let _ = self.termination.signal();
+        }
+        // No final wait or force-reap here: a draining child may need master closure first.
+        if Self::poll_child_until(child.as_mut(), Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT) {
+            self.child.take();
+        }
+    }
+
     fn wait_for_child(&mut self, timeout: Duration) -> io::Result<ShellExit> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -790,6 +1193,14 @@ impl Write for SpawnedPty {
 }
 
 impl NativePtyAdapter for SpawnedPty {
+    fn bind_activity(&mut self, activity: Option<spaceterm_core::idle_restart::Activity>) {
+        *self
+            .probe
+            .activity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = activity;
+    }
+
     fn take_reader(&mut self) -> io::Result<Box<dyn Read + Send>> {
         Self::take_reader(self)
     }
@@ -806,6 +1217,10 @@ impl NativePtyAdapter for SpawnedPty {
 
     fn line_mode(&self) -> Result<LineMode, NativePtyOperationFailure> {
         Self::line_mode(self).map_err(|error| NativePtyOperationFailure::new(error.kind()))
+    }
+
+    fn session_probe(&self) -> Option<Arc<dyn SessionProbe>> {
+        Some(Arc::clone(&self.probe) as Arc<dyn SessionProbe>)
     }
 
     fn wait_for_exit(&mut self, timeout: Duration) -> Result<NativePtyExit, NativePtyWaitFailure> {
@@ -966,6 +1381,13 @@ fn spawn_command_in_pty(
         .try_clone_to_owned()
         .map_err(|error| PtyError::CloneReader(error.into()))?;
 
+    let (reader_stop, owner_stop) = std::os::unix::net::UnixStream::pair()
+        .map_err(|error| PtyError::CloneReader(error.into()))?;
+    let closing = Arc::new(AtomicBool::new(false));
+    let image = command
+        .get_argv()
+        .first()
+        .and_then(|program| std::fs::canonicalize(program).ok());
     let mut child = pair
         .slave
         .spawn_command(command)
@@ -993,9 +1415,13 @@ fn spawn_command_in_pty(
             return Err(PtyError::TakeWriter(source.into()));
         }
     };
+    let activity = Arc::new(Mutex::new(None));
     let reader: Box<dyn Read + Send> = Box::new(PtyReader {
+        activity: Arc::clone(&activity),
         reader,
         readiness,
+        stop: reader_stop.into(),
+        closing: closing.clone(),
         counters,
     });
 
@@ -1020,6 +1446,24 @@ fn spawn_command_in_pty(
         session: observation.session,
         leader: observation.identity,
     };
+    let foreground = pair.master.as_raw_fd().and_then(|descriptor| {
+        // SAFETY: pair.master owns this live descriptor throughout cloning.
+        unsafe { BorrowedFd::borrow_raw(descriptor) }
+            .try_clone_to_owned()
+            .ok()
+            .map(Arc::new)
+    });
+    let probe = Arc::new(ShellSession {
+        host: Arc::clone(&host),
+        session,
+        // Failure leaves the read unavailable, which counts as work.
+        foreground: foreground.as_ref().map(Arc::downgrade).unwrap_or_default(),
+        activity,
+        slave: pair.master.tty_name(),
+        frozen: Mutex::new(None),
+        checkpoint: Mutex::new(None),
+        image,
+    });
     let termination = Arc::new(ChildTermination::new_with_session(
         host,
         process_group,
@@ -1033,7 +1477,11 @@ fn spawn_command_in_pty(
             master: pair.master,
             reader: Some(Box::new(reader)),
             writer,
+            reader_stop: Some(owner_stop.into()),
+            closing,
             shell_process_group: process_group,
+            probe,
+            _foreground: foreground,
             process: SpawnedChild {
                 child: Some(child),
                 termination,
@@ -1105,6 +1553,11 @@ pub(crate) fn test_factory() -> UnixNativePtyAdapterFactory {
     UnixNativePtyAdapterFactory::new(test_host(), Arc::default())
 }
 
+#[cfg(all(test, feature = "native-tests"))]
+pub(crate) fn freeze_test_factory() -> UnixNativePtyAdapterFactory {
+    UnixNativePtyAdapterFactory::new(tests::freeze_test_host(), Arc::default())
+}
+
 /// The host adapter the running Operating System composes, for OS-backed verification.
 #[cfg(all(test, feature = "native-tests"))]
 fn test_host() -> Arc<dyn UnixPtyHost> {
@@ -1168,13 +1621,67 @@ mod reader_tests {
     }
 
     #[test]
+    fn closing_the_owner_wakes_a_reader_even_while_an_outside_holder_suppresses_eof() {
+        struct NoOutput(Option<std::sync::mpsc::Sender<()>>);
+        impl Read for NoOutput {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                if let Some(attempted) = self.0.take() {
+                    attempted.send(()).unwrap();
+                    Err(io::ErrorKind::WouldBlock.into())
+                } else {
+                    Ok(0)
+                }
+            }
+        }
+
+        let (attempted, first_read) = std::sync::mpsc::channel();
+        let (finished, result) = std::sync::mpsc::channel();
+        let (readiness, mut outside_holder) = UnixStream::pair().unwrap();
+        let (stop, owner_stop) = UnixStream::pair().unwrap();
+        let counters = Arc::new(TerminalCounters::default());
+        let mut reader = PtyReader {
+            activity: Arc::default(),
+            reader: MasterReader {
+                inner: Box::new(NoOutput(Some(attempted))),
+                host: Arc::new(HangupOnIo),
+            },
+            readiness: readiness.into(),
+            stop: stop.into(),
+            closing: Arc::new(AtomicBool::new(false)),
+            counters: counters.clone(),
+        };
+        let worker = std::thread::spawn(move || {
+            finished.send(reader.read(&mut [0; 16])).unwrap();
+        });
+        first_read
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap();
+        drop(owner_stop);
+        let stopped = result.recv_timeout(std::time::Duration::from_secs(3));
+        // Also join the worker if a regression leaves it waiting for master readiness.
+        if stopped.is_err() {
+            let _ = outside_holder.write_all(&[1]);
+        }
+        worker.join().unwrap();
+        assert_eq!(
+            stopped
+                .expect("owner closure must wake the reader")
+                .unwrap(),
+            0
+        );
+        assert_eq!(counters.snapshot().pty_read_attempts, 1);
+    }
+
+    #[test]
     fn every_native_read_counts_as_an_attempt_and_only_data_counts_bytes() {
         let counters = Arc::new(TerminalCounters::default());
         // The readiness descriptor always polls readable, so a read that would block retries
         // at once.
         let (readiness, mut ready) = UnixStream::pair().unwrap();
         ready.write_all(&[1]).unwrap();
+        let (stop, _keep_stop_open) = UnixStream::pair().unwrap();
         let mut reader = PtyReader {
+            activity: Arc::default(),
             reader: MasterReader {
                 inner: Box::new(Scripted(VecDeque::from([
                     Err(io::ErrorKind::WouldBlock.into()),
@@ -1186,6 +1693,8 @@ mod reader_tests {
                 host: Arc::new(HangupOnIo),
             },
             readiness: readiness.into(),
+            stop: stop.into(),
+            closing: Arc::new(AtomicBool::new(false)),
             counters: Arc::clone(&counters),
         };
         let mut buffer = [0; 16];
@@ -1230,6 +1739,786 @@ mod tests {
     use portable_pty::{ChildKiller, ExitStatus};
 
     use super::*;
+
+    /// A controlled process inventory for these isolated PTYs. All process handles, FD
+    /// queries, stop acknowledgements, foreground and output reads still use the real OS.
+    /// The portable refusal matrix separately exercises unreadable global inventories.
+    fn idle_shell_command() -> CommandBuilder {
+        #[cfg(target_os = "macos")]
+        {
+            let mut command = CommandBuilder::new("/bin/bash");
+            command.arg("--posix");
+            command
+        }
+        #[cfg(target_os = "linux")]
+        {
+            CommandBuilder::new("/bin/sh")
+        }
+    }
+    type HolderInspection = (mpsc::Sender<()>, mpsc::Receiver<()>);
+    type NativeSignals = Arc<Mutex<Vec<(ProcessIdentity, i32)>>>;
+    struct KnownProcesses {
+        real: Arc<dyn UnixPtyHost>,
+        known: Mutex<std::collections::BTreeSet<i32>>,
+        inspection: Mutex<Option<HolderInspection>>,
+        signals: NativeSignals,
+    }
+    impl KnownProcesses {
+        fn new() -> Self {
+            Self {
+                real: test_host(),
+                known: Mutex::new([std::process::id() as i32].into_iter().collect()),
+                inspection: Mutex::new(None),
+                signals: Arc::default(),
+            }
+        }
+    }
+    struct RecordedControl {
+        inner: Box<dyn ProcessControl>,
+        signals: NativeSignals,
+    }
+    impl ProcessControl for RecordedControl {
+        fn identity(&self) -> ProcessIdentity {
+            self.inner.identity()
+        }
+        fn stopped(&self) -> io::Result<bool> {
+            self.inner.stopped()
+        }
+        fn signal(&self, signal: i32) -> io::Result<()> {
+            self.signals.lock().unwrap().push((self.identity(), signal));
+            self.inner.signal(signal)
+        }
+    }
+    impl UnixPtyHost for KnownProcesses {
+        fn process_image(&self, identity: ProcessIdentity) -> io::Result<std::path::PathBuf> {
+            self.real.process_image(identity)
+        }
+        fn cpu_time(&self, identity: ProcessIdentity) -> io::Result<Duration> {
+            self.real.cpu_time(identity)
+        }
+        fn prompt_waiting(
+            &self,
+            identity: ProcessIdentity,
+            slave: &std::path::Path,
+            frozen: bool,
+        ) -> io::Result<bool> {
+            self.real.prompt_waiting(identity, slave, frozen)
+        }
+        fn observe_process(&self, pid: i32) -> Option<ProcessObservation> {
+            self.real.observe_process(pid)
+        }
+        fn observe_exactly(&self, pid: i32) -> io::Result<Option<ProcessObservation>> {
+            self.real.observe_exactly(pid)
+        }
+        fn observe_spawned_child(&self, pid: i32) -> Option<ProcessObservation> {
+            let observation = self.real.observe_spawned_child(pid)?;
+            self.known.lock().unwrap().insert(pid);
+            Some(observation)
+        }
+        fn process_ids(&self) -> io::Result<Vec<i32>> {
+            self.real.process_ids()
+        }
+        fn session_candidates(&self, sid: i32) -> io::Result<Vec<i32>> {
+            self.real.session_candidates(sid)
+        }
+        fn complete_process_ids(&self) -> io::Result<Vec<i32>> {
+            Ok(self.known.lock().unwrap().iter().copied().collect())
+        }
+        fn holds_slave(&self, pid: i32, slave: &std::path::Path) -> io::Result<bool> {
+            let pause = self.inspection.lock().unwrap().take();
+            if let Some((entered, resume)) = pause {
+                entered.send(()).unwrap();
+                resume.recv().unwrap();
+            }
+            self.real.holds_slave(pid, slave)
+        }
+        fn pin_process(&self, identity: ProcessIdentity) -> io::Result<Box<dyn ProcessControl>> {
+            Ok(Box::new(RecordedControl {
+                inner: self.real.pin_process(identity)?,
+                signals: self.signals.clone(),
+            }))
+        }
+        fn master_read_error(&self, error: &io::Error) -> MasterReadError {
+            self.real.master_read_error(error)
+        }
+    }
+    pub(super) fn freeze_test_host() -> Arc<dyn UnixPtyHost> {
+        Arc::new(KnownProcesses::new())
+    }
+    struct RealIdle {
+        activity: spaceterm_core::idle_restart::Activity,
+        probe: Arc<dyn SessionProbe>,
+    }
+    impl spaceterm_core::idle_restart::Session for RealIdle {
+        fn activity(&self) -> spaceterm_core::idle_restart::Activity {
+            self.activity.clone()
+        }
+        fn working(&self, _: Instant) -> bool {
+            self.probe.checkpoint().is_err()
+        }
+        fn freeze(
+            &self,
+            _: Instant,
+        ) -> Result<
+            Box<dyn spaceterm_core::idle_restart::Frozen>,
+            spaceterm_core::idle_restart::Restarting,
+        > {
+            self.probe
+                .freeze()
+                .map_err(|_| spaceterm_core::idle_restart::Restarting)
+        }
+    }
+    fn raw_idle_lease(
+        pty: &SpawnedPty,
+        activity: spaceterm_core::idle_restart::Activity,
+    ) -> spaceterm_core::idle_restart::Lease {
+        let sessions: Vec<Arc<dyn spaceterm_core::idle_restart::Session>> =
+            vec![Arc::new(RealIdle {
+                activity,
+                probe: NativePtyAdapter::session_probe(pty).unwrap(),
+            })];
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(lease) = spaceterm_core::idle_restart::Lease::scan(
+                &sessions,
+                Instant::now() + Duration::from_secs(7200),
+                Duration::from_secs(3600),
+            ) {
+                return lease;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the real shell never blocked in its terminal read"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+    fn await_native_checkpoint(probe: &dyn SessionProbe) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if probe.checkpoint().is_ok() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the real shell never blocked in its terminal read"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+    #[test]
+    fn an_exec_with_the_same_pid_and_terminal_cannot_inherit_an_idle_prompt() {
+        const NAME: &str = "platform::unix_pty::tests::an_exec_with_the_same_pid_and_terminal_cannot_inherit_an_idle_prompt";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _lock = lock_real_pty_test();
+        let mut command = idle_shell_command();
+        command.args(["-c", "trap 'exec /bin/cat' USR1; printf READY; read line"]);
+        let (mut pty, terminator) = spawn_command_in_pty(
+            freeze_test_host(),
+            PtySize::default(),
+            command,
+            Arc::default(),
+        )
+        .unwrap();
+        let mut reader = pty.take_reader().unwrap();
+        read_output_marker(&mut reader, b"READY");
+        await_native_checkpoint(pty.probe.as_ref());
+        let identity = pty.probe.session.leader;
+        let original = test_host().process_image(identity).unwrap();
+        // This unreaped shell remains our child even when exec replaces its executable.
+        assert_eq!(unsafe { libc::kill(identity.process, libc::SIGUSR1) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while test_host().process_image(identity).unwrap() == original {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(pty.probe.shell_foreground().unwrap());
+        assert!(!pty.probe.others().unwrap());
+        assert!(
+            pty.probe.checkpoint().is_err(),
+            "the new foreground image is work even without another PID"
+        );
+        terminator.terminate().unwrap();
+        drop(reader);
+        drop(pty);
+    }
+
+    #[test]
+    fn a_granted_freeze_blocks_fresh_slave_opens_and_restores_its_exact_mode_and_owner() {
+        use std::os::unix::fs::MetadataExt;
+        const NAME: &str = "platform::unix_pty::tests::a_granted_freeze_blocks_fresh_slave_opens_and_restores_its_exact_mode_and_owner";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _lock = lock_real_pty_test();
+        let mut command = idle_shell_command();
+        command.args(["-c", "printf READY; read line"]);
+        let (mut pty, terminator) = spawn_command_in_pty(
+            freeze_test_host(),
+            PtySize::default(),
+            command,
+            Arc::default(),
+        )
+        .unwrap();
+        let mut reader = pty.take_reader().unwrap();
+        read_output_marker(&mut reader, b"READY");
+        let slave = pty.probe.slave.as_ref().unwrap();
+        let before = std::fs::metadata(slave).unwrap();
+        await_native_checkpoint(pty.probe.as_ref());
+        let frozen = pty.probe.freeze().unwrap();
+        frozen.verify().unwrap();
+        let mode = std::fs::metadata(slave).unwrap();
+        let opened = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+            .open(slave);
+        let fenced = mode.mode() & 0o7777 == 0;
+        let refused = if unsafe { libc::geteuid() } == 0 {
+            opened.is_ok()
+        } else {
+            opened.is_err()
+        };
+        drop(opened);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            slave,
+            std::fs::Permissions::from_mode((before.mode() & 0o7777) ^ 0o100),
+        )
+        .unwrap();
+        let changed = frozen.verify().is_err();
+        drop(frozen);
+        let after = std::fs::metadata(slave).unwrap();
+        // Capture the failure before rescuing permissions for a deliberately broken mutant.
+        std::fs::set_permissions(
+            slave,
+            std::fs::Permissions::from_mode(before.mode() & 0o7777),
+        )
+        .unwrap();
+        terminator.terminate().unwrap();
+        drop(reader);
+        drop(pty);
+        assert!(fenced, "the final grant must retain mode zero through Stop");
+        assert!(
+            refused,
+            "only root can bypass the fresh-open permission fence"
+        );
+        assert!(changed, "a changed permission fence must refuse Stop");
+        assert_eq!(
+            (after.mode(), after.uid(), after.gid()),
+            (before.mode(), before.uid(), before.gid())
+        );
+    }
+
+    #[test]
+    #[ignore = "child of a_detached_dev_tty_holder_refuses_stop_and_keeps_running"]
+    fn detached_dev_tty_holder_child() {
+        let Some(directory) = env::var_os("SPACETERM_TEST_TTY_ALIAS") else {
+            return;
+        };
+        let directory = std::path::PathBuf::from(directory);
+        let mut terminal = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+            .open("/dev/tty")
+            .unwrap();
+        // SAFETY: this child is not its process group's leader. Keep only the self-opened
+        // alias descriptor; setsid removes it from the original session without closing it.
+        assert!(unsafe { libc::setsid() } > 0);
+        for descriptor in 0..=2 {
+            // SAFETY: these are the child's inherited standard descriptors.
+            unsafe { libc::close(descriptor) };
+        }
+        std::fs::write(directory.join("ready"), std::process::id().to_string()).unwrap();
+        while !directory.join("write").exists() {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let result = terminal.write_all(b"ALIAS_ALIVE");
+        std::fs::write(
+            directory.join("result"),
+            if result.is_ok() { "ok" } else { "error" },
+        )
+        .unwrap();
+        while !directory.join("finish").exists() {
+            thread::sleep(Duration::from_millis(1));
+        }
+        std::process::exit(0);
+    }
+
+    #[test]
+    fn a_detached_dev_tty_holder_refuses_stop_and_keeps_running() {
+        const NAME: &str =
+            "platform::unix_pty::tests::a_detached_dev_tty_holder_refuses_stop_and_keeps_running";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _isolation = lock_real_pty_test();
+        let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+        let host = Arc::new(KnownProcesses::new());
+        let mut command = idle_shell_command();
+        command.args(["-c", "\"$1\" --exact platform::unix_pty::tests::detached_dev_tty_holder_child --ignored --nocapture & printf READY; read line", "alias-parent"]);
+        command.arg(std::env::current_exe().unwrap());
+        command.env("SPACETERM_TEST_TTY_ALIAS", fixture.path());
+        let (mut pty, terminator) =
+            spawn_command_in_pty(host.clone(), PtySize::default(), command, Arc::default())
+                .unwrap();
+        let mut reader = pty.take_reader().unwrap();
+        read_output_marker(&mut reader, b"READY");
+        let wait = |name: &str| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let path = fixture.path().join(name);
+            while !path.exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "the alias holder did not reach {name}"
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+            std::fs::read_to_string(path).unwrap()
+        };
+        let pid = wait("ready").parse::<i32>().unwrap();
+        let identity = test_host().observe_exactly(pid).unwrap().unwrap().identity;
+        assert_ne!(
+            test_host().observe_exactly(pid).unwrap().unwrap().session,
+            pty.probe.session.leader.process
+        );
+        struct Holder(Box<dyn ProcessControl>);
+        impl Drop for Holder {
+            fn drop(&mut self) {
+                let _ = self.0.signal(libc::SIGKILL);
+            }
+        }
+        let holder = Holder(test_host().pin_process(identity).unwrap());
+        host.known.lock().unwrap().insert(pid);
+        // The helper closed inherited terminal FDs before ready. Drain its harness startup
+        // output so an unread kernel byte cannot independently mask the holder regression.
+        while test_host()
+            .pending_output(pty.probe.foreground.upgrade().unwrap().as_raw_fd())
+            .unwrap()
+        {
+            let mut bytes = [0_u8; 4096];
+            assert!(reader.read(&mut bytes).unwrap() > 0);
+        }
+        await_native_checkpoint(pty.probe.as_ref());
+        let grant = pty.probe.freeze();
+        let refused = grant.is_err();
+        drop(grant);
+        assert!(
+            !holder.0.stopped().unwrap(),
+            "the outside holder must never be stopped"
+        );
+        std::fs::write(fixture.path().join("write"), b"now").unwrap();
+        let result = wait("result");
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            result, "ok",
+            "the pre-existing alias still addresses the old terminal"
+        );
+        #[cfg(target_os = "macos")]
+        let _ = result; // Darwin may resolve /dev/tty again at I/O rather than at open.
+        std::fs::write(fixture.path().join("finish"), b"now").unwrap();
+        terminator.terminate().unwrap();
+        drop(reader);
+        drop(pty);
+        assert!(refused, "a detached /dev/tty holder must refuse the grant");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn restoring_a_closed_terminal_never_changes_a_reused_slave_node() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        const NAME: &str = "platform::unix_pty::tests::restoring_a_closed_terminal_never_changes_a_reused_slave_node";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _isolation = lock_real_pty_test();
+        let spawn = || {
+            let mut command = idle_shell_command();
+            command.args(["-c", "printf READY; read line"]);
+            let (mut pty, terminator) = spawn_command_in_pty(
+                freeze_test_host(),
+                PtySize::default(),
+                command,
+                Arc::default(),
+            )
+            .unwrap();
+            let mut reader = pty.take_reader().unwrap();
+            read_output_marker(&mut reader, b"READY");
+            (pty, reader, terminator)
+        };
+        let (original, reader, terminator) = spawn();
+        let path = original.probe.slave.clone().unwrap();
+        let before = std::fs::metadata(&path).unwrap();
+        assert!(freeze::SlavePermissions::close(&path, std::sync::Weak::new()).is_err());
+        assert_eq!(std::fs::metadata(&path).unwrap().mode(), before.mode());
+        let permissions =
+            freeze::SlavePermissions::close(&path, original.probe.foreground.clone()).unwrap();
+        terminator.terminate().unwrap();
+        drop(reader);
+        drop(original);
+        // Linux devpts reuses both the index and inode number after the master closes,
+        // even while a slave descriptor still refers to the removed inode instance.
+        let (replacement, reader, terminator) = spawn();
+        assert_eq!(replacement.probe.slave.as_ref().unwrap(), &path);
+        let replacement_mode = if before.mode() & 0o7777 == 0o600 {
+            0o640
+        } else {
+            0o600
+        };
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(replacement_mode)).unwrap();
+        let before_restore = std::fs::metadata(&path).unwrap();
+        assert_eq!(
+            (before.dev(), before.ino()),
+            (before_restore.dev(), before_restore.ino()),
+            "the regression must exercise reused devpts identity numbers"
+        );
+        drop(permissions);
+        let after = std::fs::metadata(&path).unwrap();
+        terminator.terminate().unwrap();
+        drop(reader);
+        drop(replacement);
+        assert_eq!(
+            after.mode() & 0o7777,
+            replacement_mode,
+            "restoration must target only the original device instance"
+        );
+    }
+
+    #[test]
+    fn a_refused_final_inspection_cannot_force_kill_a_later_ordinary_close() {
+        use spaceterm_core::idle_restart::{Activity, Restarting};
+        const NAME: &str = "platform::unix_pty::tests::a_refused_final_inspection_cannot_force_kill_a_later_ordinary_close";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _isolation = lock_real_pty_test();
+        let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+        let marker = fixture.path().join("ordinary-close-trap");
+        let host = Arc::new(KnownProcesses::new());
+        let mut command = idle_shell_command();
+        command.args([
+            "-c",
+            "trap 'printf done > \"$1\"; exit' HUP TERM; printf READY; while :; do read line; done",
+            "ordinary-close",
+        ]);
+        command.arg(&marker);
+        let (mut pty, _terminator) =
+            spawn_command_in_pty(host.clone(), PtySize::default(), command, Arc::default())
+                .unwrap();
+        let mut reader = pty.take_reader().unwrap();
+        read_output_marker(&mut reader, b"READY");
+        let activity = Activity::new(Instant::now() - Duration::from_secs(7200));
+        let lease = Arc::new(raw_idle_lease(&pty, activity.clone()));
+        lease.freeze_and_grant().unwrap();
+        lease.verify_frozen().unwrap();
+        assert!(activity.input(Instant::now()).is_err());
+        let (entered, paused) = mpsc::channel();
+        let (resume, inspection) = mpsc::channel();
+        *host.inspection.lock().unwrap() = Some((entered, inspection));
+        let checking = lease.clone();
+        let worker = thread::spawn(move || checking.verify_frozen());
+        paused.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(worker.join().unwrap(), Err(Restarting));
+        assert!(!lease.granted());
+        drop(
+            activity
+                .input(Instant::now())
+                .expect("refusal must restore input"),
+        );
+        drop(lease);
+        // The inspector is still paused with its strong snapshot of the exact process
+        // controls. An ordinary close must not inherit authority from those stale handles.
+        drop(reader);
+        drop(pty);
+        let trap_finished = marker.exists();
+        let forced = host
+            .signals
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, signal)| *signal == libc::SIGKILL);
+        resume.send(()).unwrap();
+        assert!(
+            trap_finished,
+            "an ordinary close must let its HUP/TERM trap finish after refusal"
+        );
+        assert!(
+            !forced,
+            "a retained final inspector cannot authorize destructive teardown"
+        );
+    }
+
+    #[test]
+    fn an_outside_slave_holder_refuses_the_grant_without_stopping_the_holder() {
+        const NAME: &str = "platform::unix_pty::tests::an_outside_slave_holder_refuses_the_grant_without_stopping_the_holder";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _lock = lock_real_pty_test();
+        let mut command = idle_shell_command();
+        command.args(["-c", "printf READY; read line"]);
+        let (mut pty, terminator) = spawn_command_in_pty(
+            freeze_test_host(),
+            PtySize::default(),
+            command,
+            Arc::default(),
+        )
+        .unwrap();
+        let mut reader = pty.take_reader().unwrap();
+        read_output_marker(&mut reader, b"READY");
+        let outside = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+            .open(pty.probe.slave.as_ref().unwrap())
+            .unwrap();
+        let shell = test_host().pin_process(pty.probe.session.leader).unwrap();
+        assert!(pty.probe.freeze().is_err());
+        let until = Instant::now() + Duration::from_secs(3);
+        while shell.stopped().unwrap() {
+            assert!(Instant::now() < until);
+            thread::sleep(Duration::from_millis(1));
+        }
+        // The caller is the outside holder. It continues executing and its descriptor is intact.
+        assert!(unsafe { libc::fcntl(outside.as_raw_fd(), libc::F_GETFD) } >= 0);
+        drop(outside);
+        await_native_checkpoint(pty.probe.as_ref());
+        let frozen = pty.probe.freeze().unwrap();
+        frozen.verify().unwrap();
+        drop(frozen);
+        terminator.terminate().unwrap();
+        drop(reader);
+        drop(pty);
+    }
+
+    fn adopt_native_owner(
+        pty: SpawnedPty,
+        terminator: PtyTerminator,
+        activity: spaceterm_core::idle_restart::Activity,
+    ) -> (
+        crate::platform::native_pty::NativePtyOwner,
+        crate::platform::native_pty::NativePtyCloseHandle,
+    ) {
+        use crate::platform::native_pty::{
+            NativePtyCloseHandle, NativePtyOutput, NativePtyOutputSink, NativePtyOwner,
+        };
+        struct Parts(Mutex<Option<NativePtyAdapterParts>>);
+        impl NativePtyAdapterFactory for Parts {
+            fn create(
+                &self,
+                _: PreparedShellLaunch,
+                _: NativePtySize,
+            ) -> Result<NativePtyAdapterParts, NativePtyAdapterConstructionFailure> {
+                Ok(self.0.lock().unwrap().take().unwrap())
+            }
+        }
+        struct Output(spaceterm_core::idle_restart::Activity);
+        impl NativePtyOutputSink for Output {
+            fn activity(&self) -> Option<spaceterm_core::idle_restart::Activity> {
+                Some(self.0.clone())
+            }
+            fn publish(&self, event: NativePtyOutput) -> bool {
+                drop(self.0.output_receipt());
+                !matches!(event, NativePtyOutput::Stopped(_))
+            }
+        }
+        let factory = Parts(Mutex::new(Some(NativePtyAdapterParts {
+            adapter: Box::new(pty),
+            termination: Arc::new(terminator),
+        })));
+        let close = NativePtyCloseHandle::default();
+        let owner = NativePtyOwner::start(
+            &factory,
+            PreparedShellLaunch::for_test("/tmp".into()),
+            NativePtySize::default(),
+            Arc::new(Output(activity)),
+            &close,
+            Arc::default(),
+        )
+        .unwrap();
+        (owner, close)
+    }
+    fn finish_native_owner(owner: crate::platform::native_pty::NativePtyOwner) {
+        let (done, ended) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            drop(owner);
+            let _ = done.send(());
+        });
+        ended.recv_timeout(Duration::from_secs(3)).expect(
+            "native Stop must join the reader even when an outside process keeps the slave open",
+        );
+    }
+
+    #[test]
+    fn native_freeze_waits_for_the_exact_process_and_thaws_on_release() {
+        const NAME: &str = "platform::unix_pty::tests::native_freeze_waits_for_the_exact_process_and_thaws_on_release";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _lock = lock_real_pty_test();
+        let mut command = idle_shell_command();
+        command.args(["-c", "printf READY; read line"]);
+        let (mut pty, terminator) = spawn_command_in_pty(
+            freeze_test_host(),
+            PtySize::default(),
+            command,
+            Arc::default(),
+        )
+        .unwrap();
+        let mut reader = pty.take_reader().unwrap();
+        read_output_marker(&mut reader, b"READY");
+        let control = test_host().pin_process(pty.probe.session.leader).unwrap();
+        await_native_checkpoint(pty.probe.as_ref());
+        let frozen = pty.probe.freeze().unwrap();
+        assert!(control.stopped().unwrap());
+        frozen.verify().unwrap();
+        drop(frozen);
+        let until = Instant::now() + Duration::from_secs(3);
+        while control.stopped().unwrap() {
+            assert!(Instant::now() < until);
+            thread::sleep(Duration::from_millis(1));
+        }
+        terminator.terminate().unwrap();
+        drop(reader);
+        drop(pty);
+    }
+    #[test]
+    fn an_outside_sigcont_or_job_before_stop_revokes_the_grant() {
+        const NAME: &str =
+            "platform::unix_pty::tests::an_outside_sigcont_or_job_before_stop_revokes_the_grant";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _lock = lock_real_pty_test();
+        for fork in [false, true] {
+            let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+            let marker = fixture.path().join("forked");
+            let mut command = idle_shell_command();
+            command.args(["-c", "trap 'sleep 30 & printf yes > \"$1\"' USR1; printf READY; while :; do read line; done", "outside-resume"]);
+            command.arg(&marker);
+            let (mut pty, terminator) = spawn_command_in_pty(
+                freeze_test_host(),
+                PtySize::default(),
+                command,
+                Arc::default(),
+            )
+            .unwrap();
+            let mut reader = pty.take_reader().unwrap();
+            read_output_marker(&mut reader, b"READY");
+            let activity = spaceterm_core::idle_restart::Activity::new(Instant::now());
+            let lease = raw_idle_lease(&pty, activity.clone());
+            lease.freeze_and_grant().unwrap();
+            let process = test_host().pin_process(pty.probe.session.leader).unwrap();
+            process.signal(libc::SIGCONT).unwrap();
+            if fork {
+                process.signal(libc::SIGUSR1).unwrap();
+                let until = Instant::now() + Duration::from_secs(3);
+                while !marker.exists() {
+                    assert!(Instant::now() < until);
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
+            let until = Instant::now() + Duration::from_secs(3);
+            while process.stopped().unwrap() {
+                assert!(Instant::now() < until);
+                thread::sleep(Duration::from_millis(1));
+            }
+            assert!(lease.verify_frozen().is_err());
+            assert!(!lease.granted());
+            assert!(activity.input(Instant::now()).is_ok());
+            drop(lease);
+            assert!(
+                !process.stopped().unwrap(),
+                "refusal leaves the session running"
+            );
+            terminator.terminate().unwrap();
+            drop(reader);
+            drop(pty);
+        }
+    }
+    #[test]
+    fn pending_native_output_before_its_core_read_refuses_freeze_and_thaws() {
+        const NAME: &str = "platform::unix_pty::tests::pending_native_output_before_its_core_read_refuses_freeze_and_thaws";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _lock = lock_real_pty_test();
+        let mut command = idle_shell_command();
+        command.args([
+            "-c",
+            "trap 'printf PENDING' USR1; printf READY; while :; do read line; done",
+        ]);
+        let (mut pty, terminator) = spawn_command_in_pty(
+            freeze_test_host(),
+            PtySize::default(),
+            command,
+            Arc::default(),
+        )
+        .unwrap();
+        let mut reader = pty.take_reader().unwrap();
+        read_output_marker(&mut reader, b"READY");
+        let process = test_host().pin_process(pty.probe.session.leader).unwrap();
+        process.signal(libc::SIGUSR1).unwrap();
+        let mut ready = libc::pollfd {
+            fd: pty._foreground.as_ref().unwrap().as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: the master is live; the reader is intentionally paused before its Core read.
+        assert_eq!(unsafe { libc::poll(&mut ready, 1, 3000) }, 1);
+        assert!(pty.probe.freeze().is_err(), "kernel-pending output is work");
+        let until = Instant::now() + Duration::from_secs(3);
+        while process.stopped().unwrap() {
+            assert!(Instant::now() < until);
+            thread::sleep(Duration::from_millis(1));
+        }
+        read_output_marker(&mut reader, b"PENDING");
+        terminator.terminate().unwrap();
+        drop(reader);
+        drop(pty);
+    }
+    #[test]
+    fn a_frozen_native_owner_can_finish_stop_and_join_its_reader() {
+        const NAME: &str =
+            "platform::unix_pty::tests::a_frozen_native_owner_can_finish_stop_and_join_its_reader";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _lock = lock_real_pty_test();
+        let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+        let marker = fixture.path().join("hangup-trap-ran");
+        let mut command = idle_shell_command();
+        command.args([
+            "-c",
+            "trap 'printf bad > \"$1\"' HUP; printf READY; while :; do read line; done",
+            "frozen-stop",
+        ]);
+        command.arg(&marker);
+        let (mut pty, terminator) = spawn_command_in_pty(
+            freeze_test_host(),
+            PtySize::default(),
+            command,
+            Arc::default(),
+        )
+        .unwrap();
+        let mut reader = pty.take_reader().unwrap();
+        read_output_marker(&mut reader, b"READY");
+        pty.reader = Some(reader);
+        let activity = spaceterm_core::idle_restart::Activity::new(Instant::now());
+        let lease = raw_idle_lease(&pty, activity.clone());
+        let (owner, _close) = adopt_native_owner(pty, terminator, activity);
+        lease.freeze_and_grant().unwrap();
+        lease.verify_frozen().unwrap();
+        finish_native_owner(owner);
+        assert!(
+            !marker.exists(),
+            "terminal hangup must not resume the frozen shell into its trap"
+        );
+        drop(lease);
+    }
 
     #[test]
     fn launch_command_preserves_arguments_directory_environment_and_controlling_terminal() {
@@ -1376,6 +2665,301 @@ mod tests {
         drop(reader);
         drop(pty);
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn the_session_probe_sees_a_background_job_beside_the_shell() {
+        const NAME: &str =
+            "platform::unix_pty::tests::the_session_probe_sees_a_background_job_beside_the_shell";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _lock = lock_real_pty_test();
+        for (script, others) in [
+            ("printf READY; exec sleep 30", false),
+            ("sleep 30 & printf READY; wait", true),
+            // Job control puts the job in its own process group, and stops it. The shell then
+            // reads its terminal, because dash's `wait` returns at once for a stopped job: the
+            // shell would exit and the kernel would end the orphaned job before the probe reads.
+            (
+                "set -m; sleep 30 & kill -STOP $!; printf READY; read line",
+                true,
+            ),
+        ] {
+            let mut command = CommandBuilder::new("/bin/sh");
+            command.args(["-c", script]);
+            let (mut pty, terminator) =
+                spawn_command_in_pty(test_host(), PtySize::default(), command, Arc::default())
+                    .unwrap();
+            let mut reader = pty.take_reader().unwrap();
+            read_output_marker(&mut reader, b"READY");
+            let probe = NativePtyAdapter::session_probe(&pty).unwrap();
+            assert_eq!(probe.others().unwrap(), others, "{script}");
+            terminator.terminate().unwrap();
+            drop(reader);
+            drop(pty);
+        }
+    }
+
+    #[test]
+    fn the_session_probe_sees_a_member_that_dropped_its_controlling_terminal() {
+        const NAME: &str = "platform::unix_pty::tests::the_session_probe_sees_a_member_that_dropped_its_controlling_terminal";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _lock = lock_real_pty_test();
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args(["-c", "set -m; /usr/bin/python3 -c 'import fcntl, os, termios, time; fcntl.ioctl(os.open(\"/dev/tty\", os.O_RDWR), termios.TIOCNOTTY); print(\"READY\", flush=True); time.sleep(30)' & read line"]);
+        let (mut pty, terminator) =
+            spawn_command_in_pty(test_host(), PtySize::default(), command, Arc::default()).unwrap();
+        let mut reader = pty.take_reader().unwrap();
+        read_output_marker(&mut reader, b"READY");
+        let probe = NativePtyAdapter::session_probe(&pty).unwrap();
+        assert!(probe.shell_foreground().unwrap());
+        assert!(probe.others().unwrap());
+        terminator.terminate().unwrap();
+        drop(reader);
+        drop(pty);
+        assert!(probe.shell_foreground().is_err(), "the PTY owner ended");
+    }
+
+    #[test]
+    #[ignore = "child of queued_slave_descriptor_receiver_survives_stop_but_its_terminal_writes_fail"]
+    fn queued_slave_descriptor_child() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        let Some(path) = env::var_os("SPACETERM_TEST_RIGHTS_SOCKET") else {
+            return;
+        };
+        let socket = UnixStream::connect(path).unwrap();
+        let mut byte = [1_u8];
+        let mut vector = libc::iovec {
+            iov_base: byte.as_mut_ptr().cast(),
+            iov_len: 1,
+        };
+        // SAFETY: the control storage is aligned and sized for one descriptor; all pointers
+        // remain live until sendmsg completes. Sending duplicates stdout into the socket queue.
+        unsafe {
+            let space = libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as _) as usize;
+            let mut control = vec![0_usize; space.div_ceil(std::mem::size_of::<usize>())];
+            let mut message: libc::msghdr = std::mem::zeroed();
+            message.msg_iov = &mut vector;
+            message.msg_iovlen = 1;
+            message.msg_control = control.as_mut_ptr().cast();
+            message.msg_controllen = space as _;
+            let header = libc::CMSG_FIRSTHDR(&message);
+            (*header).cmsg_level = libc::SOL_SOCKET;
+            (*header).cmsg_type = libc::SCM_RIGHTS;
+            (*header).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as _) as _;
+            libc::CMSG_DATA(header)
+                .cast::<libc::c_int>()
+                .write(libc::STDOUT_FILENO);
+            assert_eq!(libc::sendmsg(socket.as_raw_fd(), &message, 0), 1);
+        }
+        std::io::stdout().write_all(b"QUEUED_READY").unwrap();
+        std::io::stdout().flush().unwrap();
+    }
+
+    #[test]
+    fn a_quiet_job_can_start_after_the_probe_without_terminal_input_or_output() {
+        const NAME: &str = "platform::unix_pty::tests::a_quiet_job_can_start_after_the_probe_without_terminal_input_or_output";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _isolation = lock_real_pty_test();
+        let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+        let marker = fixture.path().join("trap-ran");
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args([
+            "-c",
+            "trap 'sleep 30 & printf yes > \"$1\"' USR1; printf READY; while :; do read line; done",
+            "quiet-trap",
+        ]);
+        command.arg(&marker);
+        let (mut pty, terminator) =
+            spawn_command_in_pty(test_host(), PtySize::default(), command, Arc::default()).unwrap();
+        let mut reader = pty.take_reader().unwrap();
+        read_output_marker(&mut reader, b"READY");
+        assert!(!pty.probe.others().unwrap());
+        // SAFETY: this is the test's unreaped child. No terminal input or output delivers this signal.
+        assert_eq!(
+            unsafe { libc::kill(pty.probe.session.leader.process, libc::SIGUSR1) },
+            0
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !marker.exists() {
+            assert!(Instant::now() < deadline, "the shell trap did not run");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            pty.probe.others().unwrap(),
+            "a quiet child appeared after the negative probe"
+        );
+        let mut ready = libc::pollfd {
+            fd: pty._foreground.as_ref().unwrap().as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: ready is one live retained master descriptor.
+        assert_eq!(
+            unsafe { libc::poll(&mut ready, 1, 0) },
+            0,
+            "the trap printed nothing"
+        );
+        assert!(
+            pty.probe.freeze().is_err(),
+            "a new quiet job refuses the native grant"
+        );
+        let shell = test_host().pin_process(pty.probe.session.leader).unwrap();
+        let until = Instant::now() + Duration::from_secs(3);
+        while shell.stopped().unwrap() {
+            assert!(Instant::now() < until);
+            thread::sleep(Duration::from_millis(1));
+        }
+        terminator.terminate().unwrap();
+        drop(reader);
+        drop(pty);
+    }
+
+    #[test]
+    fn queued_slave_descriptor_receiver_survives_stop_but_its_terminal_writes_fail() {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        use std::os::unix::net::UnixListener;
+        const NAME: &str = "platform::unix_pty::tests::queued_slave_descriptor_receiver_survives_stop_but_its_terminal_writes_fail";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _isolation = lock_real_pty_test();
+        let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+        let path = fixture.path().join("rights");
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut command = idle_shell_command();
+        command.args(["-c", "\"$1\" --exact platform::unix_pty::tests::queued_slave_descriptor_child --ignored --nocapture; printf QUEUE_DONE; read line", "queue-sender"]);
+        command.arg(env::current_exe().unwrap());
+        command.env("SPACETERM_TEST_RIGHTS_SOCKET", &path);
+        let (mut pty, terminator) = spawn_command_in_pty(
+            freeze_test_host(),
+            PtySize::default(),
+            command,
+            Arc::default(),
+        )
+        .unwrap();
+        let mut reader = pty.take_reader().unwrap();
+        let (socket, _) = listener.accept().unwrap();
+        read_output_marker(&mut reader, b"QUEUE_DONE");
+        let sid = pty.probe.session.session;
+        let activity = spaceterm_core::idle_restart::Activity::new(Instant::now());
+        let lease = raw_idle_lease(&pty, activity.clone());
+        pty.reader = Some(reader);
+        let (owner, _close) = adopt_native_owner(pty, terminator, activity);
+        lease.freeze_and_grant().unwrap();
+        lease.verify_frozen().unwrap(); // descriptor receipt happens after the final check
+        let mut byte = [0_u8];
+        let mut vector = libc::iovec {
+            iov_base: byte.as_mut_ptr().cast(),
+            iov_len: 1,
+        };
+        // SAFETY: aligned control storage holds one descriptor. recvmsg installs a new owned
+        // descriptor; no process outside the SID held that descriptor before this receive.
+        let descriptor = unsafe {
+            let space = libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as _) as usize;
+            let mut control = vec![0_usize; space.div_ceil(std::mem::size_of::<usize>())];
+            let mut message: libc::msghdr = std::mem::zeroed();
+            message.msg_iov = &mut vector;
+            message.msg_iovlen = 1;
+            message.msg_control = control.as_mut_ptr().cast();
+            message.msg_controllen = space as _;
+            assert_eq!(libc::recvmsg(socket.as_raw_fd(), &mut message, 0), 1);
+            let header = libc::CMSG_FIRSTHDR(&message);
+            assert!(!header.is_null());
+            assert_eq!((*header).cmsg_type, libc::SCM_RIGHTS);
+            OwnedFd::from_raw_fd(libc::CMSG_DATA(header).cast::<libc::c_int>().read())
+        };
+        let mut writer = std::fs::File::from(descriptor);
+        // The receiver belongs to another session and is never stopped or ended.
+        // SAFETY: getsid is a read-only identity query for this process.
+        assert_ne!(unsafe { libc::getsid(0) }, sid);
+        finish_native_owner(owner);
+        assert!(
+            writer.write_all(b"AFTER_STOP").is_err(),
+            "the old terminal no longer accepts writes"
+        );
+        // SAFETY: writer still owns a valid descriptor; failure came from terminal hangup.
+        assert!(unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_GETFD) } >= 0);
+        assert!(
+            test_host()
+                .observe_exactly(std::process::id() as i32)
+                .unwrap()
+                .is_some()
+        );
+        drop(lease);
+    }
+
+    #[test]
+    fn fresh_session_probes_preserve_quiet_programs_and_jobs() {
+        const NAME: &str =
+            "platform::unix_pty::tests::fresh_session_probes_preserve_quiet_programs_and_jobs";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _lock = lock_real_pty_test();
+        for (case, script, shell_foreground, others) in [
+            ("bare shell", "printf READY; read line", true, false),
+            (
+                "editor-like input",
+                "set -m; /bin/sh -c 'stty -icanon -echo; printf READY; read line'; read line",
+                false,
+                true,
+            ),
+            (
+                "SSH-like foreground",
+                "set -m; /bin/sh -c 'printf READY; exec sleep 30'; read line",
+                false,
+                true,
+            ),
+            (
+                "nested program",
+                "set -m; /bin/sh -c '/bin/sh -c \"printf READY; read line\"; read line'; read line",
+                false,
+                true,
+            ),
+            (
+                "password prompt",
+                "set -m; /bin/sh -c 'stty -echo; printf READY; read line'; read line",
+                false,
+                true,
+            ),
+            (
+                "stopped job",
+                "set -m; sleep 30 & kill -STOP $!; printf READY; read line",
+                true,
+                true,
+            ),
+            (
+                "background job",
+                "set -m; sleep 30 & printf READY; read line",
+                true,
+                true,
+            ),
+        ] {
+            let mut command = CommandBuilder::new("/bin/sh");
+            command.args(["-c", script]);
+            let (mut pty, terminator) =
+                spawn_command_in_pty(test_host(), PtySize::default(), command, Arc::default())
+                    .unwrap();
+            let mut reader = pty.take_reader().unwrap();
+            read_output_marker(&mut reader, b"READY");
+            let probe = NativePtyAdapter::session_probe(&pty).unwrap();
+            assert_eq!(
+                probe.shell_foreground().unwrap(),
+                shell_foreground,
+                "{case}"
+            );
+            assert_eq!(probe.others().unwrap(), others, "{case}");
+            terminator.terminate().unwrap();
+            drop(reader);
+            drop(pty);
+        }
     }
 
     #[test]
@@ -2598,7 +4182,26 @@ mod tests {
                 master: Box::new(TestMasterPty::default()),
                 reader: Some(Box::new(io::empty())),
                 writer: Box::new(io::sink()),
+                reader_stop: None,
+                closing: Arc::new(AtomicBool::new(false)),
                 shell_process_group: 0,
+                _foreground: None,
+                probe: Arc::new(ShellSession {
+                    foreground: std::sync::Weak::new(),
+                    activity: Arc::default(),
+                    slave: None,
+                    frozen: Mutex::new(None),
+                    checkpoint: Mutex::new(None),
+                    image: None,
+                    host: test_host(),
+                    session: ProcessSessionIdentity {
+                        session: 0,
+                        leader: ProcessIdentity {
+                            process: 0,
+                            start: ProcessStart { coarse: 0, fine: 0 },
+                        },
+                    },
+                }),
                 process: SpawnedChild {
                     child: Some(child),
                     termination,

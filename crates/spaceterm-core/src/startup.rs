@@ -61,7 +61,14 @@ impl LocalStartup {
             // Launch has admitted the service operation. Observe its result even if the
             // initiating presentation has since closed; cancellation cannot undo that Start.
             let status = loop {
-                match self.core.refresh() {
+                let observed = match self.core.refresh() {
+                    Err(CoreError::Capacity) => self.core.refresh_cancellable(&cancelled),
+                    result => result,
+                };
+                match observed {
+                    Err(CoreError::ServiceBusy) if cancelled() => {
+                        return Ok(StartupOutcome::Cancelled);
+                    }
                     Err(CoreError::NotRunning) if Instant::now() < deadline => {
                         std::thread::sleep(Duration::from_millis(20));
                     }

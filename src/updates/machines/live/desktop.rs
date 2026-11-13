@@ -379,6 +379,11 @@ impl CoreLane {
     }
 }
 
+/// Whether `session`'s Core answers the detailed update facts.
+fn detailed(session: &Session) -> bool {
+    session.selected().minor >= spaceterm_core::update::facts::MINOR_DETAILED_FACTS
+}
+
 fn facts_of(reply: LaneReply) -> Result<Observed, ActionFailure> {
     match reply {
         LaneReply::Facts { boot, facts } => {
@@ -386,6 +391,15 @@ fn facts_of(reply: LaneReply) -> Result<Observed, ActionFailure> {
             Ok(Observed {
                 boot,
                 facts: *facts,
+                detailed: None,
+            })
+        }
+        LaneReply::DetailedFacts { boot, detailed } => {
+            detailed.validate().map_err(|_| ActionFailure::Failed)?;
+            Ok(Observed {
+                boot,
+                facts: detailed.facts.clone(),
+                detailed: Some(*detailed),
             })
         }
         _ => Err(ActionFailure::Failed),
@@ -407,11 +421,13 @@ impl RouteLane for CoreLane {
 impl MachineLane for CoreLane {
     fn facts(&self) -> Result<Observed, ActionFailure> {
         let mut session = self.kept()?;
+        let request = if detailed(&session) {
+            LaneRequest::DetailedFacts {}
+        } else {
+            LaneRequest::Facts {}
+        };
         let reply = session
-            .call(
-                &LaneRequest::Facts {},
-                Instant::now() + admin::REQUEST_LIMIT,
-            )
+            .call(&request, Instant::now() + admin::REQUEST_LIMIT)
             .map_err(lane_failure)?;
         let observed = facts_of(reply)?;
         self.keep(session);
@@ -425,9 +441,11 @@ impl MachineLane for CoreLane {
         stale: &dyn Fn() -> bool,
     ) -> Result<Observed, ActionFailure> {
         let mut session = self.kept()?;
-        let request = LaneRequest::WaitFacts {
-            boot: boot.to_owned(),
-            revision,
+        let (boot, revision) = (boot.to_owned(), revision);
+        let request = if detailed(&session) {
+            LaneRequest::WaitDetailedFacts { boot, revision }
+        } else {
+            LaneRequest::WaitFacts { boot, revision }
         };
         let fixed = Instant::now() + WAIT_FACTS_LIMIT + WAIT_MARGIN;
         // The request runs on its own thread, so a change the sources report abandons it at
@@ -456,12 +474,15 @@ impl MachineLane for CoreLane {
         Ok(())
     }
 
-    fn install(&self, build: Option<&EmbeddedCore>) -> Result<(), ActionFailure> {
+    fn install(
+        &self,
+        build: Option<&EmbeddedCore>,
+    ) -> Result<spaceterm_core::update::facts::UpdateFacts, ActionFailure> {
         let mut session = self.open()?;
         match build {
-            Some(build) => push::push(&mut session, build, &mut |_, _| {}).map(drop),
+            Some(build) => push::push(&mut session, build, &mut |_, _| {}),
             None => match admin::install_from_feed(&mut session) {
-                Ok(_) => Ok(()),
+                Ok((_, facts)) => Ok(facts),
                 Err(LaneError::Code(code)) if code == "version_skipped" => Err(self
                     .facts()
                     .ok()
@@ -581,8 +602,11 @@ mod tests {
         fn check(&self) -> Result<(), ActionFailure> {
             Ok(())
         }
-        fn install(&self, _: Option<&EmbeddedCore>) -> Result<(), ActionFailure> {
-            Ok(())
+        fn install(
+            &self,
+            _: Option<&EmbeddedCore>,
+        ) -> Result<spaceterm_core::update::facts::UpdateFacts, ActionFailure> {
+            Err(ActionFailure::Unreachable)
         }
         fn preview(&self, _: LaneChange) -> Result<admin::Preview, ActionFailure> {
             Err(ActionFailure::Unreachable)
@@ -610,6 +634,53 @@ mod tests {
                 Ok((Arc::new(Lane { major: 1 }) as Arc<dyn MachineLane>, Ok(())))
             }),
         }
+    }
+
+    #[test]
+    fn a_service_1_2_core_answers_the_facts_inside_its_detailed_facts() {
+        use spaceterm_core::update::facts::{Platform, UpdateCheck, UpdateFacts, Version};
+        let facts = UpdateFacts {
+            revision: 3,
+            platform: Platform::LinuxX86_64,
+            running: Version::parse("0.11.4").unwrap(),
+            pending: None,
+            sessions: 2,
+            operation: None,
+            check: UpdateCheck::Never,
+            skipped: None,
+            last_failure: None,
+        };
+        let detailed = spaceterm_core::update::DetailedUpdateFacts {
+            facts: facts.clone(),
+            continuation: None,
+            working: 1,
+            restart: None,
+        };
+        let observed = facts_of(LaneReply::DetailedFacts {
+            boot: "b1".into(),
+            detailed: Box::new(detailed.clone()),
+        })
+        .unwrap();
+        assert_eq!(observed.facts, facts);
+        assert_eq!(observed.detailed, Some(detailed.clone()));
+        let older = facts_of(LaneReply::Facts {
+            boot: "b1".into(),
+            facts: Box::new(facts),
+        })
+        .unwrap();
+        assert_eq!(older.detailed, None);
+        // More working Terminal Sessions than live ones break the bound.
+        let inflated = spaceterm_core::update::DetailedUpdateFacts {
+            working: 3,
+            ..detailed
+        };
+        assert_eq!(
+            facts_of(LaneReply::DetailedFacts {
+                boot: "b1".into(),
+                detailed: Box::new(inflated),
+            }),
+            Err(ActionFailure::Failed)
+        );
     }
 
     #[test]

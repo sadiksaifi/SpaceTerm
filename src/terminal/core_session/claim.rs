@@ -275,6 +275,8 @@ impl ClaimWorker<'_> {
             {
                 if !dormant {
                     dormant = true;
+                    // The ended or restored Pane says what was kept; its next Session does not.
+                    state.left_session();
                     *attached_session = false;
                     *takeover = false;
                     *paste_unconfirmed = false;
@@ -407,6 +409,7 @@ impl ClaimWorker<'_> {
                 state.paste_unconfirmed.store(false, Ordering::Release);
                 if !*takeover {
                     *takeover = true;
+                    state.left_session();
                     *paste_unconfirmed = false;
                     state.invalidate();
                     discard_presentation();
@@ -537,6 +540,88 @@ mod tests {
             },
             next_sequence: 1,
         })));
+    }
+
+    fn attached() -> Reply {
+        Reply::Attached {
+            lease: Lease {
+                core: [2; 32],
+                session: [3; 32],
+                control: [4; 32],
+                connection: [5; 32],
+            },
+        }
+    }
+
+    /// The Core refused typed input for an idle restart grant, then kept the Terminal Session.
+    /// Attaching to it again tells the person once, with the text to copy. When the restart
+    /// ended the Session instead, the ended Pane says so and the next Session says nothing.
+    #[test]
+    fn only_a_session_that_survives_the_refusing_grant_reports_its_unsent_input() {
+        use spaceterm_core::protocol::InputEvent;
+        let refused = [InputEvent::Paste {
+            text: "make\n".into(),
+            last: true,
+        }];
+        let state = CorePaneState::new();
+        state
+            .unsent
+            .lock()
+            .unwrap()
+            .refused_by_restart(&refused, false);
+        assert!(run_claim(&state, |_| Ok(attached())).unwrap().is_some());
+        state.attached_session();
+        assert_eq!(
+            state.take_unsent_notice().notice,
+            Some(super::super::unsent::UnsentNotice {
+                interruption: super::super::unsent::Interruption::Restart,
+                input: super::super::unsent::UnsentInput {
+                    delivery: super::super::unsent::Delivery::NotSent,
+                    text: "make\n".into(),
+                },
+            })
+        );
+        assert_eq!(
+            state.take_unsent_notice(),
+            Default::default(),
+            "it says so once"
+        );
+
+        let state = CorePaneState::new();
+        state
+            .unsent
+            .lock()
+            .unwrap()
+            .refused_by_restart(&refused, false);
+        state.set(CorePaneStatus::Restored);
+        state.start_restored();
+        let mut requests = 0;
+        let granted = run_claim(&state, |request| {
+            requests += 1;
+            match requests {
+                1 => Ok(restored(2)),
+                2 => {
+                    assert!(matches!(request, Request::StartRestored { .. }));
+                    assert!(
+                        state.unsent_input().is_some(),
+                        "the restored Pane still offers the text"
+                    );
+                    Ok(attached())
+                }
+                _ => panic!("unexpected claim {request:?}"),
+            }
+        });
+        assert!(granted.unwrap().is_some());
+        state.attached_session();
+        assert_eq!(
+            state.take_unsent_notice(),
+            super::super::unsent::UnsentChange {
+                session_left: true,
+                notice: None,
+            },
+            "the new Session says nothing, and the Pane drops what it held"
+        );
+        assert_eq!(state.unsent_input(), None);
     }
 
     #[test]

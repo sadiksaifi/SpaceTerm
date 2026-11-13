@@ -7,7 +7,7 @@ pub(crate) mod model;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use controller::{Alert, StatusHost, StatusMenu};
+pub(crate) use controller::{Alert, AlertButtons, StatusHost, StatusMenu};
 
 use gpui::{App, Global};
 use spaceterm_core::service::ServiceStatus;

@@ -1,5 +1,6 @@
 //! Settings uses the application Machine store's preview and current update state.
 
+use super::super::machine_card::MENU_SELECTOR;
 use super::super::machines::testing::{ScriptedCore, ScriptedService, connected, running};
 use super::super::machines::{CoreServiceControl, LocalCoreControl, OfferedMachine, ServiceAction};
 use super::super::{SettingsSectionId, SettingsWindow};
@@ -8,18 +9,20 @@ use crate::ui::sidebar_window::SidebarOwner;
 use crate::updates::machines::store::MachineUpdates;
 use crate::updates::machines::testing::ScriptedMachines;
 use crate::updates::machines::{MachineAction, MachineLink, MachineUpdate, MachineUpdatesEvent};
+use gpui::accesskit::Action;
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 use spaceterm_core::protocol::capability::{Capabilities, Capability};
 use spaceterm_core::update::facts::{
     PendingVersion, Platform, Protocols, UpdateCheck, UpdateFacts, Version,
 };
-use spaceterm_ui::a11y_testing::A11yTree;
+use spaceterm_ui::a11y_testing::{A11yTree, perform};
 use std::{rc::Rc, sync::Arc};
 
 const MACHINE: [u8; 32] = [1; 32];
 
 fn machine(pending: Option<&str>, sessions: u32) -> MachineUpdate {
     MachineUpdate {
+        detailed: None,
         machine: MACHINE,
         name: "This Mac".into(),
         local: true,
@@ -29,7 +32,6 @@ fn machine(pending: Option<&str>, sessions: u32) -> MachineUpdate {
         bundled: None,
         failed_push: None,
         asked: None,
-        retrying_since: None,
         facts: Some(UpdateFacts {
             revision: 1,
             platform: Platform::MacosArm64,
@@ -126,9 +128,12 @@ fn local_update_uses_the_shared_pending_version_and_cancel_preserves_sessions(
     );
     click(UPDATE_SELECTOR, cx);
     let tree = A11yTree::read(cx);
-    tree.text("Update SpaceTerm Core on This Mac?");
-    tree.text("SpaceTerm Core restarts from 1.4.0 to 1.6.0. This ends 3 Terminal Sessions on This Mac. Your Workspaces, Tabs and Panes stay, and each Pane starts a new shell when you select it.");
-    tree.node("Update Core");
+    tree.text("Restart SpaceTerm Core on This Mac?");
+    tree.text(
+        "SpaceTerm Core restarts from 1.4.0 to 1.6.0. This ends 3 Terminal Sessions. \
+         Workspaces, Tabs and Panes stay.",
+    );
+    tree.node("Restart Core");
     assert!(adapter.executed().is_empty());
     answer(UPDATE_CANCEL_SELECTOR, cx);
     assert!(adapter.executed().is_empty());
@@ -145,7 +150,7 @@ fn settings_restart_targets_the_pending_version_through_the_shared_preview(
         })
     });
     cx.run_until_parked();
-    A11yTree::read(cx).text("Update SpaceTerm Core on This Mac?");
+    A11yTree::read(cx).text("Restart SpaceTerm Core on This Mac?");
     answer(UPDATE_CONFIRM_SELECTOR, cx);
     assert_eq!(
         adapter.executed_actions(),
@@ -168,7 +173,10 @@ fn settings_same_version_restart_names_the_machine_version_and_sessions(cx: &mut
     cx.run_until_parked();
     let tree = A11yTree::read(cx);
     tree.text("Restart SpaceTerm Core on This Mac?");
-    tree.text("SpaceTerm Core 1.4.0 restarts without updating. This ends 3 Terminal Sessions on This Mac.");
+    tree.text(
+        "SpaceTerm Core 1.4.0 restarts without updating. This ends 3 Terminal Sessions. \
+         Workspaces, Tabs and Panes stay.",
+    );
     tree.node("Restart Core");
     assert!(adapter.executed().is_empty());
     answer(UPDATE_CONFIRM_SELECTOR, cx);
@@ -191,7 +199,10 @@ fn settings_rebuilds_confirmation_when_the_pending_version_or_sessions_change(
         adapter.executed().is_empty(),
         "the old approval ends no sessions"
     );
-    A11yTree::read(cx).text("SpaceTerm Core restarts from 1.4.0 to 1.7.0. This ends 4 Terminal Sessions on This Mac. Your Workspaces, Tabs and Panes stay, and each Pane starts a new shell when you select it.");
+    A11yTree::read(cx).text(
+        "SpaceTerm Core restarts from 1.4.0 to 1.7.0. This ends 4 Terminal Sessions. \
+         Workspaces, Tabs and Panes stay.",
+    );
     answer(UPDATE_CONFIRM_SELECTOR, cx);
     assert_eq!(adapter.executed().len(), 1);
     assert_eq!(
@@ -210,34 +221,31 @@ fn settings_tracks_the_shared_install_and_restart_without_starting_another(
         cx.debug_bounds(UPDATE_SELECTOR).is_some(),
         "the pending version offers Update until the work begins"
     );
-    for operation in [
-        spaceterm_core::update::facts::Operation::Installing {
-            version: Version::parse("1.6.0").unwrap(),
-            received: 5,
-            total: 10,
-        },
-        spaceterm_core::update::facts::Operation::Restarting {
-            to: Version::parse("1.6.0").unwrap(),
-        },
+    for (operation, status) in [
+        (
+            spaceterm_core::update::facts::Operation::Installing {
+                version: Version::parse("1.6.0").unwrap(),
+                received: 5,
+                total: 10,
+            },
+            "Downloading 1.6.0\u{2026}",
+        ),
+        (
+            spaceterm_core::update::facts::Operation::Restarting {
+                to: Version::parse("1.6.0").unwrap(),
+            },
+            "Restarting into 1.6.0\u{2026}",
+        ),
     ] {
         let mut update = machine(Some("1.6.0"), 3);
         update.facts.as_mut().unwrap().operation = Some(operation);
         adapter.emit(MachineUpdatesEvent::Changed(Box::new(update)));
         cx.run_until_parked();
         let subtitle = settings.read_with(cx, |settings, cx| settings.core_subtitle(cx));
-        assert!(subtitle.contains("Installing") || subtitle.contains("Updating"));
+        assert!(subtitle.ends_with(status), "{subtitle}");
         assert!(cx.debug_bounds(UPDATE_SELECTOR).is_none());
     }
     assert!(adapter.performed().is_empty());
-    assert!(adapter.executed().is_empty());
-}
-
-#[gpui::test]
-fn an_update_request_never_turns_into_a_same_version_restart(cx: &mut TestAppContext) {
-    let (settings, adapter, cx) = open(cx, None);
-    settings.update(cx, |settings, cx| settings.request_core_update(cx));
-    cx.run_until_parked();
-    assert!(adapter.asked().is_empty());
     assert!(adapter.executed().is_empty());
 }
 
@@ -254,4 +262,109 @@ fn a_failed_settings_preview_explains_the_failure(cx: &mut TestAppContext) {
         "the failure is explained"
     );
     assert!(adapter.executed().is_empty());
+}
+
+/// An approved restart the Core refuses without running it opens D5 at once, because the
+/// person waits on that click (design 4.6).
+#[gpui::test]
+fn a_refused_approved_settings_restart_opens_d5(cx: &mut TestAppContext) {
+    let (_, adapter, cx) = open(cx, Some("1.6.0"));
+    click(UPDATE_SELECTOR, cx);
+    answer(UPDATE_CONFIRM_SELECTOR, cx);
+    assert_eq!(adapter.executed().len(), 1);
+    adapter.emit(MachineUpdatesEvent::Finished {
+        machine: MACHINE,
+        action: MachineAction::Restart,
+        outcome: Err(crate::updates::machines::ActionFailure::Busy),
+    });
+    cx.run_until_parked();
+    A11yTree::read(cx).text(
+        "SpaceTerm Core on This Mac is busy with another update. Try again when it finishes.",
+    );
+    assert_eq!(adapter.executed().len(), 1, "no restart runs again");
+}
+
+/// D3f from the Machine card: OK dismisses the title bar's failure step on this desktop, and
+/// the row keeps the failure (design 4.6).
+#[gpui::test]
+fn ok_on_how_to_update_in_settings_dismisses_the_step(cx: &mut TestAppContext) {
+    let (_, adapter, cx) = open(cx, None);
+    let mut stone = machine(None, 3);
+    stone.facts.as_mut().unwrap().check = UpdateCheck::Failing {
+        since: crate::updates::now(),
+        last_success: None,
+        reason: spaceterm_core::update::facts::CheckFailure::SteppingStoneSkipped,
+    };
+    adapter.emit(MachineUpdatesEvent::Changed(Box::new(stone)));
+    cx.run_until_parked();
+    assert!(
+        cx.update(|_, cx| crate::updates::state::current(cx).step)
+            .is_some()
+    );
+    click(UPDATE_SELECTOR, cx);
+    answer("settings-update-explanation-ok", cx);
+    assert_eq!(
+        cx.update(|_, cx| crate::updates::state::current(cx).step),
+        None
+    );
+    A11yTree::read(cx).text("1.4.0 \u{b7} Can\u{2019}t update by itself");
+}
+
+/// I7 for the Machine card: its subtitle is the row's version and status, and its one button is
+/// the row's action, which asks this Machine's Core for the restart it names.
+#[gpui::test]
+fn the_card_shows_its_row_and_its_button_asks_for_that_restart(cx: &mut TestAppContext) {
+    let (_, adapter, cx) = open(cx, Some("1.6.0"));
+    let tree = A11yTree::read(cx);
+    assert!(
+        tree.find_text("1.4.0 \u{b7} Restarts into 1.6.0 when 3 Terminal Sessions end")
+            .is_some(),
+        "the card reads as the shared row"
+    );
+    tree.node("Restart Core\u{2026}");
+    click(UPDATE_SELECTOR, cx);
+    assert_eq!(adapter.asked(), [(MACHINE, MachineAction::Restart)]);
+    assert!(adapter.executed().is_empty(), "it asks before it restarts");
+}
+
+/// The card's ⋯ menu offers a same-version restart only while no Pending Version waits; while
+/// one waits, the card's button is the only restart.
+#[gpui::test]
+fn the_card_menu_offers_a_same_version_restart_only_without_a_pending_version(
+    cx: &mut TestAppContext,
+) {
+    let (_, _, cx) = open(cx, Some("1.6.0"));
+    click(MENU_SELECTOR, cx);
+    let tree = A11yTree::read(cx);
+    assert!(tree.find("Stop SpaceTerm Core\u{2026}").is_some());
+    assert!(
+        tree.find("Restart SpaceTerm Core\u{2026}").is_none(),
+        "no second restart while 1.6.0 waits"
+    );
+}
+
+#[gpui::test]
+fn the_card_menu_offers_a_same_version_restart_with_nothing_waiting(cx: &mut TestAppContext) {
+    let (_, adapter, cx) = open(cx, None);
+    click(MENU_SELECTOR, cx);
+    let tree = A11yTree::read(cx);
+    perform(
+        cx,
+        tree.node("Restart SpaceTerm Core\u{2026}"),
+        Action::Click,
+    );
+    cx.run_until_parked();
+    assert_eq!(adapter.asked(), [(MACHINE, MachineAction::Restart)]);
+    assert!(adapter.executed().is_empty(), "it asks before it restarts");
+}
+
+/// The card's Check Now asks this Machine's SpaceTerm Core to check.
+#[gpui::test]
+fn the_cards_check_now_asks_its_core_to_check(cx: &mut TestAppContext) {
+    let (_, adapter, cx) = open(cx, None);
+    click(MENU_SELECTOR, cx);
+    let tree = A11yTree::read(cx);
+    perform(cx, tree.node("Check Now"), Action::Click);
+    cx.run_until_parked();
+    assert_eq!(adapter.performed(), [(MACHINE, MachineAction::CheckAgain)]);
 }

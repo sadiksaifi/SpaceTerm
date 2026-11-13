@@ -327,6 +327,35 @@ impl Operation {
 }
 
 impl Service {
+    /// A dead helper cannot dispatch Stop from StopDispatched. Keep both ownership locks
+    /// through release so neither a live helper nor recovery can cross that decision.
+    pub(crate) fn release_idle_grant_if_safe(
+        &self,
+        release: impl FnOnce(),
+    ) -> Result<bool, CoreError> {
+        let data = Directory::open(&self.paths.data, false)?;
+        let Some(_helper) = data.try_observation_lock(super::operations::HELPER_LOCK)? else {
+            return Ok(false);
+        };
+        let Some(_operation) = data.try_observation_lock("service.lock")? else {
+            return Ok(false);
+        };
+        data.verify_path(&self.paths.data)?;
+        let state: super::State = data
+            .observe_json("service.json")?
+            .ok_or(CoreError::NotInstalled)?;
+        Self::validate_state(&state)?;
+        if state
+            .activation
+            .as_ref()
+            .is_some_and(|operation| operation.pending() && operation.step != Step::StopDispatched)
+        {
+            return Ok(false);
+        }
+        release();
+        Ok(true)
+    }
+
     /// Read-only approval preparation. Staging alone grants no runtime authority.
     pub fn prepare_activation(
         &self,
@@ -378,9 +407,33 @@ impl Service {
 
     /// Admit this approval once, then resolve only its durably retained original operation.
     pub fn activate(&self, approval: ActivationApproval) -> Result<ActivationStatus, CoreError> {
+        self.activate_prepared(approval, || Ok(()), None::<fn() -> Result<(), CoreError>>)
+    }
+
+    /// Automatic updates bind a native freeze before journaling. The existing dispatch
+    /// marker then makes recovery unable to Stop; only this helper can verify and dispatch.
+    pub(crate) fn activate_after_grant(
+        &self,
+        approval: ActivationApproval,
+        grant: impl FnOnce() -> Result<(), CoreError>,
+        before_stop: impl FnOnce() -> Result<(), CoreError>,
+    ) -> Result<ActivationStatus, CoreError> {
+        self.activate_prepared(approval, grant, Some(before_stop))
+    }
+    fn activate_prepared<G, V>(
+        &self,
+        approval: ActivationApproval,
+        grant: G,
+        before_stop: Option<V>,
+    ) -> Result<ActivationStatus, CoreError>
+    where
+        G: FnOnce() -> Result<(), CoreError>,
+        V: FnOnce() -> Result<(), CoreError>,
+    {
         self.same_service(&approval.service)?;
         let (data, _) = self.read()?.ok_or(CoreError::NotInstalled)?;
         let _operation = data.lock("service.lock", false)?;
+        let activation_id = crate::protocol::random()?;
         {
             let _intent = data.lock("service-intent.lock", false)?;
             data.verify_path(&self.paths.data)?;
@@ -397,15 +450,23 @@ impl Service {
             self.verify_choice(&approval.previous)?;
             self.verify_choice(&approval.candidate)?;
             runtime::verify(&approval.candidate.directory, &self.identity)?;
+            if before_stop.is_some() {
+                self.supervisor.check(&self.runtime(&state), false)?;
+            }
+            grant()?;
             state.activation = Some(Operation {
                 schema: 1,
-                id: crate::protocol::random()?,
+                id: activation_id,
                 previous: Build::from_installation(&approval.previous)?,
                 candidate: Build::from_installation(&approval.candidate)?,
                 stopped: state.stopped,
                 original_run: state.run.clone(),
                 candidate_run: None,
-                step: Step::Admitted,
+                step: if before_stop.is_some() {
+                    Step::StopDispatched
+                } else {
+                    Step::Admitted
+                },
                 saved: None,
                 started_at: None,
                 ready: false,
@@ -414,6 +475,36 @@ impl Service {
             });
             data.write_json(c"service.json", &state)?;
         }
+        if let Some(verify) = before_stop {
+            if let Err(error) = self
+                .supervisor
+                .check(&self.runtime(&approval.state), false)
+                .and_then(|()| verify())
+            {
+                // No native Stop was attempted. Remove only this exact dispatch marker.
+                // If this write fails, recovery still cannot dispatch Stop from that marker.
+                let _intent = data.lock("service-intent.lock", false)?;
+                let mut state = Self::state(&data)?.ok_or(CoreError::NotInstalled)?;
+                if !state.activation.as_ref().is_some_and(|operation| {
+                    operation.id == activation_id && operation.step == Step::StopDispatched
+                }) {
+                    return Err(CoreError::ActivationUnresolved);
+                }
+                state.activation = None;
+                data.write_json(c"service.json", &state)
+                    .map_err(|_| CoreError::ActivationUnresolved)?;
+                return Err(error);
+            }
+            if !approval.state.stopped
+                && let Err(error) = self
+                    .supervisor
+                    .stop()
+                    .and_then(|()| self.wait_running(false))
+            {
+                self.change(&data, activation_id, |operation| operation.failed = true)?;
+                return Err(error);
+            }
+        }
         self.resume_activation(&data)?;
         self.activation_status_locked(&data)?
             .ok_or(CoreError::ActivationUnresolved)
@@ -421,10 +512,18 @@ impl Service {
 
     /// Observe the original operation without dispatching or granting any authority.
     pub fn activation_status(&self) -> Result<Option<ActivationStatus>, CoreError> {
+        self.activation_status_with(super::Contention::Wait)
+    }
+
+    /// Observes activation with the caller's service-lock contention policy.
+    pub(crate) fn activation_status_with(
+        &self,
+        contention: super::Contention,
+    ) -> Result<Option<ActivationStatus>, CoreError> {
         let Some((data, _)) = self.read()? else {
             return Ok(None);
         };
-        let _operation = data.lock("service.lock", false)?;
+        let _operation = contention.operation_lock(&data)?;
         self.activation_status_locked(&data)
     }
 
