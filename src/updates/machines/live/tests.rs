@@ -20,10 +20,12 @@ const QUIET: Duration = Duration::from_millis(300);
 fn row(update: &MachineUpdate, now: u64) -> MachineRow {
     let dismissed = Dismissed::new();
     let deferred = HashMap::new();
+    let checked = HashMap::new();
     let marks = Marks {
         dismissed: &dismissed,
         deferred: &deferred,
         pushes_held: false,
+        checked: &checked,
     };
     MachineRow::new(update, marks, now)
 }

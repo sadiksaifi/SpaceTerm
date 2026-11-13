@@ -120,12 +120,18 @@ impl ReleaseNotes {
 
     /// This version's release page on GitHub.
     pub(crate) fn github_url(&self) -> String {
-        format!(
-            "{}/releases/tag/v{}",
-            crate::about::REPOSITORY,
-            self.version
-        )
+        release_url(&self.version)
     }
+
+    /// The version these notes describe.
+    pub(crate) fn version(&self) -> &str {
+        &self.version
+    }
+}
+
+/// The release page of `version` on GitHub, where its notes live.
+pub(crate) fn release_url(version: &str) -> String {
+    format!("{}/releases/tag/v{version}", crate::about::REPOSITORY)
 }
 
 impl ReleaseDate {

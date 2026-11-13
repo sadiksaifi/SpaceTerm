@@ -78,6 +78,8 @@ pub(crate) enum DesktopAction {
     WhatsNew,
     /// Clears a failed SpaceTerm update; SpaceTerm tries again later.
     DismissFailure,
+    /// Checks for a newer SpaceTerm, as a check the person asked for.
+    Check,
 }
 
 /// SpaceTerm or one Machine.
@@ -85,6 +87,17 @@ pub(crate) enum DesktopAction {
 pub(crate) enum Target {
     App,
     Machine(MachineId),
+}
+
+/// What an entry of an item's menu in Settings > Updates does. None of them updates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ItemCommand {
+    /// Checks only this item for updates.
+    Check(Target),
+    /// Opens this build's release notes in the window that asked.
+    WhatsNew,
+    /// Opens the release page of a version this build carries no notes for.
+    ReleasePage(SharedString),
 }
 
 /// Everything the update surfaces show, at one moment.
@@ -116,6 +129,44 @@ pub(crate) struct AppRow {
     pub(crate) replacing: Option<SharedString>,
     /// The person dismissed the failure's title-bar step on this desktop. The row keeps it.
     pub(crate) dismissed: bool,
+    /// When SpaceTerm last checked for an update.
+    pub(crate) last_check: LastCheck,
+    /// A check the person asked for on this desktop, which the row reports at once.
+    pub(crate) asked_check: Option<AskedCheck>,
+}
+
+/// When an item's last check for updates finished, as its menu reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LastCheck {
+    /// No finished check is known, or this build never checks.
+    Unknown,
+    /// The last check succeeded `age` seconds ago.
+    Succeeded { age: u64 },
+    /// Every check since the last success failed. `reason` is None when only the failure is
+    /// known. `success` is how many seconds ago the last check succeeded, when one did.
+    Failing {
+        reason: Option<CheckFailure>,
+        success: Option<u64>,
+    },
+}
+
+/// A check a person asked for on this desktop. Its row reports it at once and keeps reporting
+/// its outcome until a newer check replaces it. The title bar never shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AskedCheck {
+    Running,
+    Succeeded,
+    Failed,
+}
+
+/// How the last check of a Machine a person asked for on this desktop in this run ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Checked {
+    /// The Core finished it and reported `check`. A later check that changes the Core's
+    /// facts replaces this outcome.
+    Finished(UpdateCheck),
+    /// The Core refused it, or no request reached it.
+    Refused,
 }
 
 /// SpaceTerm's update, as the person sees it.
@@ -181,6 +232,10 @@ pub(crate) struct MachineRow {
     pub(crate) deferred: bool,
     /// The waiting Pending Version is breaking.
     pub(crate) breaking: bool,
+    /// When the Core last checked its feed, from its facts.
+    pub(crate) last_check: LastCheck,
+    /// A check the person asked for on this desktop, which the row reports at once.
+    pub(crate) asked_check: Option<AskedCheck>,
 }
 
 /// A protocol mismatch: a hard stop above the ladder.
@@ -316,6 +371,21 @@ pub(crate) struct RowView {
     pub(crate) action: Option<RowAction>,
     pub(crate) description: Option<SharedString>,
     pub(crate) accessibility: SharedString,
+    /// The color the status reads in, where a surface colors it.
+    pub(crate) tone: RowTone,
+}
+
+/// How a row's status reads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum RowTone {
+    /// In the secondary text color.
+    #[default]
+    Plain,
+    /// An update at the Insist stage, a hard stop, or a state the person must resolve
+    /// elsewhere.
+    Warning,
+    /// Something failed.
+    Failure,
 }
 
 /// A row's one action.
@@ -352,6 +422,10 @@ pub(crate) struct AppFacts<'a> {
     pub(crate) replacing: Option<&'a str>,
     /// The person dismissed the current failure on this desktop.
     pub(crate) failure_dismissed: bool,
+    /// The current or last check was one a person asked for.
+    pub(crate) manual_check: bool,
+    /// How many seconds ago the last check succeeded, on the updater's clock.
+    pub(crate) checked_ago: Option<u64>,
 }
 
 /// What only this desktop knows about the Machines, from the shared store.
@@ -362,6 +436,8 @@ pub(crate) struct Marks<'a> {
     pub(crate) deferred: &'a HashMap<MachineId, u64>,
     /// The store holds automatic pushes until SpaceTerm updates or its startup check ends.
     pub(crate) pushes_held: bool,
+    /// How the last check a person asked for here ended, by Machine.
+    pub(crate) checked: &'a HashMap<MachineId, Checked>,
 }
 
 impl UpdateView {
@@ -578,6 +654,31 @@ impl AppRow {
                 )
             })
             .map(|version| version.to_owned().into());
+        let check_failed = matches!(
+            facts.state,
+            UpdateState::Failed {
+                error: UpdateError::Check
+            }
+        );
+        let last_check = if check_failed {
+            LastCheck::Failing {
+                reason: None,
+                success: facts.checked_ago,
+            }
+        } else {
+            facts
+                .checked_ago
+                .map_or(LastCheck::Unknown, |age| LastCheck::Succeeded { age })
+        };
+        let asked_check = facts
+            .manual_check
+            .then_some(match facts.state {
+                UpdateState::Checking => Some(AskedCheck::Running),
+                UpdateState::UpToDate => Some(AskedCheck::Succeeded),
+                _ if check_failed => Some(AskedCheck::Failed),
+                _ => None,
+            })
+            .flatten();
         Self {
             running: facts.running.to_owned().into(),
             stage,
@@ -587,6 +688,8 @@ impl AppRow {
             too_old_for,
             replacing,
             dismissed: facts.failure_dismissed,
+            last_check,
+            asked_check,
         }
     }
 
@@ -678,6 +781,35 @@ impl MachineRow {
             && ladder.is_some_and(|stage| {
                 ladder::deferral_hides(stage, marks.deferred.get(&update.machine).copied(), now)
             });
+        let check = facts.map(|facts| &facts.check);
+        let last_check = match check {
+            Some(UpdateCheck::Succeeded { at }) => LastCheck::Succeeded {
+                age: now.saturating_sub(*at),
+            },
+            Some(UpdateCheck::Failing {
+                reason,
+                last_success,
+                ..
+            }) => LastCheck::Failing {
+                reason: Some(*reason),
+                success: last_success.map(|at| now.saturating_sub(at)),
+            },
+            Some(UpdateCheck::Disabled | UpdateCheck::Never) | None => LastCheck::Unknown,
+        };
+        // A finished check reports its outcome only while the Core's facts still carry it.
+        let asked_check = if update.asked == Some(Asked::Check) {
+            Some(AskedCheck::Running)
+        } else {
+            match marks.checked.get(&update.machine) {
+                Some(Checked::Refused) => Some(AskedCheck::Failed),
+                Some(Checked::Finished(finished)) if check == Some(finished) => match finished {
+                    UpdateCheck::Succeeded { .. } => Some(AskedCheck::Succeeded),
+                    UpdateCheck::Failing { .. } => Some(AskedCheck::Failed),
+                    UpdateCheck::Disabled | UpdateCheck::Never => None,
+                },
+                Some(Checked::Finished(_)) | None => None,
+            }
+        };
         Self {
             id: update.machine,
             name: update.name.clone(),
@@ -691,6 +823,8 @@ impl MachineRow {
             dismissed,
             deferred,
             breaking: pending.is_some_and(|pending| pending.breaking),
+            last_check,
+            asked_check,
         }
     }
 
@@ -1010,6 +1144,10 @@ pub(crate) fn current(cx: &App) -> UpdateView {
                 retrying: updates.retries_download(),
                 replacing: updates.replaces_download(),
                 failure_dismissed: updates.failure_dismissed(),
+                manual_check: updates.manual_check(),
+                checked_ago: updates
+                    .last_check()
+                    .map(|at| updates.now().saturating_sub(at)),
             }
         }
         None => AppFacts {
@@ -1025,9 +1163,12 @@ pub(crate) fn current(cx: &App) -> UpdateView {
             retrying: false,
             replacing: None,
             failure_dismissed: false,
+            manual_check: false,
+            checked_ago: None,
         },
     };
     let none = HashMap::new();
+    let unchecked = HashMap::new();
     let empty = Dismissed::new();
     match MachineUpdates::global(cx) {
         Some(store) => {
@@ -1036,6 +1177,7 @@ pub(crate) fn current(cx: &App) -> UpdateView {
                 dismissed: store.dismissed(),
                 deferred: store.deferred(),
                 pushes_held: store.holds_pushes(cx),
+                checked: store.checked(),
             };
             UpdateView::new(app, store.machines(), marks, now)
         }
@@ -1046,6 +1188,7 @@ pub(crate) fn current(cx: &App) -> UpdateView {
                 dismissed: &empty,
                 deferred: &none,
                 pushes_held: false,
+                checked: &unchecked,
             },
             now,
         ),

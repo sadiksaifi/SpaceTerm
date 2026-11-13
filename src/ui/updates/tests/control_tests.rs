@@ -38,6 +38,7 @@ fn row(name: &str, status: &str, action: Option<(&str, Command)>) -> RowView {
         }),
         description: None,
         accessibility: format!("{name}: {status}").into(),
+        tone: Default::default(),
     }
 }
 

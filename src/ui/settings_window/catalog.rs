@@ -164,14 +164,14 @@ pub(super) enum SettingsRowId {
     CommandLineTool,
     /// The selected server's New Worktree Location, a Server Setting.
     MachineWorktreeLocation,
-    /// The installed version, the latest check, and the next step the update service offers.
+    /// SpaceTerm's version, status and update step, with its menu of checks and notes.
     UpdateStatus,
-    /// One row per Machine under `SpaceTerm Core`, after the SpaceTerm row.
-    CoreUpdates,
+    /// SpaceTerm's automatic downloads, in SpaceTerm's card.
     AutomaticUpdateDownloads,
+    /// SpaceTerm's check interval, in SpaceTerm's card.
     UpdateCheckInterval,
-    /// Check Now, after the interval: SpaceTerm and each connected Machine check.
-    UpdateCheckNow,
+    /// One row per Machine under `SpaceTerm Core`, after SpaceTerm's card.
+    CoreUpdates,
     /// The Keybinding of one Command.
     Shortcut(Command),
     /// The settings file, shown read-only and edited in the person's own editor.
@@ -239,7 +239,6 @@ impl SettingsRowId {
             | Self::CoreUpdates
             | Self::AutomaticUpdateDownloads
             | Self::UpdateCheckInterval
-            | Self::UpdateCheckNow
             // Keybindings live outside the appearance preferences and reset through the keymap
             // profile, which returns a displaced default to its Command.
             | Self::Shortcut(_)
@@ -942,6 +941,30 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-update-status",
     },
     SettingsRowDescriptor {
+        id: SettingsRowId::AutomaticUpdateDownloads,
+        section: SettingsSectionId::Updates,
+        // SpaceTerm's own preferences share its card, so they visibly govern only SpaceTerm.
+        group: "",
+        label: crate::updates::copy::settings::AUTOMATIC_DOWNLOADS,
+        keywords: &["automatic", "background", "download", "update", "auto"],
+        selector: "settings-row-automatic-update-downloads",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::UpdateCheckInterval,
+        section: SettingsSectionId::Updates,
+        group: "",
+        label: crate::updates::copy::settings::CHECK_INTERVAL,
+        keywords: &[
+            "frequency",
+            "interval",
+            "hourly",
+            "daily",
+            "schedule",
+            "update",
+        ],
+        selector: "settings-row-update-check-interval",
+    },
+    SettingsRowDescriptor {
         id: SettingsRowId::CoreUpdates,
         section: SettingsSectionId::Updates,
         group: crate::updates::copy::settings::CORE_HEADING,
@@ -957,37 +980,6 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
             "update",
         ],
         selector: "settings-row-core-updates",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::AutomaticUpdateDownloads,
-        section: SettingsSectionId::Updates,
-        group: "Automatic updates",
-        label: crate::updates::copy::settings::AUTOMATIC_DOWNLOADS,
-        keywords: &["automatic", "background", "download", "update", "auto"],
-        selector: "settings-row-automatic-update-downloads",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::UpdateCheckInterval,
-        section: SettingsSectionId::Updates,
-        group: "Automatic updates",
-        label: "Check for updates",
-        keywords: &[
-            "frequency",
-            "interval",
-            "hourly",
-            "daily",
-            "schedule",
-            "update",
-        ],
-        selector: "settings-row-update-check-interval",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::UpdateCheckNow,
-        section: SettingsSectionId::Updates,
-        group: "Automatic updates",
-        label: crate::updates::copy::settings::CHECK_NOW,
-        keywords: &["check", "check now", "check for updates", "machine", "core"],
-        selector: "settings-row-update-check-now",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::SettingsFile,
@@ -1245,10 +1237,9 @@ mod tests {
         CommandLineTool,
         MachineWorktreeLocation,
         UpdateStatus,
-        CoreUpdates,
         AutomaticUpdateDownloads,
         UpdateCheckInterval,
-        UpdateCheckNow,
+        CoreUpdates,
         SettingsFile,
         ExportSettings,
         ImportSettings,

@@ -16,7 +16,7 @@ use spaceterm_core::update::facts::{
     PendingVersion, Platform, Protocols, UpdateCheck, UpdateFacts, Version,
 };
 
-use super::updates::{CHECK_NOW_SELECTOR, RESTART_SELECTOR};
+use super::updates::{APP_MENU_SELECTOR, CHECK_NOW_SELECTOR, RESTART_SELECTOR};
 use super::{SettingsSectionId, SettingsWindow};
 use crate::settings::storage::testing::MemoryStorage;
 use crate::updates::copy::settings as copy;
@@ -149,26 +149,334 @@ fn without_a_desktop_update_service_the_shared_row_and_check_now_remain(cx: &mut
     assert_eq!(adapter.performed(), [(PENGUIN, MachineAction::CheckAgain)]);
 }
 
-/// Check Now follows the check interval and says what it does in visible text.
+/// Check Now sits beside the page title, and SpaceTerm's own preferences, which name SpaceTerm,
+/// share SpaceTerm's card above every Machine.
 #[gpui::test]
-fn check_now_follows_the_interval_with_its_explanation(cx: &mut TestAppContext) {
+fn check_now_sits_beside_the_title_and_spaceterms_preferences_share_its_card(
+    cx: &mut TestAppContext,
+) {
+    with_machines(vec![machine(PENGUIN, "penguin", 0)], cx);
     let (_, cx) = open_updates(cx);
-    let interval = cx
-        .debug_bounds("settings-row-update-check-interval")
-        .expect("the interval renders");
-    let check_now = cx
-        .debug_bounds("settings-row-update-check-now")
-        .expect("Check Now has its own row");
+    let mut bounds = |selector: &'static str| {
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} renders"))
+    };
+    let check_now = bounds(CHECK_NOW_SELECTOR);
+    let spaceterm = bounds("settings-row-update-status");
+    let downloads = bounds("settings-row-automatic-update-downloads");
+    let interval = bounds("settings-row-update-check-interval");
+    let core = bounds("settings-row-core-updates");
     assert!(
-        check_now.top() >= interval.bottom(),
-        "Check Now comes after the interval"
+        check_now.bottom() <= spaceterm.top(),
+        "Check Now heads the page"
+    );
+    assert!(spaceterm.bottom() <= downloads.top() && downloads.bottom() <= interval.top());
+    assert!(
+        interval.bottom() < core.top(),
+        "SpaceTerm's card comes first"
     );
     assert!(
-        A11yTree::read(cx)
-            .find_text("Checks for a newer SpaceTerm and asks each connected Machine to check.")
-            .is_some(),
-        "the explanation is visible"
+        cx.debug_bounds("settings-row-update-check-now").is_none(),
+        "Check Now has no row of its own"
     );
+    let tree = A11yTree::read(cx);
+    for label in [copy::AUTOMATIC_DOWNLOADS, copy::CHECK_INTERVAL] {
+        assert!(label.contains("SpaceTerm"), "{label}");
+        assert!(tree.find_text(label).is_some(), "{label} renders");
+    }
+}
+
+/// Opens `menu` and chooses its entry `entry`.
+fn choose(menu: &str, entry: &str, cx: &mut VisualTestContext) {
+    click_owned(menu, cx);
+    click_owned(&format!("{menu}-{entry}"), cx);
+}
+
+fn click_owned(selector: &str, cx: &mut VisualTestContext) {
+    // Debug selectors are looked up by static name.
+    let selector: &'static str = Box::leak(selector.to_owned().into_boxed_str());
+    let position = cx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} was not rendered"))
+        .center();
+    cx.simulate_mouse_move(position, None, Modifiers::none());
+    cx.simulate_click(position, Modifiers::none());
+    cx.run_until_parked();
+}
+
+/// Whether some node reads `text` as its label or value.
+fn shows(text: &str, cx: &mut VisualTestContext) -> bool {
+    A11yTree::read(cx).in_order().iter().any(|node| {
+        ["label", "value"]
+            .into_iter()
+            .any(|field| node["aria"][field].as_str() == Some(text))
+    })
+}
+
+/// Each item's menu checks that item alone: SpaceTerm checks without asking any Core, a
+/// Machine's Core checks without SpaceTerm, and an offline Machine offers Connect and Check.
+#[gpui::test]
+fn each_items_menu_checks_only_that_item(cx: &mut TestAppContext) {
+    use crate::updates::ApplicationUpdates;
+    let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
+    cx.update(|cx| ApplicationUpdates::install(updater.clone(), cx));
+    let mut offline = machine(OFFLINE, "build-box", 3);
+    offline.link = MachineLink::Offline { since: 1 };
+    let adapter = with_machines(
+        vec![
+            machine(LOCAL, "This Mac", 2),
+            machine(PENGUIN, "penguin", 0),
+            offline,
+        ],
+        cx,
+    );
+    let (_, cx) = open_updates(cx);
+    updater.emit(crate::updates::UpdateEvent::UpToDate);
+    updater.emit(crate::updates::UpdateEvent::Finished);
+    cx.run_until_parked();
+    let checks = updater.checks.get();
+
+    choose("settings-row-core-update-1-menu", "check", cx);
+    assert_eq!(adapter.performed(), [(PENGUIN, MachineAction::CheckAgain)]);
+    assert_eq!(updater.checks.get(), checks, "SpaceTerm did not check");
+
+    choose(APP_MENU_SELECTOR, "check", cx);
+    assert_eq!(updater.checks.get(), checks + 1);
+    assert_eq!(adapter.performed().len(), 1, "no Core checked");
+
+    click_owned("settings-row-core-update-2-menu", cx);
+    assert!(
+        shows("Connect and Check", cx),
+        "an offline Machine connects first"
+    );
+    click_owned("settings-row-core-update-2-menu-check", cx);
+    assert_eq!(
+        adapter.performed().last(),
+        Some(&(OFFLINE, MachineAction::CheckAgain))
+    );
+}
+
+/// A check the person started reports at once in each row it reached: Checking while it runs,
+/// then a failure with Check Again, for SpaceTerm and for a Core. The title bar stays quiet.
+#[gpui::test]
+fn a_check_reports_progress_and_failure_in_each_row_at_once(cx: &mut TestAppContext) {
+    use crate::updates::{ApplicationUpdates, UpdateError, UpdateEvent};
+    let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
+    cx.update(|cx| ApplicationUpdates::install(updater.clone(), cx));
+    let adapter = with_machines(vec![machine(PENGUIN, "penguin", 0)], cx);
+    let (_, cx) = open_updates(cx);
+    updater.emit(UpdateEvent::UpToDate);
+    updater.emit(UpdateEvent::Finished);
+    cx.run_until_parked();
+    let running = env!("SPACETERM_VERSION");
+
+    click(CHECK_NOW_SELECTOR, cx);
+    assert!(shows(&format!("{running} \u{b7} Checking\u{2026}"), cx));
+    assert!(shows("0.8.0 \u{b7} Checking\u{2026}", cx));
+    assert!(
+        cx.debug_bounds(CHECK_NOW_SELECTOR).is_some(),
+        "Check Now stays while it waits"
+    );
+
+    let mut failing = machine(PENGUIN, "penguin", 0);
+    let facts = failing.facts.as_mut().unwrap();
+    facts.revision = 2;
+    facts.check = UpdateCheck::Failing {
+        since: crate::updates::now(),
+        last_success: None,
+        reason: spaceterm_core::update::facts::CheckFailure::Network,
+    };
+    adapter.emit(MachineUpdatesEvent::Finished {
+        machine: PENGUIN,
+        action: MachineAction::CheckAgain,
+        outcome: Ok(()),
+    });
+    adapter.emit(MachineUpdatesEvent::Changed(Box::new(failing)));
+    updater.emit(UpdateEvent::Failed(UpdateError::Check));
+    updater.emit(UpdateEvent::Finished);
+    cx.run_until_parked();
+
+    let failed = crate::updates::copy::rows::COULDNT_CHECK;
+    assert!(
+        shows(&format!("{running} \u{b7} {failed}"), cx),
+        "SpaceTerm's check failed"
+    );
+    assert!(
+        shows(&format!("0.8.0 \u{b7} {failed}"), cx),
+        "penguin's check failed"
+    );
+    let view = cx.update(|_, cx| state::current(cx));
+    assert_eq!(
+        view.step, None,
+        "a failed check the person sees in Settings stays out of the title bar"
+    );
+    assert_eq!(
+        view.app_row().action.map(|action| action.command),
+        Some(state::Command::Desktop(state::DesktopAction::Check))
+    );
+    click("settings-row-core-updates-action", cx);
+    assert_eq!(
+        adapter.performed().last(),
+        Some(&(PENGUIN, MachineAction::CheckAgain)),
+        "Check Again checks penguin again"
+    );
+}
+
+/// SpaceTerm and two Cores waiting at once keep their own versions, statuses and actions.
+#[gpui::test]
+fn simultaneous_updates_keep_separate_versions_statuses_and_actions(cx: &mut TestAppContext) {
+    use crate::updates::{ApplicationUpdates, UpdateEvent, UpdateService};
+    let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
+    cx.update(|cx| ApplicationUpdates::install(updater.clone(), cx));
+    let adapter = with_machines(
+        vec![
+            waiting(machine(LOCAL, "This Mac", 2)),
+            waiting(machine(PENGUIN, "penguin", 0)),
+        ],
+        cx,
+    );
+    let (_, cx) = open_updates(cx);
+    let updates = cx.update(|_, cx| cx.global::<UpdateService>().0.clone());
+    updates.update(cx, |updates, cx| updates.check(false, cx));
+    updater.emit(UpdateEvent::Available("0.11.1".into()));
+    updater.emit(UpdateEvent::Ready);
+    cx.run_until_parked();
+
+    let view = cx.update(|_, cx| state::current(cx));
+    let app = view.app_row();
+    let rows = [
+        (app.clone(), RESTART_SELECTOR),
+        (
+            view.machine_row(LOCAL).unwrap(),
+            "settings-row-core-updates-action",
+        ),
+    ];
+    for (row, selector) in rows {
+        let line = copy::line(row.version.as_deref(), row.status.as_deref());
+        assert!(shows(&line, cx), "{} shows {line}", row.name);
+        assert!(cx.debug_bounds(selector).is_some(), "{selector}");
+    }
+    assert!(app.status.unwrap().contains("0.11.1"));
+    let penguin = view.machine_row(PENGUIN).unwrap();
+    assert!(
+        penguin.status.as_deref().unwrap().contains("0.9.0"),
+        "{penguin:?}"
+    );
+    assert_eq!(
+        app.action.map(|action| action.label.to_string()).as_deref(),
+        Some("Relaunch to Update")
+    );
+    click("settings-row-core-updates-action", cx);
+    assert_eq!(
+        adapter.asked(),
+        [(LOCAL, MachineAction::Restart)],
+        "only This Mac asks"
+    );
+    assert_eq!(updater.installations.get(), 0, "SpaceTerm did not relaunch");
+}
+
+/// Each menu names the version its notes describe: another version than the one this build
+/// carries notes for opens its release page, and nothing updates.
+#[gpui::test]
+fn release_notes_name_their_version_and_never_update(cx: &mut TestAppContext) {
+    use crate::updates::{ApplicationUpdates, UpdateEvent, UpdateService};
+    let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
+    cx.update(|cx| ApplicationUpdates::install(updater.clone(), cx));
+    let adapter = with_machines(vec![waiting(machine(PENGUIN, "penguin", 0))], cx);
+    let (_, cx) = open_updates(cx);
+    let updates = cx.update(|_, cx| cx.global::<UpdateService>().0.clone());
+    updates.update(cx, |updates, cx| updates.check(false, cx));
+    updater.emit(UpdateEvent::Available("0.11.1".into()));
+    cx.run_until_parked();
+
+    let running = env!("SPACETERM_VERSION");
+    let (downloads, installations) = (updater.downloads.get(), updater.installations.get());
+    click_owned(APP_MENU_SELECTOR, cx);
+    // A build that carries its notes opens them in Settings, a release names its release page,
+    // and a Development build names no release.
+    match (
+        crate::updates::release_notes::embedded(),
+        crate::updates::stable_version(running),
+    ) {
+        (Some(_), _) => assert!(shows(&format!("What\u{2019}s New in {running}"), cx)),
+        (None, Some(_)) => assert!(shows(&format!("Release Notes for {running}"), cx)),
+        (None, None) => assert!(!shows(&format!("Release Notes for {running}"), cx)),
+    }
+    assert!(shows("Release Notes for 0.11.1", cx));
+    click_owned(&format!("{APP_MENU_SELECTOR}-next-notes"), cx);
+    assert_eq!(
+        cx.opened_url(),
+        Some(crate::updates::release_notes::release_url("0.11.1"))
+    );
+
+    choose("settings-row-core-updates-menu", "next-notes", cx);
+    assert_eq!(
+        cx.opened_url(),
+        Some(crate::updates::release_notes::release_url("0.9.0"))
+    );
+    assert_eq!(updater.installations.get(), installations);
+    assert_eq!(updater.downloads.get(), downloads);
+    assert!(adapter.performed().is_empty() && adapter.asked().is_empty());
+}
+
+/// Notes asked for from Settings open on Settings even with a Workspace Window in front, and
+/// activate it, so Done answers the keyboard and Escape dismisses the sheet. With no window
+/// named, the active window holds them.
+#[gpui::test]
+fn notes_open_on_the_window_that_asked_and_dismiss_by_keyboard(cx: &mut TestAppContext) {
+    use crate::ui::updates::whats_new::{SheetWindow, sheet_window, show};
+    use crate::updates::release_notes::ReleaseNotes;
+    use gpui::AppContext as _;
+    let (_, cx) = open_updates(cx);
+    let asked = cx.update(|window, _| window.window_handle());
+    let workspace = cx.update(|_, cx| {
+        cx.open_window(Default::default(), |window, cx| {
+            cx.new(|cx| {
+                crate::ui::WorkspaceManager::new_with_adapters(
+                    std::env::temp_dir(),
+                    crate::ui::workspace_manager::tests::workspace_adapters(),
+                    crate::settings::sidebar::SidebarState::Expanded,
+                    window,
+                    cx,
+                )
+            })
+        })
+        .expect("a Workspace Window opens")
+    });
+    let _ = cx.update(|_, cx| workspace.update(cx, |_, window, _| window.activate_window()));
+    cx.run_until_parked();
+
+    let target = cx.update(|_, cx| sheet_window(Some(asked), cx));
+    assert!(
+        matches!(target, Some(SheetWindow::Settings(_))),
+        "Settings asked"
+    );
+    let front = cx.update(|_, cx| sheet_window(None, cx));
+    assert!(
+        matches!(front, Some(SheetWindow::Workspace(_))),
+        "with no window named, the active Workspace Window"
+    );
+
+    let notes = ReleaseNotes::parse(
+        "0.9.0",
+        "2026-11-03",
+        "### Fixes\n\n- updates: Read faster\n",
+    )
+    .unwrap();
+    assert!(!cx.update(|window, _| window.is_window_active()));
+    // As every surface does, the sheet opens after the event that asked for it.
+    let target = target.unwrap();
+    cx.update(|_, cx| cx.defer(move |cx| show(&notes, target, 2026, cx)));
+    cx.run_until_parked();
+    assert!(
+        cx.update(|window, _| window.is_window_active()),
+        "Settings is active"
+    );
+    let title = "What\u{2019}s New in SpaceTerm 0.9.0";
+    assert!(shows(title, cx), "the sheet opens on Settings");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!shows(title, cx), "Escape dismisses the sheet");
 }
 
 #[gpui::test]

@@ -7,7 +7,8 @@ use super::{Platform, dialogs, sessions, waited};
 use crate::updates::ladder::Stage;
 use crate::updates::machines::MachineAction;
 use crate::updates::state::{
-    AppRow, AppStage, Blocked, Command, DesktopAction, MachineRow, MachineStage, RowAction, RowView,
+    AppRow, AppStage, AskedCheck, Blocked, Command, DesktopAction, LastCheck, MachineRow,
+    MachineStage, RowAction, RowTone, RowView,
 };
 
 pub(crate) const APP_NAME: &str = "SpaceTerm";
@@ -15,7 +16,6 @@ pub(crate) const APP_NAME: &str = "SpaceTerm";
 pub(crate) const CORE_HEADING: &str = "SpaceTerm Core";
 /// The list's last entry, which opens Settings > Updates.
 pub(crate) const UPDATE_SETTINGS: &str = "Update Settings\u{2026}";
-pub(crate) const WHATS_NEW: &str = "What\u{2019}s New";
 pub(crate) const DOWNLOAD: &str = "Download";
 pub(crate) const RELAUNCH_TO_UPDATE: &str = "Relaunch to Update";
 pub(crate) const RESTART_CORE: &str = "Restart Core\u{2026}";
@@ -24,6 +24,10 @@ pub(crate) const RESTART_CORE_NOW: &str = "Restart Core";
 pub(crate) const TRY_AGAIN: &str = "Try Again";
 pub(crate) const TRY_AGAIN_ASKS: &str = "Try Again\u{2026}";
 pub(crate) const CHECK_AGAIN: &str = "Check Again";
+/// A check a person asked for, while it runs.
+pub(crate) const CHECKING: &str = "Checking\u{2026}";
+/// A check a person asked for that failed.
+pub(crate) const COULDNT_CHECK: &str = "Couldn\u{2019}t check for updates";
 pub(crate) const HOW_TO_UPDATE: &str = "How to Update\u{2026}";
 pub(crate) const KEEP_RUNNING: &str = "Terminal Sessions keep running";
 pub(crate) const NOTHING_RUNNING: &str =
@@ -41,14 +45,42 @@ fn action(label: &str, subtitle: Option<String>, command: Command) -> Option<Row
 pub(crate) fn app_row(app: &AppRow) -> RowView {
     let keep = || Some(KEEP_RUNNING.to_owned());
     let (status, row_action, description, sentence) = match &app.stage {
-        AppStage::Current { .. } => (
-            app.running.to_string(),
-            app.notes
-                .then(|| action(WHATS_NEW, None, Command::Desktop(DesktopAction::WhatsNew)))
-                .flatten(),
-            None,
-            format!("SpaceTerm {} is running.", app.running),
-        ),
+        // Release notes are never the row's action: the action slot only updates.
+        AppStage::Current { .. } => match app.asked_check {
+            Some(AskedCheck::Running) => (
+                CHECKING.to_owned(),
+                None,
+                None,
+                format!(
+                    "SpaceTerm {} is running and checking for updates.",
+                    app.running
+                ),
+            ),
+            Some(AskedCheck::Failed) => (
+                COULDNT_CHECK.to_owned(),
+                action(CHECK_AGAIN, None, Command::Desktop(DesktopAction::Check)),
+                None,
+                format!(
+                    "SpaceTerm {} couldn\u{2019}t check for updates.",
+                    app.running
+                ),
+            ),
+            Some(AskedCheck::Succeeded) => {
+                let checked = checked(app.last_check);
+                (
+                    checked.clone(),
+                    None,
+                    None,
+                    format!("SpaceTerm {} is running. {checked}.", app.running),
+                )
+            }
+            None => (
+                app.running.to_string(),
+                None,
+                None,
+                format!("SpaceTerm {} is running.", app.running),
+            ),
+        },
         AppStage::Available { version } => (
             format!("{version} available"),
             action(DOWNLOAD, keep(), Command::Desktop(DesktopAction::Download)),
@@ -131,6 +163,17 @@ pub(crate) fn app_row(app: &AppRow) -> RowView {
         (Some(text), Some(age)) => Some(format!("{text} {age}")),
         (text, age) => text.or(age),
     };
+    let tone = match &app.stage {
+        AppStage::DownloadFailed { .. } | AppStage::RelaunchFailed { .. } => RowTone::Failure,
+        AppStage::Current { .. } if app.asked_check == Some(AskedCheck::Failed) => RowTone::Failure,
+        AppStage::CantReplace | AppStage::NeedsNewerSystem { .. } => RowTone::Warning,
+        AppStage::Available { .. } | AppStage::Downloaded { .. }
+            if app.too_old_for.is_some() || app.ladder == Stage::Insist =>
+        {
+            RowTone::Warning
+        }
+        _ => RowTone::Plain,
+    };
     RowView {
         name: APP_NAME.into(),
         version: Some(app.running.clone()),
@@ -138,6 +181,15 @@ pub(crate) fn app_row(app: &AppRow) -> RowView {
         action: row_action,
         accessibility: sentence.into(),
         description: description.map(Into::into),
+        tone,
+    }
+}
+
+/// "Checked just now", "Checked 5 minutes ago": a check the person asked for that succeeded.
+fn checked(last: LastCheck) -> String {
+    match last {
+        LastCheck::Succeeded { age } => format!("Checked {}", super::settings::ago(age)),
+        LastCheck::Unknown | LastCheck::Failing { .. } => "Checked".to_owned(),
     }
 }
 
@@ -212,12 +264,39 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
                 None,
                 format!("This SpaceTerm is too old for {subject}."),
             ),
-            (None, Some(running)) => (
-                running.clone(),
-                None,
-                None,
-                format!("{subject} runs {running}."),
-            ),
+            (None, Some(running)) => match row.asked_check {
+                Some(AskedCheck::Running) => (
+                    CHECKING.to_owned(),
+                    None,
+                    None,
+                    format!("{subject} runs {running} and is checking for updates."),
+                ),
+                Some(AskedCheck::Failed) => (
+                    COULDNT_CHECK.to_owned(),
+                    action(
+                        CHECK_AGAIN,
+                        None,
+                        Command::Machine(id, MachineAction::CheckAgain),
+                    ),
+                    None,
+                    format!("{subject} couldn\u{2019}t check for updates."),
+                ),
+                Some(AskedCheck::Succeeded) => {
+                    let checked = checked(row.last_check);
+                    (
+                        checked.clone(),
+                        None,
+                        None,
+                        format!("{subject} runs {running}. {checked}."),
+                    )
+                }
+                None => (
+                    running.clone(),
+                    None,
+                    None,
+                    format!("{subject} runs {running}."),
+                ),
+            },
             (None, None) => (
                 "Connecting\u{2026}".to_owned(),
                 None,
@@ -226,6 +305,13 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
             ),
         },
         MachineStage::Connecting => (
+            "Connecting\u{2026}".to_owned(),
+            None,
+            None,
+            format!("Connecting to {subject}."),
+        ),
+        // Check Again on a Machine no route reaches retries its routes for a while.
+        MachineStage::Offline if row.asked_check == Some(AskedCheck::Running) => (
             "Connecting\u{2026}".to_owned(),
             None,
             None,
@@ -372,6 +458,12 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
             None,
             format!("{name} stopped responding while SpaceTerm Core restarted."),
         ),
+        MachineStage::CantCheck if row.asked_check == Some(AskedCheck::Running) => (
+            CHECKING.to_owned(),
+            None,
+            None,
+            format!("{subject} is checking for updates."),
+        ),
         MachineStage::CantCheck => (
             "Can\u{2019}t check for updates".to_owned(),
             action(
@@ -415,6 +507,17 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
         (Some(text), Some(age)) => Some(format!("{text} {age}")),
         (text, age) => text.or(age),
     };
+    let tone = match &row.stage {
+        MachineStage::CantCheck if row.asked_check == Some(AskedCheck::Running) => RowTone::Plain,
+        MachineStage::StartFailed { .. }
+        | MachineStage::DownloadFailed { .. }
+        | MachineStage::CantCheck
+        | MachineStage::NeedsFloor { failed: true, .. } => RowTone::Failure,
+        MachineStage::Running if row.asked_check == Some(AskedCheck::Failed) => RowTone::Failure,
+        MachineStage::NotConfirmed { .. } | MachineStage::SteppingStoneSkipped => RowTone::Warning,
+        _ if row.blocked.is_some() || row.ladder == Some(Stage::Insist) => RowTone::Warning,
+        _ => RowTone::Plain,
+    };
     RowView {
         name: name.clone(),
         version: running.map(Into::into),
@@ -422,5 +525,6 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
         action: row_action,
         description: description.map(Into::into),
         accessibility: sentence.into(),
+        tone,
     }
 }

@@ -872,6 +872,11 @@ impl ApplicationUpdates {
         self.history.last_check
     }
 
+    /// Whether a person asked for the current or last check, from Settings or the menu.
+    pub(crate) fn manual_check(&self) -> bool {
+        self.model.manual_check
+    }
+
     /// Whether this build came by an update whose release notes the person has not opened.
     /// Observers of [`UpdateService`] hear when this changes.
     pub(crate) fn release_notes_unread(&self) -> bool {

@@ -1296,6 +1296,9 @@ impl SettingsWindow {
                 settings.request_close(CloseIntent::Window(handle), cx)
             });
         });
+        // Check Now checks everything the page lists, so it sits beside the page title.
+        let check_now =
+            (section == SettingsSectionId::Updates).then(|| self.render_update_check_now(cx));
         let scrolled = self.scroll.max_offset().y > px(0.0) && self.scroll.offset().y < px(-0.5);
         let heading = DetailHeading::new(
             "settings",
@@ -1309,8 +1312,8 @@ impl SettingsWindow {
             close,
         )
         .scrolled(scrolled);
-        match picker {
-            Some(picker) => heading.toolbar(picker),
+        match picker.or(check_now) {
+            Some(toolbar) => heading.toolbar(toolbar),
             None => heading,
         }
         .render(settings, window, cx)
@@ -1674,7 +1677,10 @@ impl SettingsWindow {
                 rendered = rendered.status_line(self.core_progress_indicator(cx));
             }
         } else if row == SettingsRowId::UpdateStatus {
-            rendered = rendered.description(self.update_status(cx).summary);
+            let status = self.update_status(cx);
+            rendered = rendered
+                .caption(status.summary, status.tone)
+                .status_line(None);
         } else if let Some(permission) = permission_access::row_permission(row) {
             rendered = rendered.description(
                 self.permission_access
@@ -1751,10 +1757,9 @@ impl SettingsWindow {
             SettingsRowId::AllMachines => self.render_all_machines(ends, appearance, window, cx),
             SettingsRowId::AddMachine => self.render_add_machine_row(ends, appearance, cx),
             SettingsRowId::CommandLineTool => self.render_command_line_tool(appearance, cx),
-            SettingsRowId::UpdateStatus => self.render_update_status(cx),
+            SettingsRowId::UpdateStatus => self.render_update_status(appearance, cx),
             // The section renders each Machine's row in this row's place.
             SettingsRowId::CoreUpdates => div().into_any_element(),
-            SettingsRowId::UpdateCheckNow => self.render_update_check_now(cx),
             SettingsRowId::AutomaticUpdateDownloads => self.render_automatic_update_downloads(cx),
             SettingsRowId::UpdateCheckInterval => self.render_update_check_interval(cx),
             SettingsRowId::Shortcut(command) => self.render_shortcut(command, cx),
@@ -2558,8 +2563,7 @@ fn row_layout(row: SettingsRowId) -> FormRowLayout {
     match row {
         SettingsRowId::TerminalTheme
         | SettingsRowId::InstalledThemes
-        | SettingsRowId::SettingsFile
-        | SettingsRowId::UpdateCheckNow => FormRowLayout::Full,
+        | SettingsRowId::SettingsFile => FormRowLayout::Full,
         SettingsRowId::AllMachines | SettingsRowId::AddMachine => FormRowLayout::Items,
         _ => FormRowLayout::Beside,
     }
@@ -2690,9 +2694,6 @@ impl SettingsWindow {
             ),
             SettingsRowId::SidebarDefaultState => Some("The sidebar state in each new window."),
             SettingsRowId::TerminalFontFamily => Some("Only monospace fonts."),
-            SettingsRowId::AutomaticUpdateDownloads
-            | SettingsRowId::UpdateCheckInterval
-            | SettingsRowId::UpdateCheckNow => updates::update_row_description(row),
             SettingsRowId::MicrophoneAccess => {
                 Some(self.microphone_access.presentation().explanation)
             }

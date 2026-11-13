@@ -117,7 +117,7 @@ What’s New | Plain | See what’s new in SpaceTerm 0.11.4.
 
 ## Rows: name | status · action (subtitle) | description | accessibility
 
-SpaceTerm | 0.11.4 · What’s New | a11y: SpaceTerm 0.11.4 is running.
+SpaceTerm | 0.11.4 | a11y: SpaceTerm 0.11.4 is running.
 SpaceTerm | 0.11.5 available · Download (Terminal Sessions keep running) | An update has waited 2 days. | a11y: SpaceTerm 0.11.5 is available. Download gets it without relaunching.
 SpaceTerm | 0.11.5 available · Download (Terminal Sessions keep running) | An update has waited 7 days. | a11y: SpaceTerm 0.11.5 is available. Download gets it without relaunching.
 SpaceTerm | 0.11.5 available · Download (Terminal Sessions keep running) | a11y: SpaceTerm 0.11.5 is available. Download gets it without relaunching.
@@ -125,6 +125,11 @@ SpaceTerm | 0.11.5 downloaded · Relaunch to Update (Terminal Sessions keep runn
 SpaceTerm | 0.11.5 downloaded · Relaunch to Update (Terminal Sessions keep running) | An update has waited 7 days. | a11y: SpaceTerm 0.11.5 is downloaded. Relaunching keeps Terminal Sessions running.
 SpaceTerm | 0.11.5 downloaded · Relaunch to Update (Terminal Sessions keep running) | a11y: SpaceTerm 0.11.5 is downloaded. Relaunching keeps Terminal Sessions running.
 SpaceTerm | 0.11.5 needs a {newer-system} | a11y: SpaceTerm 0.11.5 needs a {newer-system}.
+SpaceTerm | Checked 5 minutes ago | a11y: SpaceTerm 0.11.4 is running. Checked 5 minutes ago.
+SpaceTerm | Checked just now | a11y: SpaceTerm 0.11.4 is running. Checked just now.
+SpaceTerm | Checked | a11y: SpaceTerm 0.11.4 is running. Checked.
+SpaceTerm | Checking… | a11y: SpaceTerm 0.11.4 is running and checking for updates.
+SpaceTerm | Couldn’t check for updates · Check Again | a11y: SpaceTerm 0.11.4 couldn’t check for updates.
 SpaceTerm | Couldn’t download 0.11.5 | SpaceTerm tries again later. | a11y: SpaceTerm couldn’t download 0.11.5.
 SpaceTerm | Couldn’t download 0.11.5 · Try Again | a11y: SpaceTerm couldn’t download 0.11.5.
 SpaceTerm | Couldn’t relaunch · Try Again | a11y: SpaceTerm couldn’t relaunch. Terminal Sessions keep running.
@@ -144,6 +149,7 @@ This Computer | 0.11.4 downloaded · Restart Core… | a11y: SpaceTerm Core on T
 This Computer | 0.11.4 | a11y: SpaceTerm Core on This Computer runs 0.11.4.
 This Computer | Can’t check for updates · Check Again | a11y: SpaceTerm Core on This Computer can’t check for updates.
 This Computer | Can’t update by itself · How to Update… | a11y: SpaceTerm Core on This Computer can’t update by itself.
+This Computer | Checking… | a11y: SpaceTerm Core on This Computer runs 0.11.4 and is checking for updates.
 This Computer | Connecting… | a11y: Connecting to SpaceTerm Core on This Computer.
 This Computer | Couldn’t download 0.11.5 | SpaceTerm Core tries again later. | a11y: SpaceTerm couldn’t download SpaceTerm Core 0.11.5 to This Computer.
 This Computer | Couldn’t download 0.11.5 · Try Again | a11y: SpaceTerm couldn’t download SpaceTerm Core 0.11.5 to This Computer.
@@ -186,6 +192,7 @@ This Computer | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core�
 This Computer | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core… | An update has waited 8 days. | a11y: SpaceTerm Core on This Computer is too old for this SpaceTerm and has 0.11.4 downloaded. No Terminal Session is open.
 This Computer | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core… | a11y: SpaceTerm Core on This Computer is too old for this SpaceTerm and has 0.11.4 downloaded. No Terminal Session is open.
 This Computer | Too old for this SpaceTerm · Needs 0.12.0 before 0.12.1 · Download | a11y: SpaceTerm Core on This Computer is too old for this SpaceTerm and needs 0.12.0 before it can update to 0.12.1.
+This Mac | 0.11.3 | a11y: SpaceTerm Core on This Mac runs 0.11.3.
 This Mac | 0.11.4 downloaded · Restart Core | An update has waited 3 days. | a11y: SpaceTerm Core on This Mac has 0.11.4 downloaded. No Terminal Session is open.
 This Mac | 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | An update has waited 3 days. | a11y: SpaceTerm Core on This Mac has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.
 This Mac | 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | An update has waited 8 days. | a11y: SpaceTerm Core on This Mac has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.
@@ -199,7 +206,11 @@ This Mac | 0.11.4 downloaded · Restart Core… | a11y: SpaceTerm Core on This M
 This Mac | 0.11.4 | a11y: SpaceTerm Core on This Mac runs 0.11.4.
 This Mac | Can’t check for updates · Check Again | a11y: SpaceTerm Core on This Mac can’t check for updates.
 This Mac | Can’t update by itself · How to Update… | a11y: SpaceTerm Core on This Mac can’t update by itself.
+This Mac | Checked just now | a11y: SpaceTerm Core on This Mac runs 0.11.3. Checked just now.
+This Mac | Checking… | a11y: SpaceTerm Core on This Mac runs 0.11.3 and is checking for updates.
+This Mac | Checking… | a11y: SpaceTerm Core on This Mac runs 0.11.4 and is checking for updates.
 This Mac | Connecting… | a11y: Connecting to SpaceTerm Core on This Mac.
+This Mac | Couldn’t check for updates · Check Again | a11y: SpaceTerm Core on This Mac couldn’t check for updates.
 This Mac | Couldn’t download 0.11.5 | SpaceTerm Core tries again later. | a11y: SpaceTerm couldn’t download SpaceTerm Core 0.11.5 to This Mac.
 This Mac | Couldn’t download 0.11.5 · Try Again | a11y: SpaceTerm couldn’t download SpaceTerm Core 0.11.5 to This Mac.
 This Mac | Couldn’t restart into 0.11.4 | SpaceTerm waits for the next update. | a11y: SpaceTerm Core on This Mac couldn’t restart into 0.11.4.
@@ -241,6 +252,7 @@ This Mac | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core… | 
 This Mac | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core… | An update has waited 8 days. | a11y: SpaceTerm Core on This Mac is too old for this SpaceTerm and has 0.11.4 downloaded. No Terminal Session is open.
 This Mac | Too old for this SpaceTerm · 0.11.4 downloaded · Restart Core… | a11y: SpaceTerm Core on This Mac is too old for this SpaceTerm and has 0.11.4 downloaded. No Terminal Session is open.
 This Mac | Too old for this SpaceTerm · Needs 0.12.0 before 0.12.1 · Download | a11y: SpaceTerm Core on This Mac is too old for this SpaceTerm and needs 0.12.0 before it can update to 0.12.1.
+penguin | 0.11.3 | a11y: SpaceTerm Core on penguin runs 0.11.3.
 penguin | 0.11.4 downloaded · Restart Core | An update has waited 3 days. | a11y: SpaceTerm Core on penguin has 0.11.4 downloaded. No Terminal Session is open.
 penguin | 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | An update has waited 3 days. | a11y: SpaceTerm Core on penguin has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.
 penguin | 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | An update has waited 8 days. | a11y: SpaceTerm Core on penguin has 0.11.4 downloaded. Restarting SpaceTerm Core now ends 1 Terminal Session.
@@ -254,7 +266,11 @@ penguin | 0.11.4 downloaded · Restart Core… | a11y: SpaceTerm Core on penguin
 penguin | 0.11.4 | a11y: SpaceTerm Core on penguin runs 0.11.4.
 penguin | Can’t check for updates · Check Again | a11y: SpaceTerm Core on penguin can’t check for updates.
 penguin | Can’t update by itself · How to Update… | a11y: SpaceTerm Core on penguin can’t update by itself.
+penguin | Checked just now | a11y: SpaceTerm Core on penguin runs 0.11.3. Checked just now.
+penguin | Checking… | a11y: SpaceTerm Core on penguin runs 0.11.3 and is checking for updates.
+penguin | Checking… | a11y: SpaceTerm Core on penguin runs 0.11.4 and is checking for updates.
 penguin | Connecting… | a11y: Connecting to SpaceTerm Core on penguin.
+penguin | Couldn’t check for updates · Check Again | a11y: SpaceTerm Core on penguin couldn’t check for updates.
 penguin | Couldn’t download 0.11.5 | SpaceTerm Core tries again later. | a11y: SpaceTerm couldn’t download SpaceTerm Core 0.11.5 to penguin.
 penguin | Couldn’t download 0.11.5 · Try Again | a11y: SpaceTerm couldn’t download SpaceTerm Core 0.11.5 to penguin.
 penguin | Couldn’t restart into 0.11.4 | SpaceTerm waits for the next update. | a11y: SpaceTerm Core on penguin couldn’t restart into 0.11.4.
@@ -501,6 +517,92 @@ Terminal Session Ended | SpaceTerm Core restarted into 0.11.4. What you typed du
 Terminal Session Ended | SpaceTerm Core restarted.
 Terminal Session Ended | SpaceTerm Core restarted. What you typed during the restart may not have been sent.
 Terminal Session Ended | SpaceTerm Core restarted. What you typed during the restart wasn’t sent.
+
+## Settings > Updates menus: item | [entry]
+
+SpaceTerm | [info: Last checked 5 minutes ago] [Check for SpaceTerm Updates] --- [What’s New in 0.11.4]
+SpaceTerm | [info: Last checked 5 minutes ago] [disabled: Check for SpaceTerm Updates] --- [What’s New in 0.11.4]
+SpaceTerm | [info: Last checked 5 minutes ago] [info: The last check failed] [Check for SpaceTerm Updates] --- [What’s New in 0.11.4]
+SpaceTerm | [info: Last checked just now] [Check for SpaceTerm Updates] --- [What’s New in 0.11.4]
+SpaceTerm | [info: Last checked just now] [disabled: Check for SpaceTerm Updates] --- [What’s New in 0.11.4]
+SpaceTerm | [info: Last checked just now] [info: The last check failed] [Check for SpaceTerm Updates] --- [What’s New in 0.11.4]
+SpaceTerm | [info: Not checked yet] [Check for SpaceTerm Updates] --- [What’s New in 0.11.4]
+SpaceTerm | [info: Not checked yet] [Check for SpaceTerm Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
+SpaceTerm | [info: Not checked yet] [disabled: Check for SpaceTerm Updates] --- [What’s New in 0.11.4]
+SpaceTerm | [info: Not checked yet] [disabled: Check for SpaceTerm Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
+SpaceTerm | [info: Not checked yet] [info: An update has waited 2 days.] [disabled: Check for SpaceTerm Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
+SpaceTerm | [info: Not checked yet] [info: An update has waited 7 days.] [disabled: Check for SpaceTerm Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
+SpaceTerm | [info: Not checked yet] [info: SpaceTerm tries again later.] [Check for SpaceTerm Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
+SpaceTerm | [info: Not checked yet] [info: The last check failed] [Check for SpaceTerm Updates] --- [What’s New in 0.11.4]
+This Computer | [info: Last checked just now] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3]
+This Computer | [info: Last checked just now] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+This Computer | [info: Last checked just now] [Check for SpaceTerm Core Updates] --- [What’s New in 0.11.4]
+This Computer | [info: Last checked just now] [Check for SpaceTerm Core Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
+This Computer | [info: Last checked just now] [Check for SpaceTerm Core Updates] --- [What’s New in 0.11.4] [Release Notes for 0.12.1]
+This Computer | [info: Last checked just now] [Connect and Check] --- [Release Notes for 0.11.3]
+This Computer | [info: Last checked just now] [disabled: Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3]
+This Computer | [info: Last checked just now] [disabled: Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+This Computer | [info: Last checked just now] [disabled: Check for SpaceTerm Core Updates] --- [What’s New in 0.11.4]
+This Computer | [info: Last checked just now] [disabled: Check for SpaceTerm Core Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
+This Computer | [info: Last checked just now] [info: An update has waited 3 days.] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+This Computer | [info: Last checked just now] [info: An update has waited 8 days.] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+This Computer | [info: Last checked just now] [info: Nothing running means no program, no typing and no output in any Terminal Session. An update has waited 3 days.] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+This Computer | [info: Last checked just now] [info: Nothing running means no program, no typing and no output in any Terminal Session. An update has waited 8 days.] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+This Computer | [info: Last checked just now] [info: Nothing running means no program, no typing and no output in any Terminal Session.] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+This Computer | [info: Last checked just now] [info: SpaceTerm Core tries again later.] [Check for SpaceTerm Core Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
+This Computer | [info: Last checked just now] [info: SpaceTerm waits for the next update.] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+This Computer | [info: Not checked yet] [Check for SpaceTerm Core Updates]
+This Computer | [info: Not checked yet] [info: Checks fail: a required update couldn’t start] [Check for SpaceTerm Core Updates] --- [What’s New in 0.11.4]
+This Mac | [info: Last checked 2 hours ago] [info: Checks fail: the release feed can’t be reached] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3]
+This Mac | [info: Last checked just now] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3]
+This Mac | [info: Last checked just now] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+This Mac | [info: Last checked just now] [Check for SpaceTerm Core Updates] --- [What’s New in 0.11.4]
+This Mac | [info: Last checked just now] [Check for SpaceTerm Core Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
+This Mac | [info: Last checked just now] [Check for SpaceTerm Core Updates] --- [What’s New in 0.11.4] [Release Notes for 0.12.1]
+This Mac | [info: Last checked just now] [Connect and Check] --- [Release Notes for 0.11.3]
+This Mac | [info: Last checked just now] [disabled: Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3]
+This Mac | [info: Last checked just now] [disabled: Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+This Mac | [info: Last checked just now] [disabled: Check for SpaceTerm Core Updates] --- [What’s New in 0.11.4]
+This Mac | [info: Last checked just now] [disabled: Check for SpaceTerm Core Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
+This Mac | [info: Last checked just now] [disabled: Connect and Check] --- [Release Notes for 0.11.3]
+This Mac | [info: Last checked just now] [info: An update has waited 3 days.] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+This Mac | [info: Last checked just now] [info: An update has waited 8 days.] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+This Mac | [info: Last checked just now] [info: Nothing running means no program, no typing and no output in any Terminal Session. An update has waited 3 days.] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+This Mac | [info: Last checked just now] [info: Nothing running means no program, no typing and no output in any Terminal Session. An update has waited 8 days.] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+This Mac | [info: Last checked just now] [info: Nothing running means no program, no typing and no output in any Terminal Session.] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+This Mac | [info: Last checked just now] [info: SpaceTerm Core tries again later.] [Check for SpaceTerm Core Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
+This Mac | [info: Last checked just now] [info: SpaceTerm waits for the next update.] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+This Mac | [info: Not checked yet] [Check for SpaceTerm Core Updates]
+This Mac | [info: Not checked yet] [info: Checks fail: This Mac’s clock is behind] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3]
+This Mac | [info: Not checked yet] [info: Checks fail: a required update couldn’t start] [Check for SpaceTerm Core Updates] --- [What’s New in 0.11.4]
+This Mac | [info: Not checked yet] [info: Checks fail: the release feed doesn’t verify] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3]
+This Mac | [info: Not checked yet] [info: Checks fail: the update proxy doesn’t answer] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3]
+This Mac | [info: Not checked yet] [info: The newest release needs a newer system than This Mac’s] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3]
+penguin | [info: Last checked 2 hours ago] [info: Checks fail: the release feed can’t be reached] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3]
+penguin | [info: Last checked just now] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3]
+penguin | [info: Last checked just now] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+penguin | [info: Last checked just now] [Check for SpaceTerm Core Updates] --- [What’s New in 0.11.4]
+penguin | [info: Last checked just now] [Check for SpaceTerm Core Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
+penguin | [info: Last checked just now] [Check for SpaceTerm Core Updates] --- [What’s New in 0.11.4] [Release Notes for 0.12.1]
+penguin | [info: Last checked just now] [Connect and Check] --- [Release Notes for 0.11.3]
+penguin | [info: Last checked just now] [disabled: Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3]
+penguin | [info: Last checked just now] [disabled: Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+penguin | [info: Last checked just now] [disabled: Check for SpaceTerm Core Updates] --- [What’s New in 0.11.4]
+penguin | [info: Last checked just now] [disabled: Check for SpaceTerm Core Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
+penguin | [info: Last checked just now] [disabled: Connect and Check] --- [Release Notes for 0.11.3]
+penguin | [info: Last checked just now] [info: An update has waited 3 days.] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+penguin | [info: Last checked just now] [info: An update has waited 8 days.] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+penguin | [info: Last checked just now] [info: Nothing running means no program, no typing and no output in any Terminal Session. An update has waited 3 days.] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+penguin | [info: Last checked just now] [info: Nothing running means no program, no typing and no output in any Terminal Session. An update has waited 8 days.] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+penguin | [info: Last checked just now] [info: Nothing running means no program, no typing and no output in any Terminal Session.] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+penguin | [info: Last checked just now] [info: SpaceTerm Core tries again later.] [Check for SpaceTerm Core Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
+penguin | [info: Last checked just now] [info: SpaceTerm waits for the next update.] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+penguin | [info: Not checked yet] [Check for SpaceTerm Core Updates]
+penguin | [info: Not checked yet] [info: Checks fail: a required update couldn’t start] [Check for SpaceTerm Core Updates] --- [What’s New in 0.11.4]
+penguin | [info: Not checked yet] [info: Checks fail: penguin’s clock is behind] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3]
+penguin | [info: Not checked yet] [info: Checks fail: the release feed doesn’t verify] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3]
+penguin | [info: Not checked yet] [info: Checks fail: the update proxy doesn’t answer] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3]
+penguin | [info: Not checked yet] [info: The newest release needs a newer system than penguin’s] [Check for SpaceTerm Core Updates] --- [Release Notes for 0.11.3]
 
 ## Platform strings: token | macOS | Linux
 
