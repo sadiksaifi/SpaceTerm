@@ -192,12 +192,14 @@ impl Deck {
             (
                 "Settings > Updates menus: item | [entry]",
                 &self.menus,
-                Section::Row,
+                Section::Menu,
             ),
         ] {
             out.push_str(&format!("\n## {heading}\n\n"));
-            let lines: BTreeSet<String> =
-                lines.iter().map(|line| normalize(line, section)).collect();
+            let lines: BTreeSet<String> = lines
+                .iter()
+                .map(|line| normalize(line, section, Platform::HOST))
+                .collect();
             for line in lines {
                 out.push_str(&line);
                 out.push('\n');
@@ -246,20 +248,41 @@ const PLATFORM_STRINGS: [(&str, PlatformString); 4] = [
 enum Section {
     Row,
     Alert,
+    Menu,
 }
 
 /// `line` with this host's platform-dependent strings as their tokens. The section's own string
 /// goes first, so the same line reads the same on every platform.
-fn normalize(line: &str, section: Section) -> String {
+fn normalize(line: &str, section: Section, platform: Platform) -> String {
     let mut strings = PLATFORM_STRINGS.to_vec();
-    if section == Section::Row {
+    if section != Section::Alert {
         strings.sort_by_key(|(token, _)| *token != "{cant-replace-status}");
+    }
+    // Menu check history describes the target's system, not the desktop host's OS.
+    if section == Section::Menu {
+        strings.retain(|(token, _)| *token != "{newer-system}");
     }
     strings
         .into_iter()
         .fold(line.to_owned(), |line, (token, render)| {
-            line.replace(&render(Platform::HOST), token)
+            line.replace(&render(platform), token)
         })
+}
+
+#[test]
+fn menu_check_history_keeps_its_platform_neutral_system_wording() {
+    let line = "The newest release needs a newer system than penguin\u{2019}s";
+    for platform in [Platform::Mac, Platform::Linux] {
+        assert_eq!(normalize(line, Section::Menu, platform), line);
+        assert_eq!(
+            normalize(
+                &format!("Needs a newer {}", rows::system(platform)),
+                Section::Row,
+                platform
+            ),
+            "Needs a {newer-system}"
+        );
+    }
 }
 
 fn build() -> Deck {
