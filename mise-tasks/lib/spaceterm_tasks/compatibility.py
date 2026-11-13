@@ -334,13 +334,22 @@ def exercise_terminal(client, environment):
         client, ["pane", "run", f"printf '{marker}\\n'", "--workspace", workspace], environment
     )
     run = finished["data"].get("run") or {}
-    output = finished["data"].get("output") or {}
-    rows = output.get("rows") or []
     if run.get("state") != "finished" or run.get("exit_status") != 0:
         raise TaskError("the compatibility command returned no successful run receipt")
-    if not any(marker in row.get("text", "") for row in rows):
+    # The screen also shows the typed command, which contains the marker, so only a line of
+    # its own proves the output.
+    if marker not in (text.strip() for text in output_text(finished["data"].get("output") or {})):
         raise TaskError("the compatibility command lost its output")
     _envelope(client, ["pane", "read", "--workspace", workspace], environment)
+
+
+def output_text(output):
+    """Each line of a `pane run` output in the CLI JSON contract: the history rows, objects
+    with `text`, then the screen rows, strings. Output that never scrolled has no history rows.
+    """
+    for row in output.get("rows") or []:
+        yield row.get("text", "")
+    yield from (output.get("screen") or {}).get("rows") or []
 
 
 # The Command Line Tool that setup links for the release identity.
