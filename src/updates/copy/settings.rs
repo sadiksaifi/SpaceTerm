@@ -25,6 +25,8 @@ pub(crate) const CHECK_INTERVAL: &str = "Check for SpaceTerm updates";
 pub(crate) const CHECK_NOW: &str = "Check Now";
 /// Check Now's accessibility description and tooltip: what it checks.
 pub(crate) const CHECK_NOW_DESCRIPTION: &str = "Checks for a newer SpaceTerm and asks each connected Machine\u{2019}s SpaceTerm Core to check.";
+/// The entry in an item's menu that checks that item alone. The menu names the item.
+const CHECK_ITEM: &str = "Check for Updates";
 /// Each item's menu, by the item's name.
 pub(crate) fn item_menu_label(name: &str) -> String {
     format!("More for {name}")
@@ -165,7 +167,9 @@ fn check_lines(last: LastCheck, name: &str) -> Vec<ItemEntry> {
         None => "Not checked yet".to_owned(),
     };
     match last {
-        LastCheck::Unknown => vec![ItemEntry::info(checked(None))],
+        // Unknown facts say nothing about a check.
+        LastCheck::Unknown => Vec::new(),
+        LastCheck::Never => vec![ItemEntry::info(checked(None))],
         LastCheck::Succeeded { age } => vec![ItemEntry::info(checked(Some(age)))],
         LastCheck::Failing { reason, success } => {
             let mut lines = vec![ItemEntry::info(checked(success))];
@@ -242,7 +246,7 @@ pub(crate) fn app_menu(
         AppStage::Current { .. } | AppStage::DownloadFailed { .. }
     );
     let mut check = ItemEntry::command(
-        "Check for SpaceTerm Updates".to_owned(),
+        CHECK_ITEM.to_owned(),
         ItemCommand::Check(Target::App),
         "check",
     );
@@ -287,8 +291,8 @@ pub(crate) fn machine_menu(
         MachineStage::Offline => ("Connect and Check", true),
         MachineStage::Stopped
         | MachineStage::Restarting { .. }
-        | MachineStage::Downloading { .. } => ("Check for SpaceTerm Core Updates", false),
-        _ => ("Check for SpaceTerm Core Updates", true),
+        | MachineStage::Downloading { .. } => (CHECK_ITEM, false),
+        _ => (CHECK_ITEM, true),
     };
     let mut check = ItemEntry::command(
         label.to_owned(),

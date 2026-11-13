@@ -189,7 +189,7 @@ pub(crate) fn app_row(app: &AppRow) -> RowView {
 fn checked(last: LastCheck) -> String {
     match last {
         LastCheck::Succeeded { age } => format!("Checked {}", super::settings::ago(age)),
-        LastCheck::Unknown | LastCheck::Failing { .. } => "Checked".to_owned(),
+        LastCheck::Unknown | LastCheck::Never | LastCheck::Failing { .. } => "Checked".to_owned(),
     }
 }
 

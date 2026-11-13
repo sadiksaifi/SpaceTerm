@@ -607,7 +607,8 @@ fn machines(scenario: Scenario, now: u64) -> Vec<MachineUpdate> {
             });
         }
         Scenario::RestartOverdue => {
-            let installed_at = now - 3 * DAY;
+            // Past the Insist stage of the Update Ladder.
+            let installed_at = now - 8 * DAY;
             waiting(&mut penguin, installed_at);
             let facts = facts(&mut penguin);
             facts.sessions = 3;
@@ -683,6 +684,8 @@ fn machines(scenario: Scenario, now: u64) -> Vec<MachineUpdate> {
             this.capabilities = disconnected();
         }
         Scenario::Offline => {
+            // A long paired name, so the preview shows how rows truncate it.
+            build_box.name = "build-box-eu-west-1.ci-runners.internal.example.com".into();
             build_box.link = MachineLink::Offline { since: now - 600 };
             build_box.facts = None;
             build_box.capabilities = disconnected();

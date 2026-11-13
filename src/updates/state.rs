@@ -138,8 +138,10 @@ pub(crate) struct AppRow {
 /// When an item's last check for updates finished, as its menu reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LastCheck {
-    /// No finished check is known, or this build never checks.
+    /// The desktop has no facts that tell, as for a Machine it never heard from.
     Unknown,
+    /// No check has finished, or this build never checks.
+    Never,
     /// The last check succeeded `age` seconds ago.
     Succeeded { age: u64 },
     /// Every check since the last success failed. `reason` is None when only the failure is
@@ -668,7 +670,7 @@ impl AppRow {
         } else {
             facts
                 .checked_ago
-                .map_or(LastCheck::Unknown, |age| LastCheck::Succeeded { age })
+                .map_or(LastCheck::Never, |age| LastCheck::Succeeded { age })
         };
         let asked_check = facts
             .manual_check
@@ -794,7 +796,8 @@ impl MachineRow {
                 reason: Some(*reason),
                 success: last_success.map(|at| now.saturating_sub(at)),
             },
-            Some(UpdateCheck::Disabled | UpdateCheck::Never) | None => LastCheck::Unknown,
+            Some(UpdateCheck::Disabled | UpdateCheck::Never) => LastCheck::Never,
+            None => LastCheck::Unknown,
         };
         // A finished check reports its outcome only while the Core's facts still carry it.
         let asked_check = if update.asked == Some(Asked::Check) {

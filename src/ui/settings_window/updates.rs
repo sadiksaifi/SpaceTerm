@@ -201,6 +201,8 @@ impl SettingsWindow {
             AnchoredPlacement::Bottom,
             AnchoredAlignment::End,
         ))
+        // Every entry reads in full: the menu holds what the row's one line leaves out.
+        .fit_rows()
         .debug_selector(selector)
         .on_activate(move |activation, window, cx| {
             let Some(command) = activation.action().clone() else {
