@@ -2,14 +2,19 @@
 //! embedded at build time, ending with a link to the release on GitHub. The notes count as read
 //! once the sheet opens, not while it waits behind another modal.
 //!
-//! Opening the sheet from anywhere, the title-bar step, Help or the menu-bar menu, ends the title
-//! bar's What's New step, because the step lasts while the notes are unread. Every surface opens
-//! it with [`open_whats_new`].
+//! Opening the sheet from anywhere, the title-bar step, Help, the menu-bar menu or Settings, ends
+//! the title bar's What's New step, because the step lasts while the notes are unread. The sheet
+//! opens on the window the person asked from and activates it, so its owner is the active window
+//! and Done answers the keyboard. A surface without a window of its own opens it with
+//! [`open_whats_new`], and a window opens it with [`open_whats_new_in`].
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui::prelude::*;
-use gpui::{App, Context, Global, SharedString, Window, accesskit, actions, div};
+use gpui::{
+    AnyWindowHandle, App, Context, Global, SharedString, Window, WindowHandle, accesskit, actions,
+    div,
+};
 use spaceterm_ui::{
     Button, ButtonSize, ButtonVariant, Dialog, DialogActionRequest, DialogCloseDecision,
     DialogInitialFocus, DialogOutcome, DialogPendingCompletion, DialogSize, ModalAction,
@@ -17,8 +22,10 @@ use spaceterm_ui::{
 };
 
 use super::{front_workspace_window, service};
+use crate::ui::WorkspaceManager;
 use crate::ui::appearance::gpui_color;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
+use crate::ui::settings_window::SettingsWindow;
 use crate::updates::release_notes::{self, NotesBlock, ReleaseNotes};
 
 actions!(spaceterm, [OpenWhatsNew]);
@@ -39,8 +46,9 @@ enum SheetAction {
     Done,
 }
 
-/// The sheet is open in some window, so asking again shows no second one.
-struct OpenSheet;
+/// The window whose sheet is open or queued. Asking again brings that window forward and
+/// shows no second sheet.
+struct OpenSheet(AnyWindowHandle);
 impl Global for OpenSheet {}
 
 pub(super) fn init(cx: &mut App) {
@@ -57,29 +65,77 @@ pub(crate) fn whats_new_menu_title() -> Option<String> {
     release_notes::embedded().map(ReleaseNotes::menu_title)
 }
 
-/// Opens the What's new sheet in the front Workspace window. The notes count as read once it
-/// opens. A build without release notes, or without a Workspace window, shows nothing.
+/// Opens the What's new sheet on the active window, or on the front Workspace window when no
+/// SpaceTerm window is active. The notes count as read once it opens. A build without release
+/// notes, or without a window to hold the sheet, shows nothing.
 pub(crate) fn open_whats_new(cx: &mut App) {
+    open(None, cx);
+}
+
+/// Opens the What's new sheet on `window`, the window the person asked from, and activates it.
+pub(crate) fn open_whats_new_in(window: AnyWindowHandle, cx: &mut App) {
+    open(Some(window), cx);
+}
+
+fn open(source: Option<AnyWindowHandle>, cx: &mut App) {
     let Some(notes) = release_notes::embedded() else {
         return;
     };
-    if cx.has_global::<OpenSheet>() {
-        return;
-    }
-    // Menu actions bubble while their window is borrowed. Open after dispatch releases it.
+    // Menu actions bubble while their window is borrowed. Open after dispatch releases it, which
+    // may bring forward the window whose sheet is open.
     cx.defer(move |cx| {
-        if cx.has_global::<OpenSheet>() {
-            return;
-        }
-        let Some(handle) = front_workspace_window(cx) else {
-            return;
-        };
         let this_year = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_secs());
-        let this_year = release_notes::year_at(this_year);
-        let _ = handle.update(cx, |_, window, cx| present(notes, this_year, window, cx));
+        if let Some(target) = sheet_window(source, cx) {
+            show(notes, target, release_notes::year_at(this_year), cx);
+        }
     });
+}
+
+/// The window that holds the sheet.
+#[derive(Clone, Copy)]
+pub(crate) enum SheetWindow {
+    Settings(WindowHandle<SettingsWindow>),
+    Workspace(WindowHandle<WorkspaceManager>),
+}
+
+/// The window the sheet opens on: `source`, the window the person asked from, else the active
+/// window, when either is Settings or a Workspace Window; otherwise the front Workspace Window.
+pub(crate) fn sheet_window(source: Option<AnyWindowHandle>, cx: &App) -> Option<SheetWindow> {
+    let asked = source.or_else(|| cx.active_window());
+    if let Some(settings) = asked.and_then(|window| window.downcast::<SettingsWindow>()) {
+        return Some(SheetWindow::Settings(settings));
+    }
+    asked
+        .and_then(|window| window.downcast::<WorkspaceManager>())
+        .or_else(|| front_workspace_window(cx))
+        .map(SheetWindow::Workspace)
+}
+
+/// Activates `target` and presents the sheet for `notes` on it, so the sheet's owner is the
+/// active window and Done answers the keyboard. While the sheet is open or queued in a window,
+/// that window comes forward instead, and a sheet whose window closed opens again.
+pub(crate) fn show(notes: &ReleaseNotes, target: SheetWindow, this_year: i32, cx: &mut App) {
+    if let Some(owner) = cx.try_global::<OpenSheet>().map(|open| open.0) {
+        if owner
+            .update(cx, |_, window, _| window.activate_window())
+            .is_ok()
+        {
+            return;
+        }
+        cx.remove_global::<OpenSheet>();
+    }
+    let _ = match target {
+        SheetWindow::Settings(handle) => handle.update(cx, |_, window, cx| {
+            window.activate_window();
+            present(notes, this_year, window, cx)
+        }),
+        SheetWindow::Workspace(handle) => handle.update(cx, |_, window, cx| {
+            window.activate_window();
+            present(notes, this_year, window, cx)
+        }),
+    };
 }
 
 fn sheet(
@@ -143,7 +199,7 @@ fn present<T: 'static>(
         .present_with_lifecycle(window, cx, on_action, on_result, on_lifecycle)
         .is_ok();
     if presented {
-        cx.set_global(OpenSheet);
+        cx.set_global(OpenSheet(window.window_handle()));
     } else {
         eprintln!("failed to present the What\u{2019}s new sheet");
     }

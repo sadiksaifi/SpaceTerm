@@ -353,6 +353,11 @@ fn desktop(action: DesktopAction, activation: Option<String>, cx: &mut App) {
             crate::ui::updates::whats_new::open_whats_new(cx);
             cx.activate(true);
         }
+        DesktopAction::Check => {
+            if let Some(service) = service {
+                service.update(cx, |updates, cx| updates.check(true, cx));
+            }
+        }
         // The menu offers no dismissal; the title bar's failure step owns it.
         DesktopAction::DismissFailure => {}
     }

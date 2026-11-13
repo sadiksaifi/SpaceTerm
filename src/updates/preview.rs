@@ -110,7 +110,8 @@ impl UpdateAdapter for PreviewUpdates {
             _ => {
                 let age = match self.scenario {
                     Scenario::Warning => super::policy::DAY + 60,
-                    Scenario::Overdue => 2 * super::policy::DAY + 60,
+                    // Past the Insist stage of the Update Ladder.
+                    Scenario::Overdue => 7 * super::policy::DAY + 60,
                     _ => 0,
                 };
                 vec![

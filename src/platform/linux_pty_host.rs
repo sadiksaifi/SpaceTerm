@@ -250,7 +250,7 @@ fn terminal_read_wait(pid: i32, slave: &std::path::Path) -> io::Result<bool> {
         let mut descriptors = vec![0_u8; count as usize * 8];
         std::fs::File::open(format!("/proc/{pid}/mem"))?
             .read_exact_at(&mut descriptors, arg(0)?)?;
-        for entry in descriptors.chunks_exact(8) {
+        for entry in descriptors.as_chunks::<8>().0 {
             let fd = i32::from_ne_bytes(entry[..4].try_into().expect("poll descriptor"));
             let events = i16::from_ne_bytes(entry[4..6].try_into().expect("poll events"));
             if fd >= 0 && events & libc::POLLIN != 0 && is_terminal(fd)? {

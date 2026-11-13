@@ -9,18 +9,18 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use spaceterm_core::protocol::capability::Unavailable;
-use spaceterm_core::update::facts::Version;
+use spaceterm_core::update::facts::{CheckFailure, UpdateCheck, Version};
 use spaceterm_core::update::ordering::Floor;
 
 use crate::updates::UpdateState;
 use crate::updates::confirm::previewed;
-use crate::updates::copy::{Platform, dialogs, pane, rows};
+use crate::updates::copy::{Platform, dialogs, pane, rows, settings};
 use crate::updates::ladder::Stage;
-use crate::updates::machines::{ActionFailure, MachineAction, MachinePreview};
+use crate::updates::machines::{ActionFailure, Asked, MachineAction, MachineLink, MachinePreview};
 use crate::updates::state::tests::{
     LOCAL, NOW, PENGUIN, app, app_states, machine_variants, waiting,
 };
-use crate::updates::state::{Command, Dismissed, Marks, RowView, UpdateView};
+use crate::updates::state::{Checked, Command, Dismissed, Marks, RowView, UpdateView};
 
 const DECK: &str = "src/updates/copy/deck.txt";
 
@@ -40,6 +40,8 @@ struct Deck {
     dialogs: BTreeSet<String>,
     /// What a Pane says after a restart ended or spared its Terminal Session.
     pane: BTreeSet<String>,
+    /// Each item's menu in Settings > Updates.
+    menus: BTreeSet<String>,
     /// Every rendered field, with its role and the Machines named in its view.
     fields: Vec<(Role, Vec<String>, String)>,
     /// The Machines of the view being rendered.
@@ -104,12 +106,46 @@ impl Deck {
         ));
     }
 
+    fn menu(&mut self, name: &str, entries: Vec<settings::ItemEntry>) {
+        let mut line = format!("{name} |");
+        for entry in entries {
+            let role = if entry.command.is_some() {
+                Role::Label
+            } else {
+                Role::Text
+            };
+            self.field(role, &entry.label);
+            if entry.separator_before {
+                line.push_str(" ---");
+            }
+            let state = match (&entry.command, entry.enabled) {
+                (None, _) => "info: ",
+                (Some(_), false) => "disabled: ",
+                (Some(_), true) => "",
+            };
+            line.push_str(&format!(" [{state}{}]", entry.label));
+        }
+        self.menus.insert(line);
+    }
+
     fn view(&mut self, view: &UpdateView) {
         self.names = view
             .machines
             .iter()
             .map(|row| row.name.to_string())
             .collect();
+        let app = view.app_row();
+        // This build carries the notes of the running version, 0.11.4.
+        self.menu(
+            &app.name,
+            settings::app_menu(&view.app, &app, Some(&view.app.running), true),
+        );
+        for (machine, row) in view.machines.iter().zip(view.machine_rows()) {
+            self.menu(
+                &row.name,
+                settings::machine_menu(machine, &row, Some(&view.app.running)),
+            );
+        }
         self.row(view.app_row());
         view.machine_rows()
             .into_iter()
@@ -153,10 +189,17 @@ impl Deck {
                 &self.pane,
                 Section::Alert,
             ),
+            (
+                "Settings > Updates menus: item | [entry]",
+                &self.menus,
+                Section::Menu,
+            ),
         ] {
             out.push_str(&format!("\n## {heading}\n\n"));
-            let lines: BTreeSet<String> =
-                lines.iter().map(|line| normalize(line, section)).collect();
+            let lines: BTreeSet<String> = lines
+                .iter()
+                .map(|line| normalize(line, section, Platform::HOST))
+                .collect();
             for line in lines {
                 out.push_str(&line);
                 out.push('\n');
@@ -205,30 +248,53 @@ const PLATFORM_STRINGS: [(&str, PlatformString); 4] = [
 enum Section {
     Row,
     Alert,
+    Menu,
 }
 
 /// `line` with this host's platform-dependent strings as their tokens. The section's own string
 /// goes first, so the same line reads the same on every platform.
-fn normalize(line: &str, section: Section) -> String {
+fn normalize(line: &str, section: Section, platform: Platform) -> String {
     let mut strings = PLATFORM_STRINGS.to_vec();
-    if section == Section::Row {
+    if section != Section::Alert {
         strings.sort_by_key(|(token, _)| *token != "{cant-replace-status}");
+    }
+    // Menu check history describes the target's system, not the desktop host's OS.
+    if section == Section::Menu {
+        strings.retain(|(token, _)| *token != "{newer-system}");
     }
     strings
         .into_iter()
         .fold(line.to_owned(), |line, (token, render)| {
-            line.replace(&render(Platform::HOST), token)
+            line.replace(&render(platform), token)
         })
+}
+
+#[test]
+fn menu_check_history_keeps_its_platform_neutral_system_wording() {
+    let line = "The newest release needs a newer system than penguin\u{2019}s";
+    for platform in [Platform::Mac, Platform::Linux] {
+        assert_eq!(normalize(line, Section::Menu, platform), line);
+        assert_eq!(
+            normalize(
+                &format!("Needs a newer {}", rows::system(platform)),
+                Section::Row,
+                platform
+            ),
+            "Needs a {newer-system}"
+        );
+    }
 }
 
 fn build() -> Deck {
     let mut deck = Deck::default();
     let dismissed = Dismissed::new();
     let deferred = Default::default();
+    let checked = Default::default();
     let marks = Marks {
         dismissed: &dismissed,
         deferred: &deferred,
         pushes_held: false,
+        checked: &checked,
     };
     let fleets: Vec<Vec<_>> = [
         (LOCAL, "This Mac"),
@@ -267,6 +333,105 @@ fn build() -> Deck {
     let state = UpdateState::UpToDate;
     for fleet in &fleets {
         deck.view(&UpdateView::new(app(&state), fleet, marks, NOW));
+    }
+    // Checks a person asked for here: running, then succeeded or failed.
+    for state in [
+        UpdateState::Checking,
+        UpdateState::UpToDate,
+        UpdateState::Failed {
+            error: crate::updates::UpdateError::Check,
+        },
+    ] {
+        for checked_ago in [None, Some(0), Some(5 * 60)] {
+            for pending in [None, Some("0.11.5")] {
+                let mut facts = app(&state);
+                facts.manual_check = true;
+                facts.checked_ago = checked_ago;
+                facts.pending = pending;
+                deck.view(&UpdateView::new(facts, &[], marks, NOW));
+            }
+        }
+    }
+    let state = UpdateState::UpToDate;
+    for (id, name) in [(LOCAL, "This Mac"), (PENGUIN, "penguin")] {
+        let mut settled = waiting(id, name, 1, false, NOW);
+        settled.facts.as_mut().unwrap().pending = None;
+        let mut failing = settled.clone();
+        failing.facts.as_mut().unwrap().check = UpdateCheck::Failing {
+            since: NOW - 3_600,
+            last_success: Some(NOW - 7_200),
+            reason: CheckFailure::Network,
+        };
+        let mut running = settled.clone();
+        running.asked = Some(Asked::Check);
+        let mut connecting = running.clone();
+        connecting.link = MachineLink::Offline { since: NOW };
+        for update in [&settled, &failing] {
+            let check = update.facts.as_ref().unwrap().check.clone();
+            for outcome in [
+                Checked::Finished(check.clone()),
+                Checked::Refused(Some(check)),
+            ] {
+                let checked = std::collections::HashMap::from([(id, outcome)]);
+                let marks = Marks {
+                    checked: &checked,
+                    ..marks
+                };
+                deck.view(&UpdateView::new(
+                    app(&state),
+                    std::slice::from_ref(update),
+                    marks,
+                    NOW,
+                ));
+            }
+        }
+        // Connect and Check that reached no route.
+        let unconnected = std::collections::HashMap::from([(id, Checked::Unconnected)]);
+        let mut offline = connecting.clone();
+        offline.asked = None;
+        deck.view(&UpdateView::new(
+            app(&state),
+            std::slice::from_ref(&offline),
+            Marks {
+                checked: &unconnected,
+                ..marks
+            },
+            NOW,
+        ));
+        for update in [running, connecting] {
+            deck.view(&UpdateView::new(app(&state), &[update], marks, NOW));
+        }
+        // A check the person asked for on a Core whose update waits.
+        let mut waiting_check = waiting(id, name, 1, false, NOW);
+        waiting_check.asked = Some(Asked::Check);
+        deck.view(&UpdateView::new(
+            app(&state),
+            std::slice::from_ref(&waiting_check),
+            marks,
+            NOW,
+        ));
+        waiting_check.asked = None;
+        let observed = waiting_check.facts.as_ref().unwrap().check.clone();
+        let checked = std::collections::HashMap::from([(id, Checked::Refused(Some(observed)))]);
+        let marks = Marks {
+            checked: &checked,
+            ..marks
+        };
+        deck.view(&UpdateView::new(app(&state), &[waiting_check], marks, NOW));
+        for reason in [
+            CheckFailure::Proxy,
+            CheckFailure::Verification,
+            CheckFailure::SystemTooOld,
+            CheckFailure::ClockBehind,
+        ] {
+            let mut update = failing.clone();
+            update.facts.as_mut().unwrap().check = UpdateCheck::Failing {
+                since: NOW - 3_600,
+                last_success: None,
+                reason,
+            };
+            deck.view(&UpdateView::new(app(&state), &[update], marks, NOW));
+        }
     }
     let version = |text| Version::parse(text).unwrap();
     for (id, name) in [(LOCAL, "This Mac"), (PENGUIN, "penguin")] {

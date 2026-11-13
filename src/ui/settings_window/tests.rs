@@ -1253,7 +1253,6 @@ fn every_appearance_row_reset_restores_only_its_field(cx: &mut TestAppContext) {
             | SettingsRowId::CommandLineTool
             | SettingsRowId::UpdateStatus
             | SettingsRowId::CoreUpdates
-            | SettingsRowId::UpdateCheckNow
             | SettingsRowId::AutomaticUpdateDownloads
             | SettingsRowId::UpdateCheckInterval
             | SettingsRowId::Shortcut(_)
@@ -2496,12 +2495,13 @@ fn assert_the_footer_closes_only_the_content_column(
         let footer = cx.debug_bounds("settings-footer").unwrap();
         let status = cx.debug_bounds("settings-save-status").unwrap();
         // The heading ends on the content gutter. On Servers and Git the server picker sits
-        // beside it and its chevron ends on the gutter instead.
+        // beside it and its chevron ends on the gutter instead, as Check Now does on Updates.
         let gutter = cx
             .debug_bounds(leaked_owned(format!(
                 "{}-disclosure",
                 super::machine_list::PICKER_SELECTOR
             )))
+            .or_else(|| cx.debug_bounds(super::updates::CHECK_NOW_SELECTOR))
             .or_else(|| cx.debug_bounds(leaked_owned(format!("{}-heading", section.selector()))))
             .unwrap();
         assert_eq!(
@@ -2791,8 +2791,6 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::CoreUpdates => return None,
             SettingsRowId::AutomaticUpdateDownloads => "settings-automatic-update-downloads",
             SettingsRowId::UpdateCheckInterval => "settings-update-check-interval",
-            // Check Now asks connected Cores too, so it shows without a desktop update service.
-            SettingsRowId::UpdateCheckNow => "settings-row-update-check-now-control",
             SettingsRowId::SettingsFile => "settings-file-frame",
             SettingsRowId::ExportSettings => "settings-document-export",
             SettingsRowId::ImportSettings => "settings-import",

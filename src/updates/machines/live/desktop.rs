@@ -231,6 +231,13 @@ impl Machine for LocalMachine {
 
     /// The account-local lane has no backoff: every reach dials again.
     fn retry(&self) {}
+
+    /// The account-local lane needs no connection: every reach dials it.
+    fn connect(&self) {}
+
+    fn connecting(&self) -> bool {
+        false
+    }
 }
 
 /// What the route registry reports about one Saved Connection.
@@ -241,6 +248,8 @@ pub(crate) trait Routes: Send + Sync {
     fn lane(&self, route: &DirectRouteId) -> Option<Arc<dyn RouteLane>>;
     /// Tries the route again now, without the backoff its earlier failures earned.
     fn retry_now(&self, route: &DirectRouteId);
+    /// Connects the saved route, marking it active, as the person's Connect does.
+    fn connect(&self, route: &DirectRouteId);
 }
 
 /// A route's service lane, and the work version its Core offered at admission.
@@ -261,6 +270,10 @@ impl Routes for RegistryRoutes {
 
     fn retry_now(&self, route: &DirectRouteId) {
         self.0.retry_now(route);
+    }
+
+    fn connect(&self, route: &DirectRouteId) {
+        self.0.connect(route);
     }
 }
 
@@ -323,6 +336,39 @@ impl Machine for PairedMachine {
         for route in &self.ids {
             self.routes.retry_now(route);
         }
+    }
+
+    /// Connects each route the person could Connect or Resume on the Machine card. A connected
+    /// or connecting route is left as it is, and a route its Core revoked or refused as
+    /// incompatible offers no connection.
+    fn connect(&self) {
+        for route in &self.ids {
+            match self.routes.status(route) {
+                Some(
+                    DirectRouteStatus::Connected
+                    | DirectRouteStatus::Connecting
+                    | DirectRouteStatus::Refused(
+                        RefusalReason::Revoked | RefusalReason::Incompatible,
+                    ),
+                )
+                | None => {}
+                Some(DirectRouteStatus::Reconnecting) => self.routes.retry_now(route),
+                Some(_) => self.routes.connect(route),
+            }
+        }
+    }
+
+    fn connecting(&self) -> bool {
+        self.ids.iter().any(|route| {
+            matches!(
+                self.routes.status(route),
+                Some(
+                    DirectRouteStatus::Connecting
+                        | DirectRouteStatus::Reconnecting
+                        | DirectRouteStatus::Connected
+                )
+            )
+        })
     }
 }
 
@@ -772,6 +818,8 @@ mod tests {
         routes: Vec<(DirectRouteId, DirectRouteStatus, Option<u16>)>,
         /// Each route `retry_now` was called for, in order.
         retried: Mutex<Vec<DirectRouteId>>,
+        /// Each route `connect` was called for, in order.
+        connected: Mutex<Vec<DirectRouteId>>,
     }
 
     impl Routes for FakeRoutes {
@@ -789,6 +837,10 @@ mod tests {
 
         fn retry_now(&self, route: &DirectRouteId) {
             self.retried.lock().unwrap().push(*route);
+        }
+
+        fn connect(&self, route: &DirectRouteId) {
+            self.connected.lock().unwrap().push(*route);
         }
     }
 
@@ -819,6 +871,36 @@ mod tests {
         let machine = paired_with(Arc::clone(&routes));
         machine.retry();
         assert_eq!(*routes.retried.lock().unwrap(), [[1; 32], [2; 32]]);
+    }
+
+    /// Connect and Check connects each route the Machine card would offer Connect or Resume
+    /// on, including one the person disconnected. It leaves a connected or connecting route,
+    /// retries a reconnecting one, and connects no route its Core revoked or refused as
+    /// incompatible.
+    #[test]
+    fn connecting_a_paired_machine_connects_only_routes_the_person_could_connect() {
+        let routes = Arc::new(FakeRoutes {
+            routes: vec![
+                ([1; 32], DirectRouteStatus::Disconnected, Some(1)),
+                ([2; 32], DirectRouteStatus::Connected, Some(1)),
+                ([3; 32], DirectRouteStatus::Connecting, Some(1)),
+                ([4; 32], DirectRouteStatus::Reconnecting, Some(1)),
+                (
+                    [5; 32],
+                    DirectRouteStatus::Refused(RefusalReason::Revoked),
+                    Some(1),
+                ),
+                ([6; 32], INCOMPATIBLE, Some(1)),
+                ([7; 32], DirectRouteStatus::NeedsInteraction, Some(1)),
+            ],
+            ..FakeRoutes::default()
+        });
+        let machine = paired_with(Arc::clone(&routes));
+        machine.connect();
+        assert_eq!(*routes.connected.lock().unwrap(), [[1; 32], [7; 32]]);
+        assert_eq!(*routes.retried.lock().unwrap(), [[4; 32]]);
+        assert!(machine.connecting());
+        assert!(!paired(vec![([1; 32], DirectRouteStatus::Disconnected, Some(1))]).connecting());
     }
 
     const INCOMPATIBLE: DirectRouteStatus = DirectRouteStatus::Refused(RefusalReason::Incompatible);

@@ -56,6 +56,11 @@ fn perform_now(command: Command, presenter: Presenter, cx: &mut App) {
             }
         }
         Command::Desktop(DesktopAction::WhatsNew) => whats_new::open_whats_new(cx),
+        Command::Desktop(DesktopAction::Check) => {
+            if let Some(updates) = service(cx) {
+                updates.update(cx, |updates, cx| updates.check(true, cx));
+            }
+        }
         Command::Desktop(DesktopAction::DismissFailure) => {
             if let Some(updates) = service(cx) {
                 updates.update(cx, |updates, cx| updates.dismiss_failure(cx));

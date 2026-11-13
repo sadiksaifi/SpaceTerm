@@ -327,6 +327,7 @@ mod tests {
             dismissed: &Dismissed::new(),
             deferred: &HashMap::new(),
             pushes_held: false,
+            checked: &HashMap::new(),
         };
         let pill = UpdateView::new(facts, &[], marks, NOW)
             .pill()
@@ -390,6 +391,7 @@ mod tests {
                 dismissed: &Dismissed::new(),
                 deferred: &HashMap::new(),
                 pushes_held: false,
+                checked: &HashMap::new(),
             };
             let pill = UpdateView::new(facts, &[], marks, NOW)
                 .pill()

@@ -1,33 +1,42 @@
-//! The Updates section: the SpaceTerm row, the `SpaceTerm Core` heading with one row per
-//! Machine, and update preferences. Every row is the one the title-bar list, the Machine card
-//! and the menu bar extra show, from [`crate::updates::state`]. Listing opens no connection
-//! (ADR 0039). [`crate::updates`] owns update policy and state.
+//! The Updates section: SpaceTerm's card, with its row and its own update preferences, then the
+//! `SpaceTerm Core` card with one row per Machine. Each row is the one the title-bar list, the
+//! Machine card and the menu bar extra show, from [`crate::updates::state`]: one status line and
+//! the row's update action, plus a menu of that item's last check, a check of that item alone
+//! and its release notes. Check Now beside the page title checks SpaceTerm and each connected
+//! Machine. Listing opens no connection (ADR 0039). [`crate::updates`] owns update policy and
+//! state.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, ElementId, Entity, SharedString, Window};
+use gpui::{AnyElement, AnyWindowHandle, App, Context, ElementId, Entity, SharedString, Window};
 use spaceterm_ui::{
-    Button, ButtonSize, ButtonVariant, SegmentedControl, SegmentedOption, Switch, ToggleSize,
+    AnchoredAlignment, AnchoredPlacement, AnchoredPlacementConfig, Button, ButtonSize,
+    ButtonVariant, Icon, IconName, Menu, MenuEntry, SegmentedControl, SegmentedOption, Switch,
+    ToggleSize,
 };
 
 use super::{SettingsRowId, SettingsWindow};
 use crate::settings::SettingsDocument;
 use crate::ui::appearance::ChromeAppearance;
+use crate::ui::chrome_icons::IconRole;
 use crate::ui::sidebar_window::form::{CaptionTone, FormRow};
-use crate::updates::copy::settings as copy;
+use crate::updates::copy::settings::{self as copy, ItemEntry};
 use crate::updates::machines::store::{MachineUpdates, Surface};
-use crate::updates::machines::{MachineAction, MachineLink, MachineUpdate};
+use crate::updates::machines::{Asked, MachineAction, MachineLink, MachineUpdate};
 use crate::updates::policy::{CheckInterval, UpdatePreferences};
-use crate::updates::state::{self, RowAction, RowView};
+use crate::updates::state::{
+    self, AskedCheck, ItemCommand, RowAction, RowTone, Target, UpdateView,
+};
 use crate::updates::{ApplicationUpdates, UpdateService, UpdateState};
 
 /// The SpaceTerm row's label: the product, whose version leads its description.
 pub(super) const SPACETERM_LABEL: &str = copy::SPACETERM;
 
+/// Check Now, beside the page title.
 pub(super) const CHECK_NOW_SELECTOR: &str = "settings-update-check-now";
-/// The Check Now row's content, which spans the row with the button at its trailing edge.
-pub(super) const CHECK_NOW_CONTROL_SELECTOR: &str = "settings-row-update-check-now-control";
-/// The SpaceTerm row's action, such as Relaunch to Update or What's New.
+/// The SpaceTerm row's update action, such as Relaunch to Update or Download.
 pub(super) const RESTART_SELECTOR: &str = "settings-update-restart";
+/// The SpaceTerm row's menu.
+pub(super) const APP_MENU_SELECTOR: &str = "settings-update-status-menu";
 /// Each Machine row under `SpaceTerm Core`, numbered in list order.
 pub(super) const MACHINE_ROW_SELECTOR: &str = "settings-row-core-update";
 
@@ -37,38 +46,19 @@ pub(super) const MACHINE_ROW_SELECTOR: &str = "settings-row-core-update";
 pub(super) struct UpdateStatusPresentation {
     /// "{v}" or "{v} · {status}", as every update surface reads it.
     pub(super) summary: SharedString,
+    /// The color the status line reads in.
+    pub(super) tone: CaptionTone,
     /// The row's own action, if any.
     pub(super) action: Option<RowAction>,
 }
 
-/// How long ago the service last completed a check. A stamp after `now` reads as just now.
-pub(super) fn last_checked(last_check: Option<u64>, now: u64) -> String {
-    const MINUTE: u64 = 60;
-    const HOUR: u64 = 60 * MINUTE;
-    const DAY: u64 = 24 * HOUR;
-    let Some(last_check) = last_check else {
-        return "Not checked yet".to_owned();
-    };
-    let plural = |count: u64, unit: &str| {
-        if count == 1 {
-            format!("1 {unit}")
-        } else {
-            format!("{count} {unit}s")
-        }
-    };
-    match now.saturating_sub(last_check) {
-        age if age < MINUTE => "Last checked just now".to_owned(),
-        age if age < HOUR => format!("Last checked {} ago", plural(age / MINUTE, "minute")),
-        age if age < DAY => format!("Last checked {} ago", plural(age / HOUR, "hour")),
-        age if age < 2 * DAY => "Last checked yesterday".to_owned(),
-        age => format!("Last checked {} ago", plural(age / DAY, "day")),
+/// The color a row's status line reads in.
+fn caption_tone(tone: RowTone) -> CaptionTone {
+    match tone {
+        RowTone::Plain => CaptionTone::Guidance,
+        RowTone::Warning => CaptionTone::Warning,
+        RowTone::Failure => CaptionTone::Error,
     }
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 /// The desktop update service, when this build updates itself.
@@ -89,7 +79,7 @@ fn listed(cx: &App) -> Vec<MachineUpdate> {
 
 /// Checks for a newer SpaceTerm, when this build updates itself, and asks each connected
 /// Machine's SpaceTerm Core to check, over the connections SpaceTerm already holds. A Machine it
-/// isn't connected to is left alone.
+/// isn't connected to is left alone: its own menu offers Connect and Check.
 pub(super) fn check_now(cx: &mut App) {
     if let Some(updates) = service(cx) {
         updates.update(cx, |updates, cx| updates.check(true, cx));
@@ -111,9 +101,55 @@ pub(super) fn check_now(cx: &mut App) {
     });
 }
 
-/// Whether SpaceTerm's own check runs now.
-fn checking(cx: &App) -> bool {
-    service(cx).is_some_and(|updates| matches!(updates.read(cx).state(), UpdateState::Checking))
+/// Whether a check Check Now started still runs: SpaceTerm's own, or a connected Machine's.
+fn checking(view: &UpdateView, cx: &App) -> bool {
+    let app = view.app.asked_check == Some(AskedCheck::Running)
+        || service(cx).is_some_and(|updates| {
+            matches!(updates.read(cx).state(), UpdateState::Checking)
+                && updates.read(cx).manual_check()
+        });
+    app || listed(cx)
+        .iter()
+        .any(|update| update.link == MachineLink::Connected && update.asked == Some(Asked::Check))
+}
+
+/// Performs an entry of an item's menu. None of them updates anything.
+fn perform_item(command: ItemCommand, window: AnyWindowHandle, cx: &mut App) {
+    match command {
+        ItemCommand::Check(Target::App) => {
+            if let Some(updates) = service(cx) {
+                updates.update(cx, |updates, cx| updates.check(true, cx));
+            }
+        }
+        ItemCommand::Check(Target::Machine(machine)) => {
+            if let Some(store) = MachineUpdates::global(cx) {
+                store.update(cx, |store, cx| {
+                    store.perform(machine, MachineAction::CheckAgain, Surface::Settings, cx)
+                });
+            }
+        }
+        ItemCommand::ConnectAndCheck(machine) => {
+            if let Some(store) = MachineUpdates::global(cx) {
+                store.update(cx, |store, cx| {
+                    store.perform(
+                        machine,
+                        MachineAction::ConnectAndCheck,
+                        Surface::Settings,
+                        cx,
+                    )
+                });
+            }
+        }
+        ItemCommand::WhatsNew => crate::ui::updates::whats_new::open_whats_new_in(window, cx),
+        ItemCommand::ReleasePage(version) => {
+            cx.open_url(&crate::updates::release_notes::release_url(&version));
+        }
+    }
+}
+
+/// The version this build carries release notes for, if any.
+fn embedded_notes() -> Option<&'static str> {
+    crate::updates::release_notes::embedded().map(|notes| notes.version())
 }
 
 impl SettingsWindow {
@@ -121,66 +157,149 @@ impl SettingsWindow {
         let row = state::current(cx).app_row();
         UpdateStatusPresentation {
             summary: copy::line(row.version.as_deref(), row.status.as_deref()).into(),
+            tone: caption_tone(row.tone),
             action: row.action,
         }
     }
 
-    /// The SpaceTerm row's control: its action, if any.
-    pub(super) fn render_update_status(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let owner = cx.weak_entity();
-        let status = self.update_status(cx);
-        let button = status.action.map(|action| {
-            let command = action.command;
-            Button::new(RESTART_SELECTOR, action.label)
-                .accessibility_description(status.summary.clone())
-                .tab_stop(true)
-                .variant(ButtonVariant::Outline)
-                .size(ButtonSize::Regular)
-                .debug_selector(RESTART_SELECTOR)
-                .on_activate(move |_, window, cx| {
-                    let command = command.clone();
-                    let _ = owner.update(cx, |settings, cx| {
-                        settings.perform_update_command(command, window.window_handle(), cx)
-                    });
-                })
-        });
-        gpui::div()
-            .debug_selector(|| "settings-row-update-status-control".to_owned())
-            .flex()
-            .gap_2()
-            .children(button)
+    /// Check Now, beside the page title. While a check it started runs, it waits.
+    pub(super) fn render_update_check_now(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let view = state::current(cx);
+        Button::new(CHECK_NOW_SELECTOR, copy::CHECK_NOW)
+            .accessibility_description(copy::CHECK_NOW_DESCRIPTION)
+            .tab_stop(true)
+            .variant(ButtonVariant::Outline)
+            .size(ButtonSize::Regular)
+            .disabled(checking(&view, cx))
+            .debug_selector(CHECK_NOW_SELECTOR)
+            .on_activate(|_, _, cx| check_now(cx))
             .into_any_element()
     }
 
-    /// Check Now, after the interval. It is offered with or without a desktop update service,
-    /// because it also asks each connected Machine's SpaceTerm Core to check.
-    pub(super) fn render_update_check_now(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let last = service(cx)
-            .map(|updates| last_checked(updates.read(cx).last_check(), unix_now()))
-            .unwrap_or_default();
-        gpui::div()
-            .debug_selector(|| CHECK_NOW_CONTROL_SELECTOR.to_owned())
-            .flex()
-            .w_full()
-            .justify_end()
-            .child(
-                Button::new(CHECK_NOW_SELECTOR, copy::CHECK_NOW)
-                    .accessibility_description(SharedString::from(format!(
-                        "{} {last}",
-                        copy::CHECK_NOW_DESCRIPTION
-                    )))
-                    .tab_stop(true)
-                    .variant(ButtonVariant::Outline)
-                    .size(ButtonSize::Regular)
-                    .disabled(checking(cx))
-                    .debug_selector(CHECK_NOW_SELECTOR)
-                    .on_activate(|_, _, cx| check_now(cx)),
+    /// An item's menu: readable lines first, then its entries.
+    fn render_item_menu(
+        &self,
+        selector: String,
+        name: &str,
+        entries: Vec<ItemEntry>,
+        appearance: &ChromeAppearance,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut items = Vec::new();
+        for entry in entries {
+            if entry.separator_before {
+                items.push(MenuEntry::separator());
+            }
+            let item = MenuEntry::action(entry.label, entry.command.clone())
+                .disabled(!entry.enabled)
+                .debug_selector(format!("{selector}-{}", entry.selector));
+            items.push(if entry.command.is_some() {
+                item
+            } else {
+                item.informational()
+            });
+        }
+        let owner = cx.weak_entity();
+        let icon_size = appearance.icons.metrics(IconRole::Control).glyph_size;
+        Menu::new(
+            ElementId::from(SharedString::from(selector.clone())),
+            SharedString::from(copy::item_menu_label(name)),
+            items,
+        )
+        .icon_trigger(move |foreground| {
+            Icon::new(IconName::Ellipsis, icon_size, foreground).into_any_element()
+        })
+        .placement(AnchoredPlacementConfig::new(
+            AnchoredPlacement::Bottom,
+            AnchoredAlignment::End,
+        ))
+        // Every entry reads in full: the menu holds what the row's one line leaves out.
+        .fit_rows()
+        .debug_selector(selector)
+        .on_activate(move |activation, window, cx| {
+            let Some(command) = activation.action().clone() else {
+                return;
+            };
+            let handle = window.window_handle();
+            // A sheet the entry opens appears after the menu closes.
+            let owner = owner.clone();
+            window.defer(cx, move |_, cx| {
+                if owner.upgrade().is_some() {
+                    perform_item(command, handle, cx);
+                }
+            });
+        })
+        .into_any_element()
+    }
+
+    /// A row's update action and its menu, side by side.
+    fn render_item_controls(
+        &self,
+        selector: &str,
+        action: Option<(RowAction, SharedString)>,
+        menu: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let owner = cx.weak_entity();
+        let button = action.map(|(action, description)| {
+            let command = action.command;
+            Button::new(
+                ElementId::from(SharedString::from(selector.to_owned())),
+                action.label,
             )
+            .accessibility_description(description)
+            .tab_stop(true)
+            .variant(ButtonVariant::Outline)
+            .size(ButtonSize::Regular)
+            .debug_selector(selector.to_owned())
+            .on_activate(move |_, window, cx| {
+                let command = command.clone();
+                let _ = owner.update(cx, |settings, cx| {
+                    settings.perform_update_command(command, window.window_handle(), cx)
+                });
+            })
+        });
+        gpui::div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .children(button)
+            .child(menu)
+            .into_any_element()
+    }
+
+    /// The SpaceTerm row's controls: its update action, if any, and its menu.
+    pub(super) fn render_update_status(
+        &mut self,
+        appearance: &ChromeAppearance,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let view = state::current(cx);
+        let row = view.app_row();
+        let summary = SharedString::from(copy::line(row.version.as_deref(), row.status.as_deref()));
+        let entries = copy::app_menu(&view.app, &row, embedded_notes(), service(cx).is_some());
+        let menu = self.render_item_menu(
+            APP_MENU_SELECTOR.to_owned(),
+            SPACETERM_LABEL,
+            entries,
+            appearance,
+            cx,
+        );
+        let controls = self.render_item_controls(
+            RESTART_SELECTOR,
+            row.action.map(|action| (action, summary)),
+            menu,
+            cx,
+        );
+        gpui::div()
+            .debug_selector(|| "settings-row-update-status-control".to_owned())
+            .child(controls)
             .into_any_element()
     }
 
     /// Each Machine's update row, local first, then store order.
-    pub(super) fn update_machine_rows(&self, cx: &App) -> Vec<RowView> {
+    #[cfg(test)]
+    pub(super) fn update_machine_rows(&self, cx: &App) -> Vec<state::RowView> {
         let view = state::current(cx);
         listed(cx)
             .into_iter()
@@ -189,16 +308,23 @@ impl SettingsWindow {
     }
 
     /// The rows under `SpaceTerm Core`: one per Machine, local first, then store order, each
-    /// with its version and status and its action. Never empty, so the catalog row keeps a
-    /// place: with no Machine known it says so.
+    /// with one status line, its update action and its menu. Never empty, so the catalog row
+    /// keeps a place: with no Machine known it says so.
     pub(super) fn render_update_machine_rows(
         &mut self,
         appearance: &ChromeAppearance,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let rows = self.update_machine_rows(cx);
-        if rows.is_empty() {
+        let view = state::current(cx);
+        let machines: Vec<_> = listed(cx)
+            .into_iter()
+            .filter_map(|update| {
+                let row = view.machine_row(update.machine)?;
+                Some((view.machine(update.machine)?.clone(), row))
+            })
+            .collect();
+        if machines.is_empty() {
             return vec![
                 FormRow::new(
                     SettingsRowId::CoreUpdates.descriptor().selector,
@@ -209,45 +335,35 @@ impl SettingsWindow {
                 .into_any_element(),
             ];
         }
-        rows.into_iter()
+        machines
+            .into_iter()
             .enumerate()
-            .map(|(index, row)| {
+            .map(|(index, (machine, row))| {
                 let selector = if index == 0 {
                     SettingsRowId::CoreUpdates.descriptor().selector.to_owned()
                 } else {
                     format!("{MACHINE_ROW_SELECTOR}-{index}")
                 };
-                let owner = cx.weak_entity();
-                let control = row.action.clone().map(|action| {
-                    let command = action.command;
-                    Button::new(
-                        ElementId::from(SharedString::from(format!("{selector}-action"))),
-                        action.label,
-                    )
-                    .accessibility_description(row.accessibility.clone())
-                    .tab_stop(true)
-                    .variant(ButtonVariant::Outline)
-                    .size(ButtonSize::Regular)
-                    .debug_selector(format!("{selector}-action"))
-                    .on_activate(move |_, window, cx| {
-                        let command = command.clone();
-                        let _ = owner.update(cx, |settings, cx| {
-                            settings.perform_update_command(command, window.window_handle(), cx)
-                        });
-                    })
-                    .into_any_element()
-                });
+                let entries = copy::machine_menu(&machine, &row, embedded_notes());
+                let menu = self.render_item_menu(
+                    format!("{selector}-menu"),
+                    &row.name,
+                    entries,
+                    appearance,
+                    cx,
+                );
+                let action = row
+                    .action
+                    .clone()
+                    .map(|action| (action, row.accessibility.clone()));
+                let controls =
+                    self.render_item_controls(&format!("{selector}-action"), action, menu, cx);
                 let line = copy::line(row.version.as_deref(), row.status.as_deref());
-                let mut rendered = FormRow::new(
-                    SharedString::from(selector),
-                    row.name.clone(),
-                    control.unwrap_or_else(|| gpui::div().into_any_element()),
-                )
-                .description(SharedString::from(line));
-                if let Some(description) = row.description {
-                    rendered = rendered.message(Some((description, CaptionTone::Guidance)));
-                }
-                rendered.render(appearance, window, cx).into_any_element()
+                FormRow::new(SharedString::from(selector), row.name.clone(), controls)
+                    .caption(SharedString::from(line), caption_tone(row.tone))
+                    .status_line(None)
+                    .render(appearance, window, cx)
+                    .into_any_element()
             })
             .collect()
     }
@@ -281,7 +397,7 @@ impl SettingsWindow {
         let owner = cx.weak_entity();
         SegmentedControl::new(
             "settings-update-check-interval",
-            "Check for updates",
+            copy::CHECK_INTERVAL,
             &current,
             [
                 (CheckInterval::Hourly, "Hourly", "hourly"),
@@ -339,37 +455,4 @@ fn reset_update_preference(row: SettingsRowId, preferences: &mut UpdatePreferenc
         _ => return None,
     }
     Some(())
-}
-
-/// One line of guidance for the preference rows.
-pub(super) fn update_row_description(row: SettingsRowId) -> Option<&'static str> {
-    Some(match row {
-        SettingsRowId::AutomaticUpdateDownloads => copy::AUTOMATIC_DOWNLOADS_DESCRIPTION,
-        SettingsRowId::UpdateCheckInterval => copy::CHECK_INTERVAL_DESCRIPTION,
-        SettingsRowId::UpdateCheckNow => copy::CHECK_NOW_DESCRIPTION,
-        _ => return None,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const NOW: u64 = 1_000_000;
-
-    #[test]
-    fn last_check_should_read_as_elapsed_time_and_survive_clock_rollback() {
-        let cases = [
-            (None, "Not checked yet"),
-            (Some(NOW), "Last checked just now"),
-            (Some(NOW + 3_600), "Last checked just now"),
-            (Some(NOW - 60), "Last checked 1 minute ago"),
-            (Some(NOW - 2 * 3_600), "Last checked 2 hours ago"),
-            (Some(NOW - 30 * 3_600), "Last checked yesterday"),
-            (Some(NOW - 3 * 86_400), "Last checked 3 days ago"),
-        ];
-        for (last_check, expected) in cases {
-            assert_eq!(last_checked(last_check, NOW), expected, "{last_check:?}");
-        }
-    }
 }

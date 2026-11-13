@@ -98,12 +98,15 @@ pub(crate) fn app(state: &UpdateState) -> AppFacts<'_> {
         retrying: false,
         replacing: None,
         failure_dismissed: false,
+        manual_check: false,
+        checked_ago: None,
     }
 }
 
 struct Desk {
     dismissed: Dismissed,
     deferred: HashMap<MachineId, u64>,
+    checked: HashMap<MachineId, Checked>,
 }
 
 impl Desk {
@@ -111,6 +114,7 @@ impl Desk {
         Self {
             dismissed: Dismissed::new(),
             deferred: HashMap::new(),
+            checked: HashMap::new(),
         }
     }
 
@@ -119,6 +123,7 @@ impl Desk {
             dismissed: &self.dismissed,
             deferred: &self.deferred,
             pushes_held: false,
+            checked: &self.checked,
         }
     }
 
@@ -965,6 +970,7 @@ fn store_view(cx: &mut gpui::TestAppContext, app: &AppFacts<'_>) -> (UpdateView,
             dismissed: store.dismissed(),
             deferred: store.deferred(),
             pushes_held: false,
+            checked: store.checked(),
         };
         let view = UpdateView::new(*app, store.machines(), marks, NOW);
         let rows = view.machine_rows().len();
