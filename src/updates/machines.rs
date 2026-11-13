@@ -132,6 +132,10 @@ pub(crate) enum MachineAction {
     Install,
     Restart,
     CheckAgain,
+    /// Connects a Machine no route reaches through its Saved Connections, as the Machine card's
+    /// Connect does, then checks for an update once its service lane answers. Only a person's
+    /// explicit choice performs it; listing and Check Now never connect.
+    ConnectAndCheck,
     /// Retires `last_failure.id` on this desktop only.
     DismissFailure(u64),
     Start,

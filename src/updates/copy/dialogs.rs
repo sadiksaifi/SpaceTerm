@@ -290,7 +290,9 @@ pub(crate) fn action_failure(
     let title = match action {
         MachineAction::Install => format!("Couldn\u{2019}t Download SpaceTerm Core to {name}"),
         MachineAction::Restart => format!("Couldn\u{2019}t Restart SpaceTerm Core on {name}"),
-        MachineAction::CheckAgain => format!("Couldn\u{2019}t Check for Updates on {name}"),
+        MachineAction::CheckAgain | MachineAction::ConnectAndCheck => {
+            format!("Couldn\u{2019}t Check for Updates on {name}")
+        }
         MachineAction::Start => format!("Couldn\u{2019}t Start SpaceTerm Core on {name}"),
         MachineAction::Stop => format!("Couldn\u{2019}t Stop SpaceTerm Core on {name}"),
         MachineAction::DismissFailure(_) => return None,

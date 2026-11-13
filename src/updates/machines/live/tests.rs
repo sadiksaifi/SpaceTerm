@@ -199,20 +199,34 @@ enum Script {
 }
 
 struct ScriptedMachine {
-    script: Mutex<Script>,
+    script: Arc<Mutex<Script>>,
     lane: Arc<ScriptedLane>,
     starts: Mutex<u32>,
     retries: Mutex<u32>,
+    /// How many times the person's Connect asked its routes to connect.
+    connects: Mutex<u32>,
+    /// What Connect leads to: the script a route reaches after this long, or None when no
+    /// route connects.
+    connects_to: Mutex<Option<(Script, Duration)>>,
+    connecting: Arc<AtomicBool>,
 }
 
 impl ScriptedMachine {
     fn new(script: Script, lane: Arc<ScriptedLane>) -> Arc<Self> {
         Arc::new(Self {
-            script: Mutex::new(script),
+            script: Arc::new(Mutex::new(script)),
             lane,
             starts: Mutex::new(0),
             retries: Mutex::new(0),
+            connects: Mutex::new(0),
+            connects_to: Mutex::new(None),
+            connecting: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Makes Connect reach `script` after `delay`, while the route reads as connecting.
+    fn connects_to(&self, script: Script, delay: Duration) {
+        *self.connects_to.lock().unwrap() = Some((script, delay));
     }
 
     fn set(&self, script: Script) {
@@ -250,6 +264,26 @@ impl Machine for ScriptedMachine {
 
     fn retry(&self) {
         *self.retries.lock().unwrap() += 1;
+    }
+
+    fn connect(&self) {
+        *self.connects.lock().unwrap() += 1;
+        let Some((script, delay)) = *self.connects_to.lock().unwrap() else {
+            return;
+        };
+        self.connecting.store(true, Ordering::SeqCst);
+        // The route connects on its own thread, as the route registry's worker does.
+        let connecting = Arc::clone(&self.connecting);
+        let slot = Arc::clone(&self.script);
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            *slot.lock().unwrap() = script;
+            connecting.store(false, Ordering::SeqCst);
+        });
+    }
+
+    fn connecting(&self) -> bool {
+        self.connecting.load(Ordering::SeqCst)
     }
 }
 
@@ -1236,6 +1270,70 @@ fn removing_a_machine_does_not_leave_a_restart_wait_on_other_desktops() {
         "a removed Machine asks for no restart"
     );
     assert_eq!(*machine.retries.lock().unwrap(), 0);
+}
+
+/// Connect and Check asks the Machine's routes to connect, waits while one connects, and
+/// checks once the service lane answers, after `act` would already have returned.
+#[test]
+fn connect_and_check_checks_once_a_connecting_route_answers() {
+    let lane = ScriptedLane::new([]);
+    let machine = ScriptedMachine::new(Script::Offline, Arc::clone(&lane));
+    machine.connects_to(Script::Lane, Duration::from_millis(400));
+    let sources = ScriptedSources::with(vec![known(PENGUIN, "penguin", false, &machine)]);
+    let (adapter, events) = started(&sources, RESTART_LIMIT);
+    changed(&events, "offline machine", |update| {
+        matches!(update.link, MachineLink::Offline { .. })
+    });
+    adapter.perform(PENGUIN, MachineAction::ConnectAndCheck);
+    assert_eq!(finished(&events, &MachineAction::ConnectAndCheck), Ok(()));
+    assert_eq!(*machine.connects.lock().unwrap(), 1, "it connects once");
+    assert_eq!(
+        lane.count("check"),
+        1,
+        "the check runs after the route connects"
+    );
+}
+
+/// Connect and Check fails at once when no route connects, as after the person disconnects,
+/// and asks no Core to check.
+#[test]
+fn connect_and_check_fails_when_no_route_connects() {
+    let lane = ScriptedLane::new([]);
+    let machine = ScriptedMachine::new(Script::Offline, Arc::clone(&lane));
+    let sources = ScriptedSources::with(vec![known(PENGUIN, "penguin", false, &machine)]);
+    let (adapter, events) = started(&sources, RESTART_LIMIT);
+    changed(&events, "offline machine", |update| {
+        matches!(update.link, MachineLink::Offline { .. })
+    });
+    adapter.perform(PENGUIN, MachineAction::ConnectAndCheck);
+    assert_eq!(
+        finished(&events, &MachineAction::ConnectAndCheck),
+        Err(ActionFailure::Unreachable)
+    );
+    assert_eq!(lane.count("check"), 0);
+}
+
+/// A Machine removed while Connect and Check waits for it ends the wait without a check.
+#[test]
+fn connect_and_check_ends_when_its_machine_is_removed() {
+    let lane = ScriptedLane::new([]);
+    let machine = ScriptedMachine::new(Script::Offline, Arc::clone(&lane));
+    machine.connects_to(Script::Lane, Duration::from_secs(60));
+    let sources = ScriptedSources::with(vec![known(PENGUIN, "penguin", false, &machine)]);
+    let (adapter, events) = started(&sources, RESTART_LIMIT);
+    changed(&events, "offline machine", |update| {
+        matches!(update.link, MachineLink::Offline { .. })
+    });
+    adapter.perform(PENGUIN, MachineAction::ConnectAndCheck);
+    eventually("the routes are asked to connect", || {
+        *machine.connects.lock().unwrap() == 1
+    });
+    sources.set(Vec::new());
+    assert_eq!(
+        finished(&events, &MachineAction::ConnectAndCheck),
+        Err(ActionFailure::Unreachable)
+    );
+    assert_eq!(lane.count("check"), 0);
 }
 
 #[test]

@@ -4,7 +4,8 @@
 //! The adapter plays its scenario on timers and answers actions with these transitions:
 //! `Install` becomes `Installing` with progress over 2 seconds, then a Pending Version.
 //! `Restart` becomes `Restarting`, then `running` equals the former Pending Version after 3
-//! seconds. `CheckAgain` becomes `Checking` for 1 second, then `Succeeded`. `Stop` becomes
+//! seconds. `CheckAgain` becomes `Checking` for 1 second, then `Succeeded`. `ConnectAndCheck`
+//! connects an offline Machine after 1.5 seconds, then checks it the same way. `Stop` becomes
 //! `Stopping`, then `Stopped`. `Start` becomes `Connected`. `DismissFailure` finishes `Ok`.
 
 use std::sync::{Arc, Mutex};
@@ -39,6 +40,8 @@ const INSTALL: Duration = Duration::from_secs(2);
 const SCENARIO_INSTALL: Duration = Duration::from_secs(10);
 const RESTART: Duration = Duration::from_secs(3);
 const CHECK: Duration = Duration::from_secs(1);
+/// How long Connect and Check takes to connect an offline preview Machine.
+const CONNECT: Duration = Duration::from_millis(1500);
 const SETTLE: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -325,6 +328,23 @@ fn plan(
         return Ok(Vec::new());
     }
     match (&update.link, action) {
+        // Connect and Check connects the offline preview Machine, then checks it.
+        (MachineLink::Offline { .. }, MachineAction::ConnectAndCheck) => {
+            let connected = Box::new(|update: &mut MachineUpdate| {
+                update.link = MachineLink::Connected;
+                update.capabilities = Capabilities::fake(&Capability::ALL);
+                if update.facts.is_none() {
+                    update.facts = Some(connected_facts(
+                        Platform::LinuxX86_64,
+                        0,
+                        super::super::now(),
+                    ));
+                }
+            }) as Change;
+            let mut changes = vec![(CONNECT, connected)];
+            changes.extend(check_again());
+            return Ok(changes);
+        }
         (MachineLink::Offline { .. }, _) => return Err(ActionFailure::Unreachable),
         (MachineLink::Stopped, MachineAction::Start) => {
             return Ok(vec![(
@@ -363,7 +383,7 @@ fn plan(
                 .map_or_else(|| facts.running.clone(), |pending| pending.version.clone());
             restart_into(to)
         }
-        MachineAction::CheckAgain => check_again(),
+        MachineAction::CheckAgain | MachineAction::ConnectAndCheck => check_again(),
         MachineAction::Stop if !update.local => return Err(ActionFailure::Failed),
         MachineAction::Stop => stop(),
         MachineAction::Start | MachineAction::DismissFailure(_) => Vec::new(),

@@ -287,18 +287,26 @@ pub(crate) fn machine_menu(
             .iter()
             .map(|text| ItemEntry::info(text.to_string())),
     );
-    let (label, enabled) = match &machine.stage {
-        MachineStage::Offline => ("Connect and Check", true),
+    let (label, command, enabled) = match &machine.stage {
+        MachineStage::Offline => (
+            "Connect and Check",
+            ItemCommand::ConnectAndCheck(machine.id),
+            true,
+        ),
         MachineStage::Stopped
         | MachineStage::Restarting { .. }
-        | MachineStage::Downloading { .. } => (CHECK_ITEM, false),
-        _ => (CHECK_ITEM, true),
+        | MachineStage::Downloading { .. } => (
+            CHECK_ITEM,
+            ItemCommand::Check(Target::Machine(machine.id)),
+            false,
+        ),
+        _ => (
+            CHECK_ITEM,
+            ItemCommand::Check(Target::Machine(machine.id)),
+            true,
+        ),
     };
-    let mut check = ItemEntry::command(
-        label.to_owned(),
-        ItemCommand::Check(Target::Machine(machine.id)),
-        "check",
-    );
+    let mut check = ItemEntry::command(label.to_owned(), command, "check");
     check.enabled = enabled && machine.asked_check != Some(AskedCheck::Running);
     entries.push(check);
     let next = match &machine.stage {

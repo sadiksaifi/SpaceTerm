@@ -129,6 +129,12 @@ pub(crate) trait Machine: Send + Sync {
     /// failures earned, because its Core is expected back from a restart or was updated out
     /// of an incompatible work protocol. A route refused as incompatible is checked once more.
     fn retry(&self);
+    /// Connects each Saved Connection that is not connected, as the Machine card's Connect
+    /// does, because the person chose to connect this Machine. The account-local lane needs no
+    /// connection.
+    fn connect(&self);
+    /// Whether a route to the Machine is connecting or connected, so its lane may answer soon.
+    fn connecting(&self) -> bool;
 }
 
 /// A Machine its source knows, with every route it has.
@@ -285,6 +291,12 @@ impl MachineUpdatesAdapter for LiveMachines {
             return;
         };
         let performed = action.clone();
+        if action == MachineAction::ConnectAndCheck {
+            self.spawn_action(shared, machine, action, move |shared| {
+                connect_and_check(shared, machine, &target)
+            });
+            return;
+        }
         self.spawn_action(shared, machine, action, move |_| act(&target, &performed));
     }
 
@@ -417,7 +429,7 @@ fn act(target: &Target, action: &MachineAction) -> Result<(), ActionFailure> {
         MachineAction::Restart | MachineAction::Stop | MachineAction::Start => {
             return Err(ActionFailure::Failed);
         }
-        MachineAction::Install | MachineAction::CheckAgain => {}
+        MachineAction::Install | MachineAction::CheckAgain | MachineAction::ConnectAndCheck => {}
     }
     if *action == MachineAction::CheckAgain {
         target.known.machine.retry();
@@ -443,6 +455,42 @@ fn act(target: &Target, action: &MachineAction) -> Result<(), ActionFailure> {
             (result, _) => result.map(drop),
         },
         _ => lane.check(),
+    }
+}
+
+/// How long Connect and Check waits for a Machine's service lane after it asked to connect.
+pub(crate) const CONNECT_LIMIT: Duration = Duration::from_secs(30);
+/// How often Connect and Check reads whether the lane answers yet.
+const CONNECT_POLL: Duration = Duration::from_millis(200);
+
+/// Connect and Check: connects a Machine no route reaches, waits for its service lane while a
+/// route is connecting, and then checks for an update. It ends with `Unreachable` when no route
+/// connects within [`CONNECT_LIMIT`], when the person disconnects the Machine meanwhile, or
+/// when the Machine is removed or the adapter stops.
+fn connect_and_check(
+    shared: &Shared,
+    machine: MachineId,
+    target: &Target,
+) -> Result<(), ActionFailure> {
+    let known = &target.known.machine;
+    let deadline = std::time::Instant::now() + CONNECT_LIMIT;
+    let mut asked = false;
+    loop {
+        if shared.lock().closed || shared.target(machine).is_none() {
+            return Err(ActionFailure::Unreachable);
+        }
+        match known.reach() {
+            Reach::Lane { lane, .. } => return lane.check(),
+            Reach::Stopped => return Err(ActionFailure::Unavailable(Unavailable::NotConnected)),
+            Reach::Offline | Reach::Incompatible(_) => {}
+        }
+        if !asked {
+            known.connect();
+            asked = true;
+        } else if !known.connecting() || std::time::Instant::now() >= deadline {
+            return Err(ActionFailure::Unreachable);
+        }
+        std::thread::sleep(CONNECT_POLL);
     }
 }
 

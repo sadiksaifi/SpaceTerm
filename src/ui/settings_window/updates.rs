@@ -128,6 +128,18 @@ fn perform_item(command: ItemCommand, window: AnyWindowHandle, cx: &mut App) {
                 });
             }
         }
+        ItemCommand::ConnectAndCheck(machine) => {
+            if let Some(store) = MachineUpdates::global(cx) {
+                store.update(cx, |store, cx| {
+                    store.perform(
+                        machine,
+                        MachineAction::ConnectAndCheck,
+                        Surface::Settings,
+                        cx,
+                    )
+                });
+            }
+        }
         ItemCommand::WhatsNew => crate::ui::updates::whats_new::open_whats_new_in(window, cx),
         ItemCommand::ReleasePage(version) => {
             cx.open_url(&crate::updates::release_notes::release_url(&version));

@@ -507,7 +507,23 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
         (Some(text), Some(age)) => Some(format!("{text} {age}")),
         (text, age) => text.or(age),
     };
+    // A check the person asked for shows on a Core whose update waits too. The waiting version
+    // and its Restart Core stay, and a hard stop keeps its warning while the check runs.
+    let (status, sentence, waiting_check) = match (&row.stage, row.asked_check) {
+        (MachineStage::Downloaded { version, .. }, Some(AskedCheck::Running)) => (
+            format!("{CHECKING} \u{b7} {version} downloaded"),
+            format!("{sentence} It is checking for updates."),
+            Some(AskedCheck::Running),
+        ),
+        (MachineStage::Downloaded { version, .. }, Some(AskedCheck::Failed)) => (
+            format!("{COULDNT_CHECK} \u{b7} {version} downloaded"),
+            format!("{sentence} It couldn\u{2019}t check for updates."),
+            Some(AskedCheck::Failed),
+        ),
+        _ => (status, sentence, None),
+    };
     let tone = match &row.stage {
+        _ if waiting_check == Some(AskedCheck::Failed) => RowTone::Failure,
         MachineStage::CantCheck if row.asked_check == Some(AskedCheck::Running) => RowTone::Plain,
         MachineStage::StartFailed { .. }
         | MachineStage::DownloadFailed { .. }

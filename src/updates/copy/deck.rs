@@ -342,7 +342,10 @@ fn build() -> Deck {
         connecting.link = MachineLink::Offline { since: NOW };
         for update in [&settled, &failing] {
             let check = update.facts.as_ref().unwrap().check.clone();
-            for outcome in [Checked::Finished(check), Checked::Refused] {
+            for outcome in [
+                Checked::Finished(check.clone()),
+                Checked::Refused(Some(check)),
+            ] {
                 let checked = std::collections::HashMap::from([(id, outcome)]);
                 let marks = Marks {
                     checked: &checked,
@@ -359,6 +362,23 @@ fn build() -> Deck {
         for update in [running, connecting] {
             deck.view(&UpdateView::new(app(&state), &[update], marks, NOW));
         }
+        // A check the person asked for on a Core whose update waits.
+        let mut waiting_check = waiting(id, name, 1, false, NOW);
+        waiting_check.asked = Some(Asked::Check);
+        deck.view(&UpdateView::new(
+            app(&state),
+            std::slice::from_ref(&waiting_check),
+            marks,
+            NOW,
+        ));
+        waiting_check.asked = None;
+        let observed = waiting_check.facts.as_ref().unwrap().check.clone();
+        let checked = std::collections::HashMap::from([(id, Checked::Refused(Some(observed)))]);
+        let marks = Marks {
+            checked: &checked,
+            ..marks
+        };
+        deck.view(&UpdateView::new(app(&state), &[waiting_check], marks, NOW));
         for reason in [
             CheckFailure::Proxy,
             CheckFailure::Verification,

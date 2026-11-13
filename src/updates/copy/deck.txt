@@ -209,7 +209,9 @@ This Mac | Can’t update by itself · How to Update… | a11y: SpaceTerm Core o
 This Mac | Checked just now | a11y: SpaceTerm Core on This Mac runs 0.11.3. Checked just now.
 This Mac | Checking… | a11y: SpaceTerm Core on This Mac runs 0.11.3 and is checking for updates.
 This Mac | Checking… | a11y: SpaceTerm Core on This Mac runs 0.11.4 and is checking for updates.
+This Mac | Checking… · 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | a11y: SpaceTerm Core on This Mac restarts into 0.11.4 when its 1 Terminal Session ends. Restarting SpaceTerm Core now ends 1 Terminal Session. It is checking for updates.
 This Mac | Connecting… | a11y: Connecting to SpaceTerm Core on This Mac.
+This Mac | Couldn’t check for updates · 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | a11y: SpaceTerm Core on This Mac restarts into 0.11.4 when its 1 Terminal Session ends. Restarting SpaceTerm Core now ends 1 Terminal Session. It couldn’t check for updates.
 This Mac | Couldn’t check for updates · Check Again | a11y: SpaceTerm Core on This Mac couldn’t check for updates.
 This Mac | Couldn’t download 0.11.5 | SpaceTerm Core tries again later. | a11y: SpaceTerm couldn’t download SpaceTerm Core 0.11.5 to This Mac.
 This Mac | Couldn’t download 0.11.5 · Try Again | a11y: SpaceTerm couldn’t download SpaceTerm Core 0.11.5 to This Mac.
@@ -269,7 +271,9 @@ penguin | Can’t update by itself · How to Update… | a11y: SpaceTerm Core on
 penguin | Checked just now | a11y: SpaceTerm Core on penguin runs 0.11.3. Checked just now.
 penguin | Checking… | a11y: SpaceTerm Core on penguin runs 0.11.3 and is checking for updates.
 penguin | Checking… | a11y: SpaceTerm Core on penguin runs 0.11.4 and is checking for updates.
+penguin | Checking… · 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | a11y: SpaceTerm Core on penguin restarts into 0.11.4 when its 1 Terminal Session ends. Restarting SpaceTerm Core now ends 1 Terminal Session. It is checking for updates.
 penguin | Connecting… | a11y: Connecting to SpaceTerm Core on penguin.
+penguin | Couldn’t check for updates · 0.11.4 downloaded · Restart Core… (Ends 1 Terminal Session) | a11y: SpaceTerm Core on penguin restarts into 0.11.4 when its 1 Terminal Session ends. Restarting SpaceTerm Core now ends 1 Terminal Session. It couldn’t check for updates.
 penguin | Couldn’t check for updates · Check Again | a11y: SpaceTerm Core on penguin couldn’t check for updates.
 penguin | Couldn’t download 0.11.5 | SpaceTerm Core tries again later. | a11y: SpaceTerm couldn’t download SpaceTerm Core 0.11.5 to penguin.
 penguin | Couldn’t download 0.11.5 · Try Again | a11y: SpaceTerm couldn’t download SpaceTerm Core 0.11.5 to penguin.

@@ -94,6 +94,8 @@ pub(crate) enum Target {
 pub(crate) enum ItemCommand {
     /// Checks only this item for updates.
     Check(Target),
+    /// Connects an offline Machine through its Saved Connections, then checks it.
+    ConnectAndCheck(MachineId),
     /// Opens this build's release notes in the window that asked.
     WhatsNew,
     /// Opens the release page of a version this build carries no notes for.
@@ -167,8 +169,9 @@ pub(crate) enum Checked {
     /// The Core finished it and reported `check`. A later check that changes the Core's
     /// facts replaces this outcome.
     Finished(UpdateCheck),
-    /// The Core refused it, or no request reached it.
-    Refused,
+    /// The Core refused it, or it failed before the Core's facts said so. It holds the check
+    /// those facts carried then, and a newer completed check retires it.
+    Refused(Option<UpdateCheck>),
 }
 
 /// SpaceTerm's update, as the person sees it.
@@ -804,7 +807,10 @@ impl MachineRow {
             Some(AskedCheck::Running)
         } else {
             match marks.checked.get(&update.machine) {
-                Some(Checked::Refused) => Some(AskedCheck::Failed),
+                Some(Checked::Refused(observed)) if check == observed.as_ref() => {
+                    Some(AskedCheck::Failed)
+                }
+                Some(Checked::Refused(_)) => None,
                 Some(Checked::Finished(finished)) if check == Some(finished) => match finished {
                     UpdateCheck::Succeeded { .. } => Some(AskedCheck::Succeeded),
                     UpdateCheck::Failing { .. } => Some(AskedCheck::Failed),

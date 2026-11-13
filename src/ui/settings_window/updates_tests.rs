@@ -252,8 +252,77 @@ fn each_items_menu_checks_only_that_item(cx: &mut TestAppContext) {
     click_owned("settings-row-core-update-2-menu-check", cx);
     assert_eq!(
         adapter.performed().last(),
-        Some(&(OFFLINE, MachineAction::CheckAgain))
+        Some(&(OFFLINE, MachineAction::ConnectAndCheck))
     );
+    assert!(
+        shows("0.8.0 \u{b7} Connecting\u{2026}", cx),
+        "the offline row shows the connection the person asked for"
+    );
+}
+
+/// A Core whose update waits shows a check the person asked for, while it keeps its waiting
+/// version and Restart Core: Checking, then a failure, then its usual line after a success.
+/// The title bar stays as it was.
+#[gpui::test]
+fn a_check_shows_on_a_core_whose_update_waits(cx: &mut TestAppContext) {
+    let adapter = with_machines(vec![waiting(machine(LOCAL, "This Mac", 2))], cx);
+    let (_, cx) = open_updates(cx);
+    let before = cx.update(|_, cx| state::current(cx));
+    let usual = before.machine_row(LOCAL).unwrap();
+    let restart = usual
+        .action
+        .clone()
+        .expect("the waiting Core offers Restart Core");
+
+    choose("settings-row-core-updates-menu", "check", cx);
+    assert_eq!(adapter.performed(), [(LOCAL, MachineAction::CheckAgain)]);
+    let checking = cx
+        .update(|_, cx| state::current(cx))
+        .machine_row(LOCAL)
+        .unwrap();
+    assert_eq!(
+        checking.status.as_deref(),
+        Some("Checking\u{2026} \u{b7} 0.9.0 downloaded")
+    );
+    assert_eq!(checking.action, Some(restart.clone()), "Restart Core stays");
+    assert!(shows(
+        "0.8.0 \u{b7} Checking\u{2026} \u{b7} 0.9.0 downloaded",
+        cx
+    ));
+
+    adapter.emit(MachineUpdatesEvent::Finished {
+        machine: LOCAL,
+        action: MachineAction::CheckAgain,
+        outcome: Err(crate::updates::machines::ActionFailure::Unreachable),
+    });
+    cx.run_until_parked();
+    let view = cx.update(|_, cx| state::current(cx));
+    let failed = view.machine_row(LOCAL).unwrap();
+    assert_eq!(
+        failed.status.as_deref(),
+        Some("Couldn\u{2019}t check for updates \u{b7} 0.9.0 downloaded")
+    );
+    assert_eq!(failed.tone, state::RowTone::Failure);
+    assert_eq!(failed.action, Some(restart.clone()), "Restart Core stays");
+    assert_eq!(view.step, before.step, "the title bar shows nothing new");
+
+    let mut checked = waiting(machine(LOCAL, "This Mac", 2));
+    let facts = checked.facts.as_mut().unwrap();
+    facts.revision = 2;
+    facts.check = UpdateCheck::Succeeded {
+        at: crate::updates::now() + 1,
+    };
+    adapter.emit(MachineUpdatesEvent::Changed(Box::new(checked)));
+    cx.run_until_parked();
+    let after = cx
+        .update(|_, cx| state::current(cx))
+        .machine_row(LOCAL)
+        .unwrap();
+    assert_eq!(
+        after.status, usual.status,
+        "a newer successful check restores the usual line"
+    );
+    assert_eq!(after.action, Some(restart));
 }
 
 /// A check the person started reports at once in each row it reached: Checking while it runs,
