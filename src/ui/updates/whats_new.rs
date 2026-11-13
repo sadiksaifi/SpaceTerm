@@ -46,8 +46,9 @@ enum SheetAction {
     Done,
 }
 
-/// The sheet is open in some window, so asking again shows no second one.
-struct OpenSheet;
+/// The window whose sheet is open or queued. Asking again brings that window forward and
+/// shows no second sheet.
+struct OpenSheet(AnyWindowHandle);
 impl Global for OpenSheet {}
 
 pub(super) fn init(cx: &mut App) {
@@ -80,14 +81,9 @@ fn open(source: Option<AnyWindowHandle>, cx: &mut App) {
     let Some(notes) = release_notes::embedded() else {
         return;
     };
-    if cx.has_global::<OpenSheet>() {
-        return;
-    }
-    // Menu actions bubble while their window is borrowed. Open after dispatch releases it.
+    // Menu actions bubble while their window is borrowed. Open after dispatch releases it, which
+    // may bring forward the window whose sheet is open.
     cx.defer(move |cx| {
-        if cx.has_global::<OpenSheet>() {
-            return;
-        }
         let this_year = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_secs());
@@ -118,8 +114,18 @@ pub(crate) fn sheet_window(source: Option<AnyWindowHandle>, cx: &App) -> Option<
 }
 
 /// Activates `target` and presents the sheet for `notes` on it, so the sheet's owner is the
-/// active window and Done answers the keyboard.
+/// active window and Done answers the keyboard. While the sheet is open or queued in a window,
+/// that window comes forward instead, and a sheet whose window closed opens again.
 pub(crate) fn show(notes: &ReleaseNotes, target: SheetWindow, this_year: i32, cx: &mut App) {
+    if let Some(owner) = cx.try_global::<OpenSheet>().map(|open| open.0) {
+        if owner
+            .update(cx, |_, window, _| window.activate_window())
+            .is_ok()
+        {
+            return;
+        }
+        cx.remove_global::<OpenSheet>();
+    }
     let _ = match target {
         SheetWindow::Settings(handle) => handle.update(cx, |_, window, cx| {
             window.activate_window();
@@ -193,7 +199,7 @@ fn present<T: 'static>(
         .present_with_lifecycle(window, cx, on_action, on_result, on_lifecycle)
         .is_ok();
     if presented {
-        cx.set_global(OpenSheet);
+        cx.set_global(OpenSheet(window.window_handle()));
     } else {
         eprintln!("failed to present the What\u{2019}s new sheet");
     }

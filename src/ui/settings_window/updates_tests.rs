@@ -548,6 +548,90 @@ fn notes_open_on_the_window_that_asked_and_dismiss_by_keyboard(cx: &mut TestAppC
     assert!(!shows(title, cx), "Escape dismisses the sheet");
 }
 
+/// Opens a Workspace Window beside Settings and makes it the active window.
+fn open_workspace(cx: &mut VisualTestContext) -> gpui::WindowHandle<crate::ui::WorkspaceManager> {
+    use gpui::AppContext as _;
+    let workspace = cx.update(|_, cx| {
+        cx.open_window(Default::default(), |window, cx| {
+            cx.new(|cx| {
+                crate::ui::WorkspaceManager::new_with_adapters(
+                    std::env::temp_dir(),
+                    crate::ui::workspace_manager::tests::workspace_adapters(),
+                    crate::settings::sidebar::SidebarState::Expanded,
+                    window,
+                    cx,
+                )
+            })
+        })
+        .expect("a Workspace Window opens")
+    });
+    let _ = cx.update(|_, cx| workspace.update(cx, |_, window, _| window.activate_window()));
+    cx.run_until_parked();
+    workspace
+}
+
+/// A second notes request, from another window, activates the window that already holds the
+/// sheet and opens no second one. Once that window closes, a request opens the sheet again.
+#[gpui::test]
+fn a_second_notes_request_activates_the_window_holding_the_sheet(cx: &mut TestAppContext) {
+    use crate::ui::updates::whats_new::{sheet_window, show};
+    use crate::updates::release_notes::ReleaseNotes;
+    let (_, cx) = open_updates(cx);
+    let settings = cx.update(|window, _| window.window_handle());
+    let workspace = open_workspace(cx);
+    let notes = ReleaseNotes::parse(
+        "0.9.0",
+        "2026-11-03",
+        "### Fixes\n\n- updates: Read faster\n",
+    )
+    .unwrap();
+    let request = |source: gpui::AnyWindowHandle, cx: &mut VisualTestContext| {
+        let notes = notes.clone();
+        cx.update(|_, cx| {
+            cx.defer(move |cx| {
+                if let Some(target) = sheet_window(Some(source), cx) {
+                    show(&notes, target, 2026, cx);
+                }
+            })
+        });
+        cx.run_until_parked();
+    };
+    let modal_open = |window: gpui::AnyWindowHandle, cx: &mut VisualTestContext| {
+        cx.update(|_, cx| {
+            window
+                .update(cx, |_, window, cx| {
+                    spaceterm_ui::window_modal_is_open(window, cx)
+                })
+                .unwrap_or(false)
+        })
+    };
+
+    let title = "What\u{2019}s New in SpaceTerm 0.9.0";
+    request(workspace.into(), cx);
+    assert!(
+        modal_open(workspace.into(), cx),
+        "the Workspace Window holds the sheet"
+    );
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+
+    request(settings, cx);
+    assert_eq!(
+        cx.update(|_, cx| cx.active_window()),
+        Some(workspace.into()),
+        "the window holding the sheet comes forward"
+    );
+    assert!(!shows(title, cx), "no second sheet opens on Settings");
+
+    let _ = cx.update(|_, cx| workspace.update(cx, |_, window, _| window.remove_window()));
+    cx.run_until_parked();
+    request(settings, cx);
+    assert!(
+        shows(title, cx),
+        "with its window gone, the sheet opens again"
+    );
+}
+
 #[gpui::test]
 fn a_downloaded_update_offers_the_spaceterm_rows_action_and_relaunches_at_once(
     cx: &mut TestAppContext,
