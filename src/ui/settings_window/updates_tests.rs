@@ -674,8 +674,14 @@ fn a_check_shows_beside_a_waiting_spaceterm_release(cx: &mut TestAppContext) {
     cx.update(|cx| ApplicationUpdates::install(updater.clone(), cx));
     let (_, cx) = open_updates(cx);
     let running = env!("SPACETERM_VERSION");
-    click("settings-automatic-update-downloads", cx);
     let updates = cx.update(|_, cx| cx.global::<UpdateService>().0.clone());
+    let mut document = SettingsDocument::default();
+    document.updates.automatic_downloads = false;
+    updates.update(cx, |updates, _| {
+        updates.attach_settings(crate::settings::Settings::load(
+            MemoryStorage::with_document(&document),
+        ));
+    });
     updates.update(cx, |updates, cx| updates.check(false, cx));
     // A scheduled check finds 0.11.1, which waits for its download.
     updater.emit(UpdateEvent::Available("0.11.1".into()));
@@ -709,12 +715,28 @@ fn a_check_shows_beside_a_waiting_spaceterm_release(cx: &mut TestAppContext) {
 
     click(CHECK_NOW_SELECTOR, cx);
     updater.emit(UpdateEvent::Available("0.11.1".into()));
-    updater.emit(UpdateEvent::Finished);
     cx.run_until_parked();
     assert!(
         shows(&usual, cx),
         "a successful check restores the usual line"
     );
+
+    // The found release's cycle still waits for Download. The person's check ends it first,
+    // then checks as theirs.
+    let checks = updater.checks.get();
+    choose(APP_MENU_SELECTOR, "check", cx);
+    assert_eq!(updater.cancellations.get(), 1, "the waiting cycle ends");
+    updater.emit(UpdateEvent::Finished);
+    cx.run_until_parked();
+    assert_eq!(
+        updater.checks.get(),
+        checks + 1,
+        "the person's check follows"
+    );
+    assert!(shows(
+        &format!("{running} \u{b7} Checking\u{2026} \u{b7} 0.11.1 available"),
+        cx
+    ));
 }
 
 #[gpui::test]

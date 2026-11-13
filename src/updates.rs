@@ -594,6 +594,8 @@ pub(crate) struct ApplicationUpdates {
     /// A due check ended a cycle that only waited for the person, so a check follows once the
     /// updater finishes it.
     recheck: bool,
+    /// The check that follows is one the person asked for.
+    recheck_manual: bool,
     /// How many relaunches the person approved, which names the current one.
     relaunch_approvals: u64,
     last_attempt: u64,
@@ -738,6 +740,7 @@ impl ApplicationUpdates {
                 relaunch_requested: false,
                 replacing: None,
                 recheck: false,
+                recheck_manual: false,
                 relaunch_approvals: 0,
                 last_attempt: 0,
                 reschedule,
@@ -988,6 +991,18 @@ impl ApplicationUpdates {
                 self.model.manual_check = true;
                 cx.notify();
             }
+            return;
+        }
+        // A found release that waits for its download ends its cycle first, as a due check
+        // does, and the person's check follows once the updater finishes it.
+        if manual
+            && self.model.replaceable()
+            && matches!(self.model.state, UpdateState::Available { .. })
+        {
+            self.last_attempt = self.adapter.now();
+            self.recheck = true;
+            self.recheck_manual = true;
+            self.cancel(cx);
             return;
         }
         if !self.model.begin_check(manual) {
@@ -1296,10 +1311,11 @@ impl ApplicationUpdates {
             }
         }
         let recheck = finished && std::mem::take(&mut self.recheck);
+        let recheck_manual = recheck && std::mem::take(&mut self.recheck_manual);
         if finished && let Some(resume) = self.pending_quit.take() {
             cx.defer(move |cx| resume(cx));
         } else if recheck {
-            self.check(false, cx);
+            self.check(recheck_manual, cx);
         }
         // A finished cycle lets a due check start, and a found release can bring reminders.
         self.reschedule();

@@ -243,7 +243,7 @@ pub(crate) fn app_menu(
     );
     let idle = matches!(
         app.stage,
-        AppStage::Current { .. } | AppStage::DownloadFailed { .. }
+        AppStage::Current { .. } | AppStage::Available { .. } | AppStage::DownloadFailed { .. }
     );
     let mut check = ItemEntry::command(
         CHECK_ITEM.to_owned(),
