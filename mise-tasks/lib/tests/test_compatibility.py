@@ -243,33 +243,45 @@ class CompatibilityPlanTests(unittest.TestCase):
 
 class PaneCompatibilityTests(unittest.TestCase):
     def test_a_compatible_pair_must_finish_a_command_and_read_its_output(self):
-        calls = []
+        marker = "spaceterm-compatibility-output"
+        # The output shapes of the CLI JSON contract: a short run stays on the screen, and a
+        # longer one scrolls its first lines into the history rows.
+        for output in [
+            {"rows": [], "screen": {"rows": [f"$ printf '{marker}\\n'", marker, "$", ""]}},
+            {"rows": [{"row": 0, "text": marker, "wrapped": False}], "screen": {"rows": ["$"]}},
+        ]:
+            calls = []
 
-        def cli(client, arguments, environment):
-            calls.append(arguments)
-            if arguments[:2] == ["pane", "run"]:
-                return {
-                    "data": {
-                        "run": {"state": "finished", "exit_status": 0},
-                        "output": {"rows": [{"text": "spaceterm-compatibility-output"}]},
+            def cli(client, arguments, environment, output=output):
+                calls.append(arguments)
+                if arguments[:2] == ["pane", "run"]:
+                    return {
+                        "data": {"run": {"state": "finished", "exit_status": 0}, "output": output}
                     }
-                }
-            return {"data": {}}
+                return {"data": {}}
 
-        with (
-            patch("spaceterm_tasks.compatibility._outcome", return_value="ok"),
-            patch("spaceterm_tasks.compatibility._envelope", side_effect=cli),
-        ):
-            exercise("client", {}, {"list": "ok", "status": "ok"})
-        self.assertEqual(
-            [call[:2] for call in calls],
-            [["workspace", "create"], ["pane", "run"], ["pane", "read"]],
-        )
+            with (
+                self.subTest(output=output),
+                patch("spaceterm_tasks.compatibility._outcome", return_value="ok"),
+                patch("spaceterm_tasks.compatibility._envelope", side_effect=cli),
+            ):
+                exercise("client", {}, {"list": "ok", "status": "ok"})
+                self.assertEqual(
+                    [call[:2] for call in calls],
+                    [["workspace", "create"], ["pane", "run"], ["pane", "read"]],
+                )
 
     def test_a_pair_fails_if_the_run_receipt_is_unreadable_or_output_is_lost(self):
         for reply in [
             {"run": {"state": "unconfirmed", "exit_status": None}},
-            {"run": {"state": "finished", "exit_status": 0}, "output": {"rows": []}},
+            {
+                "run": {"state": "finished", "exit_status": 0},
+                "output": {
+                    "rows": [],
+                    "screen": {"rows": ["$ printf 'spaceterm-compatibility-output\\n'", "$"]},
+                },
+            },
+            {"run": {"state": "finished", "exit_status": 0}},
         ]:
 
             def cli(client, arguments, environment):
