@@ -632,6 +632,91 @@ fn a_second_notes_request_activates_the_window_holding_the_sheet(cx: &mut TestAp
     );
 }
 
+/// Check Now and SpaceTerm's own Check for Updates join a scheduled check that is already
+/// running: no second check starts, and the row reports that check as the person's.
+#[gpui::test]
+fn a_manual_check_joins_a_scheduled_check(cx: &mut TestAppContext) {
+    use crate::updates::{ApplicationUpdates, UpdateError, UpdateEvent, UpdateService};
+    let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
+    cx.update(|cx| ApplicationUpdates::install(updater.clone(), cx));
+    let (_, cx) = open_updates(cx);
+    let running = env!("SPACETERM_VERSION");
+    let failed = crate::updates::copy::rows::COULDNT_CHECK;
+    let updates = cx.update(|_, cx| cx.global::<UpdateService>().0.clone());
+    // A scheduled check runs.
+    updates.update(cx, |updates, cx| updates.check(false, cx));
+    cx.run_until_parked();
+    let checks = updater.checks.get();
+
+    click(CHECK_NOW_SELECTOR, cx);
+    assert_eq!(updater.checks.get(), checks, "no second check starts");
+    assert!(shows(&format!("{running} \u{b7} Checking\u{2026}"), cx));
+    updater.emit(UpdateEvent::Failed(UpdateError::Check));
+    updater.emit(UpdateEvent::Finished);
+    cx.run_until_parked();
+    assert!(shows(&format!("{running} \u{b7} {failed}"), cx));
+
+    updates.update(cx, |updates, cx| updates.check(false, cx));
+    cx.run_until_parked();
+    let checks = updater.checks.get();
+    choose(APP_MENU_SELECTOR, "check", cx);
+    assert_eq!(updater.checks.get(), checks, "no second check starts");
+    assert!(shows(&format!("{running} \u{b7} Checking\u{2026}"), cx));
+}
+
+/// A SpaceTerm release that waits for its download shows a check the person asked for: its
+/// progress and failure beside the waiting version, which keeps Download. A successful check
+/// restores the usual line.
+#[gpui::test]
+fn a_check_shows_beside_a_waiting_spaceterm_release(cx: &mut TestAppContext) {
+    use crate::updates::{ApplicationUpdates, UpdateError, UpdateEvent, UpdateService};
+    let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
+    cx.update(|cx| ApplicationUpdates::install(updater.clone(), cx));
+    let (_, cx) = open_updates(cx);
+    let running = env!("SPACETERM_VERSION");
+    click("settings-automatic-update-downloads", cx);
+    let updates = cx.update(|_, cx| cx.global::<UpdateService>().0.clone());
+    updates.update(cx, |updates, cx| updates.check(false, cx));
+    // A scheduled check finds 0.11.1, which waits for its download.
+    updater.emit(UpdateEvent::Available("0.11.1".into()));
+    updater.emit(UpdateEvent::Finished);
+    cx.run_until_parked();
+    let usual = format!("{running} \u{b7} 0.11.1 available");
+    assert!(shows(&usual, cx), "{usual}");
+
+    click(CHECK_NOW_SELECTOR, cx);
+    assert!(shows(
+        &format!("{running} \u{b7} Checking\u{2026} \u{b7} 0.11.1 available"),
+        cx
+    ));
+    updater.emit(UpdateEvent::Failed(UpdateError::Check));
+    updater.emit(UpdateEvent::Finished);
+    cx.run_until_parked();
+    assert!(shows(
+        &format!(
+            "{running} \u{b7} {} \u{b7} 0.11.1 available",
+            crate::updates::copy::rows::COULDNT_CHECK
+        ),
+        cx
+    ));
+    let row = cx.update(|_, cx| state::current(cx).app_row());
+    assert_eq!(row.tone, state::RowTone::Failure);
+    assert_eq!(
+        row.action.map(|action| action.command),
+        Some(state::Command::Desktop(state::DesktopAction::Download)),
+        "Download stays"
+    );
+
+    click(CHECK_NOW_SELECTOR, cx);
+    updater.emit(UpdateEvent::Available("0.11.1".into()));
+    updater.emit(UpdateEvent::Finished);
+    cx.run_until_parked();
+    assert!(
+        shows(&usual, cx),
+        "a successful check restores the usual line"
+    );
+}
+
 #[gpui::test]
 fn a_downloaded_update_offers_the_spaceterm_rows_action_and_relaunches_at_once(
     cx: &mut TestAppContext,

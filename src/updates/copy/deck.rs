@@ -320,10 +320,13 @@ fn build() -> Deck {
         },
     ] {
         for checked_ago in [None, Some(0), Some(5 * 60)] {
-            let mut facts = app(&state);
-            facts.manual_check = true;
-            facts.checked_ago = checked_ago;
-            deck.view(&UpdateView::new(facts, &[], marks, NOW));
+            for pending in [None, Some("0.11.5")] {
+                let mut facts = app(&state);
+                facts.manual_check = true;
+                facts.checked_ago = checked_ago;
+                facts.pending = pending;
+                deck.view(&UpdateView::new(facts, &[], marks, NOW));
+            }
         }
     }
     let state = UpdateState::UpToDate;
@@ -359,6 +362,19 @@ fn build() -> Deck {
                 ));
             }
         }
+        // Connect and Check that reached no route.
+        let unconnected = std::collections::HashMap::from([(id, Checked::Unconnected)]);
+        let mut offline = connecting.clone();
+        offline.asked = None;
+        deck.view(&UpdateView::new(
+            app(&state),
+            std::slice::from_ref(&offline),
+            Marks {
+                checked: &unconnected,
+                ..marks
+            },
+            NOW,
+        ));
         for update in [running, connecting] {
             deck.view(&UpdateView::new(app(&state), &[update], marks, NOW));
         }

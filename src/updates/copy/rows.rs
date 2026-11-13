@@ -28,6 +28,8 @@ pub(crate) const CHECK_AGAIN: &str = "Check Again";
 pub(crate) const CHECKING: &str = "Checking\u{2026}";
 /// A check a person asked for that failed.
 pub(crate) const COULDNT_CHECK: &str = "Couldn\u{2019}t check for updates";
+/// Connect and Check that reached no route to the Machine.
+pub(crate) const COULDNT_CONNECT: &str = "Couldn\u{2019}t connect";
 pub(crate) const HOW_TO_UPDATE: &str = "How to Update\u{2026}";
 pub(crate) const KEEP_RUNNING: &str = "Terminal Sessions keep running";
 pub(crate) const NOTHING_RUNNING: &str =
@@ -81,12 +83,32 @@ pub(crate) fn app_row(app: &AppRow) -> RowView {
                 format!("SpaceTerm {} is running.", app.running),
             ),
         },
-        AppStage::Available { version } => (
-            format!("{version} available"),
-            action(DOWNLOAD, keep(), Command::Desktop(DesktopAction::Download)),
-            None,
-            format!("SpaceTerm {version} is available. Download gets it without relaunching."),
-        ),
+        // A check the person asked for shows beside a release that waits for its download,
+        // which keeps Download.
+        AppStage::Available { version } => match app.asked_check {
+            Some(AskedCheck::Running) => (
+                format!("{CHECKING} \u{b7} {version} available"),
+                action(DOWNLOAD, keep(), Command::Desktop(DesktopAction::Download)),
+                None,
+                format!(
+                    "SpaceTerm {version} is available. Download gets it without relaunching. SpaceTerm is checking for updates."
+                ),
+            ),
+            Some(AskedCheck::Failed) => (
+                format!("{COULDNT_CHECK} \u{b7} {version} available"),
+                action(DOWNLOAD, keep(), Command::Desktop(DesktopAction::Download)),
+                None,
+                format!(
+                    "SpaceTerm {version} is available. Download gets it without relaunching. SpaceTerm couldn\u{2019}t check for updates."
+                ),
+            ),
+            Some(AskedCheck::Succeeded) | None => (
+                format!("{version} available"),
+                action(DOWNLOAD, keep(), Command::Desktop(DesktopAction::Download)),
+                None,
+                format!("SpaceTerm {version} is available. Download gets it without relaunching."),
+            ),
+        },
         AppStage::Downloading { version, .. } => (
             format!("Downloading {version}\u{2026}"),
             None,
@@ -165,7 +187,11 @@ pub(crate) fn app_row(app: &AppRow) -> RowView {
     };
     let tone = match &app.stage {
         AppStage::DownloadFailed { .. } | AppStage::RelaunchFailed { .. } => RowTone::Failure,
-        AppStage::Current { .. } if app.asked_check == Some(AskedCheck::Failed) => RowTone::Failure,
+        AppStage::Current { .. } | AppStage::Available { .. }
+            if app.asked_check == Some(AskedCheck::Failed) =>
+        {
+            RowTone::Failure
+        }
         AppStage::CantReplace | AppStage::NeedsNewerSystem { .. } => RowTone::Warning,
         AppStage::Available { .. } | AppStage::Downloaded { .. }
             if app.too_old_for.is_some() || app.ladder == Stage::Insist =>
@@ -316,6 +342,17 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
             None,
             None,
             format!("Connecting to {subject}."),
+        ),
+        // Connect and Check reached no route; Try Again connects and checks again.
+        MachineStage::Offline if row.asked_check == Some(AskedCheck::Failed) => (
+            format!("Offline \u{b7} {COULDNT_CONNECT}"),
+            action(
+                TRY_AGAIN,
+                None,
+                Command::Machine(id, MachineAction::ConnectAndCheck),
+            ),
+            None,
+            format!("SpaceTerm couldn\u{2019}t connect to {name} to check for updates."),
         ),
         MachineStage::Offline => (
             "Offline".to_owned(),
@@ -529,7 +566,11 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
         | MachineStage::DownloadFailed { .. }
         | MachineStage::CantCheck
         | MachineStage::NeedsFloor { failed: true, .. } => RowTone::Failure,
-        MachineStage::Running if row.asked_check == Some(AskedCheck::Failed) => RowTone::Failure,
+        MachineStage::Running | MachineStage::Offline
+            if row.asked_check == Some(AskedCheck::Failed) =>
+        {
+            RowTone::Failure
+        }
         MachineStage::NotConfirmed { .. } | MachineStage::SteppingStoneSkipped => RowTone::Warning,
         _ if row.blocked.is_some() || row.ladder == Some(Stage::Insist) => RowTone::Warning,
         _ => RowTone::Plain,

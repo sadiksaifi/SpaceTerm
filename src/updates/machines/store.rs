@@ -34,6 +34,10 @@ use crate::updates::state::{Checked, Dismissed, PUSH_FAILURE};
 /// again.
 pub(crate) const RECONNECT_WAIT: Duration = Duration::from_secs(10);
 
+/// How long after a person's check answers its facts may still arrive. A completed check that
+/// arrives later is the Core's own scheduled work.
+pub(crate) const SETTLE_WAIT: Duration = Duration::from_secs(10);
+
 /// The adapter's restart deadline. Past it, a restart that never came back reads as
 /// Unconfirmed, and a restart approved here stays this desktop's step as Restart Not Confirmed.
 pub(crate) const RESTART_DEADLINE: Duration = super::live::RESTART_LIMIT;
@@ -50,6 +54,9 @@ struct AskedWork {
     /// A restart: the running version the approved preview observed, so a Core that came back
     /// on another version settles the restart even when its restart was never observed.
     running: Option<Version>,
+    /// A check: the completed check the Core's facts carried when the person asked. The first
+    /// different completed check is this request's outcome.
+    started: Option<UpdateCheck>,
 }
 
 enum Phase {
@@ -227,9 +234,10 @@ pub(crate) struct MachineUpdates {
     heard: HashSet<MachineId>,
     /// How the last check a person started on each Machine ended, in this run.
     checked: HashMap<MachineId, Checked>,
-    /// Machines whose check answered, with the facts revision then. The Core's facts may
-    /// arrive after the answer, and the first newer revision settles the check's outcome.
-    unsettled: HashMap<MachineId, Option<u64>>,
+    /// Machines whose check answered before its facts did, with the completed check their
+    /// facts carried when the person asked and the serial of the wait. The first different
+    /// completed check within [`SETTLE_WAIT`] is the outcome; later ones are the Core's own.
+    unsettled: HashMap<MachineId, (Option<UpdateCheck>, u64)>,
     /// Each bundled Core version installed automatically in this run, by Machine.
     offered: HashSet<(MachineId, Version)>,
     /// Machines whose automatic install has not finished, and the version it pushes. Its
@@ -382,6 +390,12 @@ impl MachineUpdates {
         };
         if let Some(asked) = asked {
             self.serial += 1;
+            let started = self
+                .machines
+                .iter()
+                .find(|known| known.machine == machine)
+                .and_then(|update| update.facts.as_ref())
+                .map(|facts| facts.check.clone());
             self.asked.push(AskedWork {
                 machine,
                 asked,
@@ -389,6 +403,7 @@ impl MachineUpdates {
                 serial: self.serial,
                 began: false,
                 running: None,
+                started,
             });
         }
         self.mark();
@@ -441,21 +456,27 @@ impl MachineUpdates {
             self.asked.remove(index);
             // A check of a Machine in reach that never ran, or failed before its facts said so,
             // is the person's failure to read, bound to the check those facts carried then.
-            if asked == Asked::Check
-                && let Some(update) = update.filter(|update| {
-                    matches!(
-                        update.link,
-                        MachineLink::Connected | MachineLink::Incompatible(_)
-                    )
-                })
-            {
-                let observed = update.facts.as_ref().map(|facts| facts.check.clone());
+            let reachable = update.is_some_and(|update| {
+                matches!(
+                    update.link,
+                    MachineLink::Connected | MachineLink::Incompatible(_)
+                )
+            });
+            if asked == Asked::Check && reachable {
+                let observed = update
+                    .and_then(|update| update.facts.as_ref())
+                    .map(|facts| facts.check.clone());
                 self.checked.insert(machine, Checked::Refused(observed));
+                self.unsettled.remove(&machine);
+            } else if connected_here && update.is_some() {
+                // Connect and Check reached no route: no check ran, and the row says so.
+                self.checked.insert(machine, Checked::Unconnected);
                 self.unsettled.remove(&machine);
             }
             return;
         }
         self.tried.insert(machine, revision);
+        let started = self.asked[index].started.clone();
         // This Mac or This Computer has no route to try again, and Connect and Check already
         // waited for one.
         let unreachable = update
@@ -482,16 +503,23 @@ impl MachineUpdates {
             _ => Phase::Answered,
         };
         if asked == Asked::Check {
-            self.settle_check(machine, revision, connected_here);
+            self.settle_check(machine, started, connected_here, cx);
         }
     }
 
-    /// Records the outcome of a check a person asked for on `machine`, which answered at facts
-    /// `revision`, from the facts the store holds now. A Machine out of reach ran no check: its
-    /// routes try again, and its row says so.
-    /// `connected` says Connect and Check reached the Core, whose link and facts the store may
-    /// not have heard yet; its newer facts then settle the outcome.
-    fn settle_check(&mut self, machine: MachineId, revision: Option<u64>, connected: bool) {
+    /// Records the outcome of a check a person asked for on `machine`, which answered while
+    /// the store holds its current facts. `started` is the completed check its facts carried
+    /// when the person asked: a different one now is the outcome, in whichever order the facts
+    /// and the reply arrived. Otherwise the outcome is the first different completed check
+    /// within [`SETTLE_WAIT`]. `connected` says Connect and Check reached the Core, whose link
+    /// the store may not have heard yet. A Machine still out of reach ran no check.
+    fn settle_check(
+        &mut self,
+        machine: MachineId,
+        started: Option<UpdateCheck>,
+        connected: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(update) = self.machines.iter().find(|known| known.machine == machine) else {
             return;
         };
@@ -499,22 +527,39 @@ impl MachineUpdates {
             update.link,
             MachineLink::Connected | MachineLink::Incompatible(_)
         );
-        if connected && !reachable {
+        if !reachable && !connected {
             self.checked.remove(&machine);
-            self.unsettled.insert(machine, revision);
+            self.unsettled.remove(&machine);
             return;
         }
-        match update.facts.as_ref().filter(|_| reachable) {
-            Some(facts) => {
-                self.checked
-                    .insert(machine, Checked::Finished(facts.check.clone()));
-                self.unsettled.insert(machine, revision);
-            }
-            None => {
-                self.checked.remove(&machine);
-                self.unsettled.remove(&machine);
-            }
+        let current = update
+            .facts
+            .as_ref()
+            .filter(|_| reachable)
+            .map(|facts| facts.check.clone());
+        if let Some(current) = current.filter(|current| Some(current) != started.as_ref()) {
+            self.checked.insert(machine, Checked::Finished(current));
+            self.unsettled.remove(&machine);
+            return;
         }
+        self.checked.remove(&machine);
+        self.serial += 1;
+        let serial = self.serial;
+        self.unsettled.insert(machine, (started, serial));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SETTLE_WAIT).await;
+            let _ = this.update(cx, |this, cx| {
+                if this
+                    .unsettled
+                    .get(&machine)
+                    .is_some_and(|(_, waiting)| *waiting == serial)
+                {
+                    this.unsettled.remove(&machine);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Writes what only this desktop knows onto each Machine: the work a person started here.
@@ -549,20 +594,25 @@ impl MachineUpdates {
                     )
                 });
             let running = facts.map(|facts| &facts.running);
-            // Newer facts after a check answered carry its outcome once their check differs
-            // from the one recorded at the answer. Facts that came before the answer already
-            // carry it, as recorded there, and a revision that changes no check settles nothing.
-            if let Some(answered) = self.unsettled.get(&machine)
-                && *answered != revision
+            // A check that answered before its facts settles on the first completed check that
+            // differs from the one its facts carried when the person asked. A revision that
+            // changes no check settles nothing.
+            if let Some((started, _)) = self.unsettled.get(&machine)
                 && let Some(facts) = facts
-                && !matches!(
-                    self.checked.get(&machine),
-                    Some(Checked::Finished(recorded)) if *recorded == facts.check
-                )
+                && Some(&facts.check) != started.as_ref()
             {
                 self.checked
                     .insert(machine, Checked::Finished(facts.check.clone()));
                 self.unsettled.remove(&machine);
+            }
+            // A Machine reached again retires a Connect and Check that connected nothing.
+            if matches!(self.checked.get(&machine), Some(Checked::Unconnected))
+                && matches!(
+                    update.link,
+                    MachineLink::Connected | MachineLink::Incompatible(_)
+                )
+            {
+                self.checked.remove(&machine);
             }
             // A newer completed check retires a refused one: a success clears it, and a failure
             // stays as that check's outcome.
@@ -715,6 +765,7 @@ impl MachineUpdates {
                         .and_then(|update| update.facts.as_ref())
                         .map(|facts| facts.running.clone())
                 }),
+                started: None,
             });
             // The adapter's own deadline turns a restart that never came back into an
             // Unconfirmed link, which keeps the mark. This later one only ends a mark whose
@@ -1079,6 +1130,126 @@ mod tests {
         adapter.emit(answer(Err(ActionFailure::Busy)));
         cx.run_until_parked();
         assert_eq!(asked(cx), Some(state::AskedCheck::Failed));
+    }
+
+    /// A check's outcome is the first completed check after the person asked, whichever of its
+    /// facts and its reply comes first. A later scheduled check, after unrelated revisions or
+    /// after the request's facts never changed, is the Core's own and never reads as theirs.
+    #[gpui::test]
+    fn a_later_scheduled_check_never_becomes_the_persons(cx: &mut gpui::TestAppContext) {
+        let (adapter, store) = installed(cx);
+        let mut penguin = update("0.8.0", None);
+        penguin.facts.as_mut().unwrap().check = UpdateCheck::Succeeded { at: 1 };
+        let machine = penguin.machine;
+        adapter.emit(MachineUpdatesEvent::Machines(vec![penguin.clone()]));
+        cx.run_until_parked();
+        let revised = |revision: u64, sessions: u32, check: UpdateCheck| {
+            let mut next = penguin.clone();
+            let facts = next.facts.as_mut().unwrap();
+            facts.revision = revision;
+            facts.sessions = sessions;
+            facts.check = check;
+            MachineUpdatesEvent::Changed(Box::new(next))
+        };
+        let check_again = |cx: &mut gpui::TestAppContext| {
+            store.update(cx, |store, cx| {
+                store.perform(machine, MachineAction::CheckAgain, Surface::Settings, cx);
+            });
+        };
+        let answered = MachineUpdatesEvent::Finished {
+            machine,
+            action: MachineAction::CheckAgain,
+            outcome: Ok(()),
+        };
+        let asked = |cx: &mut gpui::TestAppContext| {
+            cx.read(|cx| state::current(cx).machines[0].asked_check)
+        };
+        let scheduled_failure = |since: u64| UpdateCheck::Failing {
+            since,
+            last_success: Some(10),
+            reason: spaceterm_core::update::facts::CheckFailure::Network,
+        };
+
+        // The person's check completes, and its facts come before its reply.
+        check_again(cx);
+        adapter.emit(revised(2, 0, UpdateCheck::Succeeded { at: 10 }));
+        adapter.emit(answered.clone());
+        cx.run_until_parked();
+        assert_eq!(asked(cx), Some(state::AskedCheck::Succeeded));
+        adapter.emit(revised(3, 2, UpdateCheck::Succeeded { at: 10 }));
+        cx.run_until_parked();
+        assert_eq!(
+            asked(cx),
+            Some(state::AskedCheck::Succeeded),
+            "sessions settle nothing"
+        );
+        // The Core's own scheduled check fails later.
+        adapter.emit(revised(4, 2, scheduled_failure(20)));
+        cx.run_until_parked();
+        assert_eq!(asked(cx), None, "a scheduled failure is not the person's");
+
+        // The reply comes first and the request's facts never change: its window closes, and
+        // a much later scheduled failure is the Core's own.
+        check_again(cx);
+        adapter.emit(answered.clone());
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(SETTLE_WAIT + Duration::from_secs(1));
+        cx.run_until_parked();
+        adapter.emit(revised(5, 2, scheduled_failure(30)));
+        cx.run_until_parked();
+        assert_eq!(asked(cx), None, "a check settles within its window");
+    }
+
+    /// Connect and Check that connects nothing keeps its failure beside the offline status,
+    /// with Try Again, until the Machine is reached or asked again.
+    #[gpui::test]
+    fn a_failed_connect_and_check_stays_beside_the_offline_status(cx: &mut gpui::TestAppContext) {
+        let (adapter, store) = installed(cx);
+        let mut offline = update("0.8.0", None);
+        offline.link = super::super::MachineLink::Offline { since: 1 };
+        let machine = offline.machine;
+        adapter.emit(MachineUpdatesEvent::Machines(vec![offline.clone()]));
+        cx.run_until_parked();
+        store.update(cx, |store, cx| {
+            store.perform(
+                machine,
+                MachineAction::ConnectAndCheck,
+                Surface::Settings,
+                cx,
+            );
+        });
+        adapter.emit(MachineUpdatesEvent::Finished {
+            machine,
+            action: MachineAction::ConnectAndCheck,
+            outcome: Err(ActionFailure::Unreachable),
+        });
+        cx.run_until_parked();
+        let row = cx.read(|cx| state::current(cx).machine_rows().remove(0));
+        assert_eq!(
+            row.status.as_deref(),
+            Some("Offline \u{b7} Couldn\u{2019}t connect")
+        );
+        assert_eq!(row.tone, state::RowTone::Failure);
+        assert_eq!(
+            row.action.map(|action| action.command),
+            Some(Command::Machine(machine, MachineAction::ConnectAndCheck)),
+            "Try Again connects and checks again"
+        );
+        assert_eq!(
+            cx.read(|cx| state::current(cx).step),
+            None,
+            "an offline Machine owes no title-bar step"
+        );
+
+        // Reached again, it reads as connected.
+        let mut connected = offline.clone();
+        connected.link = super::super::MachineLink::Connected;
+        connected.facts.as_mut().unwrap().revision = 2;
+        adapter.emit(MachineUpdatesEvent::Changed(Box::new(connected)));
+        cx.run_until_parked();
+        let row = cx.read(|cx| state::current(cx).machine_rows().remove(0));
+        assert_eq!(row.status.as_deref(), Some("0.8.0"));
     }
 
     /// A check that answered with an error stays the person's failure while the Core's facts

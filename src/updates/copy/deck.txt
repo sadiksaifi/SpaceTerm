@@ -129,6 +129,8 @@ SpaceTerm | Checked 5 minutes ago | a11y: SpaceTerm 0.11.4 is running. Checked 5
 SpaceTerm | Checked just now | a11y: SpaceTerm 0.11.4 is running. Checked just now.
 SpaceTerm | Checked | a11y: SpaceTerm 0.11.4 is running. Checked.
 SpaceTerm | Checking… | a11y: SpaceTerm 0.11.4 is running and checking for updates.
+SpaceTerm | Checking… · 0.11.5 available · Download (Terminal Sessions keep running) | a11y: SpaceTerm 0.11.5 is available. Download gets it without relaunching. SpaceTerm is checking for updates.
+SpaceTerm | Couldn’t check for updates · 0.11.5 available · Download (Terminal Sessions keep running) | a11y: SpaceTerm 0.11.5 is available. Download gets it without relaunching. SpaceTerm couldn’t check for updates.
 SpaceTerm | Couldn’t check for updates · Check Again | a11y: SpaceTerm 0.11.4 couldn’t check for updates.
 SpaceTerm | Couldn’t download 0.11.5 | SpaceTerm tries again later. | a11y: SpaceTerm couldn’t download 0.11.5.
 SpaceTerm | Couldn’t download 0.11.5 · Try Again | a11y: SpaceTerm couldn’t download 0.11.5.
@@ -225,6 +227,7 @@ This Mac | Needs 0.12.0 before 0.12.1 · Download | a11y: SpaceTerm Core on This
 This Mac | Needs a newer SpaceTerm | a11y: This SpaceTerm is too old for SpaceTerm Core on This Mac.
 This Mac | Not responding · Check Again | a11y: This Mac stopped responding while SpaceTerm Core restarted.
 This Mac | Offline | a11y: This Mac is offline.
+This Mac | Offline · Couldn’t connect · Try Again | a11y: SpaceTerm couldn’t connect to This Mac to check for updates.
 This Mac | Restarting into 0.11.4… | a11y: SpaceTerm Core on This Mac is restarting into 0.11.4.
 This Mac | Restarting into 0.11.5… | a11y: SpaceTerm Core on This Mac is restarting into 0.11.5.
 This Mac | Restarting… | a11y: SpaceTerm Core on This Mac is restarting.
@@ -287,6 +290,7 @@ penguin | Needs 0.12.0 before 0.12.1 · Download | a11y: SpaceTerm Core on pengu
 penguin | Needs a newer SpaceTerm | a11y: This SpaceTerm is too old for SpaceTerm Core on penguin.
 penguin | Not responding · Check Again | a11y: penguin stopped responding while SpaceTerm Core restarted.
 penguin | Offline | a11y: penguin is offline.
+penguin | Offline · Couldn’t connect · Try Again | a11y: SpaceTerm couldn’t connect to penguin to check for updates.
 penguin | Restarting into 0.11.4… | a11y: SpaceTerm Core on penguin is restarting into 0.11.4.
 penguin | Restarting into 0.11.5… | a11y: SpaceTerm Core on penguin is restarting into 0.11.5.
 penguin | Restarting… | a11y: SpaceTerm Core on penguin is restarting.
@@ -526,10 +530,14 @@ Terminal Session Ended | SpaceTerm Core restarted. What you typed during the res
 
 SpaceTerm | [info: Last checked 5 minutes ago] [Check for Updates] --- [What’s New in 0.11.4]
 SpaceTerm | [info: Last checked 5 minutes ago] [disabled: Check for Updates] --- [What’s New in 0.11.4]
+SpaceTerm | [info: Last checked 5 minutes ago] [disabled: Check for Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
 SpaceTerm | [info: Last checked 5 minutes ago] [info: The last check failed] [Check for Updates] --- [What’s New in 0.11.4]
+SpaceTerm | [info: Last checked 5 minutes ago] [info: The last check failed] [disabled: Check for Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
 SpaceTerm | [info: Last checked just now] [Check for Updates] --- [What’s New in 0.11.4]
 SpaceTerm | [info: Last checked just now] [disabled: Check for Updates] --- [What’s New in 0.11.4]
+SpaceTerm | [info: Last checked just now] [disabled: Check for Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
 SpaceTerm | [info: Last checked just now] [info: The last check failed] [Check for Updates] --- [What’s New in 0.11.4]
+SpaceTerm | [info: Last checked just now] [info: The last check failed] [disabled: Check for Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
 SpaceTerm | [info: Not checked yet] [Check for Updates] --- [What’s New in 0.11.4]
 SpaceTerm | [info: Not checked yet] [Check for Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
 SpaceTerm | [info: Not checked yet] [disabled: Check for Updates] --- [What’s New in 0.11.4]
@@ -538,6 +546,7 @@ SpaceTerm | [info: Not checked yet] [info: An update has waited 2 days.] [disabl
 SpaceTerm | [info: Not checked yet] [info: An update has waited 7 days.] [disabled: Check for Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
 SpaceTerm | [info: Not checked yet] [info: SpaceTerm tries again later.] [Check for Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
 SpaceTerm | [info: Not checked yet] [info: The last check failed] [Check for Updates] --- [What’s New in 0.11.4]
+SpaceTerm | [info: Not checked yet] [info: The last check failed] [disabled: Check for Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
 This Computer | [Check for Updates]
 This Computer | [info: Last checked just now] [Check for Updates] --- [Release Notes for 0.11.3]
 This Computer | [info: Last checked just now] [Check for Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]

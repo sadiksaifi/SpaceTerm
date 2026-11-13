@@ -172,6 +172,9 @@ pub(crate) enum Checked {
     /// The Core refused it, or it failed before the Core's facts said so. It holds the check
     /// those facts carried then, and a newer completed check retires it.
     Refused(Option<UpdateCheck>),
+    /// Connect and Check reached no route to the Machine, so no check ran. Reaching the
+    /// Machine again retires it.
+    Unconnected,
 }
 
 /// SpaceTerm's update, as the person sees it.
@@ -811,6 +814,7 @@ impl MachineRow {
                     Some(AskedCheck::Failed)
                 }
                 Some(Checked::Refused(_)) => None,
+                Some(Checked::Unconnected) => Some(AskedCheck::Failed),
                 Some(Checked::Finished(finished)) if check == Some(finished) => match finished {
                     UpdateCheck::Succeeded { .. } => Some(AskedCheck::Succeeded),
                     UpdateCheck::Failing { .. } => Some(AskedCheck::Failed),

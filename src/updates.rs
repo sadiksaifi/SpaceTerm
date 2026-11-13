@@ -981,6 +981,15 @@ impl ApplicationUpdates {
     }
 
     pub(crate) fn check(&mut self, manual: bool, cx: &mut Context<Self>) {
+        // A person who asks while a check already runs joins it: that check answers them, and
+        // no second one starts.
+        if manual && matches!(self.model.state, UpdateState::Checking) {
+            if !self.model.manual_check {
+                self.model.manual_check = true;
+                cx.notify();
+            }
+            return;
+        }
         if !self.model.begin_check(manual) {
             return;
         }
