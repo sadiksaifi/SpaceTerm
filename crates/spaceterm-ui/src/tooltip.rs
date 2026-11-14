@@ -290,6 +290,7 @@ pub struct Tooltip {
     detail: Option<SharedString>,
     shortcut: Option<SharedString>,
     debug_selector: SharedString,
+    menu_parent: Option<crate::menu::MenuReservation>,
 }
 
 impl Tooltip {
@@ -301,6 +302,7 @@ impl Tooltip {
             detail: None,
             shortcut: None,
             debug_selector: "tooltip".into(),
+            menu_parent: None,
         }
     }
 
@@ -316,6 +318,11 @@ impl Tooltip {
 
     pub fn debug_selector(mut self, selector: impl Into<SharedString>) -> Self {
         self.debug_selector = selector.into();
+        self
+    }
+
+    pub(crate) fn menu_parent(mut self, parent: Option<crate::menu::MenuReservation>) -> Self {
+        self.menu_parent = parent;
         self
     }
 
@@ -416,7 +423,9 @@ impl RenderOnce for TooltipTarget {
         let visible = self.visibility.is_visible();
         let enabled = visible && !self.disabled && !self.tooltip.text.is_empty();
         let parent = MODAL_TOOLTIP_PARENT.get();
-        let release = state.update(cx, |state, cx| state.synchronize(enabled, parent, cx));
+        let release = state.update(cx, |state, cx| {
+            state.synchronize(enabled, parent, self.tooltip.menu_parent, cx)
+        });
         if let Some((window_id, reservation)) = release {
             release_window(window_id, reservation, cx);
         }
@@ -797,10 +806,13 @@ fn show_target(
     cx: &mut App,
 ) {
     let window_id = window.window_handle().window_id();
-    let Some(parent) = state.read_with(cx, |state, _| state.modal_parent).ok() else {
+    let Some((parent, menu_parent)) = state
+        .read_with(cx, |state, _| (state.modal_parent, state.menu_parent))
+        .ok()
+    else {
         return;
     };
-    if !tooltip_parent_is_eligible(parent, window, cx)
+    if !tooltip_parent_is_eligible(parent, menu_parent, window, cx)
         || tooltip_suppression_epoch(window_id, cx) != suppression_epoch
         || !window.is_window_active()
     {
@@ -853,6 +865,7 @@ struct TooltipOwnership {
     owner: WeakEntity<TooltipTargetState>,
     reservation: TooltipReservation,
     modal_parent: Option<crate::modal::ModalParentToken>,
+    menu_parent: Option<crate::menu::MenuReservation>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -886,6 +899,7 @@ fn reserve_window(
     let window_id = window.window_handle().window_id();
     let weak = owner.downgrade();
     let modal_parent = owner.read(cx).modal_parent;
+    let menu_parent = owner.read(cx).menu_parent;
     cx.update_global::<TooltipCoordinator, _>(|coordinator, _| {
         coordinator.next_reservation = coordinator.next_reservation.wrapping_add(1);
         let reservation = TooltipReservation(coordinator.next_reservation);
@@ -897,6 +911,7 @@ fn reserve_window(
                     owner: weak.clone(),
                     reservation,
                     modal_parent,
+                    menu_parent,
                 },
             )
             .map(|ownership| ownership.owner)
@@ -947,12 +962,32 @@ pub(crate) fn dismiss_modal_tooltip(parent: crate::modal::ModalParentToken, cx: 
     }
 }
 
+pub(crate) fn dismiss_menu_tooltip(
+    parent: crate::menu::MenuReservation,
+    window_id: WindowId,
+    cx: &mut App,
+) {
+    if cx.has_global::<TooltipCoordinator>()
+        && cx
+            .global::<TooltipCoordinator>()
+            .owners
+            .get(&window_id)
+            .is_some_and(|owner| owner.menu_parent == Some(parent))
+    {
+        dismiss_window_tooltip(window_id, cx);
+    }
+}
+
 fn tooltip_parent_is_eligible(
     parent: Option<crate::modal::ModalParentToken>,
+    menu_parent: Option<crate::menu::MenuReservation>,
     window: &Window,
     cx: &App,
 ) -> bool {
     if parent != crate::modal::current_modal_parent(window, cx) {
+        return false;
+    }
+    if menu_parent.is_some_and(|owner| !crate::menu::owns_tooltip(owner, window, cx)) {
         return false;
     }
     let window_id = window.window_handle().window_id();
@@ -960,9 +995,11 @@ fn tooltip_parent_is_eligible(
         .suppressions
         .get(&window_id)
         .is_some_and(|reasons| {
-            reasons
-                .iter()
-                .any(|reason| *reason != TooltipSuppression::Modal || parent.is_none())
+            reasons.iter().any(|reason| match reason {
+                TooltipSuppression::Modal => parent.is_none(),
+                TooltipSuppression::Menu => menu_parent.is_none(),
+                TooltipSuppression::CommandPalette => true,
+            })
         })
 }
 
@@ -1030,6 +1067,7 @@ pub(crate) fn set_window_tooltip_suppression(
 
 struct TooltipTargetState {
     modal_parent: Option<crate::modal::ModalParentToken>,
+    menu_parent: Option<crate::menu::MenuReservation>,
     enabled: bool,
     hovered: bool,
     visible: bool,
@@ -1059,6 +1097,7 @@ impl TooltipTargetState {
         .detach();
         Self {
             modal_parent: None,
+            menu_parent: None,
             enabled: false,
             hovered: false,
             visible: false,
@@ -1073,13 +1112,16 @@ impl TooltipTargetState {
         &mut self,
         enabled: bool,
         parent: Option<crate::modal::ModalParentToken>,
+        menu_parent: Option<crate::menu::MenuReservation>,
         cx: &mut gpui::Context<Self>,
     ) -> Option<(WindowId, TooltipReservation)> {
-        if self.enabled == enabled && self.modal_parent == parent {
+        if self.enabled == enabled && self.modal_parent == parent && self.menu_parent == menu_parent
+        {
             return None;
         }
-        let parent_changed = self.modal_parent != parent;
+        let parent_changed = self.modal_parent != parent || self.menu_parent != menu_parent;
         self.modal_parent = parent;
+        self.menu_parent = menu_parent;
         self.enabled = enabled;
         if enabled && !parent_changed {
             None
@@ -1256,7 +1298,7 @@ impl Element for TooltipOverlay {
             .owner
             .read_with(cx, |state, cx| {
                 let (window_id, reservation) = state.ownership?;
-                if !tooltip_parent_is_eligible(state.modal_parent, window, cx) {
+                if !tooltip_parent_is_eligible(state.modal_parent, state.menu_parent, window, cx) {
                     return None;
                 }
                 let target = state.target_bounds?;
@@ -1730,7 +1772,7 @@ pub(crate) mod tests {
         let state = cx.update(|window, cx| {
             cx.new(|cx| {
                 let mut state = TooltipTargetState::new(window, cx);
-                state.synchronize(true, None, cx);
+                state.synchronize(true, None, None, cx);
                 state
             })
         });

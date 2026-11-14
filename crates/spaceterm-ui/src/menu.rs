@@ -2346,7 +2346,7 @@ fn convert_entries<A: Clone + 'static>(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct MenuReservation(u64);
+pub(crate) struct MenuReservation(u64);
 
 struct MenuOwnership {
     owner: WeakEntity<MenuState>,
@@ -2360,6 +2360,17 @@ struct MenuCoordinator {
     next_reservation: u64,
 }
 impl Global for MenuCoordinator {}
+
+pub(crate) fn owns_tooltip(reservation: MenuReservation, window: &Window, cx: &App) -> bool {
+    cx.has_global::<MenuCoordinator>()
+        && cx
+            .global::<MenuCoordinator>()
+            .owners
+            .get(&window.window_handle().window_id())
+            .is_some_and(|owner| {
+                owner.reservation == reservation && owner.owner.upgrade().is_some()
+            })
+}
 
 fn reserve_window(
     owner: &Entity<MenuState>,
@@ -2400,6 +2411,7 @@ fn reserve_window(
 }
 
 fn release_window(reservation: MenuReservation, window_id: WindowId, cx: &mut App) {
+    crate::tooltip::dismiss_menu_tooltip(reservation, window_id, cx);
     let menu_remains = cx.update_global::<MenuCoordinator, _>(|coordinator, _| {
         if coordinator
             .owners
@@ -3571,6 +3583,7 @@ fn render_overlay_root(state: Entity<MenuState>, window: &mut Window, cx: &mut A
     for (depth, bounds, entries, highlighted, scroll) in panels {
         overlay = overlay.child(render_panel(
             state.downgrade(),
+            state.read(cx).reservation,
             depth,
             bounds,
             entries,
@@ -3673,6 +3686,7 @@ fn render_overlay_root(state: Entity<MenuState>, window: &mut Window, cx: &mut A
 )]
 fn render_panel(
     state: WeakEntity<MenuState>,
+    reservation: Option<MenuReservation>,
     depth: usize,
     bounds: Bounds<Pixels>,
     entries: Vec<InternalEntry>,
@@ -3763,6 +3777,7 @@ fn render_panel(
                 let activation = (!extra.informational).then_some(activate);
                 content = content.child(render_row(
                     state.clone(),
+                    reservation,
                     depth,
                     index,
                     label,
@@ -3797,6 +3812,7 @@ fn render_panel(
             } => {
                 content = content.child(render_row(
                     state.clone(),
+                    reservation,
                     depth,
                     index,
                     label,
@@ -3830,6 +3846,7 @@ fn render_panel(
 )]
 fn render_row(
     state: WeakEntity<MenuState>,
+    reservation: Option<MenuReservation>,
     depth: usize,
     index: usize,
     label: SharedString,
@@ -4112,6 +4129,7 @@ fn render_row(
     }
     match extra.description {
         Some(description) => crate::Tooltip::new(tooltip_id, description)
+            .menu_parent(reservation)
             .attach(row, crate::TooltipTargetVisibility::Visible)
             .disabled(disabled)
             .into_any_element(),
@@ -5219,6 +5237,100 @@ pub(crate) mod tests {
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         (root, events, cx)
+    }
+
+    #[gpui::test]
+    fn menu_descriptions_show_after_hover_and_close_with_their_menu(cx: &mut TestAppContext) {
+        struct DescribedMenu;
+        impl Render for DescribedMenu {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                crate::TooltipLayer::new(
+                    div()
+                        .size_full()
+                        .p(px(20.0))
+                        .flex()
+                        .gap(px(40.0))
+                        .child(
+                            Menu::new(
+                                "described-menu",
+                                "Updates",
+                                vec![
+                                    MenuEntry::action("Restart pending", ())
+                                        .description("Restarts when nothing is running.")
+                                        .debug_selector("described-entry"),
+                                ],
+                            )
+                            .debug_selector("described-trigger")
+                            .on_activate(|_, _, _| {}),
+                        )
+                        .child(
+                            crate::Tooltip::new("underlying-target", "Underlying help")
+                                .debug_selector("underlying-tooltip")
+                                .attach(
+                                    div()
+                                        .id("underlying-control")
+                                        .debug_selector(|| "underlying-control".to_owned())
+                                        .w(px(80.0))
+                                        .h(px(24.0)),
+                                    crate::TooltipTargetVisibility::Visible,
+                                ),
+                        ),
+                )
+            }
+        }
+
+        cx.update(super::init);
+        cx.update(crate::tooltip::init);
+        cx.set_global(test_theme());
+        cx.set_global(crate::TooltipTheme::new(
+            crate::TooltipPaint::new(rgba(0xffffffff), rgba(0xaaaaaaff), rgba(0xccccccff)),
+            crate::TooltipMetrics::new(px(320.0)),
+        ));
+        let (_, cx) = cx.add_window_view(|_, _| DescribedMenu);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let trigger = cx.debug_bounds("described-trigger").unwrap().center();
+        cx.simulate_click(trigger, Modifiers::none());
+        cx.run_until_parked();
+        let row = cx.debug_bounds("described-entry").unwrap().center();
+        let delay = Duration::from_millis(500);
+        cx.simulate_mouse_move(row, None, Modifiers::none());
+        cx.executor()
+            .advance_clock(delay - Duration::from_millis(1));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tooltip").is_none());
+        cx.executor().advance_clock(Duration::from_millis(1));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("tooltip").is_some(),
+            "the menu description must open"
+        );
+
+        // The menu's permission does not extend to controls beneath it.
+        let underlying = cx.debug_bounds("underlying-control").unwrap().center();
+        cx.simulate_mouse_move(underlying, None, Modifiers::none());
+        cx.executor().advance_clock(delay);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("underlying-tooltip").is_none());
+
+        cx.simulate_mouse_move(row, None, Modifiers::none());
+        cx.executor().advance_clock(delay);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tooltip").is_some());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tooltip").is_none());
+
+        // Closing a menu also invalidates a description whose delay has not elapsed.
+        cx.simulate_click(trigger, Modifiers::none());
+        cx.run_until_parked();
+        let row = cx.debug_bounds("described-entry").unwrap().center();
+        cx.simulate_mouse_move(row, None, Modifiers::none());
+        cx.executor().advance_clock(delay / 2);
+        cx.simulate_keystrokes("escape");
+        cx.executor().advance_clock(delay);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tooltip").is_none());
     }
 
     #[gpui::test]
