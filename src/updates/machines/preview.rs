@@ -4,7 +4,8 @@
 //! The adapter plays its scenario on timers and answers actions with these transitions:
 //! `Install` becomes `Installing` with progress over 2 seconds, then a Pending Version.
 //! `Restart` becomes `Restarting`, then `running` equals the former Pending Version after 3
-//! seconds. `CheckAgain` becomes `Checking` for 1 second, then `Succeeded`. `ConnectAndCheck`
+//! seconds. `CheckAgain` becomes `Checking` for 1 second, then `Succeeded`, except penguin's in
+//! `check-fails`, which then answers that it failed. `ConnectAndCheck`
 //! connects an offline Machine after 1.5 seconds, then checks it the same way. `Stop` becomes
 //! `Stopping`, then `Stopped`. `Start` becomes `Connected`. `DismissFailure` finishes `Ok`.
 
@@ -67,10 +68,14 @@ pub(crate) enum Scenario {
     Offline,
     CapabilityMissing,
     UninstallUnavailable,
+    /// penguin waits at the Ask stage, and a check of penguin fails after it runs.
+    CheckFails,
+    /// 40 Machines, one with a long name and two with updates waiting.
+    ManyMachines,
 }
 
 impl Scenario {
-    pub(crate) const ALL: [Self; 21] = [
+    pub(crate) const ALL: [Self; 23] = [
         Self::UpToDate,
         Self::UpdateReady,
         Self::SeveralReady,
@@ -92,6 +97,8 @@ impl Scenario {
         Self::Offline,
         Self::CapabilityMissing,
         Self::UninstallUnavailable,
+        Self::CheckFails,
+        Self::ManyMachines,
     ];
 
     /// The value `SPACETERM_MACHINE_PREVIEW` names it by.
@@ -118,6 +125,8 @@ impl Scenario {
             Self::Offline => "offline",
             Self::CapabilityMissing => "capability-missing",
             Self::UninstallUnavailable => "uninstall-unavailable",
+            Self::CheckFails => "check-fails",
+            Self::ManyMachines => "many-machines",
         }
     }
 
@@ -164,7 +173,16 @@ impl PreviewMachines {
             let update = shared.machines.iter().find(|m| m.machine == machine)?;
             Some(plan(update, &action))
         });
+        // The scenario's check of penguin runs, then answers that it failed.
+        let fails = self.scenario == Scenario::CheckFails
+            && machine == PENGUIN
+            && action == MachineAction::CheckAgain;
         match planned {
+            Some(Ok(_)) if fails => self.play_then(
+                machine,
+                failed_check(),
+                Some((action, Err(ActionFailure::Busy))),
+            ),
             Some(Ok(changes)) => self.play(machine, changes, Some(action)),
             Some(Err(failure)) => self.finish_now(machine, Some(action), Err(failure)),
             None => self.finish_now(machine, Some(action), Err(ActionFailure::Unreachable)),
@@ -188,6 +206,17 @@ impl PreviewMachines {
         changes: Vec<(Duration, Change)>,
         finish: Option<MachineAction>,
     ) {
+        self.play_then(machine, changes, finish.map(|action| (action, Ok(()))));
+    }
+
+    /// Applies `changes` to `machine` on timers, sending `Changed` after each, then finishes
+    /// `finish`'s action with its outcome.
+    fn play_then(
+        &self,
+        machine: MachineId,
+        changes: Vec<(Duration, Change)>,
+        finish: Option<(MachineAction, Result<(), ActionFailure>)>,
+    ) {
         let shared = Arc::clone(&self.shared);
         let worker = move || {
             for (delay, change) in changes {
@@ -208,11 +237,11 @@ impl PreviewMachines {
                 let changed = Box::new(update.clone());
                 shared.send(MachineUpdatesEvent::Changed(changed));
             }
-            if let (Some(action), Ok(shared)) = (finish, shared.lock()) {
+            if let (Some((action, outcome)), Ok(shared)) = (finish, shared.lock()) {
                 shared.send(MachineUpdatesEvent::Finished {
                     machine,
                     action,
-                    outcome: Ok(()),
+                    outcome,
                 });
             }
         };
@@ -449,6 +478,18 @@ fn restart_into(to: Version) -> Vec<(Duration, Change)> {
         update.push = None;
     }) as Change;
     vec![(Duration::ZERO, restarting), (RESTART, restarted)]
+}
+
+/// `Checking` for 1 second, then no operation and the facts' check unchanged: a check that
+/// failed before it completed.
+fn failed_check() -> Vec<(Duration, Change)> {
+    let checking = Box::new(|update: &mut MachineUpdate| {
+        facts(update).operation = Some(Operation::Checking);
+    }) as Change;
+    let stopped = Box::new(|update: &mut MachineUpdate| {
+        facts(update).operation = None;
+    }) as Change;
+    vec![(Duration::ZERO, checking), (CHECK, stopped)]
 }
 
 /// `Checking` for 1 second, then `Succeeded`. A Machine that could not confirm its restart
@@ -720,6 +761,27 @@ fn machines(scenario: Scenario, now: u64) -> Vec<MachineUpdate> {
         Scenario::UninstallUnavailable => {
             penguin.capabilities = Capabilities::fake(&without(&[Capability::Uninstall]));
         }
+        Scenario::CheckFails => {
+            // At the Ask stage, so the title bar offers its Restart Core.
+            waiting(&mut penguin, now - 3 * DAY);
+            facts(&mut penguin).sessions = 2;
+        }
+        Scenario::ManyMachines => {
+            waiting(&mut penguin, now - 3 * DAY);
+            facts(&mut penguin).sessions = 2;
+            waiting(&mut build_box, now - 3600);
+            build_box.name = "build-box-eu-west-1.ci-runners.internal.example.com".into();
+            let mut all = vec![this, penguin, build_box];
+            for index in 4..=40u8 {
+                let mut id = [0; 32];
+                id[0] = index;
+                id[1] = 0x40;
+                let mut update = machine(id, "", false, Platform::LinuxX86_64, 0, now);
+                update.name = format!("machine-{index:02}").into();
+                all.push(update);
+            }
+            return all;
+        }
     }
     vec![this, penguin, build_box]
 }
@@ -792,10 +854,15 @@ mod tests {
     }
 
     #[test]
-    fn every_scenario_starts_with_three_machines_whose_facts_are_valid() {
+    fn every_scenario_starts_with_its_machines_whose_facts_are_valid() {
         for scenario in Scenario::ALL {
             let (_preview, _events, machines) = started(scenario);
-            assert_eq!(machines.len(), 3, "{}", scenario.name());
+            let expected = if scenario == Scenario::ManyMachines {
+                40
+            } else {
+                3
+            };
+            assert_eq!(machines.len(), expected, "{}", scenario.name());
             for facts in machines.iter().filter_map(|update| update.facts.as_ref()) {
                 assert_eq!(facts.validate(), Ok(()), "{}", scenario.name());
             }
