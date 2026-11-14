@@ -43,14 +43,16 @@ pub(crate) struct MachineRow {
     pub(crate) machine: MachineId,
     pub(crate) kind: MachineKind,
     pub(crate) name: SharedString,
-    /// "{running} · {status}", or "{running} · {n} Terminal Sessions" with nothing waiting.
+    /// The row's versions and short status, or "{running} · {n} Terminal Sessions" when the
+    /// versions alone say everything.
     pub(crate) line: String,
     /// The row's status alone, the part a warning colors.
     pub(crate) status: Option<SharedString>,
     /// The row's full sentence, for the tooltip and assistive technology.
     pub(crate) accessibility: SharedString,
-    /// The row's longer explanation, such as how long an update has waited.
-    pub(crate) description: Option<SharedString>,
+    /// What the row leaves out, for its submenu: when the update applies itself and how long
+    /// it waited.
+    pub(crate) details: Vec<state::Detail>,
     /// An offline Machine offers nothing, so its row dims.
     pub(crate) offline: bool,
     /// The submenu: the row's action first, then Stop or Start for this computer's Core.
@@ -63,7 +65,7 @@ pub(crate) struct Menu {
     pub(crate) summary: String,
     /// An update has waited until Insist, or a Machine is blocked: the item's symbol shows a dot.
     pub(crate) attention: bool,
-    /// The header's subtitle: "{v}" or "{v} · {status}".
+    /// The header's subtitle: SpaceTerm's versions and short status.
     pub(crate) header: String,
     /// SpaceTerm's row action, such as Relaunch to Update, Download Update or Try Again.
     pub(crate) step: Option<Item>,
@@ -87,7 +89,7 @@ impl Menu {
     /// whether this computer's Core runs.
     pub(crate) fn new(view: &UpdateView, machines: &[MachineUpdate]) -> Self {
         let app = view.app_row();
-        let header = copy::line(app.version.as_deref(), app.status.as_deref());
+        let header = copy::caption(&app);
         // SpaceTerm's step is its row's action, so a failure offers the same `Try Again` here as
         // in Settings and the title-bar list. What's New stays in the title bar and Help.
         let step = app.action.and_then(|action| {
@@ -139,8 +141,8 @@ impl Menu {
     }
 
     /// The same menu without submenus or subtitles: SpaceTerm's line and step, the `SpaceTerm
-    /// Core` heading with one line per Machine and its explanation, then every Machine action,
-    /// naming its Machine, then Settings and Quit.
+    /// Core` heading with one short line per Machine, then every Machine action, naming its
+    /// Machine, then Settings and Quit.
     #[cfg_attr(
         not(any(target_os = "linux", test)),
         allow(dead_code, reason = "only the Linux status area shows a flat menu")
@@ -164,12 +166,6 @@ impl Menu {
                 "{} \u{b7} {}",
                 machine.name, machine.line
             )));
-            rows.extend(
-                machine
-                    .description
-                    .iter()
-                    .map(|description| FlatRow::Text(description.to_string())),
-            );
         }
         let actions: Vec<FlatRow> = self
             .machines
@@ -206,13 +202,13 @@ impl Menu {
 
 fn machine_row(update: &MachineUpdate, row: RowView) -> MachineRow {
     let sessions = update.facts.as_ref().map_or(0, |facts| facts.sessions);
-    // A settled Machine's status is its version alone, so the extra shows its Terminal
-    // Sessions after it.
-    let settled = row.status.is_none() || row.status == row.version;
+    // A settled Machine's versions say everything, so the extra shows its Terminal Sessions
+    // after them.
+    let settled = row.status.is_none() && row.target.is_none();
     let line = if settled {
         copy::line(row.version.as_deref(), Some(&copy::sessions(sessions)))
     } else {
-        copy::line(row.version.as_deref(), row.status.as_deref())
+        copy::caption(&row)
     };
     let machine = update.machine;
     let mut items: Vec<Item> = row
@@ -246,7 +242,7 @@ fn machine_row(update: &MachineUpdate, row: RowView) -> MachineRow {
         line,
         status: row.status,
         accessibility: row.accessibility,
-        description: row.description,
+        details: row.details,
         offline: matches!(update.link, MachineLink::Offline { .. }),
         items,
     }

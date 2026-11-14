@@ -1254,6 +1254,7 @@ fn every_appearance_row_reset_restores_only_its_field(cx: &mut TestAppContext) {
             | SettingsRowId::UpdateStatus
             | SettingsRowId::CoreUpdates
             | SettingsRowId::AutomaticUpdateDownloads
+            | SettingsRowId::UpdateCheckNow
             | SettingsRowId::UpdateCheckInterval
             | SettingsRowId::Shortcut(_)
             | SettingsRowId::SettingsFile
@@ -2643,6 +2644,11 @@ fn active_section_owns_the_large_heading_and_its_description(cx: &mut TestAppCon
         let title = cx
             .debug_bounds(title_selector)
             .unwrap_or_else(|| panic!("{section:?} must own the visible heading"));
+        // Updates has no introduction: its rows say what each update changes.
+        if section == SettingsSectionId::Updates {
+            assert!(cx.debug_bounds(description_selector).is_none());
+            continue;
+        }
         let description = cx
             .debug_bounds(description_selector)
             .unwrap_or_else(|| panic!("{section:?} must retain its description"));
@@ -2790,6 +2796,7 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             // The fixture has no Machine updates, so the list says so and offers nothing.
             SettingsRowId::CoreUpdates => return None,
             SettingsRowId::AutomaticUpdateDownloads => "settings-automatic-update-downloads",
+            SettingsRowId::UpdateCheckNow => "settings-update-check-now",
             SettingsRowId::UpdateCheckInterval => "settings-update-check-interval",
             SettingsRowId::SettingsFile => "settings-file-frame",
             SettingsRowId::ExportSettings => "settings-document-export",

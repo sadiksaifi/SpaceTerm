@@ -169,11 +169,27 @@ pub(crate) enum Checked {
     /// The Core finished it and reported `check`. A later check that changes the Core's
     /// facts replaces this outcome.
     Finished(UpdateCheck),
-    /// The Core refused it, or it failed before the Core's facts said so. It holds the check
-    /// those facts carried then, and a newer completed check retires it.
-    Refused(Option<UpdateCheck>),
+    /// The Core refused it, or it failed before the Core's facts said so, so no check ran for
+    /// it. `observed` is the check those facts carried then, and a newer completed check
+    /// retires it. `failure` is why the request failed.
+    Refused {
+        observed: Option<UpdateCheck>,
+        failure: ActionFailure,
+    },
     /// Connect and Check reached no route to the Machine, so no check ran. Reaching the
     /// Machine again retires it.
+    Unconnected,
+}
+
+/// Why a check a person asked for on this desktop failed. Only the request's own outcome
+/// explains it, never an earlier check's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CheckFailed {
+    /// The check completed and failed. None when the facts don't say why.
+    Completed(Option<CheckFailure>),
+    /// The Core refused the request, or it failed before any check ran.
+    Refused(ActionFailure),
+    /// Connect and Check reached no route, so no check ran.
     Unconnected,
 }
 
@@ -244,6 +260,8 @@ pub(crate) struct MachineRow {
     pub(crate) last_check: LastCheck,
     /// A check the person asked for on this desktop, which the row reports at once.
     pub(crate) asked_check: Option<AskedCheck>,
+    /// Why that check failed, when it did.
+    pub(crate) check_failed: Option<CheckFailed>,
 }
 
 /// A protocol mismatch: a hard stop above the ladder.
@@ -369,18 +387,66 @@ pub(crate) struct PillView {
     pub(crate) progress: Option<f32>,
 }
 
-/// One row of the list, Settings > Updates, the Machine card and the menu bar extra.
+/// One row of the list, Settings > Updates, the Machine card and the menu bar extra. Each
+/// surface presents it in its own way from these parts: the title-bar list shows only
+/// [`RowView::primary`], and the other surfaces show the versions, the status and the action
+/// apart.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RowView {
     pub(crate) name: SharedString,
-    /// The running version. The title-bar list shows it only when nothing waits.
+    /// The running version.
     pub(crate) version: Option<SharedString>,
+    /// The version the row's update moves to, shown apart from the running one.
+    pub(crate) target: Option<SharedString>,
+    /// The row's state in a few words, when its versions alone don't tell it.
     pub(crate) status: Option<SharedString>,
     pub(crate) action: Option<RowAction>,
-    pub(crate) description: Option<SharedString>,
+    /// The title-bar list's one presentation of the row and what choosing it does.
+    pub(crate) primary: Primary,
+    /// What the row leaves out, shown on demand in its menu or submenu: when an update
+    /// applies itself, how long it waited, and what happens next after a failure.
+    pub(crate) details: Vec<Detail>,
+    /// The row's full sentence.
     pub(crate) accessibility: SharedString,
     /// The color the status reads in, where a surface colors it.
     pub(crate) tone: RowTone,
+}
+
+/// The one thing a title-bar list row shows, chosen in this priority: work in progress, a
+/// failure, the row's update action, then its status or version. Its label and command come
+/// from the same choice, so a row never shows one thing and does another.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Primary {
+    pub(crate) kind: PrimaryKind,
+    pub(crate) label: SharedString,
+    /// What choosing the row does. None for a row that only reports. A failure's command
+    /// opens that failure's details; an action's command is the row's action.
+    pub(crate) command: Option<Command>,
+    /// What assistive technology and the tooltip read: the state the label shows and, for
+    /// an action, what it changes.
+    pub(crate) description: SharedString,
+}
+
+/// Which part of a row its title-bar list presentation shows. Declaration order is priority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrimaryKind {
+    /// Work in progress, such as a check, a download or a restart. It only reports.
+    Progress,
+    /// Something failed. Choosing it opens the failure's details.
+    Failure,
+    /// The row's update action.
+    Action,
+    /// The row's status or running version. It only reports.
+    Status,
+}
+
+/// One line of a row's details, with its longer explanation when one exists.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Detail {
+    pub(crate) text: SharedString,
+    /// The exact rule behind the line, read on demand: a tooltip or an accessibility
+    /// description.
+    pub(crate) explanation: Option<SharedString>,
 }
 
 /// How a row's status reads.
@@ -806,23 +872,34 @@ impl MachineRow {
             None => LastCheck::Unknown,
         };
         // A finished check reports its outcome only while the Core's facts still carry it.
-        let asked_check = if update.asked == Some(Asked::Check) {
-            Some(AskedCheck::Running)
+        let outcome = if update.asked == Some(Asked::Check) {
+            None
         } else {
             match marks.checked.get(&update.machine) {
-                Some(Checked::Refused(observed)) if check == observed.as_ref() => {
-                    Some(AskedCheck::Failed)
+                Some(Checked::Refused { observed, failure }) if check == observed.as_ref() => {
+                    Some(Err(CheckFailed::Refused(*failure)))
                 }
-                Some(Checked::Refused(_)) => None,
-                Some(Checked::Unconnected) => Some(AskedCheck::Failed),
+                Some(Checked::Refused { .. }) => None,
+                Some(Checked::Unconnected) => Some(Err(CheckFailed::Unconnected)),
                 Some(Checked::Finished(finished)) if check == Some(finished) => match finished {
-                    UpdateCheck::Succeeded { .. } => Some(AskedCheck::Succeeded),
-                    UpdateCheck::Failing { .. } => Some(AskedCheck::Failed),
+                    UpdateCheck::Succeeded { .. } => Some(Ok(())),
+                    UpdateCheck::Failing { reason, .. } => {
+                        Some(Err(CheckFailed::Completed(Some(*reason))))
+                    }
                     UpdateCheck::Disabled | UpdateCheck::Never => None,
                 },
                 Some(Checked::Finished(_)) | None => None,
             }
         };
+        let asked_check = if update.asked == Some(Asked::Check) {
+            Some(AskedCheck::Running)
+        } else {
+            outcome.map(|outcome| match outcome {
+                Ok(()) => AskedCheck::Succeeded,
+                Err(_) => AskedCheck::Failed,
+            })
+        };
+        let check_failed = outcome.and_then(Result::err);
         Self {
             id: update.machine,
             name: update.name.clone(),
@@ -838,6 +915,7 @@ impl MachineRow {
             breaking: pending.is_some_and(|pending| pending.breaking),
             last_check,
             asked_check,
+            check_failed,
         }
     }
 

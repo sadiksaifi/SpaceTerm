@@ -523,9 +523,13 @@ fn a_paired_card_updates_through_the_shared_store_and_shows_its_progress(cx: &mu
         .expect("penguin has an update row");
     assert_eq!(
         subtitle.as_ref(),
-        crate::updates::copy::settings::line(row.version.as_deref(), row.status.as_deref())
+        crate::updates::copy::settings::caption(&row)
     );
-    assert!(subtitle.starts_with("1.2.0 \u{b7} "), "{subtitle}");
+    assert_eq!(subtitle.as_ref(), "1.2.0 \u{2192} 1.3.0");
+    assert!(
+        !footnote(&machines).contains(row.accessibility.as_ref()),
+        "the footnote doesn't repeat a waiting update"
+    );
     click(super::super::core_update::UPDATE_SELECTOR, machines.cx);
     let tree = A11yTree::read(machines.cx);
     tree.text("Restart SpaceTerm Core on penguin?");
@@ -554,13 +558,16 @@ fn a_paired_card_updates_through_the_shared_store_and_shows_its_progress(cx: &mu
         .cx
         .update(|_, cx| crate::updates::state::current(cx).machine_row(id))
         .expect("penguin has an update row");
-    let explained = restarting
-        .description
-        .clone()
-        .unwrap_or(restarting.accessibility.clone());
+    let subtitle = machines
+        .window
+        .read_with(machines.cx, |settings, cx| settings.core_subtitle(cx));
+    assert_eq!(
+        subtitle.as_ref(),
+        "1.2.0 \u{2192} 1.3.0 \u{b7} Restarting\u{2026}"
+    );
     assert!(
-        footnote(&machines).contains(explained.as_ref()),
-        "the footnote explains the restart: {explained}"
+        !footnote(&machines).contains(restarting.accessibility.as_ref()),
+        "the caption tells the restart, and the footnote doesn't repeat it"
     );
     assert!(
         machines

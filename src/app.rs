@@ -4063,7 +4063,10 @@ mod runtime_tests {
             "the relaunch confirmed its quit, and SpaceTerm kept running"
         );
         let row = cx.update(|cx| crate::updates::state::current(cx).app_row());
-        assert_eq!(row.status.as_deref(), Some("Couldn’t relaunch"));
+        assert_eq!(
+            row.status.as_deref(),
+            Some(crate::updates::copy::rows::RELAUNCH_FAILED)
+        );
         let action = row.action.expect("the failed relaunch offers Try Again");
         assert_eq!(action.label.as_ref(), "Try Again");
         cx.update(|cx| {

@@ -1,17 +1,17 @@
-//! The Updates section: SpaceTerm's card, with its row and its own update preferences, then the
-//! `SpaceTerm Core` card with one row per Machine. Each row is the one the title-bar list, the
-//! Machine card and the menu bar extra show, from [`crate::updates::state`]: one status line and
-//! the row's update action, plus a menu of that item's last check, a check of that item alone
-//! and its release notes. Check Now beside the page title checks SpaceTerm and each connected
-//! Machine. Listing opens no connection (ADR 0039). [`crate::updates`] owns update policy and
-//! state.
+//! The Updates section: SpaceTerm's card, then the `SpaceTerm Core` card with one row per
+//! Machine. SpaceTerm's card holds SpaceTerm's row, its automatic downloads, Check Now, which
+//! checks SpaceTerm and each connected Machine, and its check interval, and stays in view while
+//! the Machine rows scroll. Each row comes from the row model of [`crate::updates::state`]: its
+//! versions and short status on one line, the row's update action, and a menu of that item's
+//! last check, its details, a check of that item alone and its release notes. Listing opens no
+//! connection (ADR 0039). [`crate::updates`] owns update policy and state.
 
 use gpui::prelude::*;
 use gpui::{AnyElement, AnyWindowHandle, App, Context, ElementId, Entity, SharedString, Window};
 use spaceterm_ui::{
     AnchoredAlignment, AnchoredPlacement, AnchoredPlacementConfig, Button, ButtonSize,
-    ButtonVariant, Icon, IconName, Menu, MenuEntry, SegmentedControl, SegmentedOption, Switch,
-    ToggleSize,
+    ButtonVariant, Icon, IconName, Menu, MenuEntry, MenuSize, SegmentedControl, SegmentedOption,
+    Switch, ToggleSize,
 };
 
 use super::{SettingsRowId, SettingsWindow};
@@ -31,7 +31,7 @@ use crate::updates::{ApplicationUpdates, UpdateService, UpdateState};
 /// The SpaceTerm row's label: the product, whose version leads its description.
 pub(super) const SPACETERM_LABEL: &str = copy::SPACETERM;
 
-/// Check Now, beside the page title.
+/// Check Now, in SpaceTerm's card.
 pub(super) const CHECK_NOW_SELECTOR: &str = "settings-update-check-now";
 /// The SpaceTerm row's update action, such as Relaunch to Update or Download.
 pub(super) const RESTART_SELECTOR: &str = "settings-update-restart";
@@ -44,7 +44,7 @@ pub(super) const MACHINE_ROW_SELECTOR: &str = "settings-row-core-update";
 /// desktop update service.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct UpdateStatusPresentation {
-    /// "{v}" or "{v} · {status}", as every update surface reads it.
+    /// The row's versions and short status, such as "0.11.3 → 0.11.4 · Check failed".
     pub(super) summary: SharedString,
     /// The color the status line reads in.
     pub(super) tone: CaptionTone,
@@ -156,13 +156,14 @@ impl SettingsWindow {
     pub(super) fn update_status(&self, cx: &App) -> UpdateStatusPresentation {
         let row = state::current(cx).app_row();
         UpdateStatusPresentation {
-            summary: copy::line(row.version.as_deref(), row.status.as_deref()).into(),
+            summary: copy::caption(&row).into(),
             tone: caption_tone(row.tone),
             action: row.action,
         }
     }
 
-    /// Check Now, beside the page title. While a check it started runs, it waits.
+    /// Check Now, in the control column of SpaceTerm's card. While a check it started runs, it
+    /// waits.
     pub(super) fn render_update_check_now(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let view = state::current(cx);
         Button::new(CHECK_NOW_SELECTOR, copy::CHECK_NOW)
@@ -190,9 +191,12 @@ impl SettingsWindow {
             if entry.separator_before {
                 items.push(MenuEntry::separator());
             }
-            let item = MenuEntry::action(entry.label, entry.command.clone())
+            let mut item = MenuEntry::action(entry.label, entry.command.clone())
                 .disabled(!entry.enabled)
                 .debug_selector(format!("{selector}-{}", entry.selector));
+            if let Some(explanation) = entry.explanation {
+                item = item.description(explanation);
+            }
             items.push(if entry.command.is_some() {
                 item
             } else {
@@ -213,8 +217,9 @@ impl SettingsWindow {
             AnchoredPlacement::Bottom,
             AnchoredAlignment::End,
         ))
-        // Every entry reads in full: the menu holds what the row's one line leaves out.
-        .fit_rows()
+        // Every entry is one short line, so the menu keeps its native width. A line with an
+        // exact rule behind it shows the rule as its tooltip.
+        .size(MenuSize::Wide)
         .debug_selector(selector)
         .on_activate(move |activation, window, cx| {
             let Some(command) = activation.action().clone() else {
@@ -276,7 +281,7 @@ impl SettingsWindow {
     ) -> AnyElement {
         let view = state::current(cx);
         let row = view.app_row();
-        let summary = SharedString::from(copy::line(row.version.as_deref(), row.status.as_deref()));
+        let summary = row.accessibility.clone();
         let entries = copy::app_menu(&view.app, &row, embedded_notes(), service(cx).is_some());
         let menu = self.render_item_menu(
             APP_MENU_SELECTOR.to_owned(),
@@ -358,7 +363,7 @@ impl SettingsWindow {
                     .map(|action| (action, row.accessibility.clone()));
                 let controls =
                     self.render_item_controls(&format!("{selector}-action"), action, menu, cx);
-                let line = copy::line(row.version.as_deref(), row.status.as_deref());
+                let line = copy::caption(&row);
                 FormRow::new(SharedString::from(selector), row.name.clone(), controls)
                     .caption(SharedString::from(line), caption_tone(row.tone))
                     .status_line(None)

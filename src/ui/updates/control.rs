@@ -9,7 +9,7 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Pixels, Rgba, SharedString, WeakEntity, Window, div};
+use gpui::{AnyElement, App, Context, Pixels, Rgba, WeakEntity, Window, div};
 use spaceterm_ui::{
     ButtonPaint, ButtonShape, ButtonSize, ButtonVariant, ButtonVariantStyle, ComboButton,
     DeterminateProgress, Icon, IconName, MenuAlignment, MenuEntry, MenuLifecycleEvent,
@@ -204,33 +204,25 @@ fn variant(emphasis: Emphasis) -> ButtonVariant {
     }
 }
 
-/// A row's trailing text: `{status}` or `{status} · {action}`.
-fn detail(row: &RowView) -> Option<SharedString> {
-    let status = row.status.clone().or_else(|| row.version.clone());
-    match (status, &row.action) {
-        (Some(status), Some(action)) => Some(format!("{status} · {}", action.label).into()),
-        (Some(status), None) => Some(status),
-        (None, Some(action)) => Some(action.label.clone()),
-        (None, None) => None,
-    }
-}
-
+/// One list row: the item's name, then its one presentation, whose command choosing the row
+/// performs. A long name gives way so the presentation always reads whole, and the row's
+/// description keeps the full name and state for the tooltip and assistive technology.
 fn row_entry(row: &RowView, selector: String) -> MenuEntry<Choice> {
-    let choice = match &row.action {
-        Some(action) => Choice::Perform(action.command.clone()),
+    let primary = &row.primary;
+    let choice = match &primary.command {
+        Some(command) => Choice::Perform(command.clone()),
         None => Choice::Status,
     };
-    let informational = matches!(choice, Choice::Status);
-    let mut entry = MenuEntry::action(row.name.clone(), choice)
-        .description(row.accessibility.clone())
+    let entry = MenuEntry::action(row.name.clone(), choice)
+        .detail(primary.label.clone())
+        .label_yields()
+        .description(primary.description.clone())
         .debug_selector(selector);
-    if let Some(detail) = detail(row) {
-        entry = entry.detail(detail);
+    if primary.command.is_none() {
+        entry.informational()
+    } else {
+        entry
     }
-    if informational {
-        entry = entry.informational();
-    }
-    entry
 }
 
 /// The list: SpaceTerm's row, the heading and one row per Machine, then Update Settings.
@@ -308,10 +300,8 @@ fn pill(
             Tooltip::new("update-pill-tooltip", pill.tooltip).debug_selector("update-pill-tooltip"),
         )
         .menu_label("Updates")
+        // Every row is one short line, so the list keeps its native width.
         .menu_size(MenuSize::Wide)
-        // A row's detail carries the decision: how many Terminal Sessions a restart waits on and
-        // which action the row takes. The list grows to show it whole.
-        .fit_menu_rows()
         .placement(placement())
         .debug_selector("update-pill")
         .on_menu_lifecycle(lifecycle(control))

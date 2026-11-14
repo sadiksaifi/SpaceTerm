@@ -245,8 +245,14 @@ impl Builder<'_> {
             let menu =
                 NSMenu::initWithTitle(NSMenu::alloc(self.mtm), &NSString::from_str(&machine.name));
             menu.setAutoenablesItems(false);
-            if let Some(description) = &machine.description {
-                menu.addItem(&self.text(description));
+            for detail in &machine.details {
+                let line = self.text(&detail.text);
+                if let Some(explanation) = &detail.explanation {
+                    line.setToolTip(Some(&NSString::from_str(explanation)));
+                }
+                menu.addItem(&line);
+            }
+            if !machine.details.is_empty() {
                 menu.addItem(&NSMenuItem::separatorItem(self.mtm));
             }
             for entry in &machine.items {
@@ -517,7 +523,7 @@ pub(in crate::platform) mod tests {
             line: "0.9.0 \u{b7} 2 Terminal Sessions".to_owned(),
             status: None,
             accessibility: name.into(),
-            description: None,
+            details: Vec::new(),
             offline: false,
             items: Vec::new(),
         };

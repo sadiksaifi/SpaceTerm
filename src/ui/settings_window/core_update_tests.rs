@@ -228,13 +228,13 @@ fn settings_tracks_the_shared_install_and_restart_without_starting_another(
                 received: 5,
                 total: 10,
             },
-            "Downloading 1.6.0\u{2026}",
+            "1.4.0 \u{2192} 1.6.0 \u{b7} Downloading\u{2026}",
         ),
         (
             spaceterm_core::update::facts::Operation::Restarting {
                 to: Version::parse("1.6.0").unwrap(),
             },
-            "Restarting into 1.6.0\u{2026}",
+            "1.4.0 \u{2192} 1.6.0 \u{b7} Restarting\u{2026}",
         ),
     ] {
         let mut update = machine(Some("1.6.0"), 3);
@@ -307,7 +307,7 @@ fn ok_on_how_to_update_in_settings_dismisses_the_step(cx: &mut TestAppContext) {
         cx.update(|_, cx| crate::updates::state::current(cx).step),
         None
     );
-    A11yTree::read(cx).text("1.4.0 \u{b7} Can\u{2019}t update by itself");
+    A11yTree::read(cx).text("1.4.0 \u{b7} Required update failed");
 }
 
 /// I7 for the Machine card: its subtitle is the row's version and status, and its one button is
@@ -317,8 +317,7 @@ fn the_card_shows_its_row_and_its_button_asks_for_that_restart(cx: &mut TestAppC
     let (_, adapter, cx) = open(cx, Some("1.6.0"));
     let tree = A11yTree::read(cx);
     assert!(
-        tree.find_text("1.4.0 \u{b7} Restarts into 1.6.0 when 3 Terminal Sessions end")
-            .is_some(),
+        tree.find_text("1.4.0 \u{2192} 1.6.0").is_some(),
         "the card reads as the shared row"
     );
     tree.node("Restart Core\u{2026}");

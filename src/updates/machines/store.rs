@@ -466,7 +466,13 @@ impl MachineUpdates {
                 let observed = update
                     .and_then(|update| update.facts.as_ref())
                     .map(|facts| facts.check.clone());
-                self.checked.insert(machine, Checked::Refused(observed));
+                self.checked.insert(
+                    machine,
+                    Checked::Refused {
+                        observed,
+                        failure: outcome.err().unwrap_or(ActionFailure::Failed),
+                    },
+                );
                 self.unsettled.remove(&machine);
             } else if connected_here && update.is_some() {
                 // Connect and Check reached no route: no check ran, and the row says so.
@@ -616,7 +622,7 @@ impl MachineUpdates {
             }
             // A newer completed check retires a refused one: a success clears it, and a failure
             // stays as that check's outcome.
-            if let Some(Checked::Refused(observed)) = self.checked.get(&machine)
+            if let Some(Checked::Refused { observed, .. }) = self.checked.get(&machine)
                 && let Some(facts) = facts
                 && Some(&facts.check) != observed.as_ref()
             {
@@ -1226,10 +1232,7 @@ mod tests {
         });
         cx.run_until_parked();
         let row = cx.read(|cx| state::current(cx).machine_rows().remove(0));
-        assert_eq!(
-            row.status.as_deref(),
-            Some("Offline \u{b7} Couldn\u{2019}t connect")
-        );
+        assert_eq!(row.status.as_deref(), Some("Connection failed"));
         assert_eq!(row.tone, state::RowTone::Failure);
         assert_eq!(
             row.action.map(|action| action.command),
@@ -1249,7 +1252,8 @@ mod tests {
         adapter.emit(MachineUpdatesEvent::Changed(Box::new(connected)));
         cx.run_until_parked();
         let row = cx.read(|cx| state::current(cx).machine_rows().remove(0));
-        assert_eq!(row.status.as_deref(), Some("0.8.0"));
+        assert_eq!(row.status, None, "its version says it");
+        assert_eq!(row.version.as_deref(), Some("0.8.0"));
     }
 
     /// A check that answered with an error stays the person's failure while the Core's facts
@@ -1768,10 +1772,8 @@ mod tests {
             cx.run_until_parked();
             let view = cx.update(|cx| state::current(cx));
             let row = view.machine_row(penguin).unwrap();
-            assert_eq!(
-                row.status.as_deref(),
-                Some("Couldn\u{2019}t download 0.9.0")
-            );
+            assert_eq!(row.status.as_deref(), Some("Download failed"));
+            assert_eq!(row.target.as_deref(), Some("0.9.0"));
             let action = row.action.expect("the row offers Try Again");
             assert_eq!(action.label.as_ref(), "Try Again");
             assert_eq!(action.command, Command::Machine(penguin, install.clone()));
@@ -1842,10 +1844,8 @@ mod tests {
         cx.run_until_parked();
         let view = cx.update(|cx| state::current(cx));
         let row = view.machine_row(penguin).unwrap();
-        assert_eq!(
-            row.status.as_deref(),
-            Some("Couldn\u{2019}t download 0.9.0")
-        );
+        assert_eq!(row.status.as_deref(), Some("Download failed"));
+        assert_eq!(row.target.as_deref(), Some("0.9.0"));
         let action = row.action.expect("the row offers Try Again");
         assert_eq!(action.label.as_ref(), "Try Again");
         assert_eq!(action.command, Command::Machine(penguin, install.clone()));

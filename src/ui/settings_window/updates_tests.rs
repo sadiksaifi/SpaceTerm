@@ -136,10 +136,7 @@ fn without_a_desktop_update_service_the_shared_row_and_check_now_remain(cx: &mut
 
     let row = cx.update(|_, cx| state::current(cx).app_row());
     let status = window.read_with(cx, |settings, cx| settings.update_status(cx));
-    assert_eq!(
-        status.summary.as_ref(),
-        copy::line(row.version.as_deref(), row.status.as_deref())
-    );
+    assert_eq!(status.summary.as_ref(), copy::caption(&row));
     assert!(
         A11yTree::read(cx).find_text(&status.summary).is_some(),
         "the SpaceTerm row shows its version: {}",
@@ -149,41 +146,195 @@ fn without_a_desktop_update_service_the_shared_row_and_check_now_remain(cx: &mut
     assert_eq!(adapter.performed(), [(PENGUIN, MachineAction::CheckAgain)]);
 }
 
-/// Check Now sits beside the page title, and SpaceTerm's own preferences, which name SpaceTerm,
-/// share SpaceTerm's card above every Machine.
+/// SpaceTerm's card holds, in order, SpaceTerm's row, its automatic downloads, Check Now and its
+/// check interval, above every Machine. Check Now ends on the card's control column, and its
+/// label names what it checks. The page has no introduction and no button beside its title.
 #[gpui::test]
-fn check_now_sits_beside_the_title_and_spaceterms_preferences_share_its_card(
-    cx: &mut TestAppContext,
-) {
-    with_machines(vec![machine(PENGUIN, "penguin", 0)], cx);
+fn spaceterms_card_holds_check_now_in_its_control_column(cx: &mut TestAppContext) {
+    let adapter = with_machines(vec![machine(PENGUIN, "penguin", 0)], cx);
     let (_, cx) = open_updates(cx);
     let mut bounds = |selector: &'static str| {
         cx.debug_bounds(selector)
             .unwrap_or_else(|| panic!("{selector} renders"))
     };
-    let check_now = bounds(CHECK_NOW_SELECTOR);
     let spaceterm = bounds("settings-row-update-status");
     let downloads = bounds("settings-row-automatic-update-downloads");
+    let check_row = bounds("settings-row-update-check-now");
     let interval = bounds("settings-row-update-check-interval");
     let core = bounds("settings-row-core-updates");
     assert!(
-        check_now.bottom() <= spaceterm.top(),
-        "Check Now heads the page"
+        spaceterm.bottom() <= downloads.top(),
+        "SpaceTerm's row leads"
     );
-    assert!(spaceterm.bottom() <= downloads.top() && downloads.bottom() <= interval.top());
+    assert!(
+        downloads.bottom() <= check_row.top(),
+        "automatic downloads, then Check Now"
+    );
+    assert!(
+        check_row.bottom() <= interval.top(),
+        "Check Now, then the interval"
+    );
     assert!(
         interval.bottom() < core.top(),
         "SpaceTerm's card comes first"
     );
+    let check_now = bounds(CHECK_NOW_SELECTOR);
+    let switch = bounds("settings-automatic-update-downloads");
+    let segments = bounds("settings-update-check-interval");
+    assert_eq!(
+        check_now.right(),
+        switch.right(),
+        "Check Now ends on the control column"
+    );
+    assert_eq!(check_now.right(), segments.right());
     assert!(
-        cx.debug_bounds("settings-row-update-check-now").is_none(),
-        "Check Now has no row of its own"
+        check_row.top() <= check_now.top() && check_now.bottom() <= check_row.bottom(),
+        "Check Now sits in its row"
+    );
+    assert!(
+        cx.debug_bounds("settings-toolbar").is_none(),
+        "no button beside the title"
+    );
+    assert!(
+        cx.debug_bounds("settings-section-updates-description")
+            .is_none(),
+        "the page has no introduction"
     );
     let tree = A11yTree::read(cx);
     for label in [copy::AUTOMATIC_DOWNLOADS, copy::CHECK_INTERVAL] {
         assert!(label.contains("SpaceTerm"), "{label}");
         assert!(tree.find_text(label).is_some(), "{label} renders");
     }
+    assert!(tree.find_text(copy::CHECK_NOW_LABEL).is_some());
+    click(CHECK_NOW_SELECTOR, cx);
+    assert_eq!(adapter.performed(), [(PENGUIN, MachineAction::CheckAgain)]);
+}
+
+/// Tab reaches Check Now in SpaceTerm's card right after the automatic downloads switch, moves on
+/// from it, Shift-Tab returns to it, and Space presses it.
+#[gpui::test]
+fn the_keyboard_reaches_check_now_between_spaceterms_preferences(cx: &mut TestAppContext) {
+    let adapter = with_machines(vec![machine(PENGUIN, "penguin", 0)], cx);
+    let (_, cx) = open_updates(cx);
+    let focused = |cx: &mut VisualTestContext| {
+        A11yTree::read(cx)
+            .focused()
+            .and_then(|node| node["aria"]["label"].as_str().map(str::to_owned))
+            .unwrap_or_default()
+    };
+    let mut order = Vec::new();
+    for _ in 0..12 {
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        let label = focused(cx);
+        if label == copy::CHECK_NOW {
+            break;
+        }
+        order.push(label);
+    }
+    assert_eq!(
+        focused(cx),
+        copy::CHECK_NOW,
+        "Tab reaches Check Now: {order:?}"
+    );
+    assert_eq!(
+        order.last().map(String::as_str),
+        Some(copy::AUTOMATIC_DOWNLOADS),
+        "Check Now follows the automatic downloads switch: {order:?}"
+    );
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    let next = A11yTree::read(cx).focused().cloned().unwrap_or_default();
+    assert_ne!(focused(cx), copy::CHECK_NOW, "focus moves on: {next}");
+    assert!(
+        cx.debug_bounds("settings-update-check-interval")
+            .is_some_and(
+                |interval| interval.top() > cx.debug_bounds(CHECK_NOW_SELECTOR).unwrap().bottom()
+            ),
+        "the check interval follows Check Now"
+    );
+    cx.simulate_keystrokes("shift-tab");
+    cx.run_until_parked();
+    assert_eq!(
+        focused(cx),
+        copy::CHECK_NOW,
+        "Shift-Tab returns to Check Now"
+    );
+    // A button activates when Space comes back up.
+    let space = gpui::Keystroke::parse("space").unwrap();
+    cx.simulate_event(gpui::KeyDownEvent {
+        keystroke: space.clone(),
+        prefer_character_input: false,
+        is_held: false,
+    });
+    cx.simulate_event(gpui::KeyUpEvent { keystroke: space });
+    cx.run_until_parked();
+    assert_eq!(adapter.performed(), [(PENGUIN, MachineAction::CheckAgain)]);
+}
+
+/// With 40 Machines the list scrolls under SpaceTerm's card, which stays where it was, so Check
+/// Now stays in reach at the end of the list and still checks every connected Machine.
+#[gpui::test]
+fn spaceterms_card_stays_in_view_while_40_machines_scroll(cx: &mut TestAppContext) {
+    use gpui::{ScrollDelta, ScrollWheelEvent, TouchPhase, point, px};
+    let names: Vec<&'static str> = (0..40)
+        .map(|index| &*Box::leak(format!("machine-{index:02}").into_boxed_str()))
+        .collect();
+    let machines: Vec<MachineUpdate> = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let mut id = [0; 32];
+            id[0] = 10 + index as u8;
+            machine(id, name, 0)
+        })
+        .collect();
+    let adapter = with_machines(machines, cx);
+    let (window, cx) = open_updates(cx);
+    let card = cx.debug_bounds("settings-row-update-status").unwrap();
+    let check_now = cx.debug_bounds(CHECK_NOW_SELECTOR).unwrap();
+    let detail = cx.debug_bounds("settings-detail").unwrap();
+    assert!(
+        detail.top()
+            >= cx
+                .debug_bounds("settings-row-update-check-interval")
+                .unwrap()
+                .bottom()
+    );
+    for _ in 0..80 {
+        cx.simulate_event(ScrollWheelEvent {
+            position: detail.center(),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-120.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+    }
+    let scrolled = window.read_with(cx, |settings, _| settings.scroll.offset().y);
+    assert!(scrolled < px(0.0), "the Machine list scrolled");
+    let last = cx
+        .debug_bounds("settings-row-core-update-39")
+        .expect("the last Machine renders");
+    assert!(
+        last.bottom() <= detail.bottom() + px(1.0),
+        "the list reached its end"
+    );
+    assert_eq!(
+        cx.debug_bounds("settings-row-update-status"),
+        Some(card),
+        "the card stays"
+    );
+    assert_eq!(
+        cx.debug_bounds(CHECK_NOW_SELECTOR),
+        Some(check_now),
+        "Check Now stays"
+    );
+    click(CHECK_NOW_SELECTOR, cx);
+    assert_eq!(
+        adapter.performed().len(),
+        40,
+        "every connected Machine checks"
+    );
 }
 
 /// Opens `menu` and chooses its entry `entry`.
@@ -280,15 +431,14 @@ fn a_check_shows_on_a_core_whose_update_waits(cx: &mut TestAppContext) {
         .update(|_, cx| state::current(cx))
         .machine_row(LOCAL)
         .unwrap();
+    assert_eq!(checking.status.as_deref(), Some("Checking\u{2026}"));
     assert_eq!(
-        checking.status.as_deref(),
-        Some("Checking\u{2026} \u{b7} 0.9.0 downloaded")
+        checking.target.as_deref(),
+        Some("0.9.0"),
+        "the waiting version stays"
     );
     assert_eq!(checking.action, Some(restart.clone()), "Restart Core stays");
-    assert!(shows(
-        "0.8.0 \u{b7} Checking\u{2026} \u{b7} 0.9.0 downloaded",
-        cx
-    ));
+    assert!(shows("0.8.0 \u{2192} 0.9.0 \u{b7} Checking\u{2026}", cx));
 
     adapter.emit(MachineUpdatesEvent::Finished {
         machine: LOCAL,
@@ -298,10 +448,13 @@ fn a_check_shows_on_a_core_whose_update_waits(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let view = cx.update(|_, cx| state::current(cx));
     let failed = view.machine_row(LOCAL).unwrap();
+    assert_eq!(failed.status.as_deref(), Some("Check failed"));
     assert_eq!(
-        failed.status.as_deref(),
-        Some("Couldn\u{2019}t check for updates \u{b7} 0.9.0 downloaded")
+        failed.target.as_deref(),
+        Some("0.9.0"),
+        "the waiting version stays"
     );
+    assert!(shows("0.8.0 \u{2192} 0.9.0 \u{b7} Check failed", cx));
     assert_eq!(failed.tone, state::RowTone::Failure);
     assert_eq!(failed.action, Some(restart.clone()), "Restart Core stays");
     assert_eq!(view.step, before.step, "the title bar shows nothing new");
@@ -365,7 +518,7 @@ fn a_check_reports_progress_and_failure_in_each_row_at_once(cx: &mut TestAppCont
     updater.emit(UpdateEvent::Finished);
     cx.run_until_parked();
 
-    let failed = crate::updates::copy::rows::COULDNT_CHECK;
+    let failed = crate::updates::copy::rows::CHECK_FAILED;
     assert!(
         shows(&format!("{running} \u{b7} {failed}"), cx),
         "SpaceTerm's check failed"
@@ -421,16 +574,14 @@ fn simultaneous_updates_keep_separate_versions_statuses_and_actions(cx: &mut Tes
         ),
     ];
     for (row, selector) in rows {
-        let line = copy::line(row.version.as_deref(), row.status.as_deref());
+        let line = copy::caption(&row);
         assert!(shows(&line, cx), "{} shows {line}", row.name);
         assert!(cx.debug_bounds(selector).is_some(), "{selector}");
     }
-    assert!(app.status.unwrap().contains("0.11.1"));
+    assert_eq!(app.target.as_deref(), Some("0.11.1"));
     let penguin = view.machine_row(PENGUIN).unwrap();
-    assert!(
-        penguin.status.as_deref().unwrap().contains("0.9.0"),
-        "{penguin:?}"
-    );
+    assert_eq!(penguin.version.as_deref(), Some("0.8.0"), "{penguin:?}");
+    assert_eq!(penguin.target.as_deref(), Some("0.9.0"), "{penguin:?}");
     assert_eq!(
         app.action.map(|action| action.label.to_string()).as_deref(),
         Some("Relaunch to Update")
@@ -641,7 +792,7 @@ fn a_manual_check_joins_a_scheduled_check(cx: &mut TestAppContext) {
     cx.update(|cx| ApplicationUpdates::install(updater.clone(), cx));
     let (_, cx) = open_updates(cx);
     let running = env!("SPACETERM_VERSION");
-    let failed = crate::updates::copy::rows::COULDNT_CHECK;
+    let failed = crate::updates::copy::rows::CHECK_FAILED;
     let updates = cx.update(|_, cx| cx.global::<UpdateService>().0.clone());
     // A scheduled check runs.
     updates.update(cx, |updates, cx| updates.check(false, cx));
@@ -687,12 +838,12 @@ fn a_check_shows_beside_a_waiting_spaceterm_release(cx: &mut TestAppContext) {
     updater.emit(UpdateEvent::Available("0.11.1".into()));
     updater.emit(UpdateEvent::Finished);
     cx.run_until_parked();
-    let usual = format!("{running} \u{b7} 0.11.1 available");
+    let usual = format!("{running} \u{2192} 0.11.1");
     assert!(shows(&usual, cx), "{usual}");
 
     click(CHECK_NOW_SELECTOR, cx);
     assert!(shows(
-        &format!("{running} \u{b7} Checking\u{2026} \u{b7} 0.11.1 available"),
+        &format!("{running} \u{2192} 0.11.1 \u{b7} Checking\u{2026}"),
         cx
     ));
     updater.emit(UpdateEvent::Failed(UpdateError::Check));
@@ -700,8 +851,8 @@ fn a_check_shows_beside_a_waiting_spaceterm_release(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(shows(
         &format!(
-            "{running} \u{b7} {} \u{b7} 0.11.1 available",
-            crate::updates::copy::rows::COULDNT_CHECK
+            "{running} \u{2192} 0.11.1 \u{b7} {}",
+            crate::updates::copy::rows::CHECK_FAILED
         ),
         cx
     ));
@@ -734,7 +885,7 @@ fn a_check_shows_beside_a_waiting_spaceterm_release(cx: &mut TestAppContext) {
         "the person's check follows"
     );
     assert!(shows(
-        &format!("{running} \u{b7} Checking\u{2026} \u{b7} 0.11.1 available"),
+        &format!("{running} \u{2192} 0.11.1 \u{b7} Checking\u{2026}"),
         cx
     ));
 }
@@ -762,10 +913,10 @@ fn a_downloaded_update_offers_the_spaceterm_rows_action_and_relaunches_at_once(
             ["label", "value"].into_iter().any(|field| {
                 node["aria"][field]
                     .as_str()
-                    .is_some_and(|text| text.ends_with("0.11.1 downloaded"))
+                    .is_some_and(|text| text.ends_with("\u{2192} 0.11.1"))
             })
         }),
-        "the SpaceTerm row says the update is downloaded"
+        "the SpaceTerm row names the downloaded version apart from the running one"
     );
     click(RESTART_SELECTOR, cx);
     assert_eq!(
@@ -915,11 +1066,10 @@ fn each_machine_row_shows_and_performs_its_shared_row(cx: &mut TestAppContext) {
     for (id, name) in [(LOCAL, "This Mac"), (PENGUIN, "penguin")] {
         let row = view.machine_row(id).unwrap();
         assert!(tree.find_text(name).is_some(), "{name} is listed");
-        let status = row.status.clone().expect("a waiting Machine has a status");
-        let line = copy::line(row.version.as_deref(), Some(&status));
-        assert!(
-            line.contains("0.8.0") && line.contains(status.as_ref()),
-            "{line}"
+        let line = copy::caption(&row);
+        assert_eq!(
+            line, "0.8.0 \u{2192} 0.9.0",
+            "{name} keeps its versions apart"
         );
         assert!(tree.find_text(&line).is_some(), "{name} shows {line}");
         let action = row

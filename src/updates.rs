@@ -1841,10 +1841,10 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(main(cx), relaunch);
         let row = cx.update(|cx| state::current(cx).app_row());
+        assert_eq!(row.target.as_deref(), Some(found), "the row agrees");
         assert_eq!(
-            row.status.as_deref(),
-            Some(format!("{found} downloaded").as_str()),
-            "the row agrees"
+            row.action.map(|action| action.label.to_string()).as_deref(),
+            Some(crate::updates::copy::rows::RELAUNCH_TO_UPDATE)
         );
     }
 
@@ -2541,6 +2541,69 @@ mod tests {
 
     fn retries(service: &Entity<ApplicationUpdates>, cx: &mut gpui::TestAppContext) -> bool {
         service.read_with(cx, |updates, _| updates.retries_download())
+    }
+
+    #[gpui::test]
+    fn joining_a_retry_check_reports_the_check_without_changing_the_retry(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use state::{Command, DesktopAction, PrimaryKind, RowTone};
+
+        let (adapter, service) = clocked_fixture(cx);
+        fail_an_automatic_download(&adapter, &service, cx);
+        assert!(retries(&service, cx));
+        service.update(cx, |updates, cx| updates.check(false, cx));
+        cx.run_until_parked();
+        let checks = adapter.checks.get();
+        let before = cx.update(|cx| state::current(cx).pill());
+
+        service.update(cx, |updates, cx| updates.check(true, cx));
+        let checking = cx.update(|cx| state::current(cx).app_row());
+        assert_eq!(checking.primary.kind, PrimaryKind::Progress);
+        assert_eq!(checking.status.as_deref(), Some(copy::rows::CHECKING));
+        assert_eq!(checking.primary.command, None);
+        assert_eq!(checking.tone, RowTone::Plain);
+        assert_eq!(checking.target.as_deref(), Some("0.1.1"));
+        assert_eq!(adapter.checks.get(), checks, "the existing check is joined");
+        assert!(retries(&service, cx), "joining preserves the quiet retry");
+        assert_eq!(cx.update(|cx| state::current(cx).pill()), before);
+
+        adapter.emit(UpdateEvent::Failed(UpdateError::Check));
+        adapter.emit(UpdateEvent::Finished);
+        cx.run_until_parked();
+        let failed = cx.update(|cx| state::current(cx).app_row());
+        assert_eq!(failed.primary.kind, PrimaryKind::Failure);
+        assert_eq!(failed.status.as_deref(), Some(copy::rows::CHECK_FAILED));
+        assert_eq!(failed.tone, RowTone::Failure);
+        assert_eq!(failed.target.as_deref(), Some("0.1.1"));
+        let Some(Command::Explain(details)) = failed.primary.command else {
+            panic!("a failed check opens its own details");
+        };
+        assert_eq!(details.proceed.as_deref(), Some(copy::rows::CHECK_AGAIN));
+        assert_eq!(
+            details.then.as_deref(),
+            Some(&Command::Desktop(DesktopAction::Check)),
+        );
+        assert!(
+            retries(&service, cx),
+            "a failed check preserves the quiet retry"
+        );
+        assert_eq!(cx.update(|cx| state::current(cx).pill()), before);
+
+        service.update(cx, |updates, cx| updates.check(false, cx));
+        let scheduled = cx.update(|cx| state::current(cx).app_row());
+        assert_eq!(
+            scheduled.status.as_deref(),
+            Some(copy::rows::DOWNLOAD_FAILED)
+        );
+        assert!(retries(&service, cx));
+        adapter.emit(UpdateEvent::Available("0.1.1".into()));
+        cx.run_until_parked();
+        assert_eq!(
+            adapter.downloads.get(),
+            2,
+            "the automatic download still retries"
+        );
     }
 
     /// A download the person started that fails stays theirs to see. SpaceTerm's later tries

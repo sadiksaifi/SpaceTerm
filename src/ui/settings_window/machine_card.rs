@@ -32,7 +32,7 @@ use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::direct_machines::DirectMachineAction;
 use crate::ui::sidebar_window::form::CaptionTone;
 use crate::updates::copy::settings as copy;
-use crate::updates::state::Command;
+use crate::updates::state::{Command, PrimaryKind};
 use spaceterm_core::update::facts::Operation;
 
 pub(super) const STATUS_SELECTOR: &str = "settings-server-status";
@@ -537,18 +537,18 @@ impl SettingsWindow {
         }
     }
 
-    /// What the selected server's update explains at length when it waits for the person or
-    /// didn't finish.
+    /// What the selected server's update explains at length when it didn't finish: the
+    /// remedy its failure's details give. A settled or waiting row says everything in its
+    /// caption and its button.
     fn version_message(&self, cx: &App) -> Option<(SharedString, CaptionTone)> {
         let choice = self.selected_machine()?;
         if let Some(row) = self.machine_update_row(&choice, cx) {
-            // A settled row needs no words; a waiting or failed one explains itself.
-            return row.status.is_some().then(|| {
-                (
-                    row.description.unwrap_or(row.accessibility),
-                    CaptionTone::Guidance,
-                )
-            });
+            return match (row.primary.kind, row.primary.command) {
+                (PrimaryKind::Failure, Some(Command::Explain(details))) => {
+                    Some((details.message, CaptionTone::Guidance))
+                }
+                _ => None,
+            };
         }
         match choice {
             MachineChoice::Local => None,
@@ -950,7 +950,7 @@ impl SettingsWindow {
         };
         if let Some(row) = self.machine_update_row(&choice, cx) {
             return VersionView {
-                subtitle: copy::line(row.version.as_deref(), row.status.as_deref()).into(),
+                subtitle: copy::caption(&row).into(),
                 actions: vec![VersionStep::Observe],
             };
         }
