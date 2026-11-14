@@ -377,7 +377,12 @@ fn texts(view: &UpdateView) -> Vec<String> {
     let mut out = Vec::new();
     let mut row = |row: RowView| {
         out.extend(row.status.map(|s| s.to_string()));
-        out.extend(row.description.map(|s| s.to_string()));
+        out.push(row.primary.label.to_string());
+        out.push(row.primary.description.to_string());
+        for detail in row.details {
+            out.push(detail.text.to_string());
+            out.extend(detail.explanation.map(|s| s.to_string()));
+        }
         out.push(row.accessibility.to_string());
         if let Some(action) = row.action {
             out.push(action.label.to_string());
@@ -623,6 +628,121 @@ fn i7_the_menu_bar_extra_offers_the_spaceterm_row_action() {
             (action, step) => panic!("row {action:?}, extra {step:?}"),
         }
     });
+}
+
+/// One row's title-bar list presentation, checked against the row's typed state. `asked` is
+/// the check the person started there, and `waiting` says an update waits on the row.
+fn assert_one_presentation(asked: Option<AskedCheck>, waiting: bool, row: &RowView) -> PrimaryKind {
+    let primary = &row.primary;
+    assert!(
+        !primary.label.contains('\u{b7}'),
+        "one presentation: {primary:?}"
+    );
+    match primary.kind {
+        PrimaryKind::Progress | PrimaryKind::Status => {
+            assert_eq!(primary.command, None, "{primary:?}")
+        }
+        PrimaryKind::Failure => assert!(
+            matches!(primary.command, Some(Command::Explain(_))),
+            "a failure opens its details: {primary:?}"
+        ),
+        PrimaryKind::Action => assert_eq!(
+            primary.command,
+            row.action.as_ref().map(|action| action.command.clone()),
+            "{primary:?}"
+        ),
+    }
+    if asked == Some(AskedCheck::Running) && waiting {
+        assert_eq!(primary.kind, PrimaryKind::Progress, "{row:?}");
+        assert!(row.target.is_some(), "the waiting version stays: {row:?}");
+    }
+    if asked == Some(AskedCheck::Failed) && waiting {
+        let Some(Command::Explain(details)) = &primary.command else {
+            panic!("a failed check opens its details: {row:?}");
+        };
+        assert!(
+            matches!(
+                details.then.as_deref(),
+                Some(Command::Machine(_, MachineAction::CheckAgain))
+                    | Some(Command::Desktop(DesktopAction::Check))
+            ),
+            "its only follow-up checks again: {details:?}"
+        );
+        assert!(row.target.is_some(), "the waiting version stays: {row:?}");
+        assert!(
+            row.action.is_some(),
+            "Settings keeps the row's action: {row:?}"
+        );
+    }
+    primary.kind
+}
+
+/// The title-bar list shows one presentation per row, chosen by priority, and its command comes
+/// from the same choice: work in progress and a status only report, a failure opens its own
+/// details, and only an action performs the row's action. A check the person started beside a
+/// waiting update reports it, and a failed one offers only to check again, never the restart.
+#[test]
+fn every_list_row_shows_one_presentation_with_its_own_command() {
+    let mut seen = [false; 4];
+    scenes(|view, _| {
+        let app = view.app_row();
+        let kind =
+            assert_one_presentation(view.app.asked_check, view.app.waiting().is_some(), &app);
+        seen[kind as usize] = true;
+        for (machine, row) in view.machines.iter().zip(view.machine_rows()) {
+            let waiting = matches!(machine.stage, MachineStage::Downloaded { .. });
+            let kind = assert_one_presentation(machine.asked_check, waiting, &row);
+            seen[kind as usize] = true;
+        }
+    });
+    assert_eq!(seen, [true; 4], "every kind of presentation is generated");
+
+    // A check the person started on penguin, whose update waits at Ask with a Terminal Session.
+    let state = UpdateState::UpToDate;
+    let mut desk = Desk::new();
+    let mut checking = waiting(PENGUIN, "penguin", 1, false, NOW - 3 * DAY);
+    checking.asked = Some(Asked::Check);
+    let view = desk.view(app(&state), std::slice::from_ref(&checking), NOW);
+    let row = view.machine_row(PENGUIN).unwrap();
+    assert_eq!(view.machines[0].asked_check, Some(AskedCheck::Running));
+    assert_eq!(
+        assert_one_presentation(Some(AskedCheck::Running), true, &row),
+        PrimaryKind::Progress
+    );
+    assert_eq!(row.primary.label.as_ref(), "Checking\u{2026}");
+    let restart = Some(Command::Machine(PENGUIN, MachineAction::Restart));
+    assert_eq!(row.action.map(|action| action.command), restart);
+
+    checking.asked = None;
+    let observed = checking.facts.as_ref().map(|facts| facts.check.clone());
+    desk.checked.insert(PENGUIN, Checked::Refused(observed));
+    let view = desk.view(app(&state), std::slice::from_ref(&checking), NOW);
+    let row = view.machine_row(PENGUIN).unwrap();
+    assert_eq!(view.machines[0].asked_check, Some(AskedCheck::Failed));
+    assert_eq!(
+        assert_one_presentation(Some(AskedCheck::Failed), true, &row),
+        PrimaryKind::Failure
+    );
+    assert_eq!(row.primary.label.as_ref(), "Check failed\u{2026}");
+    assert_eq!(row.action.map(|action| action.command), restart);
+    assert_eq!(
+        view.step.map(|step| matches!(
+            step,
+            Step::Act {
+                kind: ActKind::RestartCore(_),
+                ..
+            }
+        )),
+        Some(true),
+        "the pill keeps its own step"
+    );
+
+    // An ordinary waiting Core shows only Restart Core…, with its condition on demand.
+    desk.checked.clear();
+    let view = desk.view(app(&state), std::slice::from_ref(&checking), NOW);
+    let row = view.machine_row(PENGUIN).unwrap();
+    assert_eq!(row.primary.label.as_ref(), "Restart Core\u{2026}");
+    assert_eq!(row.primary.command, restart);
 }
 
 /// A label ends in an ellipsis only when a confirmation follows. Restarting asks first when it
@@ -885,9 +1005,11 @@ fn the_rows_and_the_confirmation_name_the_software_and_the_consequence() {
     let mut this_mac = waiting(LOCAL, "This Mac", 2, false, NOW);
     let view = desk.view(app(&state), &[this_mac.clone()], NOW);
     let row = &view.machine_rows()[0];
+    assert_eq!(row.status, None, "the versions and the action say it");
+    assert_eq!(row.target.as_deref(), Some("0.11.4"));
     assert_eq!(
-        row.status.as_deref(),
-        Some("Restarts into 0.11.4 when 2 Terminal Sessions end")
+        row.details[0].text.as_ref(),
+        "Restarts when 2 Terminal Sessions end"
     );
     let action = row.action.clone().unwrap();
     assert_eq!(action.label.as_ref(), "Restart Core\u{2026}");
@@ -915,8 +1037,15 @@ fn the_rows_and_the_confirmation_name_the_software_and_the_consequence() {
         "a stage changes emphasis, never the tooltip\u{2019}s words"
     );
     assert_eq!(
-        view.machine_rows()[0].description.as_deref(),
-        Some("An update has waited 2 days.")
+        view.machine_rows()[0]
+            .details
+            .iter()
+            .map(|detail| detail.text.as_ref())
+            .collect::<Vec<_>>(),
+        [
+            "Restarts when 2 Terminal Sessions end",
+            "Update waiting 2 days"
+        ]
     );
 
     let preview = MachinePreview {
@@ -1018,20 +1147,19 @@ fn r1_the_recorded_journey_shows_whats_new_for_every_frame(cx: &mut gpui::TestAp
         assert_eq!(rows, 2);
         let rows = view.machine_rows();
         assert_eq!(rows[0].name.as_ref(), "This Mac");
+        // The list shows one presentation per row: This Mac's Restart Core…, with the restart
+        // condition on demand, and what penguin is doing.
+        assert_eq!(rows[0].primary.label.as_ref(), "Restart Core\u{2026}");
+        assert_eq!(rows[0].status, None);
         assert_eq!(
-            rows[0].status.as_deref(),
-            Some("Restarts into 0.11.4 when 2 Terminal Sessions end")
+            rows[0].details[0].text.as_ref(),
+            "Restarts when 2 Terminal Sessions end"
         );
-        penguin_status.push(rows[1].status.clone().unwrap().to_string());
+        penguin_status.push(rows[1].primary.label.to_string());
     }
     assert_eq!(
         penguin_status,
-        [
-            "Restarts into 0.11.4 in a moment",
-            "Restarting into 0.11.4\u{2026}",
-            "Offline",
-            "0.11.4",
-        ]
+        ["Restart pending", "Restarting\u{2026}", "Offline", "0.11.4",]
     );
 }
 
@@ -1331,7 +1459,7 @@ fn failure_alerts_dismiss_the_step_and_keep_the_row(cx: &mut gpui::TestAppContex
     });
     assert_eq!(step_now(cx), None);
     let row = store_view(cx, &app(&state)).0.machine_row(PENGUIN).unwrap();
-    assert_eq!(row.status.as_deref(), Some("Can\u{2019}t update by itself"));
+    assert_eq!(row.status.as_deref(), Some("Required update failed"));
     assert!(
         adapter.performed().is_empty(),
         "the Core\u{2019}s facts stay as they are"
@@ -1358,8 +1486,15 @@ fn a_core_below_the_update_floor_offers_its_stepping_stone() {
     let view = Desk::new().view(app(&state), std::slice::from_ref(&below), NOW);
     assert_eq!(view.step, None, "nothing failed");
     let row = view.machine_rows().remove(0);
-    assert_eq!(row.status.as_deref(), Some("Needs 0.12.0 before 0.14.0"));
-    assert_eq!(row.description, None, "the status says it whole");
+    assert_eq!(row.status.as_deref(), Some("0.12.0 required first"));
+    assert_eq!(row.target, None, "the newest release isn't what comes next");
+    assert_eq!(
+        row.details
+            .iter()
+            .map(|detail| detail.text.as_ref())
+            .collect::<Vec<_>>(),
+        ["Updates to 0.14.0 after 0.12.0"]
+    );
     let action = row.action.expect("the row offers the Stepping Stone");
     assert_eq!(action.label.as_ref(), "Download");
     assert_eq!(
@@ -1373,9 +1508,11 @@ fn a_core_below_the_update_floor_offers_its_stepping_stone() {
         .view(app(&state), &[too_old], NOW)
         .machine_rows()
         .remove(0);
+    assert_eq!(row.status.as_deref(), Some("0.12.0 required first"));
     assert_eq!(
-        row.status.as_deref(),
-        Some("Too old for this SpaceTerm \u{b7} Needs 0.12.0 before 0.14.0")
+        row.tone,
+        RowTone::Warning,
+        "the hard stop keeps its warning"
     );
     assert_eq!(row.action.unwrap().label.as_ref(), "Download");
 
@@ -1409,7 +1546,12 @@ fn a_failed_stepping_stone_fetch_shows_once_and_keeps_the_download(cx: &mut gpui
     let state = UpdateState::UpToDate;
     let download = |cx: &mut gpui::TestAppContext| {
         let row = store_view(cx, &app(&state)).0.machine_row(PENGUIN).unwrap();
-        assert_eq!(row.status.as_deref(), Some("Needs 0.12.0 before 0.14.0"));
+        assert!(
+            row.details
+                .iter()
+                .any(|detail| detail.text.as_ref() == "Updates to 0.14.0 after 0.12.0"),
+            "the row names the Stepping Stone first: {row:?}"
+        );
         let Some(RowAction {
             label,
             command: Command::Machine(id, action),
@@ -1590,16 +1732,21 @@ fn a_reported_continuation_takes_precedence_and_keeps_the_waiting_age() {
         .view(app(&state), &[update], NOW)
         .machine_rows()
         .remove(0);
+    assert_eq!(row.status, None, "the versions and Restart Core say it");
+    assert_eq!(row.target.as_deref(), Some("0.11.4"));
     assert_eq!(
-        row.status.as_deref(),
-        Some("Restarts into 0.11.4 after an hour with nothing running")
-    );
-    assert_eq!(
-        row.description.as_deref(),
-        Some(
-            "Nothing running means no program, no typing and no output in any Terminal Session. An update has waited 3 days."
-        ),
-        "a Pane on screen keeps nothing running"
+        row.details,
+        [
+            Detail {
+                text: "Restarts after an hour with nothing running".into(),
+                explanation: Some(crate::updates::copy::rows::NOTHING_RUNNING.into()),
+            },
+            Detail {
+                text: "Update waiting 3 days".into(),
+                explanation: None,
+            },
+        ],
+        "the exact rule and the age wait on demand"
     );
 }
 

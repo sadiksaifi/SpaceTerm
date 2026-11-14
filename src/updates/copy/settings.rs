@@ -6,7 +6,6 @@
 use gpui::SharedString;
 use spaceterm_core::update::facts::CheckFailure;
 
-use super::rows::APP_NAME;
 use crate::updates::machines::MachineAction;
 use crate::updates::state::{
     AppRow, AppStage, AskedCheck, ItemCommand, LastCheck, MachineRow, MachineStage, RowView, Target,
@@ -17,9 +16,6 @@ pub(crate) const SPACETERM: &str = "SpaceTerm";
 /// The heading over the Machine rows on every surface.
 pub(crate) const CORE_HEADING: &str = "SpaceTerm Core";
 
-/// Settings > Updates, under the page title: the one place the page names what an update ends.
-pub(crate) const UPDATES_DESCRIPTION: &str = "Relaunching SpaceTerm keeps Terminal Sessions \
-     running. Restarting SpaceTerm Core ends that Machine\u{2019}s Terminal Sessions.";
 pub(crate) const AUTOMATIC_DOWNLOADS: &str = "Download SpaceTerm updates automatically";
 pub(crate) const CHECK_INTERVAL: &str = "Check for SpaceTerm updates";
 pub(crate) const CHECK_NOW: &str = "Check Now";
@@ -58,6 +54,24 @@ pub(crate) fn line(version: Option<&str>, status: Option<&str>) -> String {
         (None, Some(status)) => status.to_owned(),
         (None, None) => String::new(),
     }
+}
+
+/// A row's versions and status on one line: "0.11.3", "0.11.3 \u{2192} 0.11.4",
+/// "0.11.3 \u{2192} 0.11.4 \u{b7} Check failed". The running and the target version stay
+/// apart, and the status says only what the versions don't.
+pub(crate) fn caption(row: &RowView) -> String {
+    let versions = match (row.version.as_deref(), row.target.as_deref()) {
+        (Some(running), Some(target)) if running != target => {
+            format!("{running} \u{2192} {target}")
+        }
+        (Some(running), _) => running.to_owned(),
+        (None, Some(target)) => format!("\u{2192} {target}"),
+        (None, None) => String::new(),
+    };
+    line(
+        (!versions.is_empty()).then_some(versions.as_str()),
+        row.status.as_deref(),
+    )
 }
 
 /// The menu bar extra's count after a settled Machine's version.
@@ -136,6 +150,8 @@ pub(crate) struct ItemEntry {
     pub(crate) separator_before: bool,
     /// A stable name for tests and accessibility tooling.
     pub(crate) selector: &'static str,
+    /// The exact rule behind an information line, read as its tooltip.
+    pub(crate) explanation: Option<SharedString>,
 }
 
 impl ItemEntry {
@@ -146,6 +162,7 @@ impl ItemEntry {
             enabled: true,
             separator_before: false,
             selector: "info",
+            explanation: None,
         }
     }
 
@@ -156,12 +173,36 @@ impl ItemEntry {
             enabled: true,
             separator_before: false,
             selector,
+            explanation: None,
         }
     }
 }
 
-/// When the item last checked, and why its checks fail, as readable lines.
-fn check_lines(last: LastCheck, name: &str) -> Vec<ItemEntry> {
+/// Why checks fail, in a few words.
+pub(crate) fn check_reason(reason: Option<CheckFailure>) -> &'static str {
+    match reason {
+        Some(CheckFailure::Network) => "Release feed unavailable",
+        Some(CheckFailure::Proxy) => "Update proxy unavailable",
+        Some(CheckFailure::Verification) => "Release verification failed",
+        Some(CheckFailure::SystemTooOld) => "Requires a newer system",
+        Some(CheckFailure::ClockBehind) => "System clock is behind",
+        Some(CheckFailure::SteppingStoneSkipped) => "Required update failed",
+        None => "Last check failed",
+    }
+}
+
+/// When the item last checked, and why its checks fail, as readable lines. A check the person
+/// asked for that failed before the facts said so reads as failed too.
+fn check_lines(last: LastCheck, asked: Option<AskedCheck>) -> Vec<ItemEntry> {
+    let mut lines = completed_check_lines(last);
+    if asked == Some(AskedCheck::Failed) && !matches!(last, LastCheck::Failing { .. }) {
+        lines.push(ItemEntry::info(check_reason(None).to_owned()));
+    }
+    lines
+}
+
+/// When the item's last completed check finished, and why its checks fail.
+fn completed_check_lines(last: LastCheck) -> Vec<ItemEntry> {
     let checked = |age: Option<u64>| match age {
         Some(age) => format!("Last checked {}", ago(age)),
         None => "Not checked yet".to_owned(),
@@ -171,32 +212,19 @@ fn check_lines(last: LastCheck, name: &str) -> Vec<ItemEntry> {
         LastCheck::Unknown => Vec::new(),
         LastCheck::Never => vec![ItemEntry::info(checked(None))],
         LastCheck::Succeeded { age } => vec![ItemEntry::info(checked(Some(age)))],
-        LastCheck::Failing { reason, success } => {
-            let mut lines = vec![ItemEntry::info(checked(success))];
-            lines.push(ItemEntry::info(match reason {
-                Some(CheckFailure::Network) => {
-                    "Checks fail: the release feed can\u{2019}t be reached".to_owned()
-                }
-                Some(CheckFailure::Proxy) => {
-                    "Checks fail: the update proxy doesn\u{2019}t answer".to_owned()
-                }
-                Some(CheckFailure::Verification) => {
-                    "Checks fail: the release feed doesn\u{2019}t verify".to_owned()
-                }
-                Some(CheckFailure::SystemTooOld) => {
-                    format!("The newest release needs a newer system than {name}\u{2019}s")
-                }
-                Some(CheckFailure::ClockBehind) => {
-                    format!("Checks fail: {name}\u{2019}s clock is behind")
-                }
-                Some(CheckFailure::SteppingStoneSkipped) => {
-                    "Checks fail: a required update couldn\u{2019}t start".to_owned()
-                }
-                None => "The last check failed".to_owned(),
-            }));
-            lines
-        }
+        LastCheck::Failing { reason, success } => vec![
+            ItemEntry::info(checked(success)),
+            ItemEntry::info(check_reason(reason).to_owned()),
+        ],
     }
+}
+
+/// A row's details as readable lines, each with its exact rule when it has one.
+fn detail_lines(row: &RowView) -> impl Iterator<Item = ItemEntry> + '_ {
+    row.details.iter().map(|detail| ItemEntry {
+        explanation: detail.explanation.clone(),
+        ..ItemEntry::info(detail.text.to_string())
+    })
 }
 
 /// The notes entry for `version`: this build's own notes when it carries them for that
@@ -235,12 +263,8 @@ pub(crate) fn app_menu(
     embedded: Option<&str>,
     checks: bool,
 ) -> Vec<ItemEntry> {
-    let mut entries = check_lines(app.last_check, APP_NAME);
-    entries.extend(
-        row.description
-            .iter()
-            .map(|text| ItemEntry::info(text.to_string())),
-    );
+    let mut entries = check_lines(app.last_check, app.asked_check);
+    entries.extend(detail_lines(row));
     let idle = matches!(
         app.stage,
         AppStage::Current { .. } | AppStage::Available { .. } | AppStage::DownloadFailed { .. }
@@ -281,12 +305,8 @@ pub(crate) fn machine_menu(
     row: &RowView,
     embedded: Option<&str>,
 ) -> Vec<ItemEntry> {
-    let mut entries = check_lines(machine.last_check, &machine.name);
-    entries.extend(
-        row.description
-            .iter()
-            .map(|text| ItemEntry::info(text.to_string())),
-    );
+    let mut entries = check_lines(machine.last_check, machine.asked_check);
+    entries.extend(detail_lines(row));
     let (label, command, enabled) = match &machine.stage {
         MachineStage::Offline => (
             "Connect and Check",

@@ -665,6 +665,8 @@ struct RowExtra {
     description: Option<SharedString>,
     /// The row can be reached and read but never activates.
     informational: bool,
+    /// The label truncates before the detail, so the detail always reads whole.
+    label_yields: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -828,6 +830,12 @@ impl<A> MenuEntry<A> {
     /// submenu available, unlike a disabled entry.
     pub fn informational(self) -> Self {
         self.extra(|extra| extra.informational = true)
+    }
+
+    /// Truncates a long label before the detail, for a row whose detail is what choosing it
+    /// does. Pair it with [`Self::description`], which keeps the whole label readable.
+    pub fn label_yields(self) -> Self {
+        self.extra(|extra| extra.label_yields = true)
     }
 }
 
@@ -3968,8 +3976,10 @@ fn render_row(
         .render(style.metrics.leading_column_metrics(), mark, icon)
         .map(|columns| columns.relative().top(icon_offset));
     // A row with a detail keeps its label whole and truncates the detail, because the label
-    // names what the row acts on.
-    let has_detail = extra.detail.is_some();
+    // names what the row acts on, unless the label yields to a detail that says what choosing
+    // the row does.
+    let keeps_label = extra.detail.is_some() && !extra.label_yields;
+    let keeps_detail = extra.detail.is_some() && extra.label_yields;
     row = row
         .children(leading)
         .child(
@@ -3977,7 +3987,7 @@ fn render_row(
                 .debug_selector(move || label_selector)
                 .min_w_0()
                 .flex_grow(1.0)
-                .when(has_detail, |label| label.flex_shrink_0())
+                .when(keeps_label, |label| label.flex_shrink_0())
                 .truncate()
                 .when(informational, |label| {
                     label.text_color(secondary_foreground)
@@ -3992,6 +4002,7 @@ fn render_row(
                     .aria_label(detail.clone())
                     .debug_selector(move || detail_selector)
                     .min_w_0()
+                    .when(keeps_detail, |detail| detail.flex_shrink_0())
                     .truncate()
                     .text_color(secondary_foreground)
                     .child(detail),

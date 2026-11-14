@@ -136,10 +136,7 @@ fn without_a_desktop_update_service_the_shared_row_and_check_now_remain(cx: &mut
 
     let row = cx.update(|_, cx| state::current(cx).app_row());
     let status = window.read_with(cx, |settings, cx| settings.update_status(cx));
-    assert_eq!(
-        status.summary.as_ref(),
-        copy::line(row.version.as_deref(), row.status.as_deref())
-    );
+    assert_eq!(status.summary.as_ref(), copy::caption(&row));
     assert!(
         A11yTree::read(cx).find_text(&status.summary).is_some(),
         "the SpaceTerm row shows its version: {}",
@@ -280,15 +277,14 @@ fn a_check_shows_on_a_core_whose_update_waits(cx: &mut TestAppContext) {
         .update(|_, cx| state::current(cx))
         .machine_row(LOCAL)
         .unwrap();
+    assert_eq!(checking.status.as_deref(), Some("Checking\u{2026}"));
     assert_eq!(
-        checking.status.as_deref(),
-        Some("Checking\u{2026} \u{b7} 0.9.0 downloaded")
+        checking.target.as_deref(),
+        Some("0.9.0"),
+        "the waiting version stays"
     );
     assert_eq!(checking.action, Some(restart.clone()), "Restart Core stays");
-    assert!(shows(
-        "0.8.0 \u{b7} Checking\u{2026} \u{b7} 0.9.0 downloaded",
-        cx
-    ));
+    assert!(shows("0.8.0 \u{2192} 0.9.0 \u{b7} Checking\u{2026}", cx));
 
     adapter.emit(MachineUpdatesEvent::Finished {
         machine: LOCAL,
@@ -298,10 +294,13 @@ fn a_check_shows_on_a_core_whose_update_waits(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let view = cx.update(|_, cx| state::current(cx));
     let failed = view.machine_row(LOCAL).unwrap();
+    assert_eq!(failed.status.as_deref(), Some("Check failed"));
     assert_eq!(
-        failed.status.as_deref(),
-        Some("Couldn\u{2019}t check for updates \u{b7} 0.9.0 downloaded")
+        failed.target.as_deref(),
+        Some("0.9.0"),
+        "the waiting version stays"
     );
+    assert!(shows("0.8.0 \u{2192} 0.9.0 \u{b7} Check failed", cx));
     assert_eq!(failed.tone, state::RowTone::Failure);
     assert_eq!(failed.action, Some(restart.clone()), "Restart Core stays");
     assert_eq!(view.step, before.step, "the title bar shows nothing new");
@@ -365,7 +364,7 @@ fn a_check_reports_progress_and_failure_in_each_row_at_once(cx: &mut TestAppCont
     updater.emit(UpdateEvent::Finished);
     cx.run_until_parked();
 
-    let failed = crate::updates::copy::rows::COULDNT_CHECK;
+    let failed = crate::updates::copy::rows::CHECK_FAILED;
     assert!(
         shows(&format!("{running} \u{b7} {failed}"), cx),
         "SpaceTerm's check failed"
@@ -421,16 +420,14 @@ fn simultaneous_updates_keep_separate_versions_statuses_and_actions(cx: &mut Tes
         ),
     ];
     for (row, selector) in rows {
-        let line = copy::line(row.version.as_deref(), row.status.as_deref());
+        let line = copy::caption(&row);
         assert!(shows(&line, cx), "{} shows {line}", row.name);
         assert!(cx.debug_bounds(selector).is_some(), "{selector}");
     }
-    assert!(app.status.unwrap().contains("0.11.1"));
+    assert_eq!(app.target.as_deref(), Some("0.11.1"));
     let penguin = view.machine_row(PENGUIN).unwrap();
-    assert!(
-        penguin.status.as_deref().unwrap().contains("0.9.0"),
-        "{penguin:?}"
-    );
+    assert_eq!(penguin.version.as_deref(), Some("0.8.0"), "{penguin:?}");
+    assert_eq!(penguin.target.as_deref(), Some("0.9.0"), "{penguin:?}");
     assert_eq!(
         app.action.map(|action| action.label.to_string()).as_deref(),
         Some("Relaunch to Update")
@@ -641,7 +638,7 @@ fn a_manual_check_joins_a_scheduled_check(cx: &mut TestAppContext) {
     cx.update(|cx| ApplicationUpdates::install(updater.clone(), cx));
     let (_, cx) = open_updates(cx);
     let running = env!("SPACETERM_VERSION");
-    let failed = crate::updates::copy::rows::COULDNT_CHECK;
+    let failed = crate::updates::copy::rows::CHECK_FAILED;
     let updates = cx.update(|_, cx| cx.global::<UpdateService>().0.clone());
     // A scheduled check runs.
     updates.update(cx, |updates, cx| updates.check(false, cx));
@@ -687,12 +684,12 @@ fn a_check_shows_beside_a_waiting_spaceterm_release(cx: &mut TestAppContext) {
     updater.emit(UpdateEvent::Available("0.11.1".into()));
     updater.emit(UpdateEvent::Finished);
     cx.run_until_parked();
-    let usual = format!("{running} \u{b7} 0.11.1 available");
+    let usual = format!("{running} \u{2192} 0.11.1");
     assert!(shows(&usual, cx), "{usual}");
 
     click(CHECK_NOW_SELECTOR, cx);
     assert!(shows(
-        &format!("{running} \u{b7} Checking\u{2026} \u{b7} 0.11.1 available"),
+        &format!("{running} \u{2192} 0.11.1 \u{b7} Checking\u{2026}"),
         cx
     ));
     updater.emit(UpdateEvent::Failed(UpdateError::Check));
@@ -700,8 +697,8 @@ fn a_check_shows_beside_a_waiting_spaceterm_release(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(shows(
         &format!(
-            "{running} \u{b7} {} \u{b7} 0.11.1 available",
-            crate::updates::copy::rows::COULDNT_CHECK
+            "{running} \u{2192} 0.11.1 \u{b7} {}",
+            crate::updates::copy::rows::CHECK_FAILED
         ),
         cx
     ));
@@ -734,7 +731,7 @@ fn a_check_shows_beside_a_waiting_spaceterm_release(cx: &mut TestAppContext) {
         "the person's check follows"
     );
     assert!(shows(
-        &format!("{running} \u{b7} Checking\u{2026} \u{b7} 0.11.1 available"),
+        &format!("{running} \u{2192} 0.11.1 \u{b7} Checking\u{2026}"),
         cx
     ));
 }
@@ -762,10 +759,10 @@ fn a_downloaded_update_offers_the_spaceterm_rows_action_and_relaunches_at_once(
             ["label", "value"].into_iter().any(|field| {
                 node["aria"][field]
                     .as_str()
-                    .is_some_and(|text| text.ends_with("0.11.1 downloaded"))
+                    .is_some_and(|text| text.ends_with("\u{2192} 0.11.1"))
             })
         }),
-        "the SpaceTerm row says the update is downloaded"
+        "the SpaceTerm row names the downloaded version apart from the running one"
     );
     click(RESTART_SELECTOR, cx);
     assert_eq!(
@@ -915,11 +912,10 @@ fn each_machine_row_shows_and_performs_its_shared_row(cx: &mut TestAppContext) {
     for (id, name) in [(LOCAL, "This Mac"), (PENGUIN, "penguin")] {
         let row = view.machine_row(id).unwrap();
         assert!(tree.find_text(name).is_some(), "{name} is listed");
-        let status = row.status.clone().expect("a waiting Machine has a status");
-        let line = copy::line(row.version.as_deref(), Some(&status));
-        assert!(
-            line.contains("0.8.0") && line.contains(status.as_ref()),
-            "{line}"
+        let line = copy::caption(&row);
+        assert_eq!(
+            line, "0.8.0 \u{2192} 0.9.0",
+            "{name} keeps its versions apart"
         );
         assert!(tree.find_text(&line).is_some(), "{name} shows {line}");
         let action = row

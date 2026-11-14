@@ -1,12 +1,12 @@
 //! The confirmation and failure alerts, D1 to D8.
 use gpui::SharedString;
 use spaceterm_core::protocol::capability::Unavailable;
-use spaceterm_core::update::facts::StartFailure;
+use spaceterm_core::update::facts::{CheckFailure, StartFailure};
 
 use super::{Platform, list_and, this_ends};
 use crate::updates::UpdateError;
 use crate::updates::confirm::{Explanation, Previewed};
-use crate::updates::machines::{ActionFailure, MachineAction};
+use crate::updates::machines::{ActionFailure, MachineAction, MachineId};
 use crate::updates::state::{
     AppRow, AppStage, Command, DesktopAction, DownloadCause, MachineRow, MachineStage,
     PUSH_FAILURE, STEPPING_STONE,
@@ -238,6 +238,99 @@ pub(crate) fn machine_failure(row: &MachineRow) -> Option<Explanation> {
         MachineStage::SteppingStoneSkipped => how_to_update(row),
         _ => return None,
     })
+}
+
+/// The details of a check that failed: why, and what still waits. Check Again checks once more;
+/// closing the alert changes nothing. `machine` is None for SpaceTerm's own check.
+pub(crate) fn check_failed(
+    machine: Option<&str>,
+    reason: Option<CheckFailure>,
+    waiting: Option<String>,
+    check: Command,
+) -> Explanation {
+    let title = match machine {
+        Some(name) => format!("Couldn\u{2019}t Check for Updates on {name}"),
+        None => "Couldn\u{2019}t Check for SpaceTerm Updates".to_owned(),
+    };
+    let why = match reason {
+        Some(CheckFailure::Network) => "The release feed can\u{2019}t be reached.".to_owned(),
+        Some(CheckFailure::Proxy) => "The update proxy doesn\u{2019}t answer.".to_owned(),
+        Some(CheckFailure::Verification) => "The release feed doesn\u{2019}t verify.".to_owned(),
+        Some(CheckFailure::SystemTooOld) => format!(
+            "{} runs a system too old for the newest release.",
+            machine.unwrap_or("This computer")
+        ),
+        Some(CheckFailure::ClockBehind) => match machine {
+            Some(name) => format!(
+                "{name}\u{2019}s clock is behind. Set the correct date and time on {name}, then try again."
+            ),
+            None => "This computer\u{2019}s clock is behind. Set the correct date and time, then try again.".to_owned(),
+        },
+        Some(CheckFailure::SteppingStoneSkipped) => {
+            "A required update couldn\u{2019}t start.".to_owned()
+        }
+        None => "The check didn\u{2019}t finish. Check your network, then try again.".to_owned(),
+    };
+    let message = match waiting {
+        Some(waiting) => format!("{why} {waiting}"),
+        None => why,
+    };
+    Explanation {
+        then: Some(Box::new(check)),
+        proceed: Some(CHECK_AGAIN.into()),
+        ..Explanation::ok(title, message)
+    }
+}
+
+/// The details of Connect and Check that reached no route. Try Again connects and checks again.
+pub(crate) fn connect_failed(name: &str, machine: MachineId) -> Explanation {
+    Explanation {
+        then: Some(Box::new(Command::Machine(
+            machine,
+            MachineAction::ConnectAndCheck,
+        ))),
+        proceed: Some(TRY_AGAIN.into()),
+        ..Explanation::ok(
+            format!("Couldn\u{2019}t Connect to {name}"),
+            format!("SpaceTerm couldn\u{2019}t reach {name} to check for updates."),
+        )
+    }
+}
+
+/// The details of a download that failed and is tried again by itself: SpaceTerm's own when
+/// `machine` is None, otherwise that Machine's SpaceTerm Core.
+pub(crate) fn retried_download(machine: Option<&str>, version: Option<&str>) -> Explanation {
+    match machine {
+        None => Explanation::ok(
+            match version {
+                Some(version) => format!("Couldn\u{2019}t Download SpaceTerm {version}"),
+                None => "Couldn\u{2019}t Download the SpaceTerm Update".to_owned(),
+            },
+            "SpaceTerm tries again later. Terminal Sessions keep running.",
+        ),
+        Some(name) => Explanation::ok(
+            match version {
+                Some(version) => {
+                    format!("Couldn\u{2019}t Download SpaceTerm Core {version} to {name}")
+                }
+                None => format!("Couldn\u{2019}t Download SpaceTerm Core to {name}"),
+            },
+            "SpaceTerm Core tries again later. Its Terminal Sessions keep running.",
+        ),
+    }
+}
+
+/// The details of a restart into `version` that failed while the version stays downloaded.
+/// Try Again restarts, asking first wherever the Core says something ends.
+pub(crate) fn restart_kept(name: &str, machine: MachineId, version: &str) -> Explanation {
+    Explanation {
+        then: Some(Box::new(Command::Machine(machine, MachineAction::Restart))),
+        proceed: Some(TRY_AGAIN.into()),
+        ..Explanation::ok(
+            format!("Couldn\u{2019}t Restart SpaceTerm Core on {name}"),
+            format!("SpaceTerm Core {version} didn\u{2019}t start. It stays downloaded."),
+        )
+    }
 }
 
 /// D3f, from the pill's `Update Failed` and the row's `How to Update…` alike. OK dismisses the

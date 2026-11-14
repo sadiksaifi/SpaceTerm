@@ -17,7 +17,9 @@ use crate::updates::machines::testing::ScriptedMachines;
 use crate::updates::machines::{
     ActionFailure, MachineAction, MachineId, MachineUpdate, MachineUpdatesEvent,
 };
-use crate::updates::state::{Command, DesktopAction, Glyph, PillView, RowAction, RowView};
+use crate::updates::state::{
+    Command, DesktopAction, Glyph, PillView, Primary, PrimaryKind, RowAction, RowView,
+};
 
 const THIS_MAC: MachineId = [1; 32];
 const PENGUIN: MachineId = [2; 32];
@@ -26,17 +28,35 @@ const BUILD_BOX: MachineId = [3; 32];
 const CONFIRM: &str = "modal-action-update-confirm-proceed";
 const CANCEL: &str = "modal-action-update-confirm-cancel";
 
+/// A scripted row: with an action, the list shows the action; otherwise it reports `status`.
 fn row(name: &str, status: &str, action: Option<(&str, Command)>) -> RowView {
+    let action = action.map(|(label, command)| RowAction {
+        label: label.to_owned().into(),
+        subtitle: None,
+        command,
+    });
+    let primary = match &action {
+        Some(action) => Primary {
+            kind: PrimaryKind::Action,
+            label: action.label.clone(),
+            command: Some(action.command.clone()),
+            description: format!("{name}: {status}").into(),
+        },
+        None => Primary {
+            kind: PrimaryKind::Status,
+            label: status.to_owned().into(),
+            command: None,
+            description: format!("{name}: {status}").into(),
+        },
+    };
     RowView {
         name: name.to_owned().into(),
         version: None,
+        target: None,
         status: Some(status.to_owned().into()),
-        action: action.map(|(label, command)| RowAction {
-            label: label.to_owned().into(),
-            subtitle: None,
-            command,
-        }),
-        description: None,
+        action,
+        primary,
+        details: Vec::new(),
         accessibility: format!("{name}: {status}").into(),
         tone: Default::default(),
     }
@@ -346,41 +366,12 @@ fn the_chevron_opens_spaceterm_then_every_machine_then_update_settings(
 
 /// While open, the list grows to show a row whose text grows, so no action is cut off, and never
 /// shrinks under the pointer when a row's text shrinks. It fits its rows again when it next opens.
-#[gpui::test]
-fn the_open_list_grows_to_fit_and_never_shrinks_until_it_closes(cx: &mut gpui::TestAppContext) {
-    const LONGER: &str = "Restarts into 0.11.4 after an hour with nothing running";
-    let _ = services(cx);
-    let script = Script::new(recording());
-    let (control, visual) = hosted(&script, cx);
-    visual.simulate_resize(gpui::size(gpui::px(900.0), gpui::px(580.0)));
-    visual.run_until_parked();
-    click("update-pill-menu", visual);
-    let width = |selector: &'static str, visual: &mut gpui::VisualTestContext| {
-        visual
-            .debug_bounds(selector)
-            .unwrap_or_else(|| panic!("{selector} renders"))
-            .size
-            .width
-    };
-    let opened = width("update-row-app", visual);
-    let with_this_mac = |status: &str| {
-        let status = status.to_owned();
-        move |shown: &mut Shown| {
-            shown.machines[0].1 = row(
-                "This Mac",
-                &status,
-                Some(("Restart Core\u{2026}", restart_core(THIS_MAC))),
-            );
-        }
-    };
-    script.set(with_this_mac(LONGER), &control, visual);
-    let grown = width("update-row-app", visual);
-    assert!(grown > opened, "the list grows to show the longer row");
-    let detail = format!("{LONGER} \u{b7} Restart Core\u{2026}");
-    let needed = visual.update(|window, _| {
+/// The text width of `text` in the list's font.
+fn text_width(text: &str, visual: &mut gpui::VisualTestContext) -> gpui::Pixels {
+    visual.update(|window, _| {
         let font = spaceterm_ui::ControlTypography::default().regular().clone();
         let run = gpui::TextRun {
-            len: detail.len(),
+            len: text.len(),
             font,
             color: window.text_style().color,
             background_color: None,
@@ -389,61 +380,69 @@ fn the_open_list_grows_to_fit_and_never_shrinks_until_it_closes(cx: &mut gpui::T
         };
         window
             .text_system()
-            .shape_line(detail.clone().into(), gpui::px(12.0), &[run], None)
+            .shape_line(text.to_owned().into(), gpui::px(12.0), &[run], None)
             .width
-    });
-    assert!(
-        width("update-row-0-detail", visual) >= needed,
-        "no action is cut off"
-    );
+    })
+}
 
-    script.set(with_this_mac("0.11.4"), &control, visual);
-    assert_eq!(
-        width("update-row-app", visual),
-        grown,
-        "a shorter row does not shrink the open list"
+fn bounds(
+    selector: &'static str,
+    visual: &mut gpui::VisualTestContext,
+) -> gpui::Bounds<gpui::Pixels> {
+    visual
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} renders"))
+}
+
+/// The list keeps its native width while a row's state changes, and every row stays one line:
+/// a longer state never widens the open list or the next one.
+#[gpui::test]
+fn the_list_keeps_its_width_and_one_line_rows_while_states_change(cx: &mut gpui::TestAppContext) {
+    let _ = services(cx);
+    let script = Script::new(recording());
+    let (control, visual) = hosted(&script, cx);
+    visual.simulate_resize(gpui::size(gpui::px(900.0), gpui::px(580.0)));
+    visual.run_until_parked();
+    click("update-pill-menu", visual);
+    let opened = bounds("update-row-app", visual);
+    let rows = |visual: &mut gpui::VisualTestContext| {
+        ["update-row-app", "update-row-0", "update-row-1"]
+            .map(|selector| bounds(selector, visual).size.height)
+    };
+    let heights = rows(visual);
+    script.set(
+        |shown| {
+            shown.machines[0].1 = row(
+                "This Mac",
+                "Couldn\u{2019}t restart into 0.11.4 after an hour with nothing running",
+                None,
+            );
+        },
+        &control,
+        visual,
     );
+    assert_eq!(
+        bounds("update-row-app", visual).size.width,
+        opened.size.width,
+        "a longer state doesn't widen the open list"
+    );
+    assert_eq!(rows(visual), heights, "every row stays one line");
     visual.simulate_keystrokes("escape");
     visual.run_until_parked();
     click("update-pill-menu", visual);
-    assert!(
-        width("update-row-app", visual) < grown,
-        "the next opening fits the shorter rows"
+    assert_eq!(
+        bounds("update-row-app", visual).size.width,
+        opened.size.width,
+        "the next opening keeps the native width"
     );
+    assert_eq!(rows(visual), heights);
 }
 
-/// At the default 900 x 580 window every row shows its name and its whole detail: the status
-/// with its Terminal Session count, then the action. The list stays inside the window, and
-/// assistive technology reads the detail and the heading.
+/// At the default 900 x 580 window every row shows its one presentation whole, a long Machine
+/// name gives way to it, and assistive technology reads the full name and state.
 #[gpui::test]
-fn every_row_shows_its_whole_detail_at_the_default_window(cx: &mut gpui::TestAppContext) {
-    const SESSIONS: &str = "Restarts into 0.11.4 when 3 Terminal Sessions end";
-    const ROWS: [(&str, &str, &str, &str); 4] = [
-        (
-            "update-row-app-label",
-            "update-row-app-detail",
-            "SpaceTerm",
-            "0.11.4 downloaded \u{b7} Relaunch to Update",
-        ),
-        (
-            "update-row-0-label",
-            "update-row-0-detail",
-            "This Mac",
-            "Restarts into 0.11.4 when 3 Terminal Sessions end \u{b7} Restart Core\u{2026}",
-        ),
-        (
-            "update-row-1-label",
-            "update-row-1-detail",
-            "penguin",
-            "Restarts into 0.11.4 in a moment",
-        ),
-        (
-            "update-row-2-label",
-            "update-row-2-detail",
-            "build-box",
-            "Restarts into 0.11.4 when 4 Terminal Sessions end \u{b7} Restart Core\u{2026}",
-        ),
-    ];
+fn every_row_shows_its_presentation_whole_and_a_long_name_gives_way(cx: &mut gpui::TestAppContext) {
+    const LONG: &str = "workstation-with-a-very-long-machine-name-0123456789";
     let _ = services(cx);
     let script = Script::new(Shown {
         pill: Some(pill(
@@ -454,7 +453,7 @@ fn every_row_shows_its_whole_detail_at_the_default_window(cx: &mut gpui::TestApp
         )),
         app: row(
             "SpaceTerm",
-            "0.11.4 downloaded",
+            "0.11.4",
             Some((
                 "Relaunch to Update",
                 Command::Desktop(DesktopAction::Update),
@@ -465,19 +464,16 @@ fn every_row_shows_its_whole_detail_at_the_default_window(cx: &mut gpui::TestApp
                 THIS_MAC,
                 row(
                     "This Mac",
-                    SESSIONS,
+                    "0.11.4",
                     Some(("Restart Core\u{2026}", restart_core(THIS_MAC))),
                 ),
             ),
-            (
-                PENGUIN,
-                row("penguin", "Restarts into 0.11.4 in a moment", None),
-            ),
+            (PENGUIN, row("penguin", "Restart pending", None)),
             (
                 BUILD_BOX,
                 row(
-                    "build-box",
-                    "Restarts into 0.11.4 when 4 Terminal Sessions end",
+                    LONG,
+                    "0.11.4",
                     Some(("Restart Core\u{2026}", restart_core(BUILD_BOX))),
                 ),
             ),
@@ -487,48 +483,40 @@ fn every_row_shows_its_whole_detail_at_the_default_window(cx: &mut gpui::TestApp
     visual.simulate_resize(gpui::size(gpui::px(900.0), gpui::px(580.0)));
     visual.run_until_parked();
     click("update-pill-menu", visual);
-    let width = |text: &str, visual: &mut gpui::VisualTestContext| {
-        visual.update(|window, _| {
-            let font = spaceterm_ui::ControlTypography::default().regular().clone();
-            let run = gpui::TextRun {
-                len: text.len(),
-                font,
-                color: window.text_style().color,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-            window
-                .text_system()
-                .shape_line(text.to_owned().into(), gpui::px(12.0), &[run], None)
-                .width
-        })
-    };
-    let tree = A11yTree::read(visual);
-    for (label, shown, name, detail) in ROWS {
-        let bounds = |selector: &'static str, visual: &mut gpui::VisualTestContext| {
-            visual
-                .debug_bounds(selector)
-                .unwrap_or_else(|| panic!("{selector} renders"))
-        };
-        let (label, shown) = (bounds(label, visual), bounds(shown, visual));
-        let (name_width, detail_width) = (width(name, visual), width(detail, visual));
+    for (detail, shown) in [
+        ("update-row-app-detail", "Relaunch to Update"),
+        ("update-row-0-detail", "Restart Core\u{2026}"),
+        ("update-row-1-detail", "Restart pending"),
+        ("update-row-2-detail", "Restart Core\u{2026}"),
+    ] {
+        let needed = text_width(shown, visual);
+        let detail = bounds(detail, visual);
         assert!(
-            label.size.width >= name_width,
-            "{name}: the name shows in full: {:?} < {name_width:?}",
-            label.size.width
+            detail.size.width >= needed,
+            "{shown} shows whole: {:?} < {needed:?}",
+            detail.size.width
         );
         assert!(
-            shown.size.width >= detail_width,
-            "{name}: the detail shows in full: {:?} < {detail_width:?}",
-            shown.size.width
+            detail.right() <= gpui::px(900.0),
+            "{shown} stays inside the window"
         );
-        assert!(
-            label.left() >= gpui::px(0.0) && shown.right() <= gpui::px(900.0),
-            "{name}: the row stays inside the window"
-        );
-        tree.node(detail);
     }
+    let name = bounds("update-row-2-label", visual);
+    assert!(
+        name.size.width < text_width(LONG, visual),
+        "the long name gives way"
+    );
+    let heights: Vec<_> = ["update-row-0", "update-row-1", "update-row-2"]
+        .into_iter()
+        .map(|selector| bounds(selector, visual).size.height)
+        .collect();
+    assert!(
+        heights.windows(2).all(|pair| pair[0] == pair[1]),
+        "{heights:?}"
+    );
+    let tree = A11yTree::read(visual);
+    tree.node(LONG);
+    assert_eq!(description(LONG, visual), format!("{LONG}: 0.11.4"));
     tree.node("SpaceTerm Core");
 }
 
@@ -1069,12 +1057,12 @@ fn cancel_on_a_failed_relaunch_dismisses_only_its_step(cx: &mut gpui::TestAppCon
     let (adapter, updates, visual) = failed_relaunch(cx);
     assert_eq!(
         app_shown(visual),
-        failed_step("Couldn\u{2019}t relaunch", Some("Try Again"))
+        failed_step("Relaunch failed", Some("Try Again"))
     );
     click("modal-action-update-explain-cancel", visual);
     assert_eq!(
         app_shown(visual),
-        dismissed_step("Couldn\u{2019}t relaunch", Some("Try Again")),
+        dismissed_step("Relaunch failed", Some("Try Again")),
         "the row keeps the failure"
     );
     assert!(relaunch_failed(&updates, visual), "the updater keeps it");
@@ -1089,7 +1077,7 @@ fn escape_on_a_failed_relaunch_dismisses_only_its_step(cx: &mut gpui::TestAppCon
     assert!(!alert_open(visual));
     assert_eq!(
         app_shown(visual),
-        dismissed_step("Couldn\u{2019}t relaunch", Some("Try Again"))
+        dismissed_step("Relaunch failed", Some("Try Again"))
     );
     assert!(relaunch_failed(&updates, visual));
     assert_eq!(adapter.installations.get(), 1, "Escape relaunches nothing");
@@ -1147,7 +1135,7 @@ fn a_failed_download_from_check_for_updates_opens_d6(cx: &mut gpui::TestAppConte
     assert!(tree.find("Couldn\u{2019}t Check for Updates").is_none());
     assert_eq!(
         app_shown(visual),
-        failed_step("Couldn\u{2019}t download 0.4.2", Some("Try Again"))
+        failed_step("Download failed", Some("Try Again"))
     );
 
     let downloads = adapter.downloads.get();
@@ -1157,7 +1145,7 @@ fn a_failed_download_from_check_for_updates_opens_d6(cx: &mut gpui::TestAppConte
         app_shown(visual),
         (
             Some(crate::updates::copy::title_bar::DOWNLOAD_UPDATE.to_owned()),
-            "Couldn\u{2019}t download 0.4.2".to_owned(),
+            "Download failed".to_owned(),
             Some("Try Again".to_owned())
         ),
         "the release keeps its step; the row keeps the failure"
@@ -1190,7 +1178,7 @@ fn a_failed_download_from_check_for_updates_opens_d6(cx: &mut gpui::TestAppConte
     visual.run_until_parked();
     assert_eq!(
         app_shown(visual),
-        failed_step("Couldn\u{2019}t download 0.4.2", Some("Try Again")),
+        failed_step("Download failed", Some("Try Again")),
         "a newer failure shows again"
     );
 }
@@ -1234,14 +1222,14 @@ fn cancel_on_d6_under_a_hard_stop_keeps_download_update(cx: &mut gpui::TestAppCo
     let (_, _, visual) = failed_check_beside(UpdateError::Download, vec![too_new], cx);
     assert_eq!(
         app_shown(visual),
-        failed_step("Couldn\u{2019}t download 0.4.2", Some("Try Again"))
+        failed_step("Download failed", Some("Try Again"))
     );
     click("modal-action-update-explain-cancel", visual);
     assert_eq!(
         app_shown(visual),
         (
             Some(crate::updates::copy::title_bar::DOWNLOAD_UPDATE.to_owned()),
-            "Couldn\u{2019}t download 0.4.2".to_owned(),
+            "Download failed".to_owned(),
             Some("Try Again".to_owned())
         ),
         "the hard stop keeps its step; the row keeps the failure"
@@ -1272,14 +1260,14 @@ fn cancel_on_d7_with_a_held_installer_keeps_relaunch_to_update(cx: &mut gpui::Te
     A11yTree::read(visual).text("Couldn\u{2019}t Relaunch SpaceTerm");
     assert_eq!(
         app_shown(visual),
-        failed_step("Couldn\u{2019}t relaunch", Some("Try Again"))
+        failed_step("Relaunch failed", Some("Try Again"))
     );
     click("modal-action-update-explain-cancel", visual);
     assert_eq!(
         app_shown(visual),
         (
             Some(crate::updates::copy::title_bar::RELAUNCH_TO_UPDATE.to_owned()),
-            "Couldn\u{2019}t relaunch".to_owned(),
+            "Relaunch failed".to_owned(),
             Some("Try Again".to_owned())
         ),
         "the held update keeps its step; the row keeps the failure"
@@ -1385,5 +1373,87 @@ fn a_reminder_click_performs_the_step_and_asks_first(cx: &mut gpui::TestAppConte
     assert!(
         machines.executed_actions().is_empty(),
         "the click restarts nothing unasked"
+    );
+}
+
+/// The title bar's control over the real update state, in a host that presents its alerts.
+fn live_control(cx: &mut gpui::TestAppContext) -> &mut gpui::VisualTestContext {
+    let (_, visual) = cx.add_window_view(|window, cx| Host {
+        control: cx.new(|cx| UpdateControl::new(window, cx)),
+    });
+    visual.update(|window, _| window.activate_window());
+    visual.run_until_parked();
+    visual
+}
+
+/// penguin waits at the Ask stage with 2 Terminal Sessions, so the pill offers its Restart Core…,
+/// and the person checked penguin for updates from this desktop.
+fn checking_beside_a_waiting_update(
+    cx: &mut gpui::TestAppContext,
+) -> (Rc<ScriptedMachines>, &mut gpui::VisualTestContext) {
+    let (_, _, machines) = services(cx);
+    let mut asking = waiting(PENGUIN, 2);
+    asking
+        .facts
+        .as_mut()
+        .unwrap()
+        .pending
+        .as_mut()
+        .unwrap()
+        .installed_at = crate::updates::now() - crate::updates::ladder::ASK_AFTER - 60;
+    machines.emit(MachineUpdatesEvent::Machines(vec![asking]));
+    cx.run_until_parked();
+    cx.update(|cx| {
+        MachineUpdates::global(cx).unwrap().update(cx, |store, cx| {
+            store.perform(PENGUIN, MachineAction::CheckAgain, Surface::Settings, cx)
+        })
+    });
+    let visual = live_control(cx);
+    (machines, visual)
+}
+
+/// A check the person started on a Machine whose update waits is the row's one presentation in
+/// the list. The row only reports it: choosing it restarts nothing and asks nothing.
+#[gpui::test]
+fn a_checking_row_beside_a_waiting_update_reports_and_restarts_nothing(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (machines, visual) = checking_beside_a_waiting_update(cx);
+    click("update-pill-menu", visual);
+    A11yTree::read(visual).node("Checking\u{2026}");
+    click("update-row-0", visual);
+    assert!(machines.asked().is_empty(), "the row previews no restart");
+    assert!(!shows(CONFIRM, visual), "no confirmation opens");
+    assert_eq!(machines.performed(), [(PENGUIN, MachineAction::CheckAgain)]);
+}
+
+/// The same check failed. The row shows the failure alone, and choosing it opens that failure's
+/// details, whose only follow-up checks again. Nothing restarts.
+#[gpui::test]
+fn a_failed_check_row_beside_a_waiting_update_opens_its_details(cx: &mut gpui::TestAppContext) {
+    let (machines, visual) = checking_beside_a_waiting_update(cx);
+    machines.emit(MachineUpdatesEvent::Finished {
+        machine: PENGUIN,
+        action: MachineAction::CheckAgain,
+        outcome: Err(ActionFailure::Busy),
+    });
+    visual.run_until_parked();
+    click("update-pill-menu", visual);
+    A11yTree::read(visual).node("Check failed\u{2026}");
+    click("update-row-0", visual);
+    assert!(machines.asked().is_empty(), "the row previews no restart");
+    assert!(!shows(CONFIRM, visual), "no confirmation opens");
+    A11yTree::read(visual).node("Check Again");
+    click("modal-action-update-explain-proceed", visual);
+    assert_eq!(
+        machines.performed(),
+        [
+            (PENGUIN, MachineAction::CheckAgain),
+            (PENGUIN, MachineAction::CheckAgain)
+        ]
+    );
+    assert!(
+        machines.asked().is_empty(),
+        "checking again restarts nothing"
     );
 }

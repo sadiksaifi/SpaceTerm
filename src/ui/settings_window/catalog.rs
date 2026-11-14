@@ -79,7 +79,9 @@ impl SettingsSectionId {
             Self::Privacy => "Notifications and clipboard access.",
             Self::Git => "Repository Status, Pull Requests, and Worktrees.",
             Self::Machines => "Machines run Workspaces and Terminal Sessions.",
-            Self::Updates => crate::updates::copy::settings::UPDATES_DESCRIPTION,
+            // The rows say what each update changes, and Restart Core asks before it ends a
+            // Terminal Session, so the page needs no introduction.
+            Self::Updates => "",
             Self::Advanced => {
                 "Every setting at once: edit them as JSON, export or import them, or start over."
             }

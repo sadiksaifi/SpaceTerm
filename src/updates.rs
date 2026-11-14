@@ -1841,10 +1841,10 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(main(cx), relaunch);
         let row = cx.update(|cx| state::current(cx).app_row());
+        assert_eq!(row.target.as_deref(), Some(found), "the row agrees");
         assert_eq!(
-            row.status.as_deref(),
-            Some(format!("{found} downloaded").as_str()),
-            "the row agrees"
+            row.action.map(|action| action.label.to_string()).as_deref(),
+            Some(crate::updates::copy::rows::RELAUNCH_TO_UPDATE)
         );
     }
 

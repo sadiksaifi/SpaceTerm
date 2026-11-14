@@ -616,14 +616,13 @@ fn each_machine_row_says_what_the_update_view_says(cx: &mut TestAppContext) {
         assert_eq!(shown.name, expected.name);
         assert_eq!(shown.status, expected.status);
         assert_eq!(shown.accessibility, expected.accessibility);
-        if let Some(status) = expected.status.as_deref()
-            && expected.status != expected.version
-        {
-            assert_eq!(
-                shown.line,
-                copy::line(expected.version.as_deref(), Some(status))
-            );
+        if expected.status.is_some() || expected.target.is_some() {
+            assert_eq!(shown.line, copy::caption(&expected));
         }
+        assert_eq!(
+            shown.details, expected.details,
+            "the submenu holds the details"
+        );
         let first = shown.items.first();
         match expected.action {
             Some(action) => {
@@ -960,7 +959,7 @@ fn ok_on_how_to_update_dismisses_the_step_and_keeps_the_row(cx: &mut TestAppCont
     assert_eq!(cx.update(|cx| state::current(cx).step), None);
     assert!(
         row(&fixture.host.menu(), PENGUIN).status.as_deref()
-            == Some("Can\u{2019}t update by itself"),
+            == Some(crate::updates::copy::rows::REQUIRED_UPDATE_FAILED),
         "the row keeps the failure"
     );
 }
@@ -1000,4 +999,39 @@ fn a_failures_follow_up_is_an_ordinary_action() {
             buttons
         );
     }
+}
+
+/// The flat Linux menu lists each Machine on one short line: its versions and state. When an
+/// update applies itself and how long it waited stay out of it, and its actions still name
+/// SpaceTerm Core and the Machine.
+#[gpui::test]
+fn the_flat_menu_lists_each_machine_on_one_short_line(cx: &mut TestAppContext) {
+    let mut asking = waiting(machine(PENGUIN, "penguin", 3));
+    asking
+        .facts
+        .as_mut()
+        .unwrap()
+        .pending
+        .as_mut()
+        .unwrap()
+        .installed_at = crate::updates::now() - 3 * crate::updates::policy::DAY;
+    let fixture = start(vec![machine(LOCAL, "This Computer", 0), asking], cx);
+    let text = flat_text(&fixture.host.menu());
+    let lines: Vec<&String> = text
+        .iter()
+        .filter(|line| !line.starts_with('[') && line.as_str() != "-")
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            &format!("SpaceTerm \u{b7} {}", env!("SPACETERM_VERSION")),
+            &copy::CORE_HEADING.to_owned(),
+            &"This Computer \u{b7} 0.8.0 \u{b7} No Terminal Sessions".to_owned(),
+            &"penguin \u{b7} 0.8.0 \u{2192} 0.9.0".to_owned(),
+        ]
+    );
+    assert!(
+        text.contains(&"[Restart SpaceTerm Core on penguin\u{2026}]".to_owned()),
+        "{text:?}"
+    );
 }

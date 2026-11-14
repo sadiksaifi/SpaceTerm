@@ -2643,6 +2643,11 @@ fn active_section_owns_the_large_heading_and_its_description(cx: &mut TestAppCon
         let title = cx
             .debug_bounds(title_selector)
             .unwrap_or_else(|| panic!("{section:?} must own the visible heading"));
+        // Updates has no introduction: its rows say what each update changes.
+        if section == SettingsSectionId::Updates {
+            assert!(cx.debug_bounds(description_selector).is_none());
+            continue;
+        }
         let description = cx
             .debug_bounds(description_selector)
             .unwrap_or_else(|| panic!("{section:?} must retain its description"));

@@ -20,7 +20,7 @@ use crate::updates::machines::{ActionFailure, Asked, MachineAction, MachineLink,
 use crate::updates::state::tests::{
     LOCAL, NOW, PENGUIN, app, app_states, machine_variants, waiting,
 };
-use crate::updates::state::{Checked, Command, Dismissed, Marks, RowView, UpdateView};
+use crate::updates::state::{Checked, Command, Dismissed, Marks, PrimaryKind, RowView, UpdateView};
 
 const DECK: &str = "src/updates/copy/deck.txt";
 
@@ -55,9 +55,15 @@ impl Deck {
     }
 
     fn row(&mut self, row: RowView) {
-        self.field(Role::Text, row.status.as_deref().unwrap_or_default());
-        if let Some(description) = &row.description {
-            self.field(Role::Text, description);
+        let caption = settings::caption(&row);
+        self.field(Role::Text, &caption);
+        self.field(Role::Label, &row.primary.label);
+        self.field(Role::Text, &row.primary.description);
+        for detail in &row.details {
+            self.field(Role::Text, &detail.text);
+            if let Some(explanation) = &detail.explanation {
+                self.field(Role::Text, explanation);
+            }
         }
         self.field(Role::Text, &row.accessibility);
         if let Some(action) = &row.action {
@@ -66,21 +72,38 @@ impl Deck {
                 self.field(Role::Text, subtitle);
             }
         }
-        let mut line = format!("{} | {}", row.name, row.status.unwrap_or_default());
+        // Settings: the caption and the action. The title-bar list: the one presentation.
+        let mut line = format!("{} | {caption}", row.name);
         if let Some(action) = &row.action {
-            line.push_str(&format!(" \u{b7} {}", action.label));
+            line.push_str(&format!(" | [{}]", action.label));
             if let Some(subtitle) = &action.subtitle {
                 line.push_str(&format!(" ({subtitle})"));
             }
         }
-        if let Some(description) = &row.description {
-            line.push_str(&format!(" | {description}"));
+        let kind = match row.primary.kind {
+            PrimaryKind::Progress => "reports",
+            PrimaryKind::Failure => "opens details",
+            PrimaryKind::Action => "acts",
+            PrimaryKind::Status => "reports",
+        };
+        line.push_str(&format!(" | list: {} ({kind})", row.primary.label));
+        for detail in &row.details {
+            line.push_str(&format!(" | {}", detail.text));
+            if let Some(explanation) = &detail.explanation {
+                line.push_str(&format!(" ({explanation})"));
+            }
         }
         line.push_str(&format!(" | a11y: {}", row.accessibility));
+        if row.primary.description != row.accessibility {
+            line.push_str(&format!(" | list a11y: {}", row.primary.description));
+        }
         self.rows.insert(line);
         if let Some(action) = row.action
             && let Command::Explain(alert) = action.command
         {
+            self.alert(&alert);
+        }
+        if let Some(Command::Explain(alert)) = row.primary.command {
             self.alert(&alert);
         }
     }
@@ -175,7 +198,7 @@ impl Deck {
                 Section::Alert,
             ),
             (
-                "Rows: name | status \u{b7} action (subtitle) | description | accessibility",
+                "Rows: name | Settings caption | [action] (subtitle) | list: one presentation | details (rule) | accessibility",
                 &self.rows,
                 Section::Row,
             ),
@@ -271,16 +294,16 @@ fn normalize(line: &str, section: Section, platform: Platform) -> String {
 
 #[test]
 fn menu_check_history_keeps_its_platform_neutral_system_wording() {
-    let line = "The newest release needs a newer system than penguin\u{2019}s";
+    let line = crate::updates::copy::settings::check_reason(Some(CheckFailure::SystemTooOld));
     for platform in [Platform::Mac, Platform::Linux] {
         assert_eq!(normalize(line, Section::Menu, platform), line);
         assert_eq!(
             normalize(
-                &format!("Needs a newer {}", rows::system(platform)),
+                &format!("Requires newer {}", rows::system(platform)),
                 Section::Row,
                 platform
             ),
-            "Needs a {newer-system}"
+            "Requires {newer-system}"
         );
     }
 }

@@ -689,18 +689,21 @@ pub(crate) fn section_heading(
                 .text_color(gpui_color(appearance.colors.text))
                 .child(title),
         )
-        .child(
-            div()
-                .debug_selector(move || format!("{selector}-description"))
-                .max_w(appearance.spacing(PROSE_MEASURE))
-                .chrome_text(appearance.typography.style(TextRole::Body))
-                .text_color(gpui_color(appearance.colors.text_secondary))
-                .whitespace_normal()
-                .child(Text::new(
-                    SharedString::from(format!("{selector}-description")).into(),
-                    description.into(),
-                )),
-        )
+        // A page whose rows explain themselves has no description, and holds no space for one.
+        .when(!description.is_empty(), |heading| {
+            heading.child(
+                div()
+                    .debug_selector(move || format!("{selector}-description"))
+                    .max_w(appearance.spacing(PROSE_MEASURE))
+                    .chrome_text(appearance.typography.style(TextRole::Body))
+                    .text_color(gpui_color(appearance.colors.text_secondary))
+                    .whitespace_normal()
+                    .child(Text::new(
+                        SharedString::from(format!("{selector}-description")).into(),
+                        description.into(),
+                    )),
+            )
+        })
 }
 
 /// The affordance restoring one row's default value. Its accessible name says which setting it

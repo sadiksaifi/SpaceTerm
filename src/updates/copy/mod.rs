@@ -53,11 +53,6 @@ pub(crate) fn days(n: u64) -> String {
     }
 }
 
-/// "An update has waited 2 days."
-pub(crate) fn waited(n: u64) -> String {
-    format!("An update has waited {}.", days(n))
-}
-
 /// "iPad", "iPad and Work Mac", "iPad, Work Mac and Studio".
 pub(crate) fn list_and(names: &[String]) -> String {
     match names {

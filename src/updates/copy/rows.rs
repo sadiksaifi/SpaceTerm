@@ -1,14 +1,19 @@
-//! Row statuses, actions and descriptions: one row model for the title-bar list, Settings >
-//! Updates, the Machine card and the menu bar extra.
+//! Row statuses, actions and details: one row model for the title-bar list, Settings > Updates,
+//! the Machine card and the menu bar extra. Each row is written once as a [`Shape`]: its
+//! versions, a short status, its action, and the work or failure it reports. [`finish`] then
+//! chooses the title-bar list's one presentation from that shape, so its label and its command
+//! always come from the same state.
 use gpui::SharedString;
 use spaceterm_core::update::continuation::Continuation;
+use spaceterm_core::update::facts::CheckFailure;
 
-use super::{Platform, dialogs, sessions, waited};
+use super::{Platform, days, dialogs, sessions};
+use crate::updates::confirm::Explanation;
 use crate::updates::ladder::Stage;
 use crate::updates::machines::MachineAction;
 use crate::updates::state::{
-    AppRow, AppStage, AskedCheck, Blocked, Command, DesktopAction, LastCheck, MachineRow,
-    MachineStage, RowAction, RowTone, RowView,
+    AppRow, AppStage, AskedCheck, Blocked, Command, DesktopAction, Detail, LastCheck, MachineRow,
+    MachineStage, Primary, PrimaryKind, RowAction, RowTone, RowView,
 };
 
 pub(crate) const APP_NAME: &str = "SpaceTerm";
@@ -24,16 +29,117 @@ pub(crate) const RESTART_CORE_NOW: &str = "Restart Core";
 pub(crate) const TRY_AGAIN: &str = "Try Again";
 pub(crate) const TRY_AGAIN_ASKS: &str = "Try Again\u{2026}";
 pub(crate) const CHECK_AGAIN: &str = "Check Again";
-/// A check a person asked for, while it runs.
-pub(crate) const CHECKING: &str = "Checking\u{2026}";
-/// A check a person asked for that failed.
-pub(crate) const COULDNT_CHECK: &str = "Couldn\u{2019}t check for updates";
-/// Connect and Check that reached no route to the Machine.
-pub(crate) const COULDNT_CONNECT: &str = "Couldn\u{2019}t connect";
 pub(crate) const HOW_TO_UPDATE: &str = "How to Update\u{2026}";
 pub(crate) const KEEP_RUNNING: &str = "Terminal Sessions keep running";
-pub(crate) const NOTHING_RUNNING: &str =
-    "Nothing running means no program, no typing and no output in any Terminal Session.";
+
+/// A check a person asked for, while it runs.
+pub(crate) const CHECKING: &str = "Checking\u{2026}";
+/// A check that failed: one a person asked for, or a Core's own checks failing for a day.
+pub(crate) const CHECK_FAILED: &str = "Check failed";
+pub(crate) const CONNECTING: &str = "Connecting\u{2026}";
+/// Connect and Check that reached no route to the Machine.
+pub(crate) const CONNECTION_FAILED: &str = "Connection failed";
+pub(crate) const DOWNLOADING: &str = "Downloading\u{2026}";
+pub(crate) const DOWNLOAD_FAILED: &str = "Download failed";
+pub(crate) const RELAUNCHING: &str = "Relaunching\u{2026}";
+pub(crate) const RELAUNCH_FAILED: &str = "Relaunch failed";
+/// A restart that has started. A queued automatic restart is [`RESTART_PENDING`].
+pub(crate) const RESTARTING: &str = "Restarting\u{2026}";
+pub(crate) const RESTART_FAILED: &str = "Restart failed";
+/// The Core restarts into its Pending Version by itself in a moment.
+pub(crate) const RESTART_PENDING: &str = "Restart pending";
+pub(crate) const NOT_RESPONDING: &str = "Not responding";
+pub(crate) const OFFLINE: &str = "Offline";
+pub(crate) const STOPPED: &str = "Stopped";
+/// A push held until SpaceTerm updates or its startup check ends.
+pub(crate) const WAITING_FOR_APP: &str = "Waiting for SpaceTerm update";
+/// SpaceTerm Core is too old for this SpaceTerm. The row sits under the SpaceTerm Core heading.
+pub(crate) const CORE_UPDATE_REQUIRED: &str = "Update required";
+/// This SpaceTerm is too old for the Core.
+pub(crate) const APP_UPDATE_REQUIRED: &str = "SpaceTerm update required";
+/// The Core couldn't start the Stepping Stone it needs, and can't update by itself.
+pub(crate) const REQUIRED_UPDATE_FAILED: &str = "Required update failed";
+
+/// What every Terminal Session must show for an hour before SpaceTerm Core restarts by itself.
+pub(crate) const NOTHING_RUNNING: &str = "Nothing running means every Terminal Session waits at \
+     an empty prompt with no program, background or stopped job, typing or output. Activity \
+     SpaceTerm Core can\u{2019}t read counts as running.";
+
+/// One row, before its title-bar list presentation is chosen.
+struct Shape {
+    status: Option<String>,
+    target: Option<String>,
+    action: Option<RowAction>,
+    /// Work in progress the row reports.
+    progress: Option<&'static str>,
+    /// A failure: its short status and the details choosing the row opens.
+    failure: Option<(String, Explanation)>,
+    details: Vec<Detail>,
+    sentence: String,
+    /// What the title-bar list's description reads when the row reports work or a failure
+    /// rather than its full sentence.
+    reported: Option<String>,
+}
+
+impl Shape {
+    fn new(sentence: String) -> Self {
+        Self {
+            status: None,
+            target: None,
+            action: None,
+            progress: None,
+            failure: None,
+            details: Vec::new(),
+            sentence,
+            reported: None,
+        }
+    }
+
+    fn status(mut self, status: impl Into<String>) -> Self {
+        self.status = Some(status.into());
+        self
+    }
+
+    fn target(mut self, target: impl ToString) -> Self {
+        self.target = Some(target.to_string());
+        self
+    }
+
+    fn action(mut self, action: Option<RowAction>) -> Self {
+        self.action = action;
+        self
+    }
+
+    /// Work in progress, which is also the row's status.
+    fn progress(mut self, label: &'static str) -> Self {
+        self.progress = Some(label);
+        self.status = Some(label.to_owned());
+        self
+    }
+
+    /// A failure, which is also the row's status.
+    fn failure(mut self, status: &str, details: Explanation) -> Self {
+        self.status = Some(status.to_owned());
+        self.failure = Some((status.to_owned(), details));
+        self
+    }
+
+    fn detail(mut self, text: impl Into<String>) -> Self {
+        self.details.push(Detail {
+            text: text.into().into(),
+            explanation: None,
+        });
+        self
+    }
+
+    fn explained(mut self, text: impl Into<String>, explanation: &str) -> Self {
+        self.details.push(Detail {
+            text: text.into().into(),
+            explanation: Some(explanation.to_owned().into()),
+        });
+        self
+    }
+}
 
 fn action(label: &str, subtitle: Option<String>, command: Command) -> Option<RowAction> {
     Some(RowAction {
@@ -43,148 +149,223 @@ fn action(label: &str, subtitle: Option<String>, command: Command) -> Option<Row
     })
 }
 
+/// The row from its shape: the title-bar list shows work in progress first, then a failure,
+/// then the row's action, then its status or version.
+fn finish(name: &str, version: Option<String>, shape: Shape, tone: RowTone) -> RowView {
+    let reported = shape.reported.clone();
+    let primary = if let Some(label) = shape.progress {
+        Primary {
+            kind: PrimaryKind::Progress,
+            label: label.into(),
+            command: None,
+            description: reported.unwrap_or_else(|| shape.sentence.clone()).into(),
+        }
+    } else if let Some((status, details)) = &shape.failure {
+        Primary {
+            kind: PrimaryKind::Failure,
+            // The ellipsis says that choosing the row opens more.
+            label: format!("{status}\u{2026}").into(),
+            command: Some(Command::Explain(details.clone())),
+            description: reported.unwrap_or_else(|| shape.sentence.clone()).into(),
+        }
+    } else if let Some(action) = &shape.action {
+        Primary {
+            kind: PrimaryKind::Action,
+            label: action.label.clone(),
+            command: Some(action.command.clone()),
+            description: shape.sentence.clone().into(),
+        }
+    } else {
+        Primary {
+            kind: PrimaryKind::Status,
+            label: shape
+                .status
+                .clone()
+                .or_else(|| version.clone())
+                .unwrap_or_default()
+                .into(),
+            command: None,
+            description: shape.sentence.clone().into(),
+        }
+    };
+    RowView {
+        name: name.to_owned().into(),
+        version: version.map(Into::into),
+        target: shape.target.map(Into::into),
+        status: shape.status.map(Into::into),
+        action: shape.action,
+        primary,
+        details: shape.details,
+        accessibility: shape.sentence.into(),
+        tone,
+    }
+}
+
+/// "Update waiting 3 days": how long the update has waited, on its inherited clock.
+fn waiting(n: u64) -> String {
+    format!("Update waiting {}", days(n))
+}
+
 /// SpaceTerm's row.
 pub(crate) fn app_row(app: &AppRow) -> RowView {
     let keep = || Some(KEEP_RUNNING.to_owned());
-    let (status, row_action, description, sentence) = match &app.stage {
+    let running = app.running.to_string();
+    let check = Command::Desktop(DesktopAction::Check);
+    let check_failed = |waiting: Option<String>| {
+        dialogs::check_failed(None, check_reason(app.last_check), waiting, check.clone())
+    };
+    let mut shape = match &app.stage {
         // Release notes are never the row's action: the action slot only updates.
         AppStage::Current { .. } => match app.asked_check {
-            Some(AskedCheck::Running) => (
-                CHECKING.to_owned(),
-                None,
-                None,
-                format!(
-                    "SpaceTerm {} is running and checking for updates.",
-                    app.running
-                ),
-            ),
-            Some(AskedCheck::Failed) => (
-                COULDNT_CHECK.to_owned(),
-                action(CHECK_AGAIN, None, Command::Desktop(DesktopAction::Check)),
-                None,
-                format!(
-                    "SpaceTerm {} couldn\u{2019}t check for updates.",
-                    app.running
-                ),
-            ),
+            Some(AskedCheck::Running) => Shape::new(format!(
+                "SpaceTerm {running} is running and checking for updates."
+            ))
+            .progress(CHECKING),
+            Some(AskedCheck::Failed) => Shape::new(format!(
+                "SpaceTerm {running} couldn\u{2019}t check for updates."
+            ))
+            .failure(CHECK_FAILED, check_failed(None))
+            .action(action(CHECK_AGAIN, None, check.clone())),
             Some(AskedCheck::Succeeded) => {
                 let checked = checked(app.last_check);
-                (
-                    checked.clone(),
-                    None,
-                    None,
-                    format!("SpaceTerm {} is running. {checked}.", app.running),
-                )
+                Shape::new(format!("SpaceTerm {running} is running. {checked}.")).status(checked)
             }
-            None => (
-                app.running.to_string(),
-                None,
-                None,
-                format!("SpaceTerm {} is running.", app.running),
-            ),
+            None => Shape::new(format!("SpaceTerm {running} is running.")),
         },
         // A check the person asked for shows beside a release that waits for its download,
         // which keeps Download.
-        AppStage::Available { version } => match app.asked_check {
-            Some(AskedCheck::Running) => (
-                format!("{CHECKING} \u{b7} {version} available"),
-                action(DOWNLOAD, keep(), Command::Desktop(DesktopAction::Download)),
-                None,
-                format!(
-                    "SpaceTerm {version} is available. Download gets it without relaunching. SpaceTerm is checking for updates."
-                ),
-            ),
-            Some(AskedCheck::Failed) => (
-                format!("{COULDNT_CHECK} \u{b7} {version} available"),
-                action(DOWNLOAD, keep(), Command::Desktop(DesktopAction::Download)),
-                None,
-                format!(
-                    "SpaceTerm {version} is available. Download gets it without relaunching. SpaceTerm couldn\u{2019}t check for updates."
-                ),
-            ),
-            Some(AskedCheck::Succeeded) | None => (
-                format!("{version} available"),
-                action(DOWNLOAD, keep(), Command::Desktop(DesktopAction::Download)),
-                None,
-                format!("SpaceTerm {version} is available. Download gets it without relaunching."),
-            ),
-        },
-        AppStage::Downloading { version, .. } => (
-            format!("Downloading {version}\u{2026}"),
-            None,
-            None,
-            format!("Downloading SpaceTerm {version}."),
-        ),
-        AppStage::Downloaded { version } => (
-            format!("{version} downloaded"),
-            action(
-                RELAUNCH_TO_UPDATE,
-                keep(),
-                Command::Desktop(DesktopAction::Update),
-            ),
-            None,
-            format!(
-                "SpaceTerm {version} is downloaded. Relaunching keeps Terminal Sessions running."
-            ),
-        ),
-        AppStage::Relaunching { .. } => (
-            "Relaunching\u{2026}".to_owned(),
-            None,
-            None,
-            "Relaunching SpaceTerm. Terminal Sessions keep running.".to_owned(),
-        ),
+        AppStage::Available { version } => {
+            let available =
+                format!("SpaceTerm {version} is available. Download gets it without relaunching.");
+            let download = action(DOWNLOAD, keep(), Command::Desktop(DesktopAction::Download));
+            match app.asked_check {
+                Some(AskedCheck::Running) => {
+                    let mut shape = Shape::new(format!(
+                        "{available} SpaceTerm is checking for updates."
+                    ))
+                    .progress(CHECKING);
+                    shape.reported = Some(format!(
+                        "SpaceTerm is checking for updates. SpaceTerm {version} is available."
+                    ));
+                    shape
+                }
+                Some(AskedCheck::Failed) => {
+                    let mut shape = Shape::new(format!(
+                        "{available} SpaceTerm couldn\u{2019}t check for updates."
+                    ))
+                    .failure(
+                        CHECK_FAILED,
+                        check_failed(Some(format!("SpaceTerm {version} is still available."))),
+                    );
+                    shape.reported = Some(format!(
+                        "SpaceTerm couldn\u{2019}t check for updates. SpaceTerm {version} is still available."
+                    ));
+                    shape
+                }
+                Some(AskedCheck::Succeeded) | None => Shape::new(available),
+            }
+            .target(version)
+            .action(download)
+        }
+        AppStage::Downloading { version, .. } => {
+            Shape::new(format!("Downloading SpaceTerm {version}."))
+                .progress(DOWNLOADING)
+                .target(version)
+        }
+        AppStage::Downloaded { version } => Shape::new(format!(
+            "SpaceTerm {version} is downloaded. Relaunching keeps Terminal Sessions running."
+        ))
+        .target(version)
+        .action(action(
+            RELAUNCH_TO_UPDATE,
+            keep(),
+            Command::Desktop(DesktopAction::Update),
+        )),
+        AppStage::Relaunching { version } => {
+            Shape::new("Relaunching SpaceTerm. Terminal Sessions keep running.".to_owned())
+                .progress(RELAUNCHING)
+                .target(version)
+        }
         AppStage::DownloadFailed {
             version, retries, ..
         } => {
-            let status = version.as_ref().map_or_else(
-                || "Couldn\u{2019}t download the update".to_owned(),
-                |v| format!("Couldn\u{2019}t download {v}"),
-            );
             let sentence = version.as_ref().map_or_else(
                 || "SpaceTerm couldn\u{2019}t download the update.".to_owned(),
                 |v| format!("SpaceTerm couldn\u{2019}t download {v}."),
             );
-            if *retries {
-                (
-                    status,
-                    None,
-                    Some("SpaceTerm tries again later.".to_owned()),
-                    sentence,
-                )
+            // The failure the pill reports and dismisses, or one SpaceTerm retries by itself.
+            let details = if *retries {
+                dialogs::retried_download(None, version.as_deref())
             } else {
-                (
-                    status,
-                    action(TRY_AGAIN, None, Command::Desktop(DesktopAction::Download)),
+                dialogs::app_failure(app)
+                    .unwrap_or_else(|| dialogs::retried_download(None, version.as_deref()))
+            };
+            let shape = Shape::new(sentence).failure(DOWNLOAD_FAILED, details);
+            let shape = match version {
+                Some(version) => shape.target(version),
+                None => shape,
+            };
+            if *retries {
+                shape.detail("SpaceTerm tries again later")
+            } else {
+                shape.action(action(
+                    TRY_AGAIN,
                     None,
-                    sentence,
-                )
+                    Command::Desktop(DesktopAction::Download),
+                ))
             }
         }
-        AppStage::RelaunchFailed { .. } => (
-            "Couldn\u{2019}t relaunch".to_owned(),
-            action(TRY_AGAIN, None, Command::Desktop(DesktopAction::Update)),
-            None,
-            "SpaceTerm couldn\u{2019}t relaunch. Terminal Sessions keep running.".to_owned(),
-        ),
+        AppStage::RelaunchFailed { version, error, .. } => {
+            let details = dialogs::app_failure(app).unwrap_or_else(|| {
+                dialogs::relaunch_failure(
+                    version.as_deref(),
+                    *error == crate::updates::UpdateError::SettingsUnsaved,
+                )
+            });
+            let shape = Shape::new(
+                "SpaceTerm couldn\u{2019}t relaunch. Terminal Sessions keep running.".to_owned(),
+            )
+            .failure(RELAUNCH_FAILED, details)
+            .action(action(
+                TRY_AGAIN,
+                None,
+                Command::Desktop(DesktopAction::Update),
+            ));
+            match version {
+                Some(version) => shape.target(version),
+                None => shape,
+            }
+        }
         AppStage::CantReplace => {
-            let status = cant_replace(Platform::HOST).to_owned();
-            let sentence = format!("{status}.");
-            (status, None, None, sentence)
+            let status = cant_replace(Platform::HOST);
+            let details = dialogs::app_failure(app).unwrap_or_else(|| {
+                Explanation::ok(
+                    dialogs::cant_replace_title(Platform::HOST),
+                    dialogs::cant_replace_message(Platform::HOST),
+                )
+            });
+            Shape::new(format!(
+                "{}.",
+                dialogs::cant_replace_message(Platform::HOST)
+            ))
+            .failure(status, details)
         }
         AppStage::NeedsNewerSystem { version } => {
-            let status = match version {
-                Some(v) => format!("{v} needs a newer {}", system(Platform::HOST)),
-                None => format!("Needs a newer {}", system(Platform::HOST)),
-            };
-            let sentence = format!("SpaceTerm {status}.");
-            (status, None, None, sentence)
+            let status = format!("Requires newer {}", system(Platform::HOST));
+            let shape = Shape::new(match version {
+                Some(v) => format!("SpaceTerm {v} needs a newer {}.", system(Platform::HOST)),
+                None => format!("SpaceTerm needs a newer {}.", system(Platform::HOST)),
+            })
+            .status(status);
+            match version {
+                Some(version) => shape.target(version),
+                None => shape,
+            }
         }
     };
-    let age = (app.waiting().is_some() && app.ladder >= Stage::Ask).then(|| waited(app.waited));
-    let description = match (description, age) {
-        (Some(text), Some(age)) => Some(format!("{text} {age}")),
-        (text, age) => text.or(age),
-    };
+    if app.waiting().is_some() && app.ladder >= Stage::Ask {
+        shape = shape.detail(waiting(app.waited));
+    }
     let tone = match &app.stage {
         AppStage::DownloadFailed { .. } | AppStage::RelaunchFailed { .. } => RowTone::Failure,
         AppStage::Current { .. } | AppStage::Available { .. }
@@ -200,15 +381,7 @@ pub(crate) fn app_row(app: &AppRow) -> RowView {
         }
         _ => RowTone::Plain,
     };
-    RowView {
-        name: APP_NAME.into(),
-        version: Some(app.running.clone()),
-        status: Some(status.into()),
-        action: row_action,
-        accessibility: sentence.into(),
-        description: description.map(Into::into),
-        tone,
-    }
+    finish(APP_NAME, Some(running), shape, tone)
 }
 
 /// "Checked just now", "Checked 5 minutes ago": a check the person asked for that succeeded.
@@ -219,11 +392,19 @@ fn checked(last: LastCheck) -> String {
     }
 }
 
-/// The SpaceTerm row's status when the installation can't be replaced.
+/// Why the last check failed, when the facts tell.
+fn check_reason(last: LastCheck) -> Option<CheckFailure> {
+    match last {
+        LastCheck::Failing { reason, .. } => reason,
+        LastCheck::Unknown | LastCheck::Never | LastCheck::Succeeded { .. } => None,
+    }
+}
+
+/// The SpaceTerm row's status when the installation can't be replaced: the remedy, short.
 pub(crate) fn cant_replace(platform: Platform) -> &'static str {
     match platform {
-        Platform::Mac => "Move SpaceTerm to Applications to update",
-        Platform::Linux => "Run the SpaceTerm install script to update",
+        Platform::Mac => "Move to Applications",
+        Platform::Linux => "Reinstall to update",
     }
 }
 
@@ -235,17 +416,17 @@ pub(crate) fn system(platform: Platform) -> &'static str {
     }
 }
 
-/// "Restarts into 0.11.4 when 2 Terminal Sessions end", "… when 1 Terminal Session ends".
-fn when_sessions_end(version: &str, n: u32) -> String {
+/// "Restarts when 1 Terminal Session ends", "… when 3 Terminal Sessions end".
+fn when_sessions_end(n: u32) -> String {
     match n {
-        1 => format!("Restarts into {version} when 1 Terminal Session ends"),
-        n => format!("Restarts into {version} when {n} Terminal Sessions end"),
+        1 => "Restarts when 1 Terminal Session ends".to_owned(),
+        n => format!("Restarts when {n} Terminal Sessions end"),
     }
 }
 
 /// One Machine's row.
 pub(crate) fn machine_row(row: &MachineRow) -> RowView {
-    let name = &row.name;
+    let name = row.name.to_string();
     let id = row.id;
     let running = row.running.as_ref().map(ToString::to_string);
     let ends = match row.sessions {
@@ -262,310 +443,301 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
         )
     };
     let try_again = if asks { TRY_AGAIN_ASKS } else { TRY_AGAIN };
-    let too_old = row.blocked == Some(Blocked::CoreTooOld);
-    let blocked = |text: String| {
-        if too_old {
-            format!("Too old for this SpaceTerm \u{b7} {text}")
-        } else {
-            text
-        }
+    let check_again = || {
+        action(
+            CHECK_AGAIN,
+            None,
+            Command::Machine(id, MachineAction::CheckAgain),
+        )
     };
+    let check_failed = |waiting: Option<String>| {
+        dialogs::check_failed(
+            Some(&name),
+            check_reason(row.last_check),
+            waiting,
+            Command::Machine(id, MachineAction::CheckAgain),
+        )
+    };
+    let too_old = row.blocked == Some(Blocked::CoreTooOld);
     let subject = format!("SpaceTerm Core on {name}");
-    let (status, row_action, description, sentence): (
-        String,
-        Option<RowAction>,
-        Option<String>,
-        String,
-    ) = match &row.stage {
+    // The pill's failure alert when the row has one, so the list and the pill open the same
+    // details.
+    let failure_alert = || dialogs::machine_failure(row);
+    let mut shape = match &row.stage {
         MachineStage::Running => match (row.blocked, &running) {
-            (Some(Blocked::CoreTooOld), _) => (
-                "Too old for this SpaceTerm".to_owned(),
-                None,
-                None,
-                format!("{subject} is too old for this SpaceTerm."),
-            ),
-            (Some(Blocked::AppTooOld), _) => (
-                "Needs a newer SpaceTerm".to_owned(),
-                None,
-                None,
-                format!("This SpaceTerm is too old for {subject}."),
-            ),
+            (Some(Blocked::CoreTooOld), _) => {
+                Shape::new(format!("{subject} is too old for this SpaceTerm."))
+                    .status(CORE_UPDATE_REQUIRED)
+            }
+            (Some(Blocked::AppTooOld), _) => {
+                Shape::new(format!("This SpaceTerm is too old for {subject}."))
+                    .status(APP_UPDATE_REQUIRED)
+            }
             (None, Some(running)) => match row.asked_check {
-                Some(AskedCheck::Running) => (
-                    CHECKING.to_owned(),
-                    None,
-                    None,
-                    format!("{subject} runs {running} and is checking for updates."),
-                ),
-                Some(AskedCheck::Failed) => (
-                    COULDNT_CHECK.to_owned(),
-                    action(
-                        CHECK_AGAIN,
-                        None,
-                        Command::Machine(id, MachineAction::CheckAgain),
-                    ),
-                    None,
-                    format!("{subject} couldn\u{2019}t check for updates."),
-                ),
+                Some(AskedCheck::Running) => Shape::new(format!(
+                    "{subject} runs {running} and is checking for updates."
+                ))
+                .progress(CHECKING),
+                Some(AskedCheck::Failed) => {
+                    Shape::new(format!("{subject} couldn\u{2019}t check for updates."))
+                        .failure(CHECK_FAILED, check_failed(None))
+                        .action(check_again())
+                }
                 Some(AskedCheck::Succeeded) => {
                     let checked = checked(row.last_check);
-                    (
-                        checked.clone(),
-                        None,
-                        None,
-                        format!("{subject} runs {running}. {checked}."),
-                    )
+                    Shape::new(format!("{subject} runs {running}. {checked}.")).status(checked)
                 }
-                None => (
-                    running.clone(),
-                    None,
-                    None,
-                    format!("{subject} runs {running}."),
-                ),
+                None => Shape::new(format!("{subject} runs {running}.")),
             },
-            (None, None) => (
-                "Connecting\u{2026}".to_owned(),
-                None,
-                None,
-                format!("Connecting to {subject}."),
-            ),
+            (None, None) => Shape::new(format!("Connecting to {subject}.")).progress(CONNECTING),
         },
-        MachineStage::Connecting => (
-            "Connecting\u{2026}".to_owned(),
-            None,
-            None,
-            format!("Connecting to {subject}."),
-        ),
+        MachineStage::Connecting => {
+            Shape::new(format!("Connecting to {subject}.")).progress(CONNECTING)
+        }
         // Check Again on a Machine no route reaches retries its routes for a while.
-        MachineStage::Offline if row.asked_check == Some(AskedCheck::Running) => (
-            "Connecting\u{2026}".to_owned(),
-            None,
-            None,
-            format!("Connecting to {subject}."),
-        ),
+        MachineStage::Offline if row.asked_check == Some(AskedCheck::Running) => {
+            Shape::new(format!("Connecting to {subject}.")).progress(CONNECTING)
+        }
         // Connect and Check reached no route; Try Again connects and checks again.
-        MachineStage::Offline if row.asked_check == Some(AskedCheck::Failed) => (
-            format!("Offline \u{b7} {COULDNT_CONNECT}"),
-            action(
-                TRY_AGAIN,
-                None,
-                Command::Machine(id, MachineAction::ConnectAndCheck),
-            ),
-            None,
+        MachineStage::Offline if row.asked_check == Some(AskedCheck::Failed) => Shape::new(
             format!("SpaceTerm couldn\u{2019}t connect to {name} to check for updates."),
-        ),
-        MachineStage::Offline => (
-            "Offline".to_owned(),
+        )
+        .failure(CONNECTION_FAILED, dialogs::connect_failed(&name, id))
+        .action(action(
+            TRY_AGAIN,
             None,
-            None,
-            format!("{name} is offline."),
-        ),
-        MachineStage::Stopped => (
-            "Stopped".to_owned(),
-            None,
-            None,
-            format!("{subject} is stopped."),
-        ),
-        MachineStage::WaitingForApp { version } => (
-            "Waiting for the SpaceTerm update".to_owned(),
-            None,
-            None,
-            format!(
-                "SpaceTerm downloads SpaceTerm Core {version} to {name} after the SpaceTerm update."
-            ),
-        ),
-        MachineStage::Downloading { version, .. } => (
-            blocked(format!("Downloading {version}\u{2026}")),
-            None,
-            None,
-            format!("Downloading SpaceTerm Core {version} to {name}."),
-        ),
+            Command::Machine(id, MachineAction::ConnectAndCheck),
+        )),
+        MachineStage::Offline => Shape::new(format!("{name} is offline.")).status(OFFLINE),
+        MachineStage::Stopped => Shape::new(format!("{subject} is stopped.")).status(STOPPED),
+        MachineStage::WaitingForApp { version } => Shape::new(format!(
+            "SpaceTerm downloads SpaceTerm Core {version} to {name} after the SpaceTerm update."
+        ))
+        .status(WAITING_FOR_APP)
+        .target(version),
+        MachineStage::Downloading { version, .. } => {
+            let shape = Shape::new(if too_old {
+                format!(
+                    "{subject} is too old for this SpaceTerm. Downloading SpaceTerm Core {version}."
+                )
+            } else {
+                format!("Downloading SpaceTerm Core {version} to {name}.")
+            })
+            .progress(DOWNLOADING)
+            .target(version);
+            if too_old {
+                shape.status(format!("{CORE_UPDATE_REQUIRED} \u{b7} {DOWNLOADING}"))
+            } else {
+                shape
+            }
+        }
         MachineStage::Downloaded {
             version,
             continuation,
             ..
         } => {
-            let version = version.to_string();
             let consequence = match row.sessions {
                 0 => "No Terminal Session is open.".to_owned(),
                 n => format!("Restarting SpaceTerm Core now ends {}.", sessions(n)),
             };
             if too_old {
-                (
-                    blocked(format!("{version} downloaded")),
-                    restart(),
-                    None,
-                    format!(
-                        "{subject} is too old for this SpaceTerm and has {version} downloaded. {consequence}"
-                    ),
-                )
+                Shape::new(format!(
+                    "{subject} is too old for this SpaceTerm and has {version} downloaded. {consequence}"
+                ))
+                .status(CORE_UPDATE_REQUIRED)
+                .target(version)
+                .action(restart())
             } else {
                 match continuation {
-                    Continuation::Soon => (
-                        format!("Restarts into {version} in a moment"),
-                        None,
-                        None,
-                        format!("{subject} restarts into {version} in a moment."),
-                    ),
-                    Continuation::WhenSessionsEnd => (
-                        when_sessions_end(&version, row.sessions),
-                        restart(),
-                        None,
+                    Continuation::Soon => Shape::new(format!(
+                        "{subject} restarts into {version} in a moment."
+                    ))
+                    .status(RESTART_PENDING)
+                    .target(version)
+                    .detail("Restarts in a moment"),
+                    Continuation::WhenSessionsEnd => Shape::new(
                         format!(
                             "{subject} restarts into {version} when its {} end. {consequence}",
                             sessions(row.sessions)
                         )
                         .replace("1 Terminal Session end.", "1 Terminal Session ends."),
+                    )
+                    .target(version)
+                    .action(restart())
+                    .detail(when_sessions_end(row.sessions)),
+                    Continuation::WhenNothingRuns => Shape::new(format!(
+                        "{subject} restarts into {version} after an hour with nothing running. {consequence}"
+                    ))
+                    .target(version)
+                    .action(restart())
+                    .explained(
+                        "Restarts after an hour with nothing running",
+                        NOTHING_RUNNING,
                     ),
-                    Continuation::WhenNothingRuns => (
-                        format!("Restarts into {version} after an hour with nothing running"),
-                        restart(),
-                        Some(NOTHING_RUNNING.to_owned()),
-                        format!(
-                            "{subject} restarts into {version} after an hour with nothing running. {consequence}"
-                        ),
-                    ),
-                    Continuation::StartFailed => (
-                        format!("Couldn\u{2019}t restart into {version}"),
-                        action(
-                            try_again,
-                            None,
-                            Command::Machine(id, MachineAction::Restart),
-                        ),
+                    Continuation::StartFailed => Shape::new(format!(
+                        "{subject} couldn\u{2019}t restart into {version}."
+                    ))
+                    .failure(
+                        RESTART_FAILED,
+                        dialogs::restart_kept(&name, id, &version.to_string()),
+                    )
+                    .target(version)
+                    .action(action(
+                        try_again,
                         None,
-                        format!("{subject} couldn\u{2019}t restart into {version}."),
-                    ),
-                    Continuation::NeedsConfirmation | Continuation::Unknown => (
-                        format!("{version} downloaded"),
-                        restart(),
-                        None,
+                        Command::Machine(id, MachineAction::Restart),
+                    )),
+                    Continuation::NeedsConfirmation | Continuation::Unknown => Shape::new(
                         format!("{subject} has {version} downloaded. {consequence}"),
-                    ),
+                    )
+                    .target(version)
+                    .action(restart()),
                 }
             }
         }
-        MachineStage::Restarting { to: Some(to), .. } => (
-            format!("Restarting into {to}\u{2026}"),
-            None,
-            None,
-            format!("{subject} is restarting into {to}."),
-        ),
-        MachineStage::Restarting { to: None, .. } => (
-            "Restarting\u{2026}".to_owned(),
-            None,
-            None,
-            format!("{subject} is restarting."),
-        ),
-        MachineStage::StartFailed { version, kept, .. } => (
-            format!("Couldn\u{2019}t restart into {version}"),
-            kept.then(|| {
-                action(
+        MachineStage::Restarting { to, .. } => {
+            let shape = Shape::new(match to {
+                Some(to) => format!("{subject} is restarting into {to}."),
+                None => format!("{subject} is restarting."),
+            })
+            .progress(RESTARTING);
+            match to {
+                Some(to) => shape.target(to),
+                None => shape,
+            }
+        }
+        MachineStage::StartFailed { version, kept, .. } => {
+            let details = failure_alert()
+                .unwrap_or_else(|| dialogs::restart_kept(&name, id, &version.to_string()));
+            let shape = Shape::new(format!("{subject} couldn\u{2019}t restart into {version}."))
+                .failure(RESTART_FAILED, details)
+                .target(version);
+            if *kept {
+                shape.action(action(
                     try_again,
                     None,
                     Command::Machine(id, MachineAction::Restart),
-                )
-            })
-            .flatten(),
-            (!kept).then(|| "SpaceTerm waits for the next update.".to_owned()),
-            format!("{subject} couldn\u{2019}t restart into {version}."),
-        ),
+                ))
+            } else {
+                shape.detail("Waiting for the next update")
+            }
+        }
         MachineStage::DownloadFailed {
             version, retries, ..
-        } => (
-            format!("Couldn\u{2019}t download {version}"),
-            (!retries)
-                .then(|| {
-                    action(
-                        TRY_AGAIN,
-                        None,
-                        Command::Machine(id, MachineAction::Install),
-                    )
-                })
-                .flatten(),
-            retries.then(|| "SpaceTerm Core tries again later.".to_owned()),
-            format!("SpaceTerm couldn\u{2019}t download SpaceTerm Core {version} to {name}."),
-        ),
-        MachineStage::NotConfirmed { .. } => (
-            "Not responding".to_owned(),
-            action(
-                CHECK_AGAIN,
-                None,
-                Command::Machine(id, MachineAction::CheckAgain),
-            ),
-            None,
-            format!("{name} stopped responding while SpaceTerm Core restarted."),
-        ),
-        MachineStage::CantCheck if row.asked_check == Some(AskedCheck::Running) => (
-            CHECKING.to_owned(),
-            None,
-            None,
-            format!("{subject} is checking for updates."),
-        ),
-        MachineStage::CantCheck => (
-            "Can\u{2019}t check for updates".to_owned(),
-            action(
-                CHECK_AGAIN,
-                None,
-                Command::Machine(id, MachineAction::CheckAgain),
-            ),
-            None,
-            format!("{subject} can\u{2019}t check for updates."),
-        ),
+        } => {
+            let version_text = version.to_string();
+            let details = if *retries {
+                dialogs::retried_download(Some(&name), Some(&version_text))
+            } else {
+                failure_alert()
+                    .unwrap_or_else(|| dialogs::retried_download(Some(&name), Some(&version_text)))
+            };
+            let shape = Shape::new(format!(
+                "SpaceTerm couldn\u{2019}t download SpaceTerm Core {version} to {name}."
+            ))
+            .failure(DOWNLOAD_FAILED, details)
+            .target(version);
+            if *retries {
+                shape.detail("SpaceTerm Core tries again later")
+            } else {
+                shape.action(action(
+                    TRY_AGAIN,
+                    None,
+                    Command::Machine(id, MachineAction::Install),
+                ))
+            }
+        }
+        MachineStage::NotConfirmed { version, .. } => Shape::new(format!(
+            "{name} stopped responding while SpaceTerm Core restarted."
+        ))
+        .failure(NOT_RESPONDING, dialogs::not_confirmed(row))
+        .target(version)
+        .action(check_again()),
+        MachineStage::CantCheck if row.asked_check == Some(AskedCheck::Running) => {
+            Shape::new(format!("{subject} is checking for updates.")).progress(CHECKING)
+        }
+        MachineStage::CantCheck => Shape::new(format!("{subject} can\u{2019}t check for updates."))
+            .failure(CHECK_FAILED, check_failed(None))
+            .action(check_again()),
         // Download asks the Core to fetch the Stepping Stone at the floor from its own feed.
-        MachineStage::NeedsFloor { version, floor, .. } => (
-            blocked(format!("Needs {floor} before {version}")),
-            action(DOWNLOAD, None, Command::Machine(id, MachineAction::Install)),
-            None,
-            if too_old {
+        // The row names the Stepping Stone, never the newest release, as what comes next.
+        MachineStage::NeedsFloor {
+            version,
+            floor,
+            failed,
+        } => {
+            let sentence = if too_old {
                 format!(
                     "{subject} is too old for this SpaceTerm and needs {floor} before it can update to {version}."
                 )
             } else {
                 format!("{subject} needs {floor} before it can update to {version}.")
-            },
-        ),
-        MachineStage::SteppingStoneSkipped => (
-            "Can\u{2019}t update by itself".to_owned(),
-            action(
-                HOW_TO_UPDATE,
-                None,
-                Command::Explain(dialogs::how_to_update(row)),
-            ),
-            None,
-            format!("{subject} can\u{2019}t update by itself."),
-        ),
-    };
-    // From Ask, a waiting row adds how long the update waited, after its own description.
-    let age = row
-        .ladder
-        .filter(|stage| *stage >= Stage::Ask)
-        .map(|_| waited(row.waited));
-    let description = match (description, age) {
-        (Some(text), Some(age)) => Some(format!("{text} {age}")),
-        (text, age) => text.or(age),
+            };
+            let download = action(DOWNLOAD, None, Command::Machine(id, MachineAction::Install));
+            let shape = if *failed {
+                let details =
+                    failure_alert().unwrap_or_else(|| dialogs::retried_download(Some(&name), None));
+                Shape::new(sentence).failure(DOWNLOAD_FAILED, details)
+            } else {
+                Shape::new(sentence).status(format!("{floor} required first"))
+            };
+            shape
+                .action(download)
+                .detail(format!("Updates to {version} after {floor}"))
+        }
+        MachineStage::SteppingStoneSkipped => {
+            Shape::new(format!("{subject} can\u{2019}t update by itself."))
+                .failure(REQUIRED_UPDATE_FAILED, dialogs::how_to_update(row))
+                .action(action(
+                    HOW_TO_UPDATE,
+                    None,
+                    Command::Explain(dialogs::how_to_update(row)),
+                ))
+        }
     };
     // A check the person asked for shows on a Core whose update waits too. The waiting version
-    // and its Restart Core stay, and a hard stop keeps its warning while the check runs.
-    let (status, sentence, waiting_check) = match (&row.stage, row.asked_check) {
-        (MachineStage::Downloaded { version, .. }, Some(AskedCheck::Running)) => (
-            format!("{CHECKING} \u{b7} {version} downloaded"),
-            format!("{sentence} It is checking for updates."),
-            Some(AskedCheck::Running),
-        ),
-        (MachineStage::Downloaded { version, .. }, Some(AskedCheck::Failed)) => (
-            format!("{COULDNT_CHECK} \u{b7} {version} downloaded"),
-            format!("{sentence} It couldn\u{2019}t check for updates."),
-            Some(AskedCheck::Failed),
-        ),
-        _ => (status, sentence, None),
-    };
+    // and its Restart Core stay beside it in Settings, and the title-bar list shows the check.
+    if let MachineStage::Downloaded { version, .. } = &row.stage {
+        match row.asked_check {
+            Some(AskedCheck::Running) => {
+                shape.sentence = format!("{} It is checking for updates.", shape.sentence);
+                shape.reported = Some(format!(
+                    "{subject} is checking for updates. {version} is downloaded."
+                ));
+                shape.status = Some(CHECKING.to_owned());
+                shape.progress = Some(CHECKING);
+            }
+            Some(AskedCheck::Failed) if shape.failure.is_none() => {
+                shape.sentence =
+                    format!("{} It couldn\u{2019}t check for updates.", shape.sentence);
+                shape.reported = Some(format!(
+                    "{subject} couldn\u{2019}t check for updates. {version} stays downloaded."
+                ));
+                shape = shape.failure(
+                    CHECK_FAILED,
+                    check_failed(Some(format!("SpaceTerm Core {version} stays downloaded."))),
+                );
+            }
+            _ => {}
+        }
+    }
+    // From Ask, a waiting row says how long the update waited, on demand.
+    if row.ladder.is_some_and(|stage| stage >= Stage::Ask) {
+        shape = shape.detail(waiting(row.waited));
+    }
+    let waiting_check_failed = matches!(row.stage, MachineStage::Downloaded { .. })
+        && row.asked_check == Some(AskedCheck::Failed);
     let tone = match &row.stage {
-        _ if waiting_check == Some(AskedCheck::Failed) => RowTone::Failure,
+        _ if waiting_check_failed => RowTone::Failure,
         MachineStage::CantCheck if row.asked_check == Some(AskedCheck::Running) => RowTone::Plain,
         MachineStage::StartFailed { .. }
         | MachineStage::DownloadFailed { .. }
         | MachineStage::CantCheck
         | MachineStage::NeedsFloor { failed: true, .. } => RowTone::Failure,
+        MachineStage::Downloaded {
+            continuation: Continuation::StartFailed,
+            ..
+        } if !too_old => RowTone::Failure,
         MachineStage::Running | MachineStage::Offline
             if row.asked_check == Some(AskedCheck::Failed) =>
         {
@@ -575,13 +747,5 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
         _ if row.blocked.is_some() || row.ladder == Some(Stage::Insist) => RowTone::Warning,
         _ => RowTone::Plain,
     };
-    RowView {
-        name: name.clone(),
-        version: running.map(Into::into),
-        status: Some(status.into()),
-        action: row_action,
-        description: description.map(Into::into),
-        accessibility: sentence.into(),
-        tone,
-    }
+    finish(&name, running, shape, tone)
 }
