@@ -19,6 +19,8 @@ pub(crate) const CORE_HEADING: &str = "SpaceTerm Core";
 pub(crate) const AUTOMATIC_DOWNLOADS: &str = "Download SpaceTerm updates automatically";
 pub(crate) const CHECK_INTERVAL: &str = "Check for SpaceTerm updates";
 pub(crate) const CHECK_NOW: &str = "Check Now";
+/// The label of the row that holds Check Now: what it checks.
+pub(crate) const CHECK_NOW_LABEL: &str = "SpaceTerm and connected Machines";
 /// Check Now's accessibility description and tooltip: what it checks.
 pub(crate) const CHECK_NOW_DESCRIPTION: &str = "Checks for a newer SpaceTerm and asks each connected Machine\u{2019}s SpaceTerm Core to check.";
 /// The entry in an item's menu that checks that item alone. The menu names the item.

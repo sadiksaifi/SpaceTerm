@@ -146,41 +146,195 @@ fn without_a_desktop_update_service_the_shared_row_and_check_now_remain(cx: &mut
     assert_eq!(adapter.performed(), [(PENGUIN, MachineAction::CheckAgain)]);
 }
 
-/// Check Now sits beside the page title, and SpaceTerm's own preferences, which name SpaceTerm,
-/// share SpaceTerm's card above every Machine.
+/// SpaceTerm's card holds, in order, SpaceTerm's row, its automatic downloads, Check Now and its
+/// check interval, above every Machine. Check Now ends on the card's control column, and its
+/// label names what it checks. The page has no introduction and no button beside its title.
 #[gpui::test]
-fn check_now_sits_beside_the_title_and_spaceterms_preferences_share_its_card(
-    cx: &mut TestAppContext,
-) {
-    with_machines(vec![machine(PENGUIN, "penguin", 0)], cx);
+fn spaceterms_card_holds_check_now_in_its_control_column(cx: &mut TestAppContext) {
+    let adapter = with_machines(vec![machine(PENGUIN, "penguin", 0)], cx);
     let (_, cx) = open_updates(cx);
     let mut bounds = |selector: &'static str| {
         cx.debug_bounds(selector)
             .unwrap_or_else(|| panic!("{selector} renders"))
     };
-    let check_now = bounds(CHECK_NOW_SELECTOR);
     let spaceterm = bounds("settings-row-update-status");
     let downloads = bounds("settings-row-automatic-update-downloads");
+    let check_row = bounds("settings-row-update-check-now");
     let interval = bounds("settings-row-update-check-interval");
     let core = bounds("settings-row-core-updates");
     assert!(
-        check_now.bottom() <= spaceterm.top(),
-        "Check Now heads the page"
+        spaceterm.bottom() <= downloads.top(),
+        "SpaceTerm's row leads"
     );
-    assert!(spaceterm.bottom() <= downloads.top() && downloads.bottom() <= interval.top());
+    assert!(
+        downloads.bottom() <= check_row.top(),
+        "automatic downloads, then Check Now"
+    );
+    assert!(
+        check_row.bottom() <= interval.top(),
+        "Check Now, then the interval"
+    );
     assert!(
         interval.bottom() < core.top(),
         "SpaceTerm's card comes first"
     );
+    let check_now = bounds(CHECK_NOW_SELECTOR);
+    let switch = bounds("settings-automatic-update-downloads");
+    let segments = bounds("settings-update-check-interval");
+    assert_eq!(
+        check_now.right(),
+        switch.right(),
+        "Check Now ends on the control column"
+    );
+    assert_eq!(check_now.right(), segments.right());
     assert!(
-        cx.debug_bounds("settings-row-update-check-now").is_none(),
-        "Check Now has no row of its own"
+        check_row.top() <= check_now.top() && check_now.bottom() <= check_row.bottom(),
+        "Check Now sits in its row"
+    );
+    assert!(
+        cx.debug_bounds("settings-toolbar").is_none(),
+        "no button beside the title"
+    );
+    assert!(
+        cx.debug_bounds("settings-section-updates-description")
+            .is_none(),
+        "the page has no introduction"
     );
     let tree = A11yTree::read(cx);
     for label in [copy::AUTOMATIC_DOWNLOADS, copy::CHECK_INTERVAL] {
         assert!(label.contains("SpaceTerm"), "{label}");
         assert!(tree.find_text(label).is_some(), "{label} renders");
     }
+    assert!(tree.find_text(copy::CHECK_NOW_LABEL).is_some());
+    click(CHECK_NOW_SELECTOR, cx);
+    assert_eq!(adapter.performed(), [(PENGUIN, MachineAction::CheckAgain)]);
+}
+
+/// Tab reaches Check Now in SpaceTerm's card right after the automatic downloads switch, moves on
+/// from it, Shift-Tab returns to it, and Space presses it.
+#[gpui::test]
+fn the_keyboard_reaches_check_now_between_spaceterms_preferences(cx: &mut TestAppContext) {
+    let adapter = with_machines(vec![machine(PENGUIN, "penguin", 0)], cx);
+    let (_, cx) = open_updates(cx);
+    let focused = |cx: &mut VisualTestContext| {
+        A11yTree::read(cx)
+            .focused()
+            .and_then(|node| node["aria"]["label"].as_str().map(str::to_owned))
+            .unwrap_or_default()
+    };
+    let mut order = Vec::new();
+    for _ in 0..12 {
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        let label = focused(cx);
+        if label == copy::CHECK_NOW {
+            break;
+        }
+        order.push(label);
+    }
+    assert_eq!(
+        focused(cx),
+        copy::CHECK_NOW,
+        "Tab reaches Check Now: {order:?}"
+    );
+    assert_eq!(
+        order.last().map(String::as_str),
+        Some(copy::AUTOMATIC_DOWNLOADS),
+        "Check Now follows the automatic downloads switch: {order:?}"
+    );
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    let next = A11yTree::read(cx).focused().cloned().unwrap_or_default();
+    assert_ne!(focused(cx), copy::CHECK_NOW, "focus moves on: {next}");
+    assert!(
+        cx.debug_bounds("settings-update-check-interval")
+            .is_some_and(
+                |interval| interval.top() > cx.debug_bounds(CHECK_NOW_SELECTOR).unwrap().bottom()
+            ),
+        "the check interval follows Check Now"
+    );
+    cx.simulate_keystrokes("shift-tab");
+    cx.run_until_parked();
+    assert_eq!(
+        focused(cx),
+        copy::CHECK_NOW,
+        "Shift-Tab returns to Check Now"
+    );
+    // A button activates when Space comes back up.
+    let space = gpui::Keystroke::parse("space").unwrap();
+    cx.simulate_event(gpui::KeyDownEvent {
+        keystroke: space.clone(),
+        prefer_character_input: false,
+        is_held: false,
+    });
+    cx.simulate_event(gpui::KeyUpEvent { keystroke: space });
+    cx.run_until_parked();
+    assert_eq!(adapter.performed(), [(PENGUIN, MachineAction::CheckAgain)]);
+}
+
+/// With 40 Machines the list scrolls under SpaceTerm's card, which stays where it was, so Check
+/// Now stays in reach at the end of the list and still checks every connected Machine.
+#[gpui::test]
+fn spaceterms_card_stays_in_view_while_40_machines_scroll(cx: &mut TestAppContext) {
+    use gpui::{ScrollDelta, ScrollWheelEvent, TouchPhase, point, px};
+    let names: Vec<&'static str> = (0..40)
+        .map(|index| &*Box::leak(format!("machine-{index:02}").into_boxed_str()))
+        .collect();
+    let machines: Vec<MachineUpdate> = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let mut id = [0; 32];
+            id[0] = 10 + index as u8;
+            machine(id, name, 0)
+        })
+        .collect();
+    let adapter = with_machines(machines, cx);
+    let (window, cx) = open_updates(cx);
+    let card = cx.debug_bounds("settings-row-update-status").unwrap();
+    let check_now = cx.debug_bounds(CHECK_NOW_SELECTOR).unwrap();
+    let detail = cx.debug_bounds("settings-detail").unwrap();
+    assert!(
+        detail.top()
+            >= cx
+                .debug_bounds("settings-row-update-check-interval")
+                .unwrap()
+                .bottom()
+    );
+    for _ in 0..80 {
+        cx.simulate_event(ScrollWheelEvent {
+            position: detail.center(),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-120.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+    }
+    let scrolled = window.read_with(cx, |settings, _| settings.scroll.offset().y);
+    assert!(scrolled < px(0.0), "the Machine list scrolled");
+    let last = cx
+        .debug_bounds("settings-row-core-update-39")
+        .expect("the last Machine renders");
+    assert!(
+        last.bottom() <= detail.bottom() + px(1.0),
+        "the list reached its end"
+    );
+    assert_eq!(
+        cx.debug_bounds("settings-row-update-status"),
+        Some(card),
+        "the card stays"
+    );
+    assert_eq!(
+        cx.debug_bounds(CHECK_NOW_SELECTOR),
+        Some(check_now),
+        "Check Now stays"
+    );
+    click(CHECK_NOW_SELECTOR, cx);
+    assert_eq!(
+        adapter.performed().len(),
+        40,
+        "every connected Machine checks"
+    );
 }
 
 /// Opens `menu` and chooses its entry `entry`.

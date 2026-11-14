@@ -1,10 +1,10 @@
-//! The Updates section: SpaceTerm's card, with its row and its own update preferences, then the
-//! `SpaceTerm Core` card with one row per Machine. Each row is the one the title-bar list, the
-//! Machine card and the menu bar extra show, from [`crate::updates::state`]: one status line and
-//! the row's update action, plus a menu of that item's last check, a check of that item alone
-//! and its release notes. Check Now beside the page title checks SpaceTerm and each connected
-//! Machine. Listing opens no connection (ADR 0039). [`crate::updates`] owns update policy and
-//! state.
+//! The Updates section: SpaceTerm's card, then the `SpaceTerm Core` card with one row per
+//! Machine. SpaceTerm's card holds SpaceTerm's row, its automatic downloads, Check Now, which
+//! checks SpaceTerm and each connected Machine, and its check interval, and stays in view while
+//! the Machine rows scroll. Each row comes from the row model of [`crate::updates::state`]: its
+//! versions and short status on one line, the row's update action, and a menu of that item's
+//! last check, its details, a check of that item alone and its release notes. Listing opens no
+//! connection (ADR 0039). [`crate::updates`] owns update policy and state.
 
 use gpui::prelude::*;
 use gpui::{AnyElement, AnyWindowHandle, App, Context, ElementId, Entity, SharedString, Window};
@@ -31,7 +31,7 @@ use crate::updates::{ApplicationUpdates, UpdateService, UpdateState};
 /// The SpaceTerm row's label: the product, whose version leads its description.
 pub(super) const SPACETERM_LABEL: &str = copy::SPACETERM;
 
-/// Check Now, beside the page title.
+/// Check Now, in SpaceTerm's card.
 pub(super) const CHECK_NOW_SELECTOR: &str = "settings-update-check-now";
 /// The SpaceTerm row's update action, such as Relaunch to Update or Download.
 pub(super) const RESTART_SELECTOR: &str = "settings-update-restart";
@@ -162,7 +162,8 @@ impl SettingsWindow {
         }
     }
 
-    /// Check Now, beside the page title. While a check it started runs, it waits.
+    /// Check Now, in the control column of SpaceTerm's card. While a check it started runs, it
+    /// waits.
     pub(super) fn render_update_check_now(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let view = state::current(cx);
         Button::new(CHECK_NOW_SELECTOR, copy::CHECK_NOW)

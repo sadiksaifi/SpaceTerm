@@ -170,6 +170,8 @@ pub(super) enum SettingsRowId {
     UpdateStatus,
     /// SpaceTerm's automatic downloads, in SpaceTerm's card.
     AutomaticUpdateDownloads,
+    /// Check Now, which checks SpaceTerm and each connected Machine, in SpaceTerm's card.
+    UpdateCheckNow,
     /// SpaceTerm's check interval, in SpaceTerm's card.
     UpdateCheckInterval,
     /// One row per Machine under `SpaceTerm Core`, after SpaceTerm's card.
@@ -240,6 +242,7 @@ impl SettingsRowId {
             | Self::UpdateStatus
             | Self::CoreUpdates
             | Self::AutomaticUpdateDownloads
+            | Self::UpdateCheckNow
             | Self::UpdateCheckInterval
             // Keybindings live outside the appearance preferences and reset through the keymap
             // profile, which returns a displaced default to its Command.
@@ -929,9 +932,6 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         label: super::updates::SPACETERM_LABEL,
         keywords: &[
             "version",
-            "check",
-            "check now",
-            "check for updates",
             "last checked",
             "update",
             "upgrade",
@@ -950,6 +950,23 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         label: crate::updates::copy::settings::AUTOMATIC_DOWNLOADS,
         keywords: &["automatic", "background", "download", "update", "auto"],
         selector: "settings-row-automatic-update-downloads",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::UpdateCheckNow,
+        section: SettingsSectionId::Updates,
+        // Check Now covers SpaceTerm and each connected Machine. It shares SpaceTerm's card so
+        // it stays in view above a long Machine list, and its label names both.
+        group: "",
+        label: crate::updates::copy::settings::CHECK_NOW_LABEL,
+        keywords: &[
+            "check",
+            "check now",
+            "check for updates",
+            "machines",
+            "core",
+            "update",
+        ],
+        selector: "settings-row-update-check-now",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::UpdateCheckInterval,
@@ -1240,6 +1257,7 @@ mod tests {
         MachineWorktreeLocation,
         UpdateStatus,
         AutomaticUpdateDownloads,
+        UpdateCheckNow,
         UpdateCheckInterval,
         CoreUpdates,
         SettingsFile,

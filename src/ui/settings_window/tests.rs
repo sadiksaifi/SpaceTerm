@@ -1254,6 +1254,7 @@ fn every_appearance_row_reset_restores_only_its_field(cx: &mut TestAppContext) {
             | SettingsRowId::UpdateStatus
             | SettingsRowId::CoreUpdates
             | SettingsRowId::AutomaticUpdateDownloads
+            | SettingsRowId::UpdateCheckNow
             | SettingsRowId::UpdateCheckInterval
             | SettingsRowId::Shortcut(_)
             | SettingsRowId::SettingsFile
@@ -2795,6 +2796,7 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             // The fixture has no Machine updates, so the list says so and offers nothing.
             SettingsRowId::CoreUpdates => return None,
             SettingsRowId::AutomaticUpdateDownloads => "settings-automatic-update-downloads",
+            SettingsRowId::UpdateCheckNow => "settings-update-check-now",
             SettingsRowId::UpdateCheckInterval => "settings-update-check-interval",
             SettingsRowId::SettingsFile => "settings-file-frame",
             SettingsRowId::ExportSettings => "settings-document-export",

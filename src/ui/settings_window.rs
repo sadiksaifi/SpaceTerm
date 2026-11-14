@@ -1296,10 +1296,11 @@ impl SettingsWindow {
                 settings.request_close(CloseIntent::Window(handle), cx)
             });
         });
-        // Check Now checks everything the page lists, so it sits beside the page title.
-        let check_now =
-            (section == SettingsSectionId::Updates).then(|| self.render_update_check_now(cx));
-        let scrolled = self.scroll.max_offset().y > px(0.0) && self.scroll.offset().y < px(-0.5);
+        // Content scrolls under a pinned group, not under the heading, so the heading draws no
+        // divider then.
+        let scrolled = !self.pins_a_group(section)
+            && self.scroll.max_offset().y > px(0.0)
+            && self.scroll.offset().y < px(-0.5);
         let heading = DetailHeading::new(
             "settings",
             section_heading(
@@ -1312,7 +1313,7 @@ impl SettingsWindow {
             close,
         )
         .scrolled(scrolled);
-        match picker.or(check_now) {
+        match picker {
             Some(toolbar) => heading.toolbar(toolbar),
             None => heading,
         }
@@ -1400,7 +1401,15 @@ impl SettingsWindow {
         let appearance = &settings.chrome;
         // One section at a time: navigation selects a view rather than a scroll destination, so
         // nothing from a neighbouring section can scroll into this one.
-        let section = self.render_section(self.active_section, settings, window, cx);
+        let (pinned, section) = self.render_section(self.active_section, settings, window, cx);
+        // The pinned group and the scrolling content share the gap between two groups, so a row
+        // scrolling up stops short of the pinned card.
+        let pinned_gap = group_spacing(appearance) - appearance.spacing(12.0);
+        let scroll_top = if pinned.is_some() {
+            appearance.spacing(12.0)
+        } else {
+            appearance.spacing(8.0)
+        };
         let empty = self.rows_for(self.active_section).is_empty();
         // A search that matches nothing names no section: its result is the canvas's only
         // content, under a heading band that keeps only window movement and Window Controls.
@@ -1426,6 +1435,17 @@ impl SettingsWindow {
             ))
             .children(heading)
             .children(self.render_banner(appearance, cx))
+            // A group that stays in view stands between the heading and the scrolling content,
+            // on the same gutters as the groups that scroll.
+            .children(pinned.map(|pinned| {
+                div()
+                    .debug_selector(|| "settings-pinned".to_owned())
+                    .flex_none()
+                    .px(card_gutter(appearance))
+                    .pt(appearance.spacing(8.0))
+                    .pb(pinned_gap)
+                    .child(pinned)
+            }))
             .child(
                 div()
                     .relative()
@@ -1442,7 +1462,7 @@ impl SettingsWindow {
                             .flex()
                             .flex_col()
                             .px(card_gutter(appearance))
-                            .pt(appearance.spacing(8.0))
+                            .pt(scroll_top)
                             .pb(appearance.spacing(18.0))
                             .on_scroll_wheel(move |_, _, cx| {
                                 let _ = revealing.update(cx, |settings, cx| {
@@ -1472,19 +1492,30 @@ impl SettingsWindow {
             .into_any_element()
     }
 
+    /// Whether `section` keeps a group in view above its scrolling content: SpaceTerm's card in
+    /// Updates, which holds Check Now. A search lists rows by match instead.
+    fn pins_a_group(&self, section: SettingsSectionId) -> bool {
+        section == SettingsSectionId::Updates && self.query.trim().is_empty()
+    }
+
+    /// The section's groups: the one that stays in view above the scrolling content, if any,
+    /// and the scrolling content.
     fn render_section(
         &mut self,
         section: SettingsSectionId,
         settings: &SettingsAppearance,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> (Option<AnyElement>, AnyElement) {
         let appearance = &settings.chrome;
         let mut rows = self.rows_for(section);
         if rows.is_empty() {
-            return div()
-                .debug_selector(move || format!("{}-empty", section.selector()))
-                .into_any_element();
+            return (
+                None,
+                div()
+                    .debug_selector(move || format!("{}-empty", section.selector()))
+                    .into_any_element(),
+            );
         }
         // The Keybindings search narrows the rows Settings Search left, so it stays in place
         // above them even when it finds nothing.
@@ -1539,7 +1570,7 @@ impl SettingsWindow {
         let network_footnote = self.network_access_footnote(cx);
         let git_footnote = self.core_git_footnote();
         self.row_bounds.borrow_mut().clear();
-        let rendered = groups
+        let mut rendered = groups
             .into_iter()
             .map(|(title, ids, members)| {
                 // The gallery's title names the appearance it is showing, which changes with the
@@ -1569,7 +1600,7 @@ impl SettingsWindow {
                 let row_bounds = Rc::clone(&self.row_bounds);
                 let reveal_after_layout = Rc::clone(&self.reveal_after_layout);
                 let scroll = self.scroll.clone();
-                FormGroup::new(group_selector(section, title), heading, members)
+                let group = FormGroup::new(group_selector(section, title), heading, members)
                     .footnote(footnote)
                     .on_rows_prepainted(move |bounds, window, _| {
                         let revealed = reveal_after_layout
@@ -1586,15 +1617,28 @@ impl SettingsWindow {
                         }
                     })
                     .render(settings)
-                    .into_any_element()
+                    .into_any_element();
+                (title, group)
             })
             .collect::<Vec<_>>();
+        // SpaceTerm's card stays in view while the Machine rows under it scroll, however many
+        // Machines there are.
+        let pinned = self
+            .pins_a_group(section)
+            .then(|| {
+                rendered
+                    .iter()
+                    .position(|(title, _)| *title == SettingsRowId::UpdateStatus.descriptor().group)
+            })
+            .flatten()
+            .map(|index| rendered.remove(index).1);
+        let rendered: Vec<AnyElement> = rendered.into_iter().map(|(_, group)| group).collect();
         let notice = match section {
             SettingsSectionId::Themes => self.render_diagnostics_notice(appearance, cx),
             SettingsSectionId::Machines => self.render_core_notices(appearance, cx),
             _ => None,
         };
-        div()
+        let body = div()
             .debug_selector(move || section.selector().to_owned())
             .flex()
             .flex_col()
@@ -1604,7 +1648,8 @@ impl SettingsWindow {
             .children(shortcut_search)
             .children(no_shortcuts)
             .children(rendered)
-            .into_any_element()
+            .into_any_element();
+        (pinned, body)
     }
 }
 
@@ -1758,6 +1803,7 @@ impl SettingsWindow {
             SettingsRowId::AddMachine => self.render_add_machine_row(ends, appearance, cx),
             SettingsRowId::CommandLineTool => self.render_command_line_tool(appearance, cx),
             SettingsRowId::UpdateStatus => self.render_update_status(appearance, cx),
+            SettingsRowId::UpdateCheckNow => self.render_update_check_now(cx),
             // The section renders each Machine's row in this row's place.
             SettingsRowId::CoreUpdates => div().into_any_element(),
             SettingsRowId::AutomaticUpdateDownloads => self.render_automatic_update_downloads(cx),
