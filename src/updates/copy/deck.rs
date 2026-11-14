@@ -372,6 +372,11 @@ fn build() -> Deck {
                 facts.checked_ago = checked_ago;
                 facts.pending = pending;
                 deck.view(&UpdateView::new(facts, &[], marks, NOW));
+                if pending.is_some() && !matches!(state, UpdateState::UpToDate) {
+                    // The person joins a scheduled check retrying an automatic download.
+                    facts.retrying = true;
+                    deck.view(&UpdateView::new(facts, &[], marks, NOW));
+                }
             }
         }
     }

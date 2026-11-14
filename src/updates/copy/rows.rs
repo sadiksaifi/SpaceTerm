@@ -365,10 +365,40 @@ pub(crate) fn app_row(app: &AppRow) -> RowView {
             }
         }
     };
+    // Joining a scheduled retry makes its check visible without ending the quiet download
+    // retry. Keep that retry stage (and its title-bar policy), but report the person's check.
+    if let AppStage::DownloadFailed {
+        version: Some(version),
+        retries: true,
+        ..
+    } = &app.stage
+    {
+        match app.asked_check {
+            Some(AskedCheck::Running) => {
+                shape.failure = None;
+                shape.sentence =
+                    format!("SpaceTerm is checking for updates. SpaceTerm {version} is available.");
+                shape = shape.progress(CHECKING);
+            }
+            Some(AskedCheck::Failed) => {
+                shape.sentence = format!(
+                    "SpaceTerm couldn\u{2019}t check for updates. SpaceTerm {version} is still available."
+                );
+                shape = shape.failure(
+                    CHECK_FAILED,
+                    check_failed(Some(format!("SpaceTerm {version} is still available."))),
+                );
+            }
+            Some(AskedCheck::Succeeded) | None => {}
+        }
+    }
     if app.waiting().is_some() && app.ladder >= Stage::Ask {
         shape = shape.detail(waiting(app.waited));
     }
     let tone = match &app.stage {
+        AppStage::DownloadFailed { .. } if app.asked_check == Some(AskedCheck::Running) => {
+            RowTone::Plain
+        }
         AppStage::DownloadFailed { .. } | AppStage::RelaunchFailed { .. } => RowTone::Failure,
         AppStage::Current { .. } | AppStage::Available { .. }
             if app.asked_check == Some(AskedCheck::Failed) =>
