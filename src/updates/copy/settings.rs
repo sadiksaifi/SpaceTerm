@@ -8,7 +8,8 @@ use spaceterm_core::update::facts::CheckFailure;
 
 use crate::updates::machines::MachineAction;
 use crate::updates::state::{
-    AppRow, AppStage, AskedCheck, ItemCommand, LastCheck, MachineRow, MachineStage, RowView, Target,
+    AppRow, AppStage, AskedCheck, CheckFailed, ItemCommand, LastCheck, MachineRow, MachineStage,
+    RowView, Target,
 };
 
 /// The product name, which heads the SpaceTerm row and the menu bar extra.
@@ -194,14 +195,21 @@ pub(crate) fn check_reason(reason: Option<CheckFailure>) -> &'static str {
 }
 
 /// When the item last checked, and why its checks fail, as readable lines. A check the person
-/// asked for that failed before the facts said so reads as failed too.
-fn check_lines(last: LastCheck, asked: Option<AskedCheck>) -> Vec<ItemEntry> {
+/// asked for that the Core refused, or that reached no route, ran no check: it says so after
+/// the last completed check, whose reason stays its own.
+fn check_lines(last: LastCheck, failed: Option<CheckFailed>) -> Vec<ItemEntry> {
     let mut lines = completed_check_lines(last);
-    if asked == Some(AskedCheck::Failed) && !matches!(last, LastCheck::Failing { .. }) {
-        lines.push(ItemEntry::info(check_reason(None).to_owned()));
+    if matches!(
+        failed,
+        Some(CheckFailed::Refused(_) | CheckFailed::Unconnected)
+    ) {
+        lines.push(ItemEntry::info(CHECK_DIDNT_RUN.to_owned()));
     }
     lines
 }
+
+/// A check the person asked for that never ran.
+const CHECK_DIDNT_RUN: &str = "Last request didn\u{2019}t run";
 
 /// When the item's last completed check finished, and why its checks fail.
 fn completed_check_lines(last: LastCheck) -> Vec<ItemEntry> {
@@ -265,7 +273,8 @@ pub(crate) fn app_menu(
     embedded: Option<&str>,
     checks: bool,
 ) -> Vec<ItemEntry> {
-    let mut entries = check_lines(app.last_check, app.asked_check);
+    // SpaceTerm's own check runs whenever it is asked, so it has no refused request.
+    let mut entries = check_lines(app.last_check, None);
     entries.extend(detail_lines(row));
     let idle = matches!(
         app.stage,
@@ -307,7 +316,7 @@ pub(crate) fn machine_menu(
     row: &RowView,
     embedded: Option<&str>,
 ) -> Vec<ItemEntry> {
-    let mut entries = check_lines(machine.last_check, machine.asked_check);
+    let mut entries = check_lines(machine.last_check, machine.check_failed);
     entries.extend(detail_lines(row));
     let (label, command, enabled) = match &machine.stage {
         MachineStage::Offline => (

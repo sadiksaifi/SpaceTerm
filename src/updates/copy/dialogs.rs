@@ -8,7 +8,7 @@ use crate::updates::UpdateError;
 use crate::updates::confirm::{Explanation, Previewed};
 use crate::updates::machines::{ActionFailure, MachineAction, MachineId};
 use crate::updates::state::{
-    AppRow, AppStage, Command, DesktopAction, DownloadCause, MachineRow, MachineStage,
+    AppRow, AppStage, CheckFailed, Command, DesktopAction, DownloadCause, MachineRow, MachineStage,
     PUSH_FAILURE, STEPPING_STONE,
 };
 
@@ -241,10 +241,12 @@ pub(crate) fn machine_failure(row: &MachineRow) -> Option<Explanation> {
 }
 
 /// The details of a check that failed: why, and what still waits. Check Again checks once more;
-/// closing the alert changes nothing. `machine` is None for SpaceTerm's own check.
+/// closing the alert changes nothing. `machine` is None for SpaceTerm's own check. `failed` is
+/// that check's own outcome, so a request the Core refused never reads as an earlier check's
+/// failure.
 pub(crate) fn check_failed(
     machine: Option<&str>,
-    reason: Option<CheckFailure>,
+    failed: CheckFailed,
     waiting: Option<String>,
     check: Command,
 ) -> Explanation {
@@ -252,7 +254,33 @@ pub(crate) fn check_failed(
         Some(name) => format!("Couldn\u{2019}t Check for Updates on {name}"),
         None => "Couldn\u{2019}t Check for SpaceTerm Updates".to_owned(),
     };
-    let why = match reason {
+    let why = match failed {
+        CheckFailed::Completed(reason) => completed_check_failure(machine, reason),
+        CheckFailed::Refused(failure) => machine
+            .and_then(|name| action_failure(name, &MachineAction::CheckAgain, failure))
+            .map(|(_, message)| message.to_string())
+            .unwrap_or_else(|| "The check didn\u{2019}t run. Try again.".to_owned()),
+        CheckFailed::Unconnected => match machine {
+            Some(name) => {
+                format!("SpaceTerm couldn\u{2019}t reach {name} to check for updates.")
+            }
+            None => "The check didn\u{2019}t run. Try again.".to_owned(),
+        },
+    };
+    let message = match waiting {
+        Some(waiting) => format!("{why} {waiting}"),
+        None => why,
+    };
+    Explanation {
+        then: Some(Box::new(check)),
+        proceed: Some(CHECK_AGAIN.into()),
+        ..Explanation::ok(title, message)
+    }
+}
+
+/// Why a check that ran and completed failed, from that check's own facts.
+fn completed_check_failure(machine: Option<&str>, reason: Option<CheckFailure>) -> String {
+    match reason {
         Some(CheckFailure::Network) => "The release feed can\u{2019}t be reached.".to_owned(),
         Some(CheckFailure::Proxy) => "The update proxy doesn\u{2019}t answer.".to_owned(),
         Some(CheckFailure::Verification) => "The release feed doesn\u{2019}t verify.".to_owned(),
@@ -270,15 +298,6 @@ pub(crate) fn check_failed(
             "A required update couldn\u{2019}t start.".to_owned()
         }
         None => "The check didn\u{2019}t finish. Check your network, then try again.".to_owned(),
-    };
-    let message = match waiting {
-        Some(waiting) => format!("{why} {waiting}"),
-        None => why,
-    };
-    Explanation {
-        then: Some(Box::new(check)),
-        proceed: Some(CHECK_AGAIN.into()),
-        ..Explanation::ok(title, message)
     }
 }
 

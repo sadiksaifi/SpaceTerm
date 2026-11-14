@@ -393,7 +393,14 @@ fn build() -> Deck {
             let check = update.facts.as_ref().unwrap().check.clone();
             for outcome in [
                 Checked::Finished(check.clone()),
-                Checked::Refused(Some(check)),
+                Checked::Refused {
+                    observed: Some(check.clone()),
+                    failure: ActionFailure::Busy,
+                },
+                Checked::Refused {
+                    observed: Some(check),
+                    failure: ActionFailure::Unavailable(Unavailable::NotConnected),
+                },
             ] {
                 let checked = std::collections::HashMap::from([(id, outcome)]);
                 let marks = Marks {
@@ -435,7 +442,13 @@ fn build() -> Deck {
         ));
         waiting_check.asked = None;
         let observed = waiting_check.facts.as_ref().unwrap().check.clone();
-        let checked = std::collections::HashMap::from([(id, Checked::Refused(Some(observed)))]);
+        let checked = std::collections::HashMap::from([(
+            id,
+            Checked::Refused {
+                observed: Some(observed),
+                failure: ActionFailure::Busy,
+            },
+        )]);
         let marks = Marks {
             checked: &checked,
             ..marks

@@ -715,7 +715,13 @@ fn every_list_row_shows_one_presentation_with_its_own_command() {
 
     checking.asked = None;
     let observed = checking.facts.as_ref().map(|facts| facts.check.clone());
-    desk.checked.insert(PENGUIN, Checked::Refused(observed));
+    desk.checked.insert(
+        PENGUIN,
+        Checked::Refused {
+            observed,
+            failure: ActionFailure::Busy,
+        },
+    );
     let view = desk.view(app(&state), std::slice::from_ref(&checking), NOW);
     let row = view.machine_row(PENGUIN).unwrap();
     assert_eq!(view.machines[0].asked_check, Some(AskedCheck::Failed));
@@ -1902,4 +1908,204 @@ fn a_requested_restart_asks_then_runs_or_defers_only_at_ask(cx: &mut gpui::TestA
             "{update:?}"
         );
     }
+}
+
+/// Every Machine stage a person can check, beside what the row already shows: a Core below the
+/// Update Floor, a restart that failed with its version kept, a Pending Version whose start
+/// failed, a feed download the Core retries, an unconfirmed restart, a Core too old for this
+/// SpaceTerm, a skipped Stepping Stone, and a push that waits for SpaceTerm.
+fn checkable_stages() -> Vec<(&'static str, MachineUpdate, bool)> {
+    let mut start_failed = waiting(PENGUIN, "penguin", 1, false, NOW - 3 * DAY);
+    start_failed.facts.as_mut().unwrap().last_failure = Some(UpdateFailure {
+        id: 7,
+        at: NOW,
+        version: version("0.11.4"),
+        kind: FailureKind::Start(StartFailure::DiskFull),
+    });
+    let mut continuation_failed = waiting(PENGUIN, "penguin", 2, false, NOW - 3 * DAY);
+    continuation_failed.detailed = Some(DetailedUpdateFacts {
+        facts: continuation_failed.facts.clone().unwrap(),
+        continuation: Some(Continuation::StartFailed),
+        working: 0,
+        restart: None,
+    });
+    let mut feed_failed = machine(PENGUIN, "penguin", false, Some(facts("0.11.3", 0)));
+    feed_failed.facts.as_mut().unwrap().last_failure = Some(UpdateFailure {
+        id: 8,
+        at: NOW,
+        version: version("0.11.5"),
+        kind: FailureKind::Install(InstallFailure::Download),
+    });
+    let mut unconfirmed = machine(PENGUIN, "penguin", false, Some(facts("0.11.3", 0)));
+    unconfirmed.link = MachineLink::Unconfirmed {
+        expected: version("0.11.4"),
+        since: NOW,
+    };
+    let mut too_old = machine(PENGUIN, "penguin", false, Some(facts("0.11.3", 0)));
+    too_old.link = MachineLink::Incompatible(Incompatible::ListenerTooOld);
+    let mut stone = machine(PENGUIN, "penguin", false, Some(facts("0.11.3", 0)));
+    stone.facts.as_mut().unwrap().check = UpdateCheck::Failing {
+        since: NOW - 2 * DAY,
+        reason: CheckFailure::SteppingStoneSkipped,
+        last_success: None,
+    };
+    let mut pushed = machine(PENGUIN, "penguin", false, Some(facts("0.11.3", 0)));
+    pushed.push = Some(version("0.11.5"));
+    vec![
+        ("below the floor", below_the_floor(), false),
+        ("restart failed, version kept", start_failed, false),
+        ("pending start failed", continuation_failed, false),
+        ("feed download retried", feed_failed, false),
+        ("restart unconfirmed", unconfirmed, false),
+        ("too old", too_old, false),
+        ("stepping stone skipped", stone, false),
+        ("push waits for SpaceTerm", pushed, true),
+    ]
+}
+
+/// A check the person started on any checkable Machine is the title-bar list row's one
+/// presentation: Checking while it runs, then its failure, whose details only check again. The
+/// row's own update or retry action and its versions stay for Settings, and choosing the list
+/// row never performs them meanwhile.
+#[test]
+fn a_manual_check_leads_the_list_row_on_every_checkable_stage() {
+    let state = UpdateState::UpToDate;
+    for (name, update, pushes_held) in checkable_stages() {
+        let mut desk = Desk::new();
+        fn marks(desk: &Desk, pushes_held: bool) -> Marks<'_> {
+            Marks {
+                pushes_held,
+                ..desk.marks()
+            }
+        }
+        let before = UpdateView::new(
+            app(&state),
+            std::slice::from_ref(&update),
+            marks(&desk, pushes_held),
+            NOW,
+        )
+        .machine_row(PENGUIN)
+        .unwrap();
+
+        let mut checking = update.clone();
+        checking.asked = Some(Asked::Check);
+        let row = UpdateView::new(
+            app(&state),
+            std::slice::from_ref(&checking),
+            marks(&desk, pushes_held),
+            NOW,
+        )
+        .machine_row(PENGUIN)
+        .unwrap();
+        assert_eq!(row.primary.kind, PrimaryKind::Progress, "{name}: {row:?}");
+        assert_eq!(row.primary.label.as_ref(), "Checking\u{2026}", "{name}");
+        assert_eq!(
+            row.primary.command, None,
+            "{name}: choosing it does nothing"
+        );
+        assert_eq!(
+            row.action, before.action,
+            "{name}: Settings keeps the row's action"
+        );
+        assert_eq!(row.target, before.target, "{name}: the versions stay");
+
+        let observed = update.facts.as_ref().map(|facts| facts.check.clone());
+        desk.checked.insert(
+            PENGUIN,
+            Checked::Refused {
+                observed,
+                failure: ActionFailure::Busy,
+            },
+        );
+        let row = UpdateView::new(
+            app(&state),
+            std::slice::from_ref(&update),
+            marks(&desk, pushes_held),
+            NOW,
+        )
+        .machine_row(PENGUIN)
+        .unwrap();
+        assert_eq!(row.primary.kind, PrimaryKind::Failure, "{name}: {row:?}");
+        assert_eq!(row.primary.label.as_ref(), "Check failed\u{2026}", "{name}");
+        let Some(Command::Explain(details)) = &row.primary.command else {
+            panic!("{name}: the failed check opens its details: {row:?}");
+        };
+        assert_eq!(
+            details.then.as_deref(),
+            Some(&Command::Machine(PENGUIN, MachineAction::CheckAgain)),
+            "{name}: its only follow-up checks again"
+        );
+        assert_eq!(
+            row.action, before.action,
+            "{name}: Settings keeps the row's action"
+        );
+        assert_eq!(row.target, before.target, "{name}: the versions stay");
+    }
+}
+
+/// The details a failed check's list row opens.
+fn failed_check_details(cx: &mut gpui::TestAppContext) -> Explanation {
+    let state = UpdateState::UpToDate;
+    let row = store_view(cx, &app(&state)).0.machine_row(PENGUIN).unwrap();
+    match row.primary.command {
+        Some(Command::Explain(details)) => details,
+        other => panic!("the failed check opens its details: {other:?}"),
+    }
+}
+
+/// A check the Core refused never ran, so its details say why it was refused, never why an
+/// earlier check failed. A newer check that completes and fails explains itself with its own
+/// reason.
+#[gpui::test]
+fn a_refused_check_never_borrows_an_earlier_checks_reason(cx: &mut gpui::TestAppContext) {
+    let (adapter, store) = installed_store(cx);
+    let mut feed_down = machine(PENGUIN, "penguin", false, Some(facts("0.11.3", 0)));
+    feed_down.facts.as_mut().unwrap().check = UpdateCheck::Failing {
+        since: NOW - 3 * DAY,
+        reason: CheckFailure::Network,
+        last_success: Some(NOW - 4 * DAY),
+    };
+    adapter.emit(MachineUpdatesEvent::Machines(vec![feed_down.clone()]));
+    cx.run_until_parked();
+    store.update(cx, |store, cx| {
+        store.perform(PENGUIN, MachineAction::CheckAgain, Surface::Settings, cx)
+    });
+    adapter.emit(MachineUpdatesEvent::Finished {
+        machine: PENGUIN,
+        action: MachineAction::CheckAgain,
+        outcome: Err(ActionFailure::Busy),
+    });
+    cx.run_until_parked();
+    let refused = failed_check_details(cx);
+    assert!(
+        !refused.message.contains("release feed"),
+        "the refusal isn't the earlier failure: {refused:?}"
+    );
+    assert!(refused.message.contains("busy"), "{refused:?}");
+
+    // A revision that changes only sessions keeps the refusal.
+    let mut sessions = feed_down.clone();
+    let facts = sessions.facts.as_mut().unwrap();
+    facts.revision = 2;
+    facts.sessions = 1;
+    adapter.emit(MachineUpdatesEvent::Changed(Box::new(sessions.clone())));
+    cx.run_until_parked();
+    assert_eq!(failed_check_details(cx).message, refused.message);
+
+    // A newer completed check that fails explains itself with its own reason.
+    let mut verified = sessions;
+    let facts = verified.facts.as_mut().unwrap();
+    facts.revision = 3;
+    facts.check = UpdateCheck::Failing {
+        since: NOW - 3 * DAY,
+        reason: CheckFailure::Verification,
+        last_success: Some(NOW - 4 * DAY),
+    };
+    adapter.emit(MachineUpdatesEvent::Changed(Box::new(verified)));
+    cx.run_until_parked();
+    let completed = failed_check_details(cx);
+    assert!(
+        completed.message.contains("doesn\u{2019}t verify"),
+        "{completed:?}"
+    );
 }

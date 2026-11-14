@@ -189,6 +189,7 @@ This Computer | 0.11.4 · Checking… | list: Checking… (reports) | a11y: Spac
 This Computer | 0.11.4 · Download failed | [Download] | list: Download failed… (opens details) | Updates to 0.12.1 after 0.12.0 | a11y: SpaceTerm Core on This Computer needs 0.12.0 before it can update to 0.12.1.
 This Computer | 0.11.4 · Required update failed | [How to Update…] | list: Required update failed… (opens details) | a11y: SpaceTerm Core on This Computer can’t update by itself.
 This Computer | 0.11.4 · Restarting… | list: Restarting… (reports) | a11y: SpaceTerm Core on This Computer is restarting.
+This Computer | 0.11.4 → 0.11.5 · Checking… | [Check Again] | list: Checking… (reports) | Not responding | a11y: This Computer stopped responding while SpaceTerm Core restarted. It is checking for updates. | list a11y: SpaceTerm Core on This Computer is checking for updates.
 This Computer | 0.11.4 → 0.11.5 · Download failed | [Try Again] | list: Download failed… (opens details) | a11y: SpaceTerm couldn’t download SpaceTerm Core 0.11.5 to This Computer.
 This Computer | 0.11.4 → 0.11.5 · Download failed | list: Download failed… (opens details) | SpaceTerm Core tries again later | a11y: SpaceTerm couldn’t download SpaceTerm Core 0.11.5 to This Computer.
 This Computer | 0.11.4 → 0.11.5 · Downloading… | list: Downloading… (reports) | a11y: Downloading SpaceTerm Core 0.11.5 to This Computer.
@@ -254,6 +255,7 @@ This Mac | 0.11.4 · Checking… | list: Checking… (reports) | a11y: SpaceTerm
 This Mac | 0.11.4 · Download failed | [Download] | list: Download failed… (opens details) | Updates to 0.12.1 after 0.12.0 | a11y: SpaceTerm Core on This Mac needs 0.12.0 before it can update to 0.12.1.
 This Mac | 0.11.4 · Required update failed | [How to Update…] | list: Required update failed… (opens details) | a11y: SpaceTerm Core on This Mac can’t update by itself.
 This Mac | 0.11.4 · Restarting… | list: Restarting… (reports) | a11y: SpaceTerm Core on This Mac is restarting.
+This Mac | 0.11.4 → 0.11.5 · Checking… | [Check Again] | list: Checking… (reports) | Not responding | a11y: This Mac stopped responding while SpaceTerm Core restarted. It is checking for updates. | list a11y: SpaceTerm Core on This Mac is checking for updates.
 This Mac | 0.11.4 → 0.11.5 · Download failed | [Try Again] | list: Download failed… (opens details) | a11y: SpaceTerm couldn’t download SpaceTerm Core 0.11.5 to This Mac.
 This Mac | 0.11.4 → 0.11.5 · Download failed | list: Download failed… (opens details) | SpaceTerm Core tries again later | a11y: SpaceTerm couldn’t download SpaceTerm Core 0.11.5 to This Mac.
 This Mac | 0.11.4 → 0.11.5 · Downloading… | list: Downloading… (reports) | a11y: Downloading SpaceTerm Core 0.11.5 to This Mac.
@@ -319,6 +321,7 @@ penguin | 0.11.4 · Checking… | list: Checking… (reports) | a11y: SpaceTerm 
 penguin | 0.11.4 · Download failed | [Download] | list: Download failed… (opens details) | Updates to 0.12.1 after 0.12.0 | a11y: SpaceTerm Core on penguin needs 0.12.0 before it can update to 0.12.1.
 penguin | 0.11.4 · Required update failed | [How to Update…] | list: Required update failed… (opens details) | a11y: SpaceTerm Core on penguin can’t update by itself.
 penguin | 0.11.4 · Restarting… | list: Restarting… (reports) | a11y: SpaceTerm Core on penguin is restarting.
+penguin | 0.11.4 → 0.11.5 · Checking… | [Check Again] | list: Checking… (reports) | Not responding | a11y: penguin stopped responding while SpaceTerm Core restarted. It is checking for updates. | list a11y: SpaceTerm Core on penguin is checking for updates.
 penguin | 0.11.4 → 0.11.5 · Download failed | [Try Again] | list: Download failed… (opens details) | a11y: SpaceTerm couldn’t download SpaceTerm Core 0.11.5 to penguin.
 penguin | 0.11.4 → 0.11.5 · Download failed | list: Download failed… (opens details) | SpaceTerm Core tries again later | a11y: SpaceTerm couldn’t download SpaceTerm Core 0.11.5 to penguin.
 penguin | 0.11.4 → 0.11.5 · Downloading… | list: Downloading… (reports) | a11y: Downloading SpaceTerm Core 0.11.5 to penguin.
@@ -333,11 +336,13 @@ Couldn’t Check for SpaceTerm Updates | The check didn’t finish. Check your n
 Couldn’t Check for Updates on This Computer | The check didn’t finish. Check your network, then try again. | Check Again, Cancel
 Couldn’t Check for Updates on This Mac | On This Mac, install a newer compatible SpaceTerm Core archive with spaceterm update --archive, or wait for a newer release. | OK
 Couldn’t Check for Updates on This Mac | SpaceTerm Core on This Mac didn’t finish. Try again. | OK
+Couldn’t Check for Updates on This Mac | SpaceTerm Core on This Mac is busy with another update. Try again when it finishes. SpaceTerm Core 0.11.4 stays downloaded. | Check Again, Cancel
+Couldn’t Check for Updates on This Mac | SpaceTerm Core on This Mac is busy with another update. Try again when it finishes. | Check Again, Cancel
 Couldn’t Check for Updates on This Mac | SpaceTerm Core on This Mac is busy with another update. Try again when it finishes. | OK
 Couldn’t Check for Updates on This Mac | SpaceTerm Core on This Mac is too old for this SpaceTerm. | OK
+Couldn’t Check for Updates on This Mac | SpaceTerm can’t reach This Mac. Try again when it’s connected. | Check Again, Cancel
 Couldn’t Check for Updates on This Mac | SpaceTerm can’t reach This Mac. Try again when it’s connected. | OK
 Couldn’t Check for Updates on This Mac | SpaceTerm was replaced on disk while it was running. Relaunch SpaceTerm, then try again. | OK
-Couldn’t Check for Updates on This Mac | The check didn’t finish. Check your network, then try again. SpaceTerm Core 0.11.4 stays downloaded. | Check Again, Cancel
 Couldn’t Check for Updates on This Mac | The check didn’t finish. Check your network, then try again. | Check Again, Cancel
 Couldn’t Check for Updates on This Mac | The release feed can’t be reached. | Check Again, Cancel
 Couldn’t Check for Updates on This Mac | This Mac is out of disk space. Free some space, then try again. | OK
@@ -347,11 +352,13 @@ Couldn’t Check for Updates on This Mac | This Mac’s clock is more than five 
 Couldn’t Check for Updates on This Mac | This SpaceTerm is too old for SpaceTerm Core on This Mac. | OK
 Couldn’t Check for Updates on penguin | On penguin, install a newer compatible SpaceTerm Core archive with spaceterm update --archive, or wait for a newer release. | OK
 Couldn’t Check for Updates on penguin | SpaceTerm Core on penguin didn’t finish. Try again. | OK
+Couldn’t Check for Updates on penguin | SpaceTerm Core on penguin is busy with another update. Try again when it finishes. SpaceTerm Core 0.11.4 stays downloaded. | Check Again, Cancel
+Couldn’t Check for Updates on penguin | SpaceTerm Core on penguin is busy with another update. Try again when it finishes. | Check Again, Cancel
 Couldn’t Check for Updates on penguin | SpaceTerm Core on penguin is busy with another update. Try again when it finishes. | OK
 Couldn’t Check for Updates on penguin | SpaceTerm Core on penguin is too old for this SpaceTerm. | OK
+Couldn’t Check for Updates on penguin | SpaceTerm can’t reach penguin. Try again when it’s connected. | Check Again, Cancel
 Couldn’t Check for Updates on penguin | SpaceTerm can’t reach penguin. Try again when it’s connected. | OK
 Couldn’t Check for Updates on penguin | SpaceTerm was replaced on disk while it was running. Relaunch SpaceTerm, then try again. | OK
-Couldn’t Check for Updates on penguin | The check didn’t finish. Check your network, then try again. SpaceTerm Core 0.11.4 stays downloaded. | Check Again, Cancel
 Couldn’t Check for Updates on penguin | The check didn’t finish. Check your network, then try again. | Check Again, Cancel
 Couldn’t Check for Updates on penguin | The release feed can’t be reached. | Check Again, Cancel
 Couldn’t Check for Updates on penguin | This SpaceTerm is too old for SpaceTerm Core on penguin. | OK
@@ -584,6 +591,7 @@ This Computer | [info: Last checked just now] [disabled: Check for Updates] --- 
 This Computer | [info: Last checked just now] [disabled: Check for Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
 This Computer | [info: Last checked just now] [disabled: Check for Updates] --- [What’s New in 0.11.4]
 This Computer | [info: Last checked just now] [disabled: Check for Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
+This Computer | [info: Last checked just now] [info: Not responding] [disabled: Check for Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
 This Computer | [info: Last checked just now] [info: Restarts after an hour with nothing running] [Check for Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
 This Computer | [info: Last checked just now] [info: Restarts after an hour with nothing running] [info: Update waiting 3 days] [Check for Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
 This Computer | [info: Last checked just now] [info: Restarts after an hour with nothing running] [info: Update waiting 8 days] [Check for Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
@@ -604,6 +612,7 @@ This Computer | [info: Last checked just now] [info: Waiting for the next update
 This Computer | [info: Not checked yet] [info: Required update failed] [Check for Updates] --- [What’s New in 0.11.4]
 This Mac | [Check for Updates]
 This Mac | [info: Last checked 2 hours ago] [info: Release feed unavailable] [Check for Updates] --- [Release Notes for 0.11.3]
+This Mac | [info: Last checked 2 hours ago] [info: Release feed unavailable] [info: Last request didn’t run] [Check for Updates] --- [Release Notes for 0.11.3]
 This Mac | [info: Last checked just now] [Check for Updates] --- [Release Notes for 0.11.3]
 This Mac | [info: Last checked just now] [Check for Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
 This Mac | [info: Last checked just now] [Check for Updates] --- [What’s New in 0.11.4]
@@ -614,9 +623,10 @@ This Mac | [info: Last checked just now] [disabled: Check for Updates] --- [Rele
 This Mac | [info: Last checked just now] [disabled: Check for Updates] --- [What’s New in 0.11.4]
 This Mac | [info: Last checked just now] [disabled: Check for Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
 This Mac | [info: Last checked just now] [disabled: Connect and Check] --- [Release Notes for 0.11.3]
-This Mac | [info: Last checked just now] [info: Last check failed] [Check for Updates] --- [Release Notes for 0.11.3]
-This Mac | [info: Last checked just now] [info: Last check failed] [Connect and Check] --- [Release Notes for 0.11.3]
-This Mac | [info: Last checked just now] [info: Last check failed] [info: Restarts when 1 Terminal Session ends] [Check for Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+This Mac | [info: Last checked just now] [info: Last request didn’t run] [Check for Updates] --- [Release Notes for 0.11.3]
+This Mac | [info: Last checked just now] [info: Last request didn’t run] [Connect and Check] --- [Release Notes for 0.11.3]
+This Mac | [info: Last checked just now] [info: Last request didn’t run] [info: Restarts when 1 Terminal Session ends] [Check for Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+This Mac | [info: Last checked just now] [info: Not responding] [disabled: Check for Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
 This Mac | [info: Last checked just now] [info: Restarts after an hour with nothing running] [Check for Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
 This Mac | [info: Last checked just now] [info: Restarts after an hour with nothing running] [info: Update waiting 3 days] [Check for Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
 This Mac | [info: Last checked just now] [info: Restarts after an hour with nothing running] [info: Update waiting 8 days] [Check for Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
@@ -642,6 +652,7 @@ This Mac | [info: Not checked yet] [info: System clock is behind] [Check for Upd
 This Mac | [info: Not checked yet] [info: Update proxy unavailable] [Check for Updates] --- [Release Notes for 0.11.3]
 penguin | [Check for Updates]
 penguin | [info: Last checked 2 hours ago] [info: Release feed unavailable] [Check for Updates] --- [Release Notes for 0.11.3]
+penguin | [info: Last checked 2 hours ago] [info: Release feed unavailable] [info: Last request didn’t run] [Check for Updates] --- [Release Notes for 0.11.3]
 penguin | [info: Last checked just now] [Check for Updates] --- [Release Notes for 0.11.3]
 penguin | [info: Last checked just now] [Check for Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
 penguin | [info: Last checked just now] [Check for Updates] --- [What’s New in 0.11.4]
@@ -652,9 +663,10 @@ penguin | [info: Last checked just now] [disabled: Check for Updates] --- [Relea
 penguin | [info: Last checked just now] [disabled: Check for Updates] --- [What’s New in 0.11.4]
 penguin | [info: Last checked just now] [disabled: Check for Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
 penguin | [info: Last checked just now] [disabled: Connect and Check] --- [Release Notes for 0.11.3]
-penguin | [info: Last checked just now] [info: Last check failed] [Check for Updates] --- [Release Notes for 0.11.3]
-penguin | [info: Last checked just now] [info: Last check failed] [Connect and Check] --- [Release Notes for 0.11.3]
-penguin | [info: Last checked just now] [info: Last check failed] [info: Restarts when 1 Terminal Session ends] [Check for Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+penguin | [info: Last checked just now] [info: Last request didn’t run] [Check for Updates] --- [Release Notes for 0.11.3]
+penguin | [info: Last checked just now] [info: Last request didn’t run] [Connect and Check] --- [Release Notes for 0.11.3]
+penguin | [info: Last checked just now] [info: Last request didn’t run] [info: Restarts when 1 Terminal Session ends] [Check for Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
+penguin | [info: Last checked just now] [info: Not responding] [disabled: Check for Updates] --- [What’s New in 0.11.4] [Release Notes for 0.11.5]
 penguin | [info: Last checked just now] [info: Restarts after an hour with nothing running] [Check for Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
 penguin | [info: Last checked just now] [info: Restarts after an hour with nothing running] [info: Update waiting 3 days] [Check for Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]
 penguin | [info: Last checked just now] [info: Restarts after an hour with nothing running] [info: Update waiting 8 days] [Check for Updates] --- [Release Notes for 0.11.3] [What’s New in 0.11.4]

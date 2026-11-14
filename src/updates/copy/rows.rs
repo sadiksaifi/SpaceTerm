@@ -12,8 +12,8 @@ use crate::updates::confirm::Explanation;
 use crate::updates::ladder::Stage;
 use crate::updates::machines::MachineAction;
 use crate::updates::state::{
-    AppRow, AppStage, AskedCheck, Blocked, Command, DesktopAction, Detail, LastCheck, MachineRow,
-    MachineStage, Primary, PrimaryKind, RowAction, RowTone, RowView,
+    AppRow, AppStage, AskedCheck, Blocked, CheckFailed, Command, DesktopAction, Detail, LastCheck,
+    MachineRow, MachineStage, Primary, PrimaryKind, RowAction, RowTone, RowView,
 };
 
 pub(crate) const APP_NAME: &str = "SpaceTerm";
@@ -212,7 +212,9 @@ pub(crate) fn app_row(app: &AppRow) -> RowView {
     let running = app.running.to_string();
     let check = Command::Desktop(DesktopAction::Check);
     let check_failed = |waiting: Option<String>| {
-        dialogs::check_failed(None, check_reason(app.last_check), waiting, check.clone())
+        // SpaceTerm's own check ran and failed; its updater gives no reason.
+        let failed = CheckFailed::Completed(check_reason(app.last_check));
+        dialogs::check_failed(None, failed, waiting, check.clone())
     };
     let mut shape = match &app.stage {
         // Release notes are never the row's action: the action slot only updates.
@@ -450,14 +452,18 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
             Command::Machine(id, MachineAction::CheckAgain),
         )
     };
-    let check_failed = |waiting: Option<String>| {
+    // A check the person asked for explains itself by its own outcome; the Core's own failing
+    // checks by their reason.
+    let own_checks_failed = CheckFailed::Completed(check_reason(row.last_check));
+    let check_failed = |failed: CheckFailed, waiting: Option<String>| {
         dialogs::check_failed(
             Some(&name),
-            check_reason(row.last_check),
+            failed,
             waiting,
             Command::Machine(id, MachineAction::CheckAgain),
         )
     };
+    let asked_failed = row.check_failed.unwrap_or(own_checks_failed);
     let too_old = row.blocked == Some(Blocked::CoreTooOld);
     let subject = format!("SpaceTerm Core on {name}");
     // The pill's failure alert when the row has one, so the list and the pill open the same
@@ -480,7 +486,7 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
                 .progress(CHECKING),
                 Some(AskedCheck::Failed) => {
                     Shape::new(format!("{subject} couldn\u{2019}t check for updates."))
-                        .failure(CHECK_FAILED, check_failed(None))
+                        .failure(CHECK_FAILED, check_failed(asked_failed, None))
                         .action(check_again())
                 }
                 Some(AskedCheck::Succeeded) => {
@@ -657,7 +663,7 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
             Shape::new(format!("{subject} is checking for updates.")).progress(CHECKING)
         }
         MachineStage::CantCheck => Shape::new(format!("{subject} can\u{2019}t check for updates."))
-            .failure(CHECK_FAILED, check_failed(None))
+            .failure(CHECK_FAILED, check_failed(own_checks_failed, None))
             .action(check_again()),
         // Download asks the Core to fetch the Stepping Stone at the floor from its own feed.
         // The row names the Stepping Stone, never the newest release, as what comes next.
@@ -695,40 +701,69 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
                 ))
         }
     };
-    // A check the person asked for shows on a Core whose update waits too. The waiting version
-    // and its Restart Core stay beside it in Settings, and the title-bar list shows the check.
-    if let MachineStage::Downloaded { version, .. } = &row.stage {
-        match row.asked_check {
-            Some(AskedCheck::Running) => {
-                shape.sentence = format!("{} It is checking for updates.", shape.sentence);
-                shape.reported = Some(format!(
-                    "{subject} is checking for updates. {version} is downloaded."
-                ));
-                shape.status = Some(CHECKING.to_owned());
-                shape.progress = Some(CHECKING);
-            }
-            Some(AskedCheck::Failed) if shape.failure.is_none() => {
-                shape.sentence =
-                    format!("{} It couldn\u{2019}t check for updates.", shape.sentence);
-                shape.reported = Some(format!(
-                    "{subject} couldn\u{2019}t check for updates. {version} stays downloaded."
-                ));
-                shape = shape.failure(
-                    CHECK_FAILED,
-                    check_failed(Some(format!("SpaceTerm Core {version} stays downloaded."))),
-                );
-            }
-            _ => {}
+    // A check the person asked for leads the row on every stage that doesn't already present
+    // it, unless work the row reports is in progress. The row's own update or retry action and
+    // its versions stay beside it in Settings; the title-bar list shows the check, and a failure
+    // the check displaces stays among the details.
+    let presents_check = match &row.stage {
+        MachineStage::Running => row.blocked.is_none() && running.is_some(),
+        MachineStage::Offline
+        | MachineStage::Connecting
+        | MachineStage::Downloading { .. }
+        | MachineStage::Restarting { .. } => true,
+        MachineStage::CantCheck => row.asked_check == Some(AskedCheck::Running),
+        _ => false,
+    };
+    let downloaded = match &row.stage {
+        MachineStage::Downloaded { version, .. } => Some(version.to_string()),
+        _ => None,
+    };
+    let overlaid = (!presents_check).then_some(row.asked_check).flatten();
+    if matches!(overlaid, Some(AskedCheck::Running | AskedCheck::Failed)) {
+        let displaced = shape.failure.take().map(|(status, _)| status);
+        if let Some(status) = displaced.filter(|status| status != CHECK_FAILED) {
+            shape = shape.detail(status);
         }
+    }
+    match overlaid {
+        Some(AskedCheck::Running) => {
+            shape.sentence = format!("{} It is checking for updates.", shape.sentence);
+            shape.reported = Some(match &downloaded {
+                Some(version) => {
+                    format!("{subject} is checking for updates. {version} is downloaded.")
+                }
+                None => format!("{subject} is checking for updates."),
+            });
+            shape = shape.progress(CHECKING);
+        }
+        Some(AskedCheck::Failed) => {
+            shape.sentence = format!("{} It couldn\u{2019}t check for updates.", shape.sentence);
+            shape.reported = Some(match &downloaded {
+                Some(version) => format!(
+                    "{subject} couldn\u{2019}t check for updates. {version} stays downloaded."
+                ),
+                None => format!("{subject} couldn\u{2019}t check for updates."),
+            });
+            let waiting = downloaded
+                .as_ref()
+                .map(|version| format!("SpaceTerm Core {version} stays downloaded."));
+            shape = shape.failure(CHECK_FAILED, check_failed(asked_failed, waiting));
+        }
+        Some(AskedCheck::Succeeded) | None => {}
     }
     // From Ask, a waiting row says how long the update waited, on demand.
     if row.ladder.is_some_and(|stage| stage >= Stage::Ask) {
         shape = shape.detail(waiting(row.waited));
     }
-    let waiting_check_failed = matches!(row.stage, MachineStage::Downloaded { .. })
-        && row.asked_check == Some(AskedCheck::Failed);
     let tone = match &row.stage {
-        _ if waiting_check_failed => RowTone::Failure,
+        _ if overlaid == Some(AskedCheck::Failed) => RowTone::Failure,
+        _ if overlaid == Some(AskedCheck::Running) => {
+            if row.blocked.is_some() || row.ladder == Some(Stage::Insist) {
+                RowTone::Warning
+            } else {
+                RowTone::Plain
+            }
+        }
         MachineStage::CantCheck if row.asked_check == Some(AskedCheck::Running) => RowTone::Plain,
         MachineStage::StartFailed { .. }
         | MachineStage::DownloadFailed { .. }

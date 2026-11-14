@@ -466,7 +466,13 @@ impl MachineUpdates {
                 let observed = update
                     .and_then(|update| update.facts.as_ref())
                     .map(|facts| facts.check.clone());
-                self.checked.insert(machine, Checked::Refused(observed));
+                self.checked.insert(
+                    machine,
+                    Checked::Refused {
+                        observed,
+                        failure: outcome.err().unwrap_or(ActionFailure::Failed),
+                    },
+                );
                 self.unsettled.remove(&machine);
             } else if connected_here && update.is_some() {
                 // Connect and Check reached no route: no check ran, and the row says so.
@@ -616,7 +622,7 @@ impl MachineUpdates {
             }
             // A newer completed check retires a refused one: a success clears it, and a failure
             // stays as that check's outcome.
-            if let Some(Checked::Refused(observed)) = self.checked.get(&machine)
+            if let Some(Checked::Refused { observed, .. }) = self.checked.get(&machine)
                 && let Some(facts) = facts
                 && Some(&facts.check) != observed.as_ref()
             {
