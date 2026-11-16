@@ -147,7 +147,7 @@ The workload task reports keystroke-to-pixels p99 with the other Pane idle, then
 For example, from the Mac against Penguin:
 
 ```sh
-mise run bench:latency:netem --owner-host penguin --jail /var/tmp/spaceterm-netem \
+mise run bench:latency:netem --owner-host penguin-eth --jail /var/tmp/spaceterm-netem \
   --expose 192.168.1.206:9341 --client-address "$(ipconfig getifaddr en8)" --interface en8 \
   --rounds 2 --output .snap/loss-test
 ```

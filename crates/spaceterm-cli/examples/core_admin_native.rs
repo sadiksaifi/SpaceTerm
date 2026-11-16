@@ -8,7 +8,7 @@
 //! checks each envelope and exit status. Fixture control runs on the server's own machine
 //! through the `fixture` role of this executable: it injects ledger records, ends the server or
 //! kills the helper inside a crash window, starts a Terminal Session and runs the pairing checks
-//! on a pty. A command prefix such as `ssh penguin` reaches a remote machine.
+//! on a pty. A command prefix such as `ssh penguin-eth` reaches a remote machine.
 //!
 //! ```text
 //! core_admin_native [--identity ID] [--target NAME] [--cli PATH]
@@ -20,7 +20,7 @@
 //! ```
 //!
 //! Each option also reads `SPACETERM_ADMIN_<OPTION>` with dashes as underscores, for example
-//! `SPACETERM_ADMIN_TARGET=penguin` and `SPACETERM_ADMIN_MACHINE="ssh penguin"`. Without
+//! `SPACETERM_ADMIN_TARGET=penguin` and `SPACETERM_ADMIN_MACHINE="ssh penguin-eth"`. Without
 //! `--target`, the target is this machine's own SpaceTerm Core. Stop runs on the target machine
 //! itself, because a paired machine can't stop it. Update cases run only when their
 //! archives are given, and each archive must be newer than the version the target runs, because
