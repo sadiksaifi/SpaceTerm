@@ -2,7 +2,7 @@ use super::*;
 use crate::direct::tests::Fixture;
 use std::{
     net::IpAddr,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 struct Network {
@@ -199,6 +199,36 @@ fn a_kept_address_this_machine_lacks_at_startup_listens_once_assigned() {
         status(&fixture).listener,
         ListenerState::Listening { addr: bind }
     );
+}
+
+/// While the address stays missing, the host's other wakes, such as terminal output, bind
+/// nothing: only a change of the system's addresses or the fallback interval does.
+#[test]
+fn a_listener_waiting_for_its_address_binds_again_only_when_due() {
+    let network = network(&["127.0.0.1"], &[]);
+    let mut fixture = fixture(network.clone());
+    fixture.listen_at("127.0.0.1".parse().unwrap());
+    let binds = Arc::new(AtomicUsize::new(0));
+    let binder: ListenerBinder = {
+        let binds = Arc::clone(&binds);
+        Arc::new(move |_, _| {
+            binds.fetch_add(1, Ordering::Relaxed);
+            Err(crate::connection::quic::QuicError::AddressNotAssigned)
+        })
+    };
+    fixture.state = State::open_with_adapters(&fixture.paths, network, binder).unwrap();
+    let mut state = fixture.state.lock().unwrap();
+    // The test machine's own route changes would make the count depend on that machine.
+    state.unassigned.as_mut().unwrap().signal = None;
+    let opened = binds.load(Ordering::Relaxed);
+    let due = state.retry_listen();
+    for _ in 0..50 {
+        assert_eq!(state.retry_listen(), due);
+    }
+    assert_eq!(binds.load(Ordering::Relaxed), opened);
+    state.unassigned.as_mut().unwrap().due = std::time::Instant::now();
+    assert!(state.retry_listen() > due);
+    assert_eq!(binds.load(Ordering::Relaxed), opened + 1);
 }
 
 #[test]
