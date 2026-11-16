@@ -105,6 +105,8 @@ pub enum QuicError {
     Incompatible,
     #[error("the address is in use")]
     AddressInUse,
+    #[error("the address is not on this computer")]
+    AddressNotAssigned,
 }
 
 fn transport() -> Arc<TransportConfig> {
@@ -276,13 +278,13 @@ impl Udp {
         if address.is_ipv6() {
             socket.set_only_v6(true).map_err(|_| QuicError::Transport)?;
         }
-        socket.bind(&address.into()).map_err(|error| {
-            if error.kind() == ErrorKind::AddrInUse {
-                QuicError::AddressInUse
-            } else {
-                QuicError::Transport
-            }
-        })?;
+        socket
+            .bind(&address.into())
+            .map_err(|error| match error.kind() {
+                ErrorKind::AddrInUse => QuicError::AddressInUse,
+                ErrorKind::AddrNotAvailable => QuicError::AddressNotAssigned,
+                _ => QuicError::Transport,
+            })?;
         let socket = UdpSocket::from(socket);
         socket
             .set_nonblocking(true)
@@ -2713,6 +2715,17 @@ mod tests {
         assert!(!listener.retire(), "no connection is live");
         drop(listener);
         assert!(QuicListener::bind(bound, config).is_ok());
+    }
+
+    /// An address this computer does not hold yet, such as a Tailscale address before tailscaled
+    /// assigns it, is a refusal of its own, so the server can wait for the address to appear.
+    #[test]
+    fn binding_an_address_this_computer_lacks_reports_it_unassigned() {
+        let documentation = "192.0.2.77:0".parse().unwrap();
+        assert!(matches!(
+            QuicListener::bind(documentation, server_config_for_tests()),
+            Err(QuicError::AddressNotAssigned)
+        ));
     }
 
     /// A connection whose thread holds it past retirement, as a severed lane still running a

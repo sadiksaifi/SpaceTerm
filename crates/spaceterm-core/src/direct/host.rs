@@ -9,11 +9,22 @@ const MAX_PENDING: usize = 32;
 enum Bind {
     /// Another socket, such as a retired listener's, holds the address.
     InUse,
+    /// The address is not on this computer, as a Tailscale address is before tailscaled
+    /// assigns it.
+    NotAssigned,
     Other,
 }
 /// How often a `Starting` listener tries its address again while it waits.
 const LISTEN_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
+/// How often a listener waiting for its address to be assigned tries again without a
+/// route-change signal, which can't be opened or can lose messages.
+const ADDRESS_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 pub(crate) type Shared = Arc<Mutex<State>>;
+/// A listener's wait for its address to be assigned to this computer.
+struct Unassigned {
+    /// Readable when the system's addresses change, if the system gives such a signal.
+    signal: Option<Arc<crate::connection::route_signal::RouteSignal>>,
+}
 /// The host-local socket boundary. A binder retains ownership of every prepared listener.
 type ListenerBinder = Arc<
     dyn Fn(
@@ -57,6 +68,8 @@ pub(crate) struct State {
     listener: Option<QuicListener>,
     /// When a `Starting` listener first found its address in use.
     starting_since: Option<std::time::Instant>,
+    /// Set while a `Starting` listener waits for its address to be assigned to this computer.
+    unassigned: Option<Unassigned>,
     /// Listeners replaced by a policy change, still routing to their connections until those
     /// end. A listener at the same address is taken back instead of binding again.
     retired: Vec<QuicListener>,
@@ -110,6 +123,7 @@ impl State {
             pin,
             listener: None,
             starting_since: None,
+            unassigned: None,
             retired: Vec::new(),
             listener_state: ListenerState::Off,
             invitations: Vec::new(),
@@ -159,7 +173,9 @@ impl State {
     /// that a retired listener's live connections still block waits as `Starting` until they
     /// end, within [`crate::connection::quic::RETIRE_LIMIT`]; [`Self::retry_listen`] then binds
     /// again. Only a bind refused after every retired listener finished counts against
-    /// `STALL_AFTER`, so retirement never uses up the time the bind itself has.
+    /// `STALL_AFTER`, so retirement never uses up the time the bind itself has. An address not
+    /// on this computer yet waits as `Starting` without a limit: Network Access keeps it, and
+    /// the system may assign it at any time, as tailscaled does after boot.
     fn open_at(&mut self, address: std::net::SocketAddr) -> ListenerState {
         let revived = self
             .retired
@@ -167,14 +183,23 @@ impl State {
             .position(|listener| listener.address() == address && listener.revive())
             .map(|index| self.retired.remove(index));
         if let Some(listener) = revived {
+            self.unassigned = None;
             self.listener = Some(listener);
             return ListenerState::Listening { addr: address };
         }
         self.retired.retain(|listener| !listener.finished());
-        match self.bind(address) {
+        let state = match self.bind(address) {
             Ok(listener) => {
                 self.listener = Some(listener);
                 ListenerState::Listening { addr: address }
+            }
+            Err(Bind::NotAssigned) => {
+                self.starting_since = None;
+                // Opened before the next bind, so an address assigned after this one is seen.
+                self.unassigned.get_or_insert_with(|| Unassigned {
+                    signal: crate::connection::route_signal::RouteSignal::open().map(Arc::new),
+                });
+                return ListenerState::Starting { addr: address };
             }
             Err(Bind::InUse) if !self.retired.is_empty() => {
                 self.starting_since = None;
@@ -192,24 +217,46 @@ impl State {
             }
             Err(Bind::InUse) => ListenerState::Failed(DirectError::PortInUse),
             Err(Bind::Other) => ListenerState::Failed(DirectError::Transport),
-        }
+        };
+        self.unassigned = None;
+        state
     }
     /// Binds again while `Starting`. Every turn tries the bind, so an address a retired
-    /// listener just released binds at once; [`Self::open_at`] decides when waiting has failed.
-    /// Returns when to try again, if still waiting.
+    /// listener just released, or one the system just assigned, binds at once;
+    /// [`Self::open_at`] decides when waiting has failed. Returns when to try again, if still
+    /// waiting.
     pub(crate) fn retry_listen(&mut self) -> Option<std::time::Instant> {
         let ListenerState::Starting { addr } = self.listener_state else {
             self.starting_since = None;
+            self.unassigned = None;
             return None;
         };
+        // Read before the bind, so the signal stays quiet until the next change.
+        if let Some(signal) = self.address_signal() {
+            signal.changed();
+        }
         self.listener_state = self.open_at(addr);
         if matches!(self.listener_state, ListenerState::Starting { .. }) {
-            Some(std::time::Instant::now() + LISTEN_RETRY)
+            let retry = if self.unassigned.is_some() {
+                ADDRESS_RETRY
+            } else {
+                LISTEN_RETRY
+            };
+            Some(std::time::Instant::now() + retry)
         } else {
             self.starting_since = None;
             self.listener_changed();
             None
         }
+    }
+    /// Turns readable when the system's addresses change while the listener waits for its
+    /// address to be assigned, so the host tries the bind again at once.
+    pub(crate) fn address_signal(
+        &self,
+    ) -> Option<Arc<crate::connection::route_signal::RouteSignal>> {
+        matches!(self.listener_state, ListenerState::Starting { .. })
+            .then(|| self.unassigned.as_ref()?.signal.clone())
+            .flatten()
     }
     /// Readies the listener `next` needs before anything is committed or retired, so a change
     /// whose address can't be bound leaves the current listener and its connections as they are.
@@ -264,6 +311,8 @@ impl State {
             Ok(listener) => Ok(Prepared::Fresh(listener)),
             Err(Bind::InUse) if self.holds(policy.bind) => Ok(Prepared::Deferred),
             Err(Bind::InUse) => Err(DirectError::PortInUse),
+            // The address left this computer after the change checked its addresses.
+            Err(Bind::NotAssigned) => Err(DirectError::InvalidAddress),
             Err(Bind::Other) => Err(DirectError::AddressUnavailable),
         }
     }
@@ -302,6 +351,7 @@ impl State {
         self.listener_changed();
         self.retire_listener();
         self.starting_since = None;
+        self.unassigned = None;
         self.listener = Some(listener);
         self.listener_state = ListenerState::Listening { addr };
     }
@@ -322,6 +372,7 @@ impl State {
             .map_err(|_| Bind::Other)?;
         let listener = (self.bind_listener)(address, config).map_err(|error| match error {
             crate::connection::quic::QuicError::AddressInUse => Bind::InUse,
+            crate::connection::quic::QuicError::AddressNotAssigned => Bind::NotAssigned,
             _ => Bind::Other,
         })?;
         if let Some(wake) = &self.wake {
@@ -354,6 +405,7 @@ impl State {
             self.connections.end_all();
             self.retire_listener();
             self.listener_changed();
+            self.unassigned = None;
             self.listener_state = ListenerState::Failed(error);
             return Err(error);
         }
@@ -662,10 +714,12 @@ impl State {
     fn status(&self) -> DirectStatus {
         let network = network::snapshot(self.network.as_ref());
         let listener = match (&self.listener_state, &network) {
+            // The socket stays bound and takes the address back when it returns, so the
+            // listener reads as waiting for it.
             (ListenerState::Listening { addr }, Ok(snapshot))
                 if !addr.ip().is_unspecified() && !snapshot.contains(&addr.ip()) =>
             {
-                ListenerState::Failed(DirectError::InvalidAddress)
+                ListenerState::Starting { addr: *addr }
             }
             _ => self.listener_state.clone(),
         };

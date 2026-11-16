@@ -119,20 +119,21 @@ fn no_usable_address_is_distinct_from_failure_to_read_interfaces() {
     );
 }
 
+/// A Tailscale address leaves while tailscaled restarts. The listener reads as waiting for it,
+/// as it does when SpaceTerm Core starts before the address is assigned.
 #[test]
-fn address_loss_reports_a_failed_listener_without_changing_the_retained_policy_or_identity() {
+fn address_loss_reports_a_waiting_listener_without_changing_the_retained_policy_or_identity() {
     let network = network(&["127.0.0.1", "10.0.0.5"], &["10.0.0.5"]);
     let fixture = fixture(network.clone());
     fixture.enable();
     let before = status(&fixture);
-    assert!(matches!(before.listener, ListenerState::Listening { .. }));
+    let ListenerState::Listening { addr } = before.listener else {
+        panic!("{:?}", before.listener)
+    };
     let retained = std::fs::read(fixture.paths.data.join("direct.json")).unwrap();
     *network.addresses.lock().unwrap() = vec!["10.0.0.9".parse().unwrap()];
     let after = status(&fixture);
-    assert_eq!(
-        after.listener,
-        ListenerState::Failed(DirectError::InvalidAddress)
-    );
+    assert_eq!(after.listener, ListenerState::Starting { addr });
     assert_eq!(
         after.network_addresses.unwrap().available,
         vec!["10.0.0.9".parse::<IpAddr>().unwrap()]
@@ -156,6 +157,48 @@ fn address_loss_reports_a_failed_listener_without_changing_the_retained_policy_o
         status(&fixture).listener,
         ListenerState::Listening { .. }
     ));
+}
+
+/// SpaceTerm Core starts at boot before tailscaled assigns the Tailscale address Network Access
+/// keeps. The listener waits for the address and listens once it is assigned, with no change to
+/// Network Access.
+#[test]
+fn a_kept_address_this_machine_lacks_at_startup_listens_once_assigned() {
+    let network = network(&["127.0.0.1"], &[]);
+    let mut fixture = fixture(network.clone());
+    let bind = fixture.listen_at("127.0.0.1".parse().unwrap());
+    let retained = std::fs::read(fixture.paths.data.join("direct.json")).unwrap();
+    let assigned = Arc::new(AtomicBool::new(false));
+    let binder: ListenerBinder = {
+        let assigned = Arc::clone(&assigned);
+        Arc::new(move |address, config| {
+            if assigned.load(Ordering::Relaxed) {
+                QuicListener::bind(address, config)
+            } else {
+                Err(crate::connection::quic::QuicError::AddressNotAssigned)
+            }
+        })
+    };
+    fixture.state = State::open_with_adapters(&fixture.paths, network, binder).unwrap();
+    for _ in 0..3 {
+        assert_eq!(
+            status(&fixture).listener,
+            ListenerState::Starting { addr: bind }
+        );
+    }
+    assert!(matches!(
+        fixture.management(Management::Invite { advertise: None }),
+        Err(DirectError::Disabled)
+    ));
+    assert_eq!(
+        std::fs::read(fixture.paths.data.join("direct.json")).unwrap(),
+        retained
+    );
+    assigned.store(true, Ordering::Relaxed);
+    assert_eq!(
+        status(&fixture).listener,
+        ListenerState::Listening { addr: bind }
+    );
 }
 
 #[test]

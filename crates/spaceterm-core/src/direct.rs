@@ -186,7 +186,8 @@ pub enum ListenerState {
     Listening {
         addr: SocketAddr,
     },
-    /// Waits to bind `addr` until the connections of the previous address end, within seconds.
+    /// Waits to bind `addr`: until the connections of the previous address end, within seconds,
+    /// or until the address is on this computer, without a limit.
     Starting {
         addr: SocketAddr,
     },

@@ -74,7 +74,8 @@ pub(super) fn transport(error: QuicError) -> DirectError {
         QuicError::Transport
         | QuicError::TimedOut
         | QuicError::Closed
-        | QuicError::AddressInUse => DirectError::Transport,
+        | QuicError::AddressInUse
+        | QuicError::AddressNotAssigned => DirectError::Transport,
         // Either side refused the other's certificate or signature: not worth retrying.
         QuicError::Refused => DirectError::AuthenticationRefused,
         QuicError::Incompatible => DirectError::IncompatibleProtocol,

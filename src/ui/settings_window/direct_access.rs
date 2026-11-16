@@ -314,6 +314,12 @@ fn listening_address(address: SocketAddr) -> String {
 pub(super) fn access_problem(state: &AccessState, core: &str) -> Option<String> {
     let address = state.policy.map(|policy| policy.ip());
     match (state.listener, &state.addresses) {
+        // The address is not on the server's machine yet, as a Tailscale address is at boot.
+        (Listener::Starting(address), Some(addresses))
+            if !address.ip().is_unspecified() && !addresses.available.contains(&address.ip()) =>
+        {
+            Some(format!("Waiting for {} to be on {core}.", address.ip()))
+        }
         (Listener::Starting(address), _) => Some(format!(
             "SpaceTerm Core is waiting to listen on UDP port {}.",
             address.port()
