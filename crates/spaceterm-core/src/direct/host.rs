@@ -333,9 +333,10 @@ impl State {
             Ok(listener) => Ok(Prepared::Fresh(listener)),
             Err(Bind::InUse) if self.holds(policy.bind) => Ok(Prepared::Deferred),
             Err(Bind::InUse) => Err(DirectError::PortInUse),
-            // The address left this computer after the change checked its addresses.
-            Err(Bind::NotAssigned) => Err(DirectError::InvalidAddress),
-            Err(Bind::Other) => Err(DirectError::AddressUnavailable),
+            // The address left this computer after the change checked its addresses. Like any
+            // other refused bind, the change readied nothing and commits nothing, which the
+            // service lane settles as failed.
+            Err(Bind::NotAssigned | Bind::Other) => Err(DirectError::AddressUnavailable),
         }
     }
     /// Whether one of this server's own listeners, current or retired, holds `address`'s port
