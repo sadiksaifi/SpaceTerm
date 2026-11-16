@@ -29,7 +29,7 @@ Release rehearsal (docs/adr/0065-present-updates-as-one-split-pill-and-one-ladde
 
 1. On This Mac, run the previous published release with 2 open Terminal Sessions.
    On Penguin, run the previous published release with no Terminal Session. Use
-   ssh penguin for its commands and Remora for its desktop.
+   its fleet SSH alias for its commands and Remora for its desktop.
 2. Start this task while the previous release's window is open: it must see that
    window first. Leave it running. On This Mac, download the candidate and
    relaunch SpaceTerm into it from the title bar.

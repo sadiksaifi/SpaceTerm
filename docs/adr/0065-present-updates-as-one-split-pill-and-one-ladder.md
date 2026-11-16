@@ -170,7 +170,7 @@ ADRs state what a text must carry: the software it changes, the Machine, the ver
 
 Before any release that changes [state.rs](../../src/updates/state.rs), the copy module, the continuation derivation, the ladder, the Machine update store, the Pane restart path or the engine's restart rules, a person runs the recorded journey live:
 
-1. Start from the previous published release on This Mac with 2 open Terminal Sessions, and on Penguin with none. Penguin runs over `ssh penguin` and its desktop through Remora.
+1. Start from the previous published release on This Mac with 2 open Terminal Sessions, and on Penguin with none. Penguin runs over SSH through its `fleet` alias and its desktop through Remora.
 2. Start `mise run release:rehearsal:macos <folder>` while the previous release's window is open. The task must see that window first, because it starts capturing only when a window of a new SpaceTerm process appears.
 3. Update to the candidate and relaunch into it. The task captures the title bar's trailing corner once per second for 60 seconds from the relaunched window's first appearance.
 4. Open the chevron during the capture.

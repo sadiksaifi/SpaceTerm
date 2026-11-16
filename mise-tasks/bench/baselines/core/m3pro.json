@@ -4,7 +4,7 @@
     "commit": "f041f73984f204aa01d73e0256d319625345e817",
     "cpus": 11,
     "hardware": "Apple M3 Pro",
-    "host": "macbook-pro-personal",
+    "host": "m3pro",
     "input_sha256": "f2617e0006744196634338c48ddc52eebc19d6cb025a2b90d4d53f05ec2c8679",
     "jailed": false,
     "memory_bytes": 19327352832,

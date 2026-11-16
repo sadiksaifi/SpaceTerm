@@ -1151,7 +1151,7 @@ class BaselineFileTests(unittest.TestCase):
     def test_checked_in_core_baselines_carry_every_metric(self):
         paths = sorted((bench.BASELINES / "core").glob("*.json"))
         self.assertEqual(
-            [path.stem for path in paths], ["macbook-pro-personal", "penguin"], "checked-in hosts"
+            [path.stem for path in paths], ["m3pro", "penguin"], "checked-in hosts"
         )
         for path in paths:
             with self.subTest(host=path.stem):
