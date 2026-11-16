@@ -128,12 +128,19 @@ fn reports_change(message: &[u8]) -> bool {
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::os::unix::net::UnixDatagram;
 
+    /// A signal and the end that stands in for the system: each [`route_added`] sent there
+    /// reports one change.
+    pub(crate) fn signal_pair() -> (RouteSignal, UnixDatagram) {
+        let (signal, system) = UnixDatagram::pair().unwrap();
+        (RouteSignal(signal.into()), system)
+    }
+
     /// A message the platform's route signal counts as a change.
-    pub(in crate::connection) fn route_added() -> Vec<u8> {
+    pub(crate) fn route_added() -> Vec<u8> {
         let message = vec![0u8; 256];
         #[cfg(target_os = "macos")]
         let message = {

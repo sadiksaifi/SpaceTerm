@@ -2081,6 +2081,62 @@ mod tests {
         );
     }
 
+    /// SpaceTerm Core started at boot before tailscaled assigned its Network Access address,
+    /// and no client asks for its status. The host's own turns wait on the system's address
+    /// changes and listen once the address is assigned.
+    #[test]
+    fn the_host_listens_once_a_waiting_address_is_assigned_without_a_status_request() {
+        use crate::connection::route_signal::tests::{route_added, signal_pair};
+        use crate::direct::ListenerState;
+        use crate::direct::host::tests::{listener_state, wait_for_assignment};
+        use std::time::Duration;
+        let fixture = crate::direct::tests::Fixture::new();
+        let bind = fixture.listen_at(std::net::Ipv4Addr::LOCALHOST.into());
+        let assigned = Arc::new(AtomicBool::new(false));
+        let (signal, system) = signal_pair();
+        wait_for_assignment(&fixture.state, Arc::clone(&assigned), Some(signal));
+        let panes: SharedPaneService = Arc::new(Mutex::new(Box::new(NoPanes)));
+        let (bell, _ring) = UnixStream::pair().unwrap();
+        bell.set_nonblocking(true).unwrap();
+        let quiet = Duration::from_millis(200);
+
+        // A change that brings no address wakes the host once and is read, so the next wait
+        // blocks instead of spinning.
+        system.send(&route_added()).unwrap();
+        let (_, waiting) = tick(&panes, Some(&fixture.state));
+        let waiting = waiting.expect("the host waits on the address signal");
+        let started = Instant::now();
+        wait_for_work(&bell, None, Some(&waiting), Some(started + quiet));
+        assert!(started.elapsed() >= quiet, "the change was left unread");
+        assert_eq!(
+            listener_state(&fixture.state),
+            ListenerState::Starting { addr: bind }
+        );
+
+        assigned.store(true, Ordering::Relaxed);
+        system.send(&route_added()).unwrap();
+        let started = Instant::now();
+        wait_for_work(
+            &bell,
+            None,
+            Some(&waiting),
+            Some(started + Duration::from_secs(5)),
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the address change wakes the host"
+        );
+        let (_, waiting) = tick(&panes, Some(&fixture.state));
+        assert!(
+            waiting.is_none(),
+            "a listening host waits on no address signal"
+        );
+        assert_eq!(
+            listener_state(&fixture.state),
+            ListenerState::Listening { addr: bind }
+        );
+    }
+
     #[test]
     fn an_ended_connection_thread_rings_the_accept_loop_bell() {
         let fixture = crate::direct::tests::Fixture::new();

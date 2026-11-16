@@ -231,6 +231,29 @@ fn a_listener_waiting_for_its_address_binds_again_only_when_due() {
     assert_eq!(binds.load(Ordering::Relaxed), opened + 1);
 }
 
+/// Without a signal of the system's address changes, the listener still listens once its
+/// address is assigned, at the next fallback bind.
+#[test]
+fn a_waiting_listener_without_an_address_signal_listens_at_the_fallback_bind() {
+    let fixture = Fixture::new();
+    let bind = fixture.listen_at("127.0.0.1".parse().unwrap());
+    let assigned = Arc::new(AtomicBool::new(false));
+    super::tests::wait_for_assignment(&fixture.state, Arc::clone(&assigned), None);
+    assigned.store(true, Ordering::Relaxed);
+    let due = fixture.state.lock().unwrap().retry_listen();
+    assert!(due.is_some(), "no bind before the fallback is due");
+    assert_eq!(
+        super::tests::listener_state(&fixture.state),
+        ListenerState::Starting { addr: bind }
+    );
+    super::tests::fallback_due(&fixture.state);
+    assert_eq!(fixture.state.lock().unwrap().retry_listen(), None);
+    assert_eq!(
+        super::tests::listener_state(&fixture.state),
+        ListenerState::Listening { addr: bind }
+    );
+}
+
 #[test]
 fn every_interface_invitations_advertise_the_suggested_address_of_either_family() {
     for (bind_ip, preferred, expected) in [
@@ -374,6 +397,43 @@ fn network_access_refuses_an_address_this_machine_doesnt_have() {
             })
             .err(),
         Some(DirectError::InvalidAddress)
+    );
+    assert_eq!(
+        std::fs::read(fixture.paths.data.join("direct.json")).unwrap(),
+        retained
+    );
+    assert_eq!(
+        status(&fixture).listener,
+        ListenerState::Listening { addr: bind }
+    );
+}
+
+/// The address leaves between the check of this computer's addresses and the bind, or the
+/// kernel lists an address it won't bind yet. The change fails as one that changed nothing, so
+/// the service lane settles it as failed instead of unconfirmed.
+#[test]
+fn a_change_whose_address_the_bind_finds_missing_fails_and_changes_nothing() {
+    let network = network(&["127.0.0.1", "10.0.0.9"], &[]);
+    let missing: std::net::IpAddr = "10.0.0.9".parse().unwrap();
+    let binder: ListenerBinder = Arc::new(move |address, config| {
+        if address.ip() == missing {
+            Err(crate::connection::quic::QuicError::AddressNotAssigned)
+        } else {
+            QuicListener::bind(address, config)
+        }
+    });
+    let mut fixture = Fixture::new();
+    fixture.state = State::open_with_adapters(&fixture.paths, network, binder).unwrap();
+    let bind = fixture.listen_at("127.0.0.1".parse().unwrap());
+    let retained = std::fs::read(fixture.paths.data.join("direct.json")).unwrap();
+    assert_eq!(
+        fixture
+            .management(Management::SetPolicy {
+                enabled: true,
+                policy: Some(NetworkPolicy::new("10.0.0.9:9231".parse().unwrap()).unwrap()),
+            })
+            .err(),
+        Some(DirectError::AddressUnavailable)
     );
     assert_eq!(
         std::fs::read(fixture.paths.data.join("direct.json")).unwrap(),

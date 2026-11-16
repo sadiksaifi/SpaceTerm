@@ -333,9 +333,10 @@ impl State {
             Ok(listener) => Ok(Prepared::Fresh(listener)),
             Err(Bind::InUse) if self.holds(policy.bind) => Ok(Prepared::Deferred),
             Err(Bind::InUse) => Err(DirectError::PortInUse),
-            // The address left this computer after the change checked its addresses.
-            Err(Bind::NotAssigned) => Err(DirectError::InvalidAddress),
-            Err(Bind::Other) => Err(DirectError::AddressUnavailable),
+            // The address left this computer after the change checked its addresses. Like any
+            // other refused bind, the change readied nothing and commits nothing, which the
+            // service lane settles as failed.
+            Err(Bind::NotAssigned | Bind::Other) => Err(DirectError::AddressUnavailable),
         }
     }
     /// Whether one of this server's own listeners, current or retired, holds `address`'s port
@@ -2066,8 +2067,49 @@ mod lane_tests;
 mod agent_tests;
 
 #[cfg(test)]
-pub(super) mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Makes `state` wait for its Network Access address, as SpaceTerm Core does at boot before
+    /// tailscaled assigns it: every bind finds the address missing until `assigned` is set.
+    /// `signal` stands in for the system's address changes.
+    pub(crate) fn wait_for_assignment(
+        state: &Shared,
+        assigned: Arc<std::sync::atomic::AtomicBool>,
+        signal: Option<crate::connection::route_signal::RouteSignal>,
+    ) {
+        let mut state = state.lock().unwrap();
+        let previous = Arc::clone(&state.bind_listener);
+        state.bind_listener = Arc::new(move |address, config| {
+            if assigned.load(std::sync::atomic::Ordering::Relaxed) {
+                previous(address, config)
+            } else {
+                Err(crate::connection::quic::QuicError::AddressNotAssigned)
+            }
+        });
+        state.listen();
+        state
+            .unassigned
+            .as_mut()
+            .expect("the listener waits for its address")
+            .signal = signal.map(Arc::new);
+    }
+
+    /// The listener's state, read without trying the bind again as a status request does.
+    pub(crate) fn listener_state(state: &Shared) -> ListenerState {
+        state.lock().unwrap().listener_state.clone()
+    }
+
+    /// Makes the fallback bind of a listener waiting for its address due now.
+    pub(crate) fn fallback_due(state: &Shared) {
+        state
+            .lock()
+            .unwrap()
+            .unassigned
+            .as_mut()
+            .expect("the listener waits for its address")
+            .due = std::time::Instant::now();
+    }
 
     #[test]
     fn a_listener_that_exhausts_bind_retries_reports_port_in_use() {
