@@ -119,20 +119,21 @@ fn no_usable_address_is_distinct_from_failure_to_read_interfaces() {
     );
 }
 
+/// A Tailscale address leaves while tailscaled restarts. The listener reads as waiting for it,
+/// as it does when SpaceTerm Core starts before the address is assigned.
 #[test]
-fn address_loss_reports_a_failed_listener_without_changing_the_retained_policy_or_identity() {
+fn address_loss_reports_a_waiting_listener_without_changing_the_retained_policy_or_identity() {
     let network = network(&["127.0.0.1", "10.0.0.5"], &["10.0.0.5"]);
     let fixture = fixture(network.clone());
     fixture.enable();
     let before = status(&fixture);
-    assert!(matches!(before.listener, ListenerState::Listening { .. }));
+    let ListenerState::Listening { addr } = before.listener else {
+        panic!("{:?}", before.listener)
+    };
     let retained = std::fs::read(fixture.paths.data.join("direct.json")).unwrap();
     *network.addresses.lock().unwrap() = vec!["10.0.0.9".parse().unwrap()];
     let after = status(&fixture);
-    assert_eq!(
-        after.listener,
-        ListenerState::Failed(DirectError::InvalidAddress)
-    );
+    assert_eq!(after.listener, ListenerState::Starting { addr });
     assert_eq!(
         after.network_addresses.unwrap().available,
         vec!["10.0.0.9".parse::<IpAddr>().unwrap()]

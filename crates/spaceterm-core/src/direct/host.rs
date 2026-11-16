@@ -710,10 +710,12 @@ impl State {
     fn status(&self) -> DirectStatus {
         let network = network::snapshot(self.network.as_ref());
         let listener = match (&self.listener_state, &network) {
+            // The socket stays bound and takes the address back when it returns, so the
+            // listener reads as waiting for it.
             (ListenerState::Listening { addr }, Ok(snapshot))
                 if !addr.ip().is_unspecified() && !snapshot.contains(&addr.ip()) =>
             {
-                ListenerState::Failed(DirectError::InvalidAddress)
+                ListenerState::Starting { addr: *addr }
             }
             _ => self.listener_state.clone(),
         };
