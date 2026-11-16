@@ -716,6 +716,23 @@ fn a_listening_address_that_disappeared_asks_for_another_and_keeps_the_port(
     assert!(reads("Listening on 192.168.1.22:9300.", cx));
 }
 
+/// SpaceTerm Core started before tailscaled assigned the Tailscale address Network Access keeps,
+/// so it waits for that address instead of asking for another.
+#[gpui::test]
+fn a_core_waiting_for_its_address_names_the_address(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::with_state(AccessState {
+        machine_name: CORE.into(),
+        policy: Some(address("100.64.0.7:9231")),
+        configured: Some(address("100.64.0.7:9231")),
+        listener: Listener::Starting(address("100.64.0.7:9231")),
+        addresses: Some(addresses(&["192.168.1.20"], Some("192.168.1.20"))),
+    });
+    let (_, cx) = open_machines(&access, cx);
+
+    assert!(reads("Waiting for 100.64.0.7 to be on studio.", cx));
+    assert!(access.policies().is_empty());
+}
+
 /// An address chosen while access is off keeps access off and keeps the port chosen before, and
 /// turning access on later listens there.
 #[gpui::test]
