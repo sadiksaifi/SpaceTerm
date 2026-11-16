@@ -24,6 +24,8 @@ pub(crate) type Shared = Arc<Mutex<State>>;
 struct Unassigned {
     /// Readable when the system's addresses change, if the system gives such a signal.
     signal: Option<Arc<crate::connection::route_signal::RouteSignal>>,
+    /// When the next bind is due without a change of the system's addresses.
+    due: std::time::Instant,
 }
 /// The host-local socket boundary. A binder retains ownership of every prepared listener.
 type ListenerBinder = Arc<
@@ -195,10 +197,18 @@ impl State {
             }
             Err(Bind::NotAssigned) => {
                 self.starting_since = None;
-                // Opened before the next bind, so an address assigned after this one is seen.
-                self.unassigned.get_or_insert_with(|| Unassigned {
-                    signal: crate::connection::route_signal::RouteSignal::open().map(Arc::new),
-                });
+                let due = std::time::Instant::now() + ADDRESS_RETRY;
+                match &mut self.unassigned {
+                    Some(unassigned) => unassigned.due = due,
+                    // Opened before the next bind, so an address assigned after this one is seen.
+                    None => {
+                        self.unassigned = Some(Unassigned {
+                            signal: crate::connection::route_signal::RouteSignal::open()
+                                .map(Arc::new),
+                            due,
+                        });
+                    }
+                }
                 return ListenerState::Starting { addr: address };
             }
             Err(Bind::InUse) if !self.retired.is_empty() => {
@@ -221,28 +231,40 @@ impl State {
         self.unassigned = None;
         state
     }
-    /// Binds again while `Starting`. Every turn tries the bind, so an address a retired
-    /// listener just released, or one the system just assigned, binds at once;
-    /// [`Self::open_at`] decides when waiting has failed. Returns when to try again, if still
-    /// waiting.
+    /// Binds again while `Starting`, as the host's turns call it. A listener whose address a
+    /// retired listener holds tries every turn, so the address binds as soon as it is released.
+    /// One waiting for its address to be assigned tries only after a change of the system's
+    /// addresses or once [`ADDRESS_RETRY`] passed, so other wakes cost no bind. Returns when to
+    /// try again, if still waiting.
     pub(crate) fn retry_listen(&mut self) -> Option<std::time::Instant> {
+        if let (ListenerState::Starting { .. }, Some(unassigned)) =
+            (&self.listener_state, &self.unassigned)
+        {
+            // Read before the bind, so the signal stays quiet until the next change.
+            let changed = unassigned
+                .signal
+                .as_ref()
+                .is_some_and(|signal| signal.changed());
+            if !changed && std::time::Instant::now() < unassigned.due {
+                return Some(unassigned.due);
+            }
+        }
+        self.retry_listen_now()
+    }
+    /// Binds again at once while `Starting`, as a status request does; [`Self::open_at`]
+    /// decides when waiting has failed. Returns when to try again, if still waiting.
+    fn retry_listen_now(&mut self) -> Option<std::time::Instant> {
         let ListenerState::Starting { addr } = self.listener_state else {
             self.starting_since = None;
             self.unassigned = None;
             return None;
         };
-        // Read before the bind, so the signal stays quiet until the next change.
-        if let Some(signal) = self.address_signal() {
-            signal.changed();
-        }
         self.listener_state = self.open_at(addr);
         if matches!(self.listener_state, ListenerState::Starting { .. }) {
-            let retry = if self.unassigned.is_some() {
-                ADDRESS_RETRY
-            } else {
-                LISTEN_RETRY
-            };
-            Some(std::time::Instant::now() + retry)
+            Some(self.unassigned.as_ref().map_or_else(
+                || std::time::Instant::now() + LISTEN_RETRY,
+                |unassigned| unassigned.due,
+            ))
         } else {
             self.starting_since = None;
             self.listener_changed();
@@ -760,7 +782,7 @@ impl State {
         self.expire()?;
         let reply = match request {
             Management::Status => {
-                let _ = self.retry_listen();
+                let _ = self.retry_listen_now();
                 ManagementReply::Status(self.status())
             }
             Management::PrepareSetup {
