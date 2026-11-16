@@ -4,6 +4,7 @@
 //!   [`quic`] paired connections, and [`loopback`] is an in-memory carrier for tests.
 //! - [`path`] tells a paired client when the system would reach its server from another local
 //!   address, so its QUIC socket moves there.
+//! - [`route_signal`] turns readable when the system's routes or addresses change.
 //! - [`io`] runs one I/O thread per connection, waiting on carrier readiness and a wake pipe.
 //! - [`outbox`] orders a server's outgoing messages by priority and holds the latest presentation
 //!   per channel under one frame of credit.
@@ -26,6 +27,7 @@ pub mod outbox;
 pub mod path;
 pub mod quic;
 pub mod registry;
+pub mod route_signal;
 pub mod service;
 pub mod sync;
 #[cfg(test)]
