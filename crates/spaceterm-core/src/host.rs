@@ -5,6 +5,7 @@ use crate::connection::Wake;
 use crate::connection::admitted::AdmittedConnection;
 use crate::connection::io::Waker;
 use crate::connection::outbox::Outbox;
+use crate::connection::route_signal::RouteSignal;
 use crate::connection::service::{
     DirectManagement, Dispatch, PaneService, Peer, SharedPaneService,
 };
@@ -1019,7 +1020,7 @@ fn serve_runtime_ready(
     // ends or the pause passes, instead of waking the loop at once forever.
     let mut local_paused: Option<Instant> = None;
     while !stop.stopping() {
-        let deadline = tick(&panes, direct.as_ref());
+        let (deadline, address_signal) = tick(&panes, direct.as_ref());
         // A connection thread rings the bell when it ends, so a full set of network slots waits
         // for that instead of a listener it cannot accept from.
         if reap(&mut connections, &mut network) {
@@ -1030,7 +1031,12 @@ fn serve_runtime_ready(
         local_paused = local_paused.filter(|until| now < *until);
         let deadline = [deadline, local_paused].into_iter().flatten().min();
         // The QUIC listener's own thread rings the bell when a connection arrives.
-        wait_for_work(&bell, local_paused.is_none().then_some(&listener), deadline);
+        wait_for_work(
+            &bell,
+            local_paused.is_none().then_some(&listener),
+            address_signal.as_deref(),
+            deadline,
+        );
         if stop.stopping() {
             break;
         }
@@ -1125,29 +1131,33 @@ const MAX_LOCAL_CONNECTIONS: usize = 64;
 /// Serving threads for network connections, including those still in the QUIC handshake.
 const MAX_NETWORK_CONNECTIONS: usize = 32;
 
-/// Runs the service's timed work and revocations found by direct-network recovery, and returns
-/// when the service next needs a tick.
+/// Runs the service's timed work and revocations found by direct-network recovery. Returns when
+/// the service next needs a tick, and the signal that the system's addresses changed while the
+/// Network Access listener waits for its address to be assigned.
 fn tick(
     panes: &SharedPaneService,
     direct: Option<&crate::direct::host::Shared>,
-) -> Option<Instant> {
-    let (retired, listen) = direct
+) -> (Option<Instant>, Option<Arc<RouteSignal>>) {
+    let (retired, listen, signal) = direct
         .map(|state| {
             let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
             let retired = state.pending_releases().unwrap_or_default();
             // A listener waiting for an address binds once the previous one's last connection
-            // ended; its thread rings this loop then.
-            (retired, state.retry_listen())
+            // ended, when its thread rings this loop, or once the system assigns the address,
+            // when the address signal turns readable.
+            let listen = state.retry_listen();
+            (retired, listen, state.address_signal())
         })
         .unwrap_or_default();
     let mut panes = panes.lock().unwrap_or_else(|e| e.into_inner());
     for client in retired {
         panes.revoked(client);
     }
-    [panes.tick(Instant::now()), listen]
+    let deadline = [panes.tick(Instant::now()), listen]
         .into_iter()
         .flatten()
-        .min()
+        .min();
+    (deadline, signal)
 }
 
 /// How long a listener that failed to accept rests unless a connection ends first.
@@ -1195,21 +1205,28 @@ fn raise_descriptor_limit() {
     }
 }
 
-/// Waits for a connection on either listener, a wake, or the service's next tick. A paused
-/// listener is left out.
-fn wait_for_work(bell: &UnixStream, listener: Option<&UnixListener>, deadline: Option<Instant>) {
-    let mut descriptors = vec![libc::pollfd {
-        fd: bell.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    }];
-    if let Some(listener) = listener {
-        descriptors.push(libc::pollfd {
-            fd: listener.as_raw_fd(),
+/// Waits for a connection on either listener, a wake, a change of the system's addresses, or
+/// the service's next tick. A paused listener is left out.
+fn wait_for_work(
+    bell: &UnixStream,
+    listener: Option<&UnixListener>,
+    address_signal: Option<&RouteSignal>,
+    deadline: Option<Instant>,
+) {
+    let descriptors = [
+        Some(bell.as_raw_fd()),
+        listener.map(UnixListener::as_raw_fd),
+        address_signal.map(RouteSignal::descriptor),
+    ];
+    let mut descriptors: Vec<_> = descriptors
+        .into_iter()
+        .flatten()
+        .map(|fd| libc::pollfd {
+            fd,
             events: libc::POLLIN,
             revents: 0,
-        });
-    }
+        })
+        .collect();
     let timeout = deadline.map_or(-1, |deadline| {
         let remaining = deadline.saturating_duration_since(Instant::now());
         remaining.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32

@@ -158,6 +158,48 @@ fn address_loss_reports_a_failed_listener_without_changing_the_retained_policy_o
     ));
 }
 
+/// SpaceTerm Core starts at boot before tailscaled assigns the Tailscale address Network Access
+/// keeps. The listener waits for the address and listens once it is assigned, with no change to
+/// Network Access.
+#[test]
+fn a_kept_address_this_machine_lacks_at_startup_listens_once_assigned() {
+    let network = network(&["127.0.0.1"], &[]);
+    let mut fixture = fixture(network.clone());
+    let bind = fixture.listen_at("127.0.0.1".parse().unwrap());
+    let retained = std::fs::read(fixture.paths.data.join("direct.json")).unwrap();
+    let assigned = Arc::new(AtomicBool::new(false));
+    let binder: ListenerBinder = {
+        let assigned = Arc::clone(&assigned);
+        Arc::new(move |address, config| {
+            if assigned.load(Ordering::Relaxed) {
+                QuicListener::bind(address, config)
+            } else {
+                Err(crate::connection::quic::QuicError::AddressNotAssigned)
+            }
+        })
+    };
+    fixture.state = State::open_with_adapters(&fixture.paths, network, binder).unwrap();
+    for _ in 0..3 {
+        assert_eq!(
+            status(&fixture).listener,
+            ListenerState::Starting { addr: bind }
+        );
+    }
+    assert!(matches!(
+        fixture.management(Management::Invite { advertise: None }),
+        Err(DirectError::Disabled)
+    ));
+    assert_eq!(
+        std::fs::read(fixture.paths.data.join("direct.json")).unwrap(),
+        retained
+    );
+    assigned.store(true, Ordering::Relaxed);
+    assert_eq!(
+        status(&fixture).listener,
+        ListenerState::Listening { addr: bind }
+    );
+}
+
 #[test]
 fn every_interface_invitations_advertise_the_suggested_address_of_either_family() {
     for (bind_ip, preferred, expected) in [
