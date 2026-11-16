@@ -20,6 +20,11 @@ const LISTEN_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
 /// route-change signal, which can't be opened or can lose messages.
 const ADDRESS_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 pub(crate) type Shared = Arc<Mutex<State>>;
+/// A listener's wait for its address to be assigned to this computer.
+struct Unassigned {
+    /// Readable when the system's addresses change, if the system gives such a signal.
+    signal: Option<Arc<crate::connection::route_signal::RouteSignal>>,
+}
 /// The host-local socket boundary. A binder retains ownership of every prepared listener.
 type ListenerBinder = Arc<
     dyn Fn(
@@ -64,8 +69,7 @@ pub(crate) struct State {
     /// When a `Starting` listener first found its address in use.
     starting_since: Option<std::time::Instant>,
     /// Set while a `Starting` listener waits for its address to be assigned to this computer.
-    /// Holds the signal that the system's addresses changed, if the system gives one.
-    unassigned: Option<Option<Arc<crate::connection::route_signal::RouteSignal>>>,
+    unassigned: Option<Unassigned>,
     /// Listeners replaced by a policy change, still routing to their connections until those
     /// end. A listener at the same address is taken back instead of binding again.
     retired: Vec<QuicListener>,
@@ -192,8 +196,8 @@ impl State {
             Err(Bind::NotAssigned) => {
                 self.starting_since = None;
                 // Opened before the next bind, so an address assigned after this one is seen.
-                self.unassigned.get_or_insert_with(|| {
-                    crate::connection::route_signal::RouteSignal::open().map(Arc::new)
+                self.unassigned.get_or_insert_with(|| Unassigned {
+                    signal: crate::connection::route_signal::RouteSignal::open().map(Arc::new),
                 });
                 return ListenerState::Starting { addr: address };
             }
@@ -251,7 +255,7 @@ impl State {
         &self,
     ) -> Option<Arc<crate::connection::route_signal::RouteSignal>> {
         matches!(self.listener_state, ListenerState::Starting { .. })
-            .then(|| self.unassigned.clone().flatten())
+            .then(|| self.unassigned.as_ref()?.signal.clone())
             .flatten()
     }
     /// Readies the listener `next` needs before anything is committed or retired, so a change
