@@ -328,9 +328,9 @@ mod exercise {
     impl Peer {
         fn penguin() -> Result<Self> {
             let command = if super::terminal_semantics::input_timing_requested() {
-                "SPACETERM_NATIVE_INPUT_TIMING=1 exec \"$HOME/Projects/SpaceTerm/target/debug/examples/direct_devices\" device-pipe"
+                "SPACETERM_NATIVE_INPUT_TIMING=1 exec \"$HOME/Projects/spaceterm/spaceterm-desktop/target/debug/examples/direct_devices\" device-pipe"
             } else {
-                "exec \"$HOME/Projects/SpaceTerm/target/debug/examples/direct_devices\" device-pipe"
+                "exec \"$HOME/Projects/spaceterm/spaceterm-desktop/target/debug/examples/direct_devices\" device-pipe"
             };
             let mut child = api(Command::new("ssh")
                 .args([
