@@ -33,7 +33,13 @@ A native desktop terminal multiplexer for macOS and Linux, coming soon for Windo
 - Before any user-requested commit, push, or PR merge into main, disclose any known pre-existing test or check failures unrelated to your changes.
 - For SpaceTerm Core setup on This Mac or This Computer, follow [the local workflow](docs/local-server.md).
 - For Linux native verification/work, check `fleet` for `ssh`/`remora` for `penguin` linux machine.
-- Repositories live at `~/Projects/spaceterm/{spaceterm-desktop,zed,accesskit}` on either hosts. Clone missing forks from `github.com/sadiksaifi/{zed,accesskit}`.
+- On either host in the fleet, repositories are located under `~/Projects/spaceterm/`. Clone missing repositories with the following local directory, remote repository, and primary branch mappings:
+
+| Local directory     | GitHub repository      | Primary branch |
+| ------------------- | ---------------------- | -------------- |
+| `spaceterm-desktop` | `sadiksaifi/spaceterm` | `main`         |
+| `zed`               | `sadiksaifi/zed`       | `spaceterm`    |
+| `accesskit`         | `sadiksaifi/accesskit` | `spaceterm`    |
 
 ## GitHub Project Board
 
