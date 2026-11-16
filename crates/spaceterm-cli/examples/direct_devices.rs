@@ -41,6 +41,29 @@ mod exercise {
     const DEVICE_NAME: &str = "direct541-penguin";
     const MAX_PIPE_FRAME: usize = 16 * 1024;
     const PIPE_DEADLINE: Duration = Duration::from_secs(90);
+    // Fleet aliases for Penguin, tried in order: Ethernet first, then Tailscale.
+    const PENGUIN_ALIASES: [&str; 2] = ["penguin-eth", "penguin-tailnet"];
+    const SSH_OPTIONS: [&str; 19] = [
+        "-T",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        "UpdateHostKeys=no",
+        "-o",
+        "AddKeysToAgent=no",
+        "-o",
+        "UseKeychain=no",
+        "-o",
+        "LogLevel=ERROR",
+        "-o",
+        "ControlMaster=no",
+        "-o",
+        "ControlPath=none",
+        "-o",
+        "ConnectTimeout=5",
+    ];
 
     fn api<T, E>(result: std::result::Result<T, E>) -> Result<T> {
         result.map_err(|_| "native API refused or unavailable")
@@ -325,6 +348,23 @@ mod exercise {
         output: ChildStdout,
     }
 
+    /// Returns the first Penguin alias that accepts a connection.
+    fn penguin_alias() -> Result<&'static str> {
+        for alias in PENGUIN_ALIASES {
+            let status = Command::new("ssh")
+                .args(SSH_OPTIONS)
+                .args([alias, "true"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            if status.is_ok_and(|status| status.success()) {
+                return Ok(alias);
+            }
+        }
+        Err("Penguin unreachable through penguin-eth and penguin-tailnet")
+    }
+
     impl Peer {
         fn penguin() -> Result<Self> {
             let command = if super::terminal_semantics::input_timing_requested() {
@@ -333,27 +373,8 @@ mod exercise {
                 "exec \"$HOME/Projects/spaceterm/spaceterm-desktop/target/debug/examples/direct_devices\" device-pipe"
             };
             let mut child = api(Command::new("ssh")
-                .args([
-                    "-T",
-                    "-o",
-                    "BatchMode=yes",
-                    "-o",
-                    "StrictHostKeyChecking=yes",
-                    "-o",
-                    "UpdateHostKeys=no",
-                    "-o",
-                    "AddKeysToAgent=no",
-                    "-o",
-                    "UseKeychain=no",
-                    "-o",
-                    "LogLevel=ERROR",
-                    "-o",
-                    "ControlMaster=no",
-                    "-o",
-                    "ControlPath=none",
-                    "penguin",
-                    command,
-                ])
+                .args(SSH_OPTIONS)
+                .args([penguin_alias()?, command])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit())
