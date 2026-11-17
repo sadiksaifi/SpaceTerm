@@ -6,7 +6,7 @@
 //! process holds no cached answer: a request made after a reset prompts again.
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use super::probe::{self, Probe};
@@ -76,7 +76,7 @@ impl MacosSystemPermissions {
             )
             .and_then(|(layout, executable)| own_bundle(&executable, layout))
             .filter(|_| launched);
-        Self::with(identity, bundle, Box::new(System))
+        Self::with(identity, bundle, Box::new(System::default()))
     }
 
     /// `bundle` is the server's own bundle when launchd started the server from it, which makes
@@ -317,23 +317,27 @@ fn capture_state(capture: Capture) -> PermissionState {
 }
 
 /// The system itself.
-struct System;
+#[derive(Default)]
+struct System {
+    prompts: PromptChildren,
+}
 
 impl Native for System {
     fn probe(&self) -> Result<Probe, PermissionError> {
         probe::run()
     }
 
-    /// Screen Recording and Accessibility list the requesting process only once per process, so
-    /// each request runs in a fresh child, which inherits the server's responsibility as a
-    /// Terminal Session's programs do.
+    /// Each request runs in a fresh child, which inherits the server's responsibility as a
+    /// Terminal Session's programs do. A process lists itself and shows a prompt only once, so the
+    /// long-running server could not ask again after a reset.
     fn request(&self, permission: SystemPermission) -> Result<(), PermissionError> {
         let executable = std::env::current_exe().map_err(|_| PermissionError::Unavailable)?;
         let mut command = Command::new(executable);
         command.args(request_arguments(permission)).env_clear();
         if permission.prompts() {
             // The child waits for the person's answer, so the request returns once it starts.
-            spawn_prompt(&mut command)
+            self.prompts
+                .start(permission, &mut command, PROMPT_LIMIT + PROMPT_GRACE)
         } else {
             run_tool(&mut command)
         }
@@ -449,22 +453,54 @@ fn request_accessibility() -> Result<(), PermissionError> {
     Ok(())
 }
 
-/// Starts a capture request child and returns. A thread waits for the child, so it never lingers
-/// as a zombie, and stops one that outlives its own limit.
-fn spawn_prompt(command: &mut Command) -> Result<(), PermissionError> {
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| PermissionError::Unavailable)?;
-    std::thread::Builder::new()
-        .name("spaceterm-permission-prompt".to_owned())
-        .spawn(move || {
-            let _ = probe::wait_bounded(&mut child, PROMPT_LIMIT + PROMPT_GRACE);
-        })
-        .map(|_| ())
-        .map_err(|_| PermissionError::Unavailable)
+/// The capture request children still waiting for an answer, at most one for each permission.
+#[derive(Default)]
+struct PromptChildren {
+    waiting: Arc<Mutex<Vec<SystemPermission>>>,
+}
+
+impl PromptChildren {
+    /// Starts `command` as the child that asks for `permission` and returns. A child already
+    /// waiting for the same permission keeps asking, so a repeated request starts nothing. A
+    /// thread owns each child from the start: it reaps the child, stops one that outlives
+    /// `limit`, and then lets the permission be asked again.
+    fn start(
+        &self,
+        permission: SystemPermission,
+        command: &mut Command,
+        limit: std::time::Duration,
+    ) -> Result<(), PermissionError> {
+        let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
+        if waiting.contains(&permission) {
+            return Ok(());
+        }
+        // The owner starts before the child, so no child is ever left without one.
+        let (hand_over, owned) = std::sync::mpsc::channel::<std::process::Child>();
+        let release = Arc::clone(&self.waiting);
+        std::thread::Builder::new()
+            .name("spaceterm-permission-prompt".to_owned())
+            .spawn(move || {
+                if let Ok(mut child) = owned.recv() {
+                    let _ = probe::wait_bounded(&mut child, limit);
+                }
+                release
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .retain(|waiting| *waiting != permission);
+            })
+            .map_err(|_| PermissionError::Unavailable)?;
+        // The owner waits for this lock before it releases the permission, so the entry made
+        // here is the one it removes, also when the child fails to start.
+        waiting.push(permission);
+        let child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| PermissionError::Unavailable)?;
+        let _ = hand_over.send(child);
+        Ok(())
+    }
 }
 
 fn run_tool(command: &mut Command) -> Result<(), PermissionError> {
@@ -484,7 +520,6 @@ fn run_tool(command: &mut Command) -> Result<(), PermissionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     /// Native effects whose readings and failures the test scripts, recording each effect.
     #[derive(Default)]
@@ -850,6 +885,70 @@ mod tests {
 
     #[test]
     fn this_macos_reports_its_major_version() {
-        assert!(System.os_major().is_some_and(|major| major >= 26));
+        assert!(System::default().os_major().is_some_and(|major| major >= 26));
+    }
+
+    /// Waits until no child asks for `permission`, as its owner thread reports.
+    fn released(prompts: &PromptChildren, permission: SystemPermission) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if !prompts.waiting.lock().unwrap().contains(&permission) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    /// A child still waiting for an answer takes every repeated request for its permission, so
+    /// repeated requests never stack children; another permission asks for itself.
+    #[test]
+    fn a_waiting_prompt_child_takes_repeated_requests_for_its_permission() {
+        let prompts = PromptChildren::default();
+        let limit = Duration::from_millis(500);
+        let mut waiting = Command::new("/bin/sleep");
+        waiting.arg("30");
+        assert_eq!(
+            prompts.start(SystemPermission::Microphone, &mut waiting, limit),
+            Ok(())
+        );
+
+        // This command cannot start, so success proves the waiting child took the request.
+        let mut missing = Command::new("/nonexistent/spaceterm");
+        assert_eq!(
+            prompts.start(SystemPermission::Microphone, &mut missing, limit),
+            Ok(())
+        );
+        assert_eq!(
+            prompts.start(SystemPermission::Camera, &mut missing, limit),
+            Err(PermissionError::Unavailable)
+        );
+
+        // The owner stops the child at its limit, and the permission can be asked again.
+        assert!(released(&prompts, SystemPermission::Microphone));
+        assert_eq!(
+            prompts.start(SystemPermission::Microphone, &mut missing, limit),
+            Err(PermissionError::Unavailable)
+        );
+    }
+
+    /// A child that ends, or never starts, leaves its permission free to be asked again.
+    #[test]
+    fn an_ended_prompt_child_releases_its_permission() {
+        let prompts = PromptChildren::default();
+        let limit = Duration::from_secs(5);
+        let mut missing = Command::new("/nonexistent/spaceterm");
+        assert_eq!(
+            prompts.start(SystemPermission::Camera, &mut missing, limit),
+            Err(PermissionError::Unavailable)
+        );
+        assert!(released(&prompts, SystemPermission::Camera));
+
+        let mut answered = Command::new("/usr/bin/true");
+        assert_eq!(
+            prompts.start(SystemPermission::Camera, &mut answered, limit),
+            Ok(())
+        );
+        assert!(released(&prompts, SystemPermission::Camera));
     }
 }
