@@ -1,8 +1,9 @@
 //! The server's macOS System Permissions, which TCC keys to the server bundle's identifier and
 //! signature.
 //!
-//! Reads run in a probe child. Requests run in the server itself, the responsible process whose
-//! prompt and System Settings entry name the server.
+//! Reads run in a probe child, and requests run in a request child. Each child inherits the
+//! server's responsibility, so its prompt and System Settings entry name the server, and a fresh
+//! process holds no cached answer: a request made after a reset prompts again.
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, PoisonError};
@@ -19,6 +20,11 @@ use crate::service::{Layout, bundle_identifier, bundle_name};
 const TCCUTIL: &str = "/usr/bin/tccutil";
 /// Both tools answer within a second. A slower one is stuck and is stopped.
 const TOOL_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a capture request waits for the person to answer the system prompt. The desktop reads
+/// the decision for as long.
+const PROMPT_LIMIT: Duration = Duration::from_secs(600);
+/// The time a capture request child is given beyond its own limit before the server stops it.
+const PROMPT_GRACE: Duration = Duration::from_secs(5);
 
 /// The privacy service `tccutil` names for each permission.
 const fn tcc_service(permission: SystemPermission) -> &'static str {
@@ -322,18 +328,14 @@ impl Native for System {
     /// each request runs in a fresh child, which inherits the server's responsibility as a
     /// Terminal Session's programs do.
     fn request(&self, permission: SystemPermission) -> Result<(), PermissionError> {
-        match permission {
-            SystemPermission::Microphone => request_capture(Capture::Audio),
-            SystemPermission::Camera => request_capture(Capture::Video),
-            SystemPermission::ScreenRecording | SystemPermission::Accessibility => {
-                let executable =
-                    std::env::current_exe().map_err(|_| PermissionError::Unavailable)?;
-                run_tool(
-                    Command::new(executable)
-                        .args(request_arguments(permission))
-                        .env_clear(),
-                )
-            }
+        let executable = std::env::current_exe().map_err(|_| PermissionError::Unavailable)?;
+        let mut command = Command::new(executable);
+        command.args(request_arguments(permission)).env_clear();
+        if permission.prompts() {
+            // The child waits for the person's answer, so the request returns once it starts.
+            spawn_prompt(&mut command)
+        } else {
+            run_tool(&mut command)
         }
     }
 
@@ -388,7 +390,8 @@ fn request_arguments(permission: SystemPermission) -> [&'static str; 3] {
 }
 
 /// The request role: asks the system for `permission` from this process, which lists this
-/// process's responsible bundle in System Settings and may show the system's prompt.
+/// process's responsible bundle in System Settings and may show the system's prompt. A capture
+/// request waits for the person's answer, up to [`PROMPT_LIMIT`].
 pub(super) fn request_in_process(permission: SystemPermission) -> Result<(), PermissionError> {
     match permission {
         SystemPermission::Microphone => request_capture(Capture::Audio),
@@ -407,13 +410,18 @@ fn request_capture(capture: Capture) -> Result<(), PermissionError> {
     use objc2::runtime::Bool;
     use objc2_av_foundation::AVCaptureDevice;
     let media_type = Capture::media_type()(capture).ok_or(PermissionError::Unavailable)?;
-    // The decision reaches the probe's next read, so the completion keeps nothing.
-    let completion = RcBlock::new(|_: Bool| {});
+    // The decision reaches the probe's next read, so the completion only reports that it came.
+    let (sender, decided) = std::sync::mpsc::sync_channel(1);
+    let completion = RcBlock::new(move |_: Bool| {
+        let _ = sender.try_send(());
+    });
     // SAFETY: The media type is valid here. AVCaptureDevice copies the escaping block, which
-    // captures nothing and runs on an arbitrary queue.
+    // captures only a sender that may be used from any thread, and runs it on an arbitrary queue.
     unsafe {
         AVCaptureDevice::requestAccessForMediaType_completionHandler(media_type, &completion);
     }
+    // The prompt belongs to this process, so the process stays until the person answers.
+    let _ = decided.recv_timeout(PROMPT_LIMIT);
     Ok(())
 }
 
@@ -439,6 +447,24 @@ fn request_accessibility() -> Result<(), PermissionError> {
         CFRelease(options);
     }
     Ok(())
+}
+
+/// Starts a capture request child and returns. A thread waits for the child, so it never lingers
+/// as a zombie, and stops one that outlives its own limit.
+fn spawn_prompt(command: &mut Command) -> Result<(), PermissionError> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| PermissionError::Unavailable)?;
+    std::thread::Builder::new()
+        .name("spaceterm-permission-prompt".to_owned())
+        .spawn(move || {
+            let _ = probe::wait_bounded(&mut child, PROMPT_LIMIT + PROMPT_GRACE);
+        })
+        .map(|_| ())
+        .map_err(|_| PermissionError::Unavailable)
 }
 
 fn run_tool(command: &mut Command) -> Result<(), PermissionError> {
