@@ -25,6 +25,8 @@ const TOOL_TIMEOUT: Duration = Duration::from_secs(10);
 const PROMPT_LIMIT: Duration = Duration::from_secs(600);
 /// The time a capture request child is given beyond its own limit before the server stops it.
 const PROMPT_GRACE: Duration = Duration::from_secs(5);
+/// How often a waiting capture request child checks that its server still runs.
+const PARENT_POLL: Duration = Duration::from_millis(500);
 
 /// The privacy service `tccutil` names for each permission.
 const fn tcc_service(permission: SystemPermission) -> &'static str {
@@ -424,9 +426,36 @@ fn request_capture(capture: Capture) -> Result<(), PermissionError> {
     unsafe {
         AVCaptureDevice::requestAccessForMediaType_completionHandler(media_type, &completion);
     }
-    // The prompt belongs to this process, so the process stays until the person answers.
-    let _ = decided.recv_timeout(PROMPT_LIMIT);
+    // SAFETY: getppid reads this process's parent and cannot fail.
+    let parent = unsafe { libc::getppid() };
+    // SAFETY: As above.
+    wait_for_answer(&decided, PROMPT_LIMIT, PARENT_POLL, || unsafe {
+        libc::getppid() == parent
+    });
     Ok(())
+}
+
+/// Keeps a capture request child, which owns its prompt, until the person answers, `limit`
+/// passes, or the server that asked ends. A child whose server ended has no one to report to, so
+/// it stops asking instead of outliving the server.
+fn wait_for_answer(
+    decided: &std::sync::mpsc::Receiver<()>,
+    limit: Duration,
+    poll: Duration,
+    server_runs: impl Fn() -> bool,
+) {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        match decided.recv_timeout(poll.min(left)) {
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if !server_runs() => return,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
 }
 
 fn request_accessibility() -> Result<(), PermissionError> {
@@ -885,7 +914,11 @@ mod tests {
 
     #[test]
     fn this_macos_reports_its_major_version() {
-        assert!(System::default().os_major().is_some_and(|major| major >= 26));
+        assert!(
+            System::default()
+                .os_major()
+                .is_some_and(|major| major >= 26)
+        );
     }
 
     /// Waits until no child asks for `permission`, as its owner thread reports.
@@ -950,5 +983,44 @@ mod tests {
             Ok(())
         );
         assert!(released(&prompts, SystemPermission::Camera));
+    }
+
+    /// A waiting capture request child returns when the person answers, when its server ends, or
+    /// at its limit, whichever comes first.
+    #[test]
+    fn a_waiting_capture_child_stops_when_answered_or_when_its_server_ends() {
+        let poll = Duration::from_millis(5);
+        let limit = Duration::from_secs(30);
+
+        let (answer, decided) = std::sync::mpsc::sync_channel(1);
+        answer.send(()).unwrap();
+        let started = std::time::Instant::now();
+        wait_for_answer(&decided, limit, poll, || true);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "an answer ends the wait"
+        );
+
+        let (_answer, decided) = std::sync::mpsc::sync_channel::<()>(1);
+        let checks = std::cell::Cell::new(0);
+        let started = std::time::Instant::now();
+        wait_for_answer(&decided, limit, poll, || {
+            checks.set(checks.get() + 1);
+            checks.get() < 3
+        });
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "an ended server ends the wait"
+        );
+        assert_eq!(checks.get(), 3);
+
+        let (_answer, decided) = std::sync::mpsc::sync_channel::<()>(1);
+        let started = std::time::Instant::now();
+        wait_for_answer(&decided, Duration::from_millis(50), poll, || true);
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the limit ends the wait"
+        );
     }
 }
