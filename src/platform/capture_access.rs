@@ -42,10 +42,13 @@ pub(crate) enum CaptureAccessError {
 
 pub(crate) type CaptureAuthorizationCompletion = Box<dyn FnOnce(CaptureAuthorization) + Send>;
 
+pub(crate) type CaptureResetCompletion = Box<dyn FnOnce(Result<(), CaptureAccessError>) + Send>;
+
 /// Capture authorization and its explicit recovery operations.
 ///
 /// Callers request authorization only from `NotDetermined`. A denied decision is persistent, so
-/// recovery opens the Operating System's privacy list for the device instead of prompting again.
+/// recovery opens the Operating System's privacy list for the device, or resets the decision so
+/// the next request prompts again.
 pub(crate) trait CaptureAccess {
     fn authorization(
         &self,
@@ -59,4 +62,18 @@ pub(crate) trait CaptureAccess {
     ) -> Result<(), CaptureAccessError>;
 
     fn open_settings(&self, device: CaptureDevice) -> Result<(), CaptureAccessError>;
+
+    /// Whether [`Self::reset`] can act on exactly the grant holder's own entry.
+    fn can_reset(&self) -> bool;
+
+    /// Forgets the Operating System's decision for one device and the grant holder only, so the
+    /// device reads as not determined and the next request prompts again.
+    ///
+    /// The completion follows a verification, so a read made on completion reflects the reset. It
+    /// may run on any thread.
+    fn reset(
+        &self,
+        device: CaptureDevice,
+        completion: CaptureResetCompletion,
+    ) -> Result<(), CaptureAccessError>;
 }
