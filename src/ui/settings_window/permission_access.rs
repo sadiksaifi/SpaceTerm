@@ -251,6 +251,9 @@ impl PermissionAccessRow {
         });
 
         let (control, (caption_kind, caption)) = match self.status {
+            // A running reset owns the row until it reports, whatever the reads in between say,
+            // failed reads included.
+            _ if self.resetting() => (waiting, notice.unwrap_or(purpose)),
             PermissionAccessStatus::Unsupported => (
                 AccessControl::Status {
                     label: "Unavailable",
@@ -261,10 +264,6 @@ impl PermissionAccessRow {
                     "Unavailable on this platform.".to_owned(),
                 ),
             ),
-            // A running reset owns the row until it reports, whatever the reads in between say.
-            PermissionAccessStatus::Authorization(_) if self.resetting() => {
-                (waiting, notice.unwrap_or(purpose))
-            }
             PermissionAccessStatus::Authorization(Authorization::Granted) => {
                 (allowed, notice.unwrap_or(purpose))
             }

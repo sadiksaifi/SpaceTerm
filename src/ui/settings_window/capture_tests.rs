@@ -853,3 +853,52 @@ fn a_failed_reset_keeps_the_decision_and_offers_the_reset_again(cx: &mut TestApp
     );
     assert_eq!(access.resets.borrow().len(), 3);
 }
+
+/// A read that fails while a reset runs cannot replace the reset with Check Again.
+#[gpui::test]
+fn a_failed_read_during_a_reset_keeps_the_reset_running(cx: &mut TestAppContext) {
+    let access = ScriptedCaptureAccess::new(Ok(CaptureAuthorization::Authorized));
+    let (window, cx) = open_privacy(&access, cx);
+    click(RESET_SELECTOR, cx);
+    click_modal_action(MICROPHONE.reset_confirm, cx);
+
+    access
+        .authorization
+        .set(Err(CaptureAccessError::PlatformUnavailable));
+    cx.deactivate_window();
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+
+    assert_eq!(
+        status(&window, cx),
+        CaptureAccessStatus::Failed(CaptureAccessError::PlatformUnavailable)
+    );
+    assert_eq!(shown_state(&window, cx), Some("Waiting"));
+    assert_eq!(action(&window, cx), None);
+    assert_eq!(explanation(&window, cx), "Resetting Microphone\u{2026}");
+}
+
+/// The row reports the latest recovery: a failed reset after a failed System Settings opening
+/// says the reset failed.
+#[gpui::test]
+fn a_failed_reset_replaces_an_earlier_system_settings_failure(cx: &mut TestAppContext) {
+    let access = ScriptedCaptureAccess::new(Ok(CaptureAuthorization::Denied));
+    access
+        .open_failure
+        .set(Some(CaptureAccessError::PlatformRejected));
+    let (window, cx) = open_privacy(&access, cx);
+    click(OPEN_SETTINGS_SELECTOR, cx);
+    assert!(explanation(&window, cx).contains("Privacy & Security > Microphone"));
+
+    click(RESET_SELECTOR, cx);
+    click_modal_action(MICROPHONE.reset_confirm, cx);
+    access.take_reset()(Err(CaptureAccessError::PlatformRejected));
+    cx.run_until_parked();
+
+    assert_eq!(
+        explanation(&window, cx),
+        "Couldn\u{2019}t reset Microphone. Try again."
+    );
+    assert_eq!(caption_kind(&window, cx), CaptionKind::Error);
+    assert_eq!(action(&window, cx), Some(AccessAction::OpenSettings));
+}

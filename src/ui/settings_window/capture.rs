@@ -242,17 +242,18 @@ impl CaptureAccessRow {
             )
         });
         let (control, (caption_kind, caption)) = match self.status {
-            CaptureAccessStatus::Unsupported => (
-                status("Unavailable"),
-                guidance("Unavailable on this platform."),
-            ),
-            // A running reset owns the row until it reports, whatever the reads in between say.
-            CaptureAccessStatus::Authorization(_) if self.reset == Some(CaptureReset::Running) => (
+            // A running reset owns the row until it reports, whatever the reads in between say,
+            // failed reads included.
+            _ if self.reset == Some(CaptureReset::Running) => (
                 status("Waiting"),
                 (
                     CaptionKind::Waiting,
                     format!("Resetting {}\u{2026}", text.list),
                 ),
+            ),
+            CaptureAccessStatus::Unsupported => (
+                status("Unavailable"),
+                guidance("Unavailable on this platform."),
             ),
             CaptureAccessStatus::Authorization(Authorization::Authorized) => (
                 AccessControl::Status {
@@ -423,6 +424,8 @@ impl SettingsWindow {
         let Some(access) = row.access.clone() else {
             return;
         };
+        // The reset is the latest recovery, so its result replaces an earlier one's.
+        row.recovery_failure = None;
         let (sender, receiver) = async_channel::bounded(1);
         match access.reset(
             device,

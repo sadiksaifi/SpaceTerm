@@ -807,3 +807,29 @@ fn every_state_ends_the_row_in_one_control_on_the_trailing_edge(cx: &mut TestApp
         }
     }
 }
+
+/// A read that fails while a reset runs cannot replace the reset with Check Again.
+#[gpui::test]
+fn a_failed_read_during_a_reset_keeps_the_reset_running(cx: &mut TestAppContext) {
+    let access = ScriptedPermissionAccess::new(Ok(Granted), Ok(Granted));
+    let (window, cx) = open_privacy(&access, cx);
+    click(SCREEN_RECORDING_RESET, cx);
+    click_modal_action(SCREEN_RECORDING.reset_confirm, cx);
+
+    access.set(
+        ScreenRecording,
+        Err(PermissionAccessError::PlatformUnavailable),
+    );
+    return_to_settings(cx);
+
+    assert_eq!(
+        status(&window, ScreenRecording, cx),
+        PermissionAccessStatus::Failed(PermissionAccessError::PlatformUnavailable)
+    );
+    assert_eq!(shown_state(&window, ScreenRecording, cx), Some("Waiting"));
+    assert_eq!(action(&window, ScreenRecording, cx), None);
+    assert_eq!(
+        explanation(&window, ScreenRecording, cx),
+        "Resetting Screen Recording\u{2026}"
+    );
+}
