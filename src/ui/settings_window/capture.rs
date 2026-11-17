@@ -4,7 +4,11 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Task, div};
+use gpui::{AnyElement, Task, Window};
+use spaceterm_ui::{
+    Alert, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionIntent, ModalActionRole,
+    ModalId,
+};
 
 use crate::platform::capture_access::{
     CaptureAccess, CaptureAccessError, CaptureAuthorization, CaptureDevice,
@@ -12,59 +16,63 @@ use crate::platform::capture_access::{
 use crate::ui::appearance::ChromeAppearance;
 
 use super::SettingsWindow;
-use crate::ui::sidebar_window::form::{action_button, badge};
+use super::access_row::{
+    self, AccessAction, AccessControl, AccessPresentation, AccessSelectors, CaptionKind,
+};
 
 /// The selectors and copy of one device's row.
 pub(super) struct CaptureText {
-    pub(super) control: &'static str,
-    pub(super) request: &'static str,
-    pub(super) open_settings: &'static str,
-    pub(super) check_again: &'static str,
-    pub(super) state_unavailable: &'static str,
-    pub(super) state_allowed: &'static str,
-    pub(super) state_not_requested: &'static str,
-    pub(super) state_requesting: &'static str,
-    pub(super) state_denied: &'static str,
-    pub(super) state_restricted: &'static str,
+    pub(super) row: AccessSelectors,
+    pub(super) reset_modal: &'static str,
+    pub(super) reset_confirm: &'static str,
+    pub(super) reset_cancel: &'static str,
     purpose: &'static str,
-    /// The Privacy & Security list that holds the device's grant.
+    /// The device's name, which is also the Privacy & Security list that holds its grant.
     list: &'static str,
+    /// The device in running text.
+    noun: &'static str,
     restricted: &'static str,
     check_failed: &'static str,
     request_failed: &'static str,
 }
 
 pub(super) const MICROPHONE: CaptureText = CaptureText {
-    control: "settings-microphone-access-control",
-    request: "settings-microphone-access-request",
-    open_settings: "settings-microphone-access-open-settings",
-    check_again: "settings-microphone-access-check-again",
-    state_unavailable: "settings-microphone-access-state-unavailable",
-    state_allowed: "settings-microphone-access-state-allowed",
-    state_not_requested: "settings-microphone-access-state-not-requested",
-    state_requesting: "settings-microphone-access-state-requesting",
-    state_denied: "settings-microphone-access-state-denied",
-    state_restricted: "settings-microphone-access-state-restricted",
+    row: AccessSelectors {
+        control: "settings-microphone-access-control",
+        status: "settings-microphone-access-status",
+        allow: "settings-microphone-access-allow",
+        open_settings: "settings-microphone-access-open-settings",
+        cancel: "settings-microphone-access-cancel",
+        check_again: "settings-microphone-access-check-again",
+        progress: "settings-microphone-access-progress",
+    },
+    reset_modal: "settings-microphone-reset",
+    reset_confirm: "settings-microphone-reset-confirm",
+    reset_cancel: "settings-microphone-reset-cancel",
     purpose: "Lets terminal programs use the microphone.",
     list: "Microphone",
+    noun: "microphone",
     restricted: "Your device\u{2019}s administrator has blocked microphone access.",
     check_failed: "Couldn\u{2019}t check microphone access.",
     request_failed: "Microphone access request failed.",
 };
 
 pub(super) const CAMERA: CaptureText = CaptureText {
-    control: "settings-camera-access-control",
-    request: "settings-camera-access-request",
-    open_settings: "settings-camera-access-open-settings",
-    check_again: "settings-camera-access-check-again",
-    state_unavailable: "settings-camera-access-state-unavailable",
-    state_allowed: "settings-camera-access-state-allowed",
-    state_not_requested: "settings-camera-access-state-not-requested",
-    state_requesting: "settings-camera-access-state-requesting",
-    state_denied: "settings-camera-access-state-denied",
-    state_restricted: "settings-camera-access-state-restricted",
+    row: AccessSelectors {
+        control: "settings-camera-access-control",
+        status: "settings-camera-access-status",
+        allow: "settings-camera-access-allow",
+        open_settings: "settings-camera-access-open-settings",
+        cancel: "settings-camera-access-cancel",
+        check_again: "settings-camera-access-check-again",
+        progress: "settings-camera-access-progress",
+    },
+    reset_modal: "settings-camera-reset",
+    reset_confirm: "settings-camera-reset-confirm",
+    reset_cancel: "settings-camera-reset-cancel",
     purpose: "Lets terminal programs use the camera.",
     list: "Camera",
+    noun: "camera",
     restricted: "Your device\u{2019}s administrator has blocked camera access.",
     check_failed: "Couldn\u{2019}t check camera access.",
     request_failed: "Camera access request failed.",
@@ -103,36 +111,34 @@ pub(super) enum CaptureAccessStatus {
     Failed(CaptureAccessError),
 }
 
-/// The action the row offers for its status, when there is one worth offering.
+/// Where the latest reset of the device's decision stands.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum CaptureAccessAction {
-    Request,
-    /// The request button, withheld while the system prompt is answered.
-    Requesting,
-    OpenSettings,
-    CheckAgain,
+pub(super) enum CaptureReset {
+    Running,
+    Failed,
 }
 
-/// The row's complete presentation, derived from status alone so every state reads one way.
+/// The reset confirmation's decisions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct CaptureAccessPresentation {
-    pub(super) state: &'static str,
-    /// Names the state badge, so a test can tell each state apart by geometry.
-    pub(super) state_selector: &'static str,
-    pub(super) explanation: &'static str,
-    pub(super) action: Option<CaptureAccessAction>,
+enum ResetDecision {
+    Reset,
+    Cancel,
 }
 
-/// Owns one device's injected capability, its last known status, and the pending request bridge.
+/// Owns one device's injected capability, its last known status, and the pending native bridges.
 pub(super) struct CaptureAccessRow {
     device: CaptureDevice,
     access: Option<Rc<dyn CaptureAccess>>,
-    status: CaptureAccessStatus,
+    pub(super) status: CaptureAccessStatus,
     /// A recovery that could not open the system's settings, kept beside the denial it meant to fix.
     recovery_failure: Option<CaptureAccessError>,
+    /// The latest reset, kept beside the decision it meant to clear.
+    pub(super) reset: Option<CaptureReset>,
     /// Returns the system's decision to GPUI. Dropping the window drops the bridge, and a late
     /// decision then has nowhere to land.
     _request: Option<Task<()>>,
+    /// Returns the reset's result to GPUI.
+    _reset: Option<Task<()>>,
 }
 
 impl CaptureAccessRow {
@@ -142,7 +148,9 @@ impl CaptureAccessRow {
             access,
             status: CaptureAccessStatus::Unsupported,
             recovery_failure: None,
+            reset: None,
             _request: None,
+            _reset: None,
         };
         row.refresh();
         row
@@ -172,8 +180,12 @@ impl CaptureAccessRow {
         }
     }
 
-    /// A recovery failure belongs to the denial it tried to fix, so any other status retires it.
+    /// A recovery or reset failure belongs to the status it tried to change, so any other status
+    /// retires it. A running reset keeps its place until it reports.
     fn apply(&mut self, status: CaptureAccessStatus) {
+        if status != self.status && self.reset == Some(CaptureReset::Failed) {
+            self.reset = None;
+        }
         self.status = status;
         if status != CaptureAccessStatus::Authorization(CaptureAuthorization::Denied) {
             self.recovery_failure = None;
@@ -190,60 +202,103 @@ impl CaptureAccessRow {
         self.recovery_failure = access.open_settings(self.device).err();
     }
 
-    pub(super) fn presentation(&self) -> CaptureAccessPresentation {
-        use CaptureAccessAction as Action;
+    /// Whether the device holds a decision the reset can clear right now.
+    fn can_reset(&self) -> bool {
+        matches!(
+            self.status,
+            CaptureAccessStatus::Authorization(
+                CaptureAuthorization::Authorized | CaptureAuthorization::Denied
+            )
+        ) && self.reset != Some(CaptureReset::Running)
+            && self
+                .access
+                .as_ref()
+                .is_some_and(|access| access.can_reset())
+    }
+
+    /// Applies a reset's result. The capability verifies before it reports, so the read here
+    /// already reflects the reset.
+    fn finish_reset(&mut self, result: Option<Result<(), CaptureAccessError>>) {
+        self.reset = None;
+        self.refresh();
+        if !matches!(result, Some(Ok(()))) {
+            self.reset = Some(CaptureReset::Failed);
+        }
+    }
+
+    pub(super) fn presentation(&self) -> AccessPresentation {
         use CaptureAuthorization as Authorization;
 
         let text = capture_text(self.device);
-        let (state, state_selector, explanation, action) = match self.status {
+        let status = |label| AccessControl::Status {
+            label,
+            allowed: false,
+        };
+        let guidance = |caption: &'static str| (CaptionKind::Guidance, caption.to_owned());
+        let reset_failure = (self.reset == Some(CaptureReset::Failed)).then(|| {
+            (
+                CaptionKind::Error,
+                format!("Couldn\u{2019}t reset {}. Try again.", text.list),
+            )
+        });
+        let (control, (caption_kind, caption)) = match self.status {
             CaptureAccessStatus::Unsupported => (
-                "Unavailable",
-                text.state_unavailable,
-                "Unavailable on this platform.",
-                None,
+                status("Unavailable"),
+                guidance("Unavailable on this platform."),
             ),
-            CaptureAccessStatus::Authorization(Authorization::Authorized) => {
-                ("Allowed", text.state_allowed, text.purpose, None)
-            }
+            // A running reset owns the row until it reports, whatever the reads in between say.
+            CaptureAccessStatus::Authorization(_) if self.reset == Some(CaptureReset::Running) => (
+                status("Waiting"),
+                (
+                    CaptionKind::Waiting,
+                    format!("Resetting {}\u{2026}", text.list),
+                ),
+            ),
+            CaptureAccessStatus::Authorization(Authorization::Authorized) => (
+                AccessControl::Status {
+                    label: "Allowed",
+                    allowed: true,
+                },
+                reset_failure.unwrap_or_else(|| guidance(text.purpose)),
+            ),
             CaptureAccessStatus::Authorization(Authorization::NotDetermined) => (
-                "Not requested",
-                text.state_not_requested,
-                text.purpose,
-                Some(Action::Request),
+                AccessControl::Action(AccessAction::Allow),
+                guidance(text.purpose),
             ),
             CaptureAccessStatus::Requesting => (
-                "Requesting",
-                text.state_requesting,
-                "Respond to the system prompt.",
-                Some(Action::Requesting),
+                status("Waiting"),
+                (
+                    CaptionKind::Waiting,
+                    "Respond to the system prompt.".to_owned(),
+                ),
             ),
             CaptureAccessStatus::Authorization(Authorization::Denied) => (
-                "Denied",
-                text.state_denied,
+                AccessControl::Action(AccessAction::OpenSettings),
                 match self.recovery_failure {
-                    None => text.purpose,
-                    Some(_) => open_failed(self.device),
+                    Some(_) => (CaptionKind::Error, open_failed(self.device).to_owned()),
+                    None => reset_failure.unwrap_or_else(|| guidance(text.purpose)),
                 },
-                Some(Action::OpenSettings),
             ),
             CaptureAccessStatus::Authorization(Authorization::Restricted) => {
-                ("Restricted", text.state_restricted, text.restricted, None)
+                (status("Restricted"), guidance(text.restricted))
             }
             CaptureAccessStatus::Failed(error) => (
-                "Unavailable",
-                text.state_unavailable,
-                match error {
-                    CaptureAccessError::PlatformUnavailable => text.check_failed,
-                    CaptureAccessError::PlatformRejected => text.request_failed,
-                },
-                Some(Action::CheckAgain),
+                AccessControl::Action(AccessAction::CheckAgain),
+                (
+                    CaptionKind::Error,
+                    match error {
+                        CaptureAccessError::PlatformUnavailable => text.check_failed,
+                        CaptureAccessError::PlatformRejected => text.request_failed,
+                    }
+                    .to_owned(),
+                ),
             ),
         };
-        CaptureAccessPresentation {
-            state,
-            state_selector,
-            explanation,
-            action,
+        AccessPresentation {
+            control,
+            caption: caption.into(),
+            caption_kind,
+            resettable: self.can_reset(),
         }
     }
 }
@@ -305,62 +360,113 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    /// The state badge and, when one applies, the action beside it.
+    /// Asks before resetting the device's decision, because the reset removes an allowed grant.
+    pub(super) fn confirm_capture_reset(
+        &mut self,
+        device: CaptureDevice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.capture_row(device).can_reset() {
+            return;
+        }
+        let text = capture_text(device);
+        let title = format!("Reset {}?", text.list);
+        let owner = cx.weak_entity();
+        let result = Alert::new(
+            ModalId::new(text.reset_modal),
+            title.clone(),
+            title,
+            format!(
+                "Terminal programs lose {} access. Choose Allow\u{2026} afterward and the system asks again.",
+                text.noun
+            ),
+            vec![
+                ModalAction::new(
+                    ResetDecision::Reset,
+                    "Reset",
+                    ModalActionRole::Affirmative,
+                    text.reset_confirm,
+                )
+                .with_intent(ModalActionIntent::Destructive)
+                .with_emphasis(ModalActionEmphasis::Prominent),
+                ModalAction::new(
+                    ResetDecision::Cancel,
+                    "Cancel",
+                    ModalActionRole::Cancel,
+                    text.reset_cancel,
+                ),
+            ],
+        )
+        .present(window, cx, move |outcome, cx| {
+            let AlertOutcome::Activated {
+                action_id: ResetDecision::Reset,
+                ..
+            } = outcome
+            else {
+                return;
+            };
+            let _ = owner.update(cx, |settings, cx| settings.reset_capture(device, cx));
+        });
+        if result.is_err() {
+            eprintln!("failed to present the SpaceTerm capture reset alert");
+        }
+    }
+
+    /// Clears the device's decision, so the row offers Allow and the system prompts again. The
+    /// native completion may run on any thread, so it sends the result through a channel.
+    pub(super) fn reset_capture(&mut self, device: CaptureDevice, cx: &mut Context<Self>) {
+        let row = self.capture_row(device);
+        if !row.can_reset() {
+            return;
+        }
+        let Some(access) = row.access.clone() else {
+            return;
+        };
+        let (sender, receiver) = async_channel::bounded(1);
+        match access.reset(
+            device,
+            Box::new(move |result| {
+                let _ = sender.try_send(result);
+            }),
+        ) {
+            Ok(()) => {
+                row.reset = Some(CaptureReset::Running);
+                row._reset = Some(cx.spawn(async move |settings, cx| {
+                    let result = receiver.recv().await.ok();
+                    let _ = settings.update(cx, |settings, cx| {
+                        settings.capture_row(device).finish_reset(result);
+                        cx.notify();
+                    });
+                }));
+            }
+            Err(_) => row.reset = Some(CaptureReset::Failed),
+        }
+        cx.notify();
+    }
+
+    /// The row's one trailing control: its next step, or its state.
     pub(super) fn render_capture_access(
         &mut self,
         device: CaptureDevice,
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let text = capture_text(device);
-        let presentation = self.capture_row(device).presentation();
-        let state_selector = presentation.state_selector;
+        let control = self.capture_row(device).presentation().control;
         let owner = cx.weak_entity();
-        let action = presentation.action.map(|action| {
-            let owner = owner.clone();
-            match action {
-                CaptureAccessAction::Request | CaptureAccessAction::Requesting => action_button(
-                    text.request,
-                    "Request Access…",
-                    action == CaptureAccessAction::Request,
-                    move |_, cx| {
-                        let _ = owner.update(cx, |settings, cx| {
-                            settings.request_capture_access(device, cx);
-                        });
-                    },
-                ),
-                CaptureAccessAction::OpenSettings => action_button(
-                    text.open_settings,
-                    "Open System Settings",
-                    true,
-                    move |_, cx| {
-                        let _ = owner.update(cx, |settings, cx| {
-                            settings.open_capture_settings(device, cx);
-                        });
-                    },
-                ),
-                CaptureAccessAction::CheckAgain => {
-                    action_button(text.check_again, "Check Again", true, move |_, cx| {
-                        let _ = owner.update(cx, |settings, cx| {
-                            settings.refresh_capture_row(device, cx);
-                        });
-                    })
-                }
-            }
-        });
-        div()
-            .debug_selector(|| text.control.to_owned())
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(appearance.spacing(8.0))
-            .child(
-                div()
-                    .debug_selector(move || state_selector.to_owned())
-                    .child(badge(state_selector, presentation.state, appearance)),
-            )
-            .children(action)
-            .into_any_element()
+        access_row::render_control(
+            &capture_text(device).row,
+            control,
+            appearance,
+            move |action, _, cx| {
+                let _ = owner.update(cx, |settings, cx| match action {
+                    AccessAction::Allow => settings.request_capture_access(device, cx),
+                    AccessAction::OpenSettings => settings.open_capture_settings(device, cx),
+                    AccessAction::CheckAgain => settings.refresh_capture_row(device, cx),
+                    AccessAction::Cancel => {}
+                });
+            },
+        )
     }
 }
 

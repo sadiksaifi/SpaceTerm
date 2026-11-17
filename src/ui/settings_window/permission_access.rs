@@ -4,7 +4,7 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Entity, SharedString, Task, Window, div};
+use gpui::{AnyElement, App, Entity, Task, Window};
 use spaceterm_ui::{
     Alert, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionIntent, ModalActionRole,
     ModalId,
@@ -21,55 +21,46 @@ use crate::ui::permission_setup::{
 };
 
 use super::SettingsWindow;
-use crate::ui::sidebar_window::form::{action_button, badge};
+use super::access_row::{
+    self, AccessAction, AccessControl, AccessPresentation, AccessSelectors, CaptionKind,
+};
 
-/// The selectors of one permission's row.
+/// The selectors of one permission's row and of its reset confirmation.
 pub(super) struct PermissionText {
-    pub(super) control: &'static str,
-    pub(super) set_up: &'static str,
-    pub(super) cancel_setup: &'static str,
-    pub(super) open_settings: &'static str,
-    pub(super) check_again: &'static str,
-    pub(super) troubleshoot: &'static str,
-    pub(super) state_allowed: &'static str,
-    pub(super) state_not_allowed: &'static str,
-    pub(super) state_unavailable: &'static str,
-    pub(super) troubleshoot_modal: &'static str,
-    pub(super) troubleshoot_open_settings: &'static str,
-    pub(super) troubleshoot_reset: &'static str,
-    pub(super) troubleshoot_cancel: &'static str,
+    pub(super) row: AccessSelectors,
+    pub(super) reset_modal: &'static str,
+    pub(super) reset_confirm: &'static str,
+    pub(super) reset_cancel: &'static str,
 }
 
 pub(super) const SCREEN_RECORDING: PermissionText = PermissionText {
-    control: "settings-screen-recording-access-control",
-    set_up: "settings-screen-recording-access-set-up",
-    cancel_setup: "settings-screen-recording-access-cancel-setup",
-    open_settings: "settings-screen-recording-access-open-settings",
-    check_again: "settings-screen-recording-access-check-again",
-    troubleshoot: "settings-screen-recording-access-troubleshoot",
-    state_allowed: "settings-screen-recording-access-state-allowed",
-    state_not_allowed: "settings-screen-recording-access-state-not-allowed",
-    state_unavailable: "settings-screen-recording-access-state-unavailable",
-    troubleshoot_modal: "settings-screen-recording-troubleshoot",
-    troubleshoot_open_settings: "settings-screen-recording-troubleshoot-open-settings",
-    troubleshoot_reset: "settings-screen-recording-troubleshoot-reset",
-    troubleshoot_cancel: "settings-screen-recording-troubleshoot-cancel",
+    row: AccessSelectors {
+        control: "settings-screen-recording-access-control",
+        status: "settings-screen-recording-access-status",
+        allow: "settings-screen-recording-access-allow",
+        open_settings: "settings-screen-recording-access-open-settings",
+        cancel: "settings-screen-recording-access-cancel",
+        check_again: "settings-screen-recording-access-check-again",
+        progress: "settings-screen-recording-access-progress",
+    },
+    reset_modal: "settings-screen-recording-reset",
+    reset_confirm: "settings-screen-recording-reset-confirm",
+    reset_cancel: "settings-screen-recording-reset-cancel",
 };
 
 pub(super) const ACCESSIBILITY: PermissionText = PermissionText {
-    control: "settings-accessibility-access-control",
-    set_up: "settings-accessibility-access-set-up",
-    cancel_setup: "settings-accessibility-access-cancel-setup",
-    open_settings: "settings-accessibility-access-open-settings",
-    check_again: "settings-accessibility-access-check-again",
-    troubleshoot: "settings-accessibility-access-troubleshoot",
-    state_allowed: "settings-accessibility-access-state-allowed",
-    state_not_allowed: "settings-accessibility-access-state-not-allowed",
-    state_unavailable: "settings-accessibility-access-state-unavailable",
-    troubleshoot_modal: "settings-accessibility-troubleshoot",
-    troubleshoot_open_settings: "settings-accessibility-troubleshoot-open-settings",
-    troubleshoot_reset: "settings-accessibility-troubleshoot-reset",
-    troubleshoot_cancel: "settings-accessibility-troubleshoot-cancel",
+    row: AccessSelectors {
+        control: "settings-accessibility-access-control",
+        status: "settings-accessibility-access-status",
+        allow: "settings-accessibility-access-allow",
+        open_settings: "settings-accessibility-access-open-settings",
+        cancel: "settings-accessibility-access-cancel",
+        check_again: "settings-accessibility-access-check-again",
+        progress: "settings-accessibility-access-progress",
+    },
+    reset_modal: "settings-accessibility-reset",
+    reset_confirm: "settings-accessibility-reset-confirm",
+    reset_cancel: "settings-accessibility-reset-cancel",
 };
 
 /// The permission a Settings Row presents, when it presents one of these.
@@ -98,21 +89,6 @@ pub(super) enum PermissionAccessStatus {
     Failed(PermissionAccessError),
 }
 
-/// The one action the row offers for its status, when there is one worth offering.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum PermissionAccessAction {
-    /// Starts a Permission Setup.
-    SetUp,
-    /// Ends the running Permission Setup.
-    CancelSetup,
-    /// Opens the permission's list in System Settings, for a host that composes no Permission
-    /// Setup.
-    OpenSettings,
-    CheckAgain,
-    /// Presents the recovery for a grant that a program still reports missing.
-    Troubleshoot,
-}
-
 /// What the latest recovery step reported, kept beside the status it tried to change.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RecoveryNotice {
@@ -121,23 +97,10 @@ pub(super) enum RecoveryNotice {
     ResetFailed,
 }
 
-/// The row's complete presentation, derived from its state so every state reads one way.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct PermissionAccessPresentation {
-    pub(super) state: &'static str,
-    /// Names the state badge, so a test can tell each state apart by geometry.
-    pub(super) state_selector: &'static str,
-    pub(super) explanation: SharedString,
-    pub(super) action: Option<PermissionAccessAction>,
-    /// Whether the action accepts activation, which it does except while a reset runs.
-    pub(super) action_enabled: bool,
-}
-
-/// The troubleshooting alert's decisions.
+/// The reset confirmation's decisions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TroubleshootDecision {
+enum ResetDecision {
     Reset,
-    OpenSettings,
     Cancel,
 }
 
@@ -256,88 +219,109 @@ impl PermissionAccessRow {
         holder_name(self.access.as_ref().map(|access| access.holder()))
     }
 
-    pub(super) fn presentation(&self) -> PermissionAccessPresentation {
-        use PermissionAccessAction as Action;
+    pub(super) fn presentation(&self) -> AccessPresentation {
         use PermissionAuthorization as Authorization;
 
-        let text = permission_text(self.permission);
         let copy = self.copy();
         let name = copy.name;
         let application = self.holder_name();
         let application = application.as_str();
         let pane = copy.pane;
-        let purpose = format!("Lets terminal programs {}.", copy.purpose);
+        let purpose = (
+            CaptionKind::Guidance,
+            format!("Lets terminal programs {}.", copy.purpose),
+        );
+        let allowed = AccessControl::Status {
+            label: "Allowed",
+            allowed: true,
+        };
+        let waiting = AccessControl::Status {
+            label: "Waiting",
+            allowed: false,
+        };
         let notice = self.notice.map(|notice| match notice {
-            RecoveryNotice::OpenFailed => open_failed(application, pane),
-            RecoveryNotice::Resetting => format!("Resetting {name}…"),
-            RecoveryNotice::ResetFailed => format!(
-                "Couldn\u{2019}t reset {name}. Remove {application} in Privacy & Security > {pane}, then set it up again."
+            RecoveryNotice::OpenFailed => (CaptionKind::Error, open_failed(application, pane)),
+            RecoveryNotice::Resetting => {
+                (CaptionKind::Waiting, format!("Resetting {name}\u{2026}"))
+            }
+            RecoveryNotice::ResetFailed => (
+                CaptionKind::Error,
+                format!("Couldn\u{2019}t reset {name}. Try again."),
             ),
         });
 
-        let (state, state_selector, explanation, action) = match self.status {
+        let (control, (caption_kind, caption)) = match self.status {
             PermissionAccessStatus::Unsupported => (
-                "Unavailable",
-                text.state_unavailable,
-                "Not available on this platform.".to_owned(),
-                None,
-            ),
-            PermissionAccessStatus::Authorization(Authorization::Granted) => (
-                "Allowed",
-                text.state_allowed,
-                notice.unwrap_or(purpose),
-                Some(Action::Troubleshoot),
-            ),
-            PermissionAccessStatus::Authorization(Authorization::NotGranted) => {
-                let (explanation, action) = match self.setup {
-                    Some(PermissionSetupStatus::Running) => (
-                        "Continue in System Settings.".to_owned(),
-                        Action::CancelSetup,
-                    ),
-                    Some(status) => {
-                        let failure = match status {
-                            PermissionSetupStatus::Failed(
-                                PermissionSetupFailure::SettingsUnavailable,
-                            ) => Some(open_failed(application, pane)),
-                            PermissionSetupStatus::Failed(
-                                PermissionSetupFailure::SettingsNotShown,
-                            ) => Some(
-                                "Couldn\u{2019}t open System Settings. Choose Set Up to try again."
-                                    .to_owned(),
-                            ),
-                            PermissionSetupStatus::Idle | PermissionSetupStatus::Running => None,
-                        };
-                        (notice.or(failure).unwrap_or(purpose), Action::SetUp)
-                    }
-                    None => (notice.unwrap_or(purpose), Action::OpenSettings),
-                };
-                (
-                    "Not allowed",
-                    text.state_not_allowed,
-                    explanation,
-                    Some(action),
-                )
-            }
-            PermissionAccessStatus::Failed(error) => (
-                "Unavailable",
-                text.state_unavailable,
-                match error {
-                    PermissionAccessError::PlatformUnavailable => {
-                        format!("Couldn\u{2019}t check {name} access.")
-                    }
-                    PermissionAccessError::PlatformRejected => {
-                        format!("{name} access check failed.")
-                    }
+                AccessControl::Status {
+                    label: "Unavailable",
+                    allowed: false,
                 },
-                Some(Action::CheckAgain),
+                (
+                    CaptionKind::Guidance,
+                    "Unavailable on this platform.".to_owned(),
+                ),
+            ),
+            // A running reset owns the row until it reports, whatever the reads in between say.
+            PermissionAccessStatus::Authorization(_) if self.resetting() => {
+                (waiting, notice.unwrap_or(purpose))
+            }
+            PermissionAccessStatus::Authorization(Authorization::Granted) => {
+                (allowed, notice.unwrap_or(purpose))
+            }
+            PermissionAccessStatus::Authorization(Authorization::NotGranted) => match self.setup {
+                Some(PermissionSetupStatus::Running) => (
+                    AccessControl::Action(AccessAction::Cancel),
+                    (
+                        CaptionKind::Waiting,
+                        "Continue in System Settings.".to_owned(),
+                    ),
+                ),
+                Some(status) => {
+                    let failure = match status {
+                        PermissionSetupStatus::Failed(
+                            PermissionSetupFailure::SettingsUnavailable,
+                        ) => Some((CaptionKind::Error, open_failed(application, pane))),
+                        PermissionSetupStatus::Failed(PermissionSetupFailure::SettingsNotShown) => {
+                            Some((
+                                CaptionKind::Error,
+                                "Couldn\u{2019}t open System Settings. Choose Allow\u{2026} to try again."
+                                    .to_owned(),
+                            ))
+                        }
+                        PermissionSetupStatus::Idle | PermissionSetupStatus::Running => None,
+                    };
+                    (
+                        AccessControl::Action(AccessAction::Allow),
+                        notice.or(failure).unwrap_or(purpose),
+                    )
+                }
+                None => (
+                    AccessControl::Action(AccessAction::OpenSettings),
+                    notice.unwrap_or(purpose),
+                ),
+            },
+            PermissionAccessStatus::Failed(error) => (
+                AccessControl::Action(AccessAction::CheckAgain),
+                (
+                    CaptionKind::Error,
+                    match error {
+                        PermissionAccessError::PlatformUnavailable => {
+                            format!("Couldn\u{2019}t check {name} access.")
+                        }
+                        PermissionAccessError::PlatformRejected => {
+                            format!("{name} access check failed.")
+                        }
+                    },
+                ),
             ),
         };
-        PermissionAccessPresentation {
-            state,
-            state_selector,
-            explanation: explanation.into(),
-            action,
-            action_enabled: !self.resetting(),
+        AccessPresentation {
+            control,
+            caption: caption.into(),
+            caption_kind,
+            resettable: self.status
+                == PermissionAccessStatus::Authorization(Authorization::Granted)
+                && self.can_reset(),
         }
     }
 }
@@ -503,86 +487,60 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    /// Presents the recovery for an allowed grant that a program still reports missing: reopen
-    /// the program, then reset the permission and allow it again.
-    pub(super) fn troubleshoot_permission(
+    /// Asks before resetting an allowed grant, because the reset removes access until the person
+    /// allows it again.
+    pub(super) fn confirm_permission_reset(
         &mut self,
         permission: SystemPermission,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let row = self.permission_access.row(permission);
-        if row.status != PermissionAccessStatus::Authorization(PermissionAuthorization::Granted)
-            || row.resetting()
-        {
+        if !row.presentation().resettable {
             return;
         }
         let text = permission_text(permission);
-        let copy = row.copy();
-        let name = copy.name;
-        let pane = copy.pane;
+        let name = row.copy().name;
         let application = row.holder_name();
-        let title = format!("{name} Not Working?");
-        let reopen = "Quit and reopen the program that needs access.";
-        let (message, primary) = if row.can_reset() {
-            (
-                format!(
-                    "{reopen} If that doesn\u{2019}t help, reset {name} and allow {application} again."
-                ),
+        let title = format!("Reset {name}?");
+        let owner = cx.weak_entity();
+        let result = Alert::new(
+            ModalId::new(text.reset_modal),
+            title.clone(),
+            title,
+            format!("{application} loses {name} access, then System Settings opens so you can allow it again."),
+            vec![
                 ModalAction::new(
-                    TroubleshootDecision::Reset,
+                    ResetDecision::Reset,
                     "Reset",
                     ModalActionRole::Affirmative,
-                    text.troubleshoot_reset,
+                    text.reset_confirm,
                 )
                 .with_intent(ModalActionIntent::Destructive)
                 .with_emphasis(ModalActionEmphasis::Prominent),
-            )
-        } else {
-            (
-                format!(
-                    "{reopen} If that doesn\u{2019}t help, remove {application} from Privacy & Security > {pane}, then set it up again."
-                ),
                 ModalAction::new(
-                    TroubleshootDecision::OpenSettings,
-                    "Open System Settings",
-                    ModalActionRole::Affirmative,
-                    text.troubleshoot_open_settings,
-                )
-                .default_action(true),
-            )
-        };
-        let owner = cx.weak_entity();
-        let result = Alert::new(
-            ModalId::new(text.troubleshoot_modal),
-            title.clone(),
-            title,
-            message,
-            vec![
-                primary,
-                ModalAction::new(
-                    TroubleshootDecision::Cancel,
+                    ResetDecision::Cancel,
                     "Cancel",
                     ModalActionRole::Cancel,
-                    text.troubleshoot_cancel,
+                    text.reset_cancel,
                 ),
             ],
         )
-        .detail("Some programs use a helper app that needs its own permission.")
+        .detail(
+            "If a program can\u{2019}t use it, quit and reopen the program first. Some programs use a helper app that needs its own permission.",
+        )
         .present(window, cx, move |outcome, cx| {
-            let AlertOutcome::Activated { action_id, .. } = outcome else {
+            let AlertOutcome::Activated {
+                action_id: ResetDecision::Reset,
+                ..
+            } = outcome
+            else {
                 return;
             };
-            let _ = owner.update(cx, |settings, cx| match action_id {
-                TroubleshootDecision::Reset => settings.reset_permission(permission, cx),
-                TroubleshootDecision::OpenSettings => {
-                    settings.open_permission_settings(permission, cx);
-                }
-                TroubleshootDecision::Cancel => {}
-            });
+            let _ = owner.update(cx, |settings, cx| settings.reset_permission(permission, cx));
         });
         if result.is_err() {
-            eprintln!("failed to present the SpaceTerm permission troubleshooting alert");
+            eprintln!("failed to present the SpaceTerm permission reset alert");
         }
     }
 
@@ -638,72 +596,34 @@ impl SettingsWindow {
         }
     }
 
-    /// The state badge and, when one applies, the action beside it.
+    /// The row's one trailing control: its next step, or its state.
     pub(super) fn render_permission_access(
         &mut self,
         permission: SystemPermission,
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let text = permission_text(permission);
-        let presentation = self.permission_access.row(permission).presentation();
-        let state_selector = presentation.state_selector;
-        let enabled = presentation.action_enabled;
+        let control = self
+            .permission_access
+            .row(permission)
+            .presentation()
+            .control;
         let owner = cx.weak_entity();
-        let action = presentation.action.map(|action| match action {
-            PermissionAccessAction::SetUp => {
-                action_button(text.set_up, "Set Up…", enabled, move |_, cx| {
-                    let _ = owner.update(cx, |settings, cx| {
-                        settings.set_up_permission(permission, cx);
-                    });
-                })
-            }
-            PermissionAccessAction::CancelSetup => {
-                action_button(text.cancel_setup, "Cancel Setup", enabled, move |_, cx| {
-                    let _ = owner.update(cx, |settings, cx| {
-                        settings.cancel_permission_setup(cx);
-                    });
-                })
-            }
-            PermissionAccessAction::OpenSettings => action_button(
-                text.open_settings,
-                "Open System Settings",
-                enabled,
-                move |_, cx| {
-                    let _ = owner.update(cx, |settings, cx| {
+        access_row::render_control(
+            &permission_text(permission).row,
+            control,
+            appearance,
+            move |action, _, cx| {
+                let _ = owner.update(cx, |settings, cx| match action {
+                    AccessAction::Allow => settings.set_up_permission(permission, cx),
+                    AccessAction::Cancel => settings.cancel_permission_setup(cx),
+                    AccessAction::OpenSettings => {
                         settings.open_permission_settings(permission, cx);
-                    });
-                },
-            ),
-            PermissionAccessAction::CheckAgain => {
-                action_button(text.check_again, "Check Again", enabled, move |_, cx| {
-                    let _ = owner.update(cx, |settings, cx| settings.refresh_permission_access(cx));
-                })
-            }
-            PermissionAccessAction::Troubleshoot => action_button(
-                text.troubleshoot,
-                "Troubleshoot…",
-                enabled,
-                move |window, cx: &mut App| {
-                    let _ = owner.update(cx, |settings, cx| {
-                        settings.troubleshoot_permission(permission, window, cx);
-                    });
-                },
-            ),
-        });
-        div()
-            .debug_selector(|| text.control.to_owned())
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(appearance.spacing(8.0))
-            .child(
-                div()
-                    .debug_selector(move || state_selector.to_owned())
-                    .child(badge(state_selector, presentation.state, appearance)),
-            )
-            .children(action)
-            .into_any_element()
+                    }
+                    AccessAction::CheckAgain => settings.refresh_permission_access(cx),
+                });
+            },
+        )
     }
 }
 

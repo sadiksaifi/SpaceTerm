@@ -1,6 +1,7 @@
 //! The Settings Window: a separate, modeless Operating-System Window for SpaceTerm Settings.
 //! It is application scoped so it stays reachable when no Workspace window exists.
 
+mod access_row;
 mod add_machine;
 mod advanced;
 mod background_image;
@@ -582,6 +583,10 @@ enum RowReset {
     Git,
     Sidebar,
     Shortcut(crate::keybindings::Command),
+    /// Clears a System Permission's grant, then sets it up again.
+    Permission(SystemPermission),
+    /// Clears a capture device's decision, so the system prompts again.
+    Capture(CaptureDevice),
 }
 
 impl SettingsWindow {
@@ -1159,16 +1164,60 @@ impl SettingsWindow {
         (reset != *current).then_some(RowReset::Appearance(target))
     }
 
+    /// The presentation of a row that shows a permission, with the selectors its control uses.
+    fn access_presentation(
+        &self,
+        row: SettingsRowId,
+    ) -> Option<(
+        &'static access_row::AccessSelectors,
+        access_row::AccessPresentation,
+    )> {
+        match row {
+            SettingsRowId::MicrophoneAccess => Some((
+                &capture::MICROPHONE.row,
+                self.microphone_access.presentation(),
+            )),
+            SettingsRowId::CameraAccess => {
+                Some((&capture::CAMERA.row, self.camera_access.presentation()))
+            }
+            SettingsRowId::NotificationAccess => Some((
+                &notifications::SELECTORS,
+                self.notification_access.presentation(),
+            )),
+            _ => permission_access::row_permission(row).map(|permission| {
+                (
+                    &permission_access::permission_text(permission).row,
+                    self.permission_access.row(permission).presentation(),
+                )
+            }),
+        }
+    }
+
+    /// The reset a permission row offers, which clears the grant's holder entry rather than a
+    /// setting, so it does not wait on the Settings Document.
+    fn access_reset(&self, row: SettingsRowId) -> Option<RowReset> {
+        let (_, presentation) = self.access_presentation(row)?;
+        if !presentation.resettable {
+            return None;
+        }
+        match row {
+            SettingsRowId::MicrophoneAccess => Some(RowReset::Capture(CaptureDevice::Microphone)),
+            SettingsRowId::CameraAccess => Some(RowReset::Capture(CaptureDevice::Camera)),
+            _ => permission_access::row_permission(row).map(RowReset::Permission),
+        }
+    }
+
     fn row_reset(
         &self,
         row: SettingsRowId,
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.editor.editable() {
-            return None;
-        }
-        let reset = self.pending_reset(row, cx)?;
+        let reset = match self.access_reset(row) {
+            Some(reset) => reset,
+            None if !self.editor.editable() => return None,
+            None => self.pending_reset(row, cx)?,
+        };
         let owner = cx.weak_entity();
         Some(
             reset_button(
@@ -1179,9 +1228,15 @@ impl SettingsWindow {
                     .mark_metrics(crate::ui::chrome_icons::MarkRole::Reset)
                     .glyph_size,
                 true,
-                move |_, cx| {
+                move |window, cx| {
                     let reset = reset.clone();
                     let _ = owner.update(cx, |settings, cx| match reset {
+                        RowReset::Permission(permission) => {
+                            settings.confirm_permission_reset(permission, window, cx);
+                        }
+                        RowReset::Capture(device) => {
+                            settings.confirm_capture_reset(device, window, cx);
+                        }
                         RowReset::MachineLocation => settings.reset_machine_location(cx),
                         RowReset::Appearance(target) => settings.editor.reset(target, cx),
                         RowReset::Update => settings.reset_update_preference(row, cx),
@@ -1726,13 +1781,8 @@ impl SettingsWindow {
             rendered = rendered
                 .caption(status.summary, status.tone)
                 .status_line(None);
-        } else if let Some(permission) = permission_access::row_permission(row) {
-            rendered = rendered.description(
-                self.permission_access
-                    .row(permission)
-                    .presentation()
-                    .explanation,
-            );
+        } else if let Some((selectors, presentation)) = self.access_presentation(row) {
+            rendered = access_row::caption(rendered, selectors, &presentation);
         } else if let SettingsRowId::Shortcut(command) = row {
             if let Some(description) = self.shortcut_description(command, cx) {
                 rendered = rendered.caption(description.text, description.tone);
@@ -2740,13 +2790,6 @@ impl SettingsWindow {
             ),
             SettingsRowId::SidebarDefaultState => Some("The sidebar state in each new window."),
             SettingsRowId::TerminalFontFamily => Some("Only monospace fonts."),
-            SettingsRowId::MicrophoneAccess => {
-                Some(self.microphone_access.presentation().explanation)
-            }
-            SettingsRowId::CameraAccess => Some(self.camera_access.presentation().explanation),
-            SettingsRowId::NotificationAccess => {
-                Some(self.notification_access.presentation().explanation)
-            }
             SettingsRowId::TerminalAttentionNotifications => Some(
                 "Notify when a bell rings or a command finishes in a Pane while SpaceTerm is in the background.",
             ),
