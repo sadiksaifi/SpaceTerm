@@ -344,6 +344,40 @@ fn a_request_after_a_grant_opens_the_next_list(cx: &mut TestAppContext) {
     );
 }
 
+/// A reset removes a grant the setup already reported, then asks for the same permission again.
+/// The setup starts that permission over instead of keeping a guide that says it is allowed.
+#[gpui::test]
+fn a_permission_asked_for_again_after_its_grant_starts_over(cx: &mut TestAppContext) {
+    let fixture = install(NotGranted, NotGranted, cx);
+    fixture.start(&[Accessibility], cx);
+    fixture.show_settings(settings_frame(), cx);
+    fixture.access.set(Accessibility, Ok(Granted));
+    fixture.access.report_change();
+    cx.run_until_parked();
+    assert_eq!(
+        fixture.current(cx),
+        Some((Accessibility, SetupStep::Granted))
+    );
+
+    fixture.access.set(Accessibility, Ok(NotGranted));
+    fixture.start(&[Accessibility], cx);
+
+    assert_eq!(
+        *fixture.access.prepared.borrow(),
+        [Accessibility, Accessibility]
+    );
+    assert_eq!(
+        *fixture.access.opened.borrow(),
+        [Accessibility, Accessibility]
+    );
+    assert_eq!(
+        fixture.current(cx),
+        Some((Accessibility, SetupStep::Opening))
+    );
+    // The guide that reported the grant is gone until System Settings shows the list again.
+    assert!(guide(cx).is_none());
+}
+
 /// System Settings keeps showing the previous list for a moment after it is asked for another, so
 /// the guide waits before pointing at "the list above".
 #[gpui::test]
