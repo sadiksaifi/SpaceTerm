@@ -19,8 +19,9 @@ use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform
 use crate::settings::SettingsDocument;
 use crate::ui::appearance_runtime;
 
+use super::super::access_row::{AccessAction, AccessControl, CaptionKind};
 use super::super::permission_access::{
-    ACCESSIBILITY, PermissionAccessAction, PermissionAccessStatus, RecoveryNotice, SCREEN_RECORDING,
+    ACCESSIBILITY, PermissionAccessStatus, RecoveryNotice, SCREEN_RECORDING,
 };
 use super::super::{PermissionCapabilities, SettingsWindow};
 use crate::settings::storage::testing::MemoryStorage;
@@ -30,6 +31,8 @@ use SystemPermission::{Accessibility, ScreenRecording};
 
 const SCREEN_RECORDING_ROW: &str = "settings-row-screen-recording-access";
 const ACCESSIBILITY_ROW: &str = "settings-row-accessibility-access";
+const SCREEN_RECORDING_RESET: &str = "settings-row-screen-recording-access-reset";
+const ACCESSIBILITY_RESET: &str = "settings-row-accessibility-access-reset";
 const APPLICATION: &str =
     crate::application_identity::ApplicationIdentity::current().display_name();
 
@@ -124,27 +127,50 @@ fn action(
     window: &Entity<SettingsWindow>,
     permission: SystemPermission,
     cx: &mut VisualTestContext,
-) -> Option<PermissionAccessAction> {
+) -> Option<AccessAction> {
     window.read_with(cx, |window, _| {
-        window
+        match window
             .permission_access
             .row(permission)
             .presentation()
-            .action
+            .control
+        {
+            AccessControl::Action(action) => Some(action),
+            AccessControl::Status { .. } => None,
+        }
     })
 }
 
-fn action_enabled(
+/// The state the row shows in place of a button, when it has no next step.
+fn shown_state(
     window: &Entity<SettingsWindow>,
     permission: SystemPermission,
     cx: &mut VisualTestContext,
-) -> bool {
+) -> Option<&'static str> {
+    window.read_with(cx, |window, _| {
+        match window
+            .permission_access
+            .row(permission)
+            .presentation()
+            .control
+        {
+            AccessControl::Status { label, .. } => Some(label),
+            AccessControl::Action(_) => None,
+        }
+    })
+}
+
+fn caption_kind(
+    window: &Entity<SettingsWindow>,
+    permission: SystemPermission,
+    cx: &mut VisualTestContext,
+) -> CaptionKind {
     window.read_with(cx, |window, _| {
         window
             .permission_access
             .row(permission)
             .presentation()
-            .action_enabled
+            .caption_kind
     })
 }
 
@@ -158,7 +184,7 @@ fn explanation(
             .permission_access
             .row(permission)
             .presentation()
-            .explanation
+            .caption
             .to_string()
     })
 }
@@ -189,13 +215,12 @@ fn privacy_section_presents_both_permissions_beside_microphone_access(cx: &mut T
         "settings-section-privacy-group-permissions",
         "settings-row-microphone-access",
         SCREEN_RECORDING_ROW,
-        SCREEN_RECORDING.control,
-        SCREEN_RECORDING.state_not_allowed,
-        SCREEN_RECORDING.set_up,
+        SCREEN_RECORDING.row.control,
+        SCREEN_RECORDING.row.allow,
         ACCESSIBILITY_ROW,
-        ACCESSIBILITY.control,
-        ACCESSIBILITY.state_allowed,
-        ACCESSIBILITY.troubleshoot,
+        ACCESSIBILITY.row.control,
+        ACCESSIBILITY.row.status,
+        ACCESSIBILITY_RESET,
     ] {
         assert!(
             cx.debug_bounds(selector).is_some(),
@@ -212,10 +237,16 @@ fn privacy_section_presents_both_permissions_beside_microphone_access(cx: &mut T
             "{row} should share the group"
         );
     }
-    // Each row offers one action: Set Up already recovers a missing grant, so only an allowed
-    // grant offers Troubleshoot.
-    assert!(cx.debug_bounds(SCREEN_RECORDING.troubleshoot).is_none());
-    assert!(cx.debug_bounds(ACCESSIBILITY.set_up).is_none());
+    // Each row ends in one control: a missing grant offers Allow, and an allowed grant shows its
+    // state with the reset beside the label instead of a second button.
+    assert_eq!(
+        action(&window, ScreenRecording, cx),
+        Some(AccessAction::Allow)
+    );
+    assert_eq!(shown_state(&window, Accessibility, cx), Some("Allowed"));
+    assert!(cx.debug_bounds(SCREEN_RECORDING.row.status).is_none());
+    assert!(cx.debug_bounds(SCREEN_RECORDING_RESET).is_none());
+    assert!(cx.debug_bounds(ACCESSIBILITY.row.allow).is_none());
     // The description says what the permission lets terminal programs do, in any state.
     assert_eq!(
         explanation(&window, ScreenRecording, cx),
@@ -230,26 +261,37 @@ fn privacy_section_presents_both_permissions_beside_microphone_access(cx: &mut T
     assert!(access.opened.borrow().is_empty());
 }
 
-/// Set Up starts a Permission Setup, the row follows it, and only a read reports the grant.
+/// Allow starts a Permission Setup, the row follows it, and only a read reports the grant.
 #[gpui::test]
-fn set_up_starts_a_permission_setup_and_the_row_follows_it(cx: &mut TestAppContext) {
+fn allow_starts_a_permission_setup_and_the_row_follows_it(cx: &mut TestAppContext) {
     let access = ScriptedPermissionAccess::new(Ok(NotGranted), Ok(NotGranted));
     let host = ScriptedSetupGuideHost::new();
     let (window, cx) = open_privacy_with(&access, host.clone(), cx);
 
-    click(SCREEN_RECORDING.set_up, cx);
+    click(SCREEN_RECORDING.row.allow, cx);
 
     assert_eq!(*access.prepared.borrow(), [ScreenRecording]);
     assert_eq!(*access.opened.borrow(), [ScreenRecording]);
     assert_eq!(
         action(&window, ScreenRecording, cx),
-        Some(PermissionAccessAction::CancelSetup)
+        Some(AccessAction::Cancel)
     );
-    assert!(explanation(&window, ScreenRecording, cx).contains("Continue in System Settings"));
+    assert_eq!(
+        explanation(&window, ScreenRecording, cx),
+        "Continue in System Settings."
+    );
+    assert_eq!(
+        caption_kind(&window, ScreenRecording, cx),
+        CaptionKind::Waiting
+    );
+    assert!(
+        cx.debug_bounds(format!("{}-track", SCREEN_RECORDING.row.progress).leak())
+            .is_some()
+    );
     // The other permission is untouched by this row's setup.
     assert_eq!(
         action(&window, Accessibility, cx),
-        Some(PermissionAccessAction::SetUp)
+        Some(AccessAction::Allow)
     );
     // Opening System Settings alone never reports access as allowed.
     return_to_settings(cx);
@@ -276,26 +318,27 @@ fn set_up_starts_a_permission_setup_and_the_row_follows_it(cx: &mut TestAppConte
         status(&window, ScreenRecording, cx),
         PermissionAccessStatus::Authorization(Granted)
     );
-    assert_eq!(
-        action(&window, ScreenRecording, cx),
-        Some(PermissionAccessAction::Troubleshoot)
-    );
-    assert!(cx.debug_bounds(SCREEN_RECORDING.state_allowed).is_some());
+    assert_eq!(shown_state(&window, ScreenRecording, cx), Some("Allowed"));
+    assert!(cx.debug_bounds(SCREEN_RECORDING.row.status).is_some());
+    assert!(cx.debug_bounds(SCREEN_RECORDING_RESET).is_some());
 }
 
 #[gpui::test]
-fn cancel_setup_ends_the_running_setup(cx: &mut TestAppContext) {
+fn cancel_ends_the_running_setup(cx: &mut TestAppContext) {
     let access = ScriptedPermissionAccess::new(Ok(NotGranted), Ok(NotGranted));
     let (window, cx) = open_privacy(&access, cx);
-    click(ACCESSIBILITY.set_up, cx);
+    click(ACCESSIBILITY.row.allow, cx);
 
-    click(ACCESSIBILITY.cancel_setup, cx);
+    click(ACCESSIBILITY.row.cancel, cx);
 
     assert_eq!(
         action(&window, Accessibility, cx),
-        Some(PermissionAccessAction::SetUp)
+        Some(AccessAction::Allow)
     );
-    assert!(!explanation(&window, Accessibility, cx).contains("Continue in System Settings"));
+    assert_eq!(
+        explanation(&window, Accessibility, cx),
+        "Lets terminal programs click and type in other apps."
+    );
     assert_eq!(
         access.observers(),
         1,
@@ -312,9 +355,9 @@ fn a_host_without_a_permission_setup_opens_system_settings(cx: &mut TestAppConte
 
     assert_eq!(
         action(&window, ScreenRecording, cx),
-        Some(PermissionAccessAction::OpenSettings)
+        Some(AccessAction::OpenSettings)
     );
-    click(SCREEN_RECORDING.open_settings, cx);
+    click(SCREEN_RECORDING.row.open_settings, cx);
 
     assert_eq!(*access.opened.borrow(), [ScreenRecording]);
     assert!(access.prepared.borrow().is_empty());
@@ -322,7 +365,7 @@ fn a_host_without_a_permission_setup_opens_system_settings(cx: &mut TestAppConte
 
 /// Revocation and reauthorization both arrive through reads on return.
 #[gpui::test]
-fn a_revoked_grant_is_read_on_return_and_offers_a_setup(cx: &mut TestAppContext) {
+fn a_revoked_grant_is_read_on_return_and_offers_allow(cx: &mut TestAppContext) {
     let access = ScriptedPermissionAccess::new(Ok(Granted), Ok(Granted));
     let (window, cx) = open_privacy(&access, cx);
 
@@ -334,8 +377,9 @@ fn a_revoked_grant_is_read_on_return_and_offers_a_setup(cx: &mut TestAppContext)
     );
     assert_eq!(
         action(&window, Accessibility, cx),
-        Some(PermissionAccessAction::SetUp)
+        Some(AccessAction::Allow)
     );
+    assert!(cx.debug_bounds(ACCESSIBILITY_RESET).is_none());
 
     access.set(Accessibility, Ok(Granted));
     return_to_settings(cx);
@@ -366,7 +410,7 @@ fn a_reported_change_refreshes_a_grant_the_activation_read_missed(cx: &mut TestA
         status(&window, Accessibility, cx),
         PermissionAccessStatus::Authorization(Granted)
     );
-    assert!(cx.debug_bounds(ACCESSIBILITY.state_allowed).is_some());
+    assert!(cx.debug_bounds(ACCESSIBILITY.row.status).is_some());
 
     // Closing the window ends the observation with it.
     drop(window);
@@ -388,40 +432,39 @@ fn settings_opens_at_the_normal_window_level_so_system_settings_stays_visible(
     assert!(options.kind == gpui::WindowKind::Normal);
 }
 
-/// Stale-grant recovery: an allowed grant can still fail, so Troubleshoot offers one alert whose
-/// Reset clears one permission of this application and starts a Permission Setup again.
+/// Stale-grant recovery: an allowed grant can still fail, so the reset beside the label asks
+/// once, clears one permission of the grant's holder, and starts a Permission Setup again.
 #[gpui::test]
-fn troubleshoot_resets_one_permission_and_sets_it_up_again(cx: &mut TestAppContext) {
+fn the_reset_clears_one_permission_and_sets_it_up_again(cx: &mut TestAppContext) {
     let access = ScriptedPermissionAccess::new(Ok(Granted), Ok(Granted));
     let (window, cx) = open_privacy(&access, cx);
 
-    click(ACCESSIBILITY.troubleshoot, cx);
-    assert!(
-        cx.debug_bounds(modal_action(ACCESSIBILITY.troubleshoot_open_settings))
-            .is_none(),
-        "a resettable identity is offered Reset, which leads to System Settings itself"
-    );
-    // The alert alone resets nothing.
+    click(ACCESSIBILITY_RESET, cx);
+    // The confirmation alone resets nothing.
     assert!(access.resets.borrow().is_empty());
-    click_modal_action(ACCESSIBILITY.troubleshoot_reset, cx);
+    click_modal_action(ACCESSIBILITY.reset_confirm, cx);
 
     assert_eq!(*access.resets.borrow(), [Accessibility]);
     assert_eq!(
         notice(&window, Accessibility, cx),
         Some(RecoveryNotice::Resetting)
     );
-    assert!(!action_enabled(&window, Accessibility, cx));
+    assert_eq!(shown_state(&window, Accessibility, cx), Some("Waiting"));
+    assert_eq!(
+        caption_kind(&window, Accessibility, cx),
+        CaptionKind::Waiting
+    );
+    assert!(cx.debug_bounds(ACCESSIBILITY_RESET).is_none());
     // The grant can disappear before the reset reports, and a return to the window meanwhile
-    // keeps reporting the reset as running and withholds Set Up.
+    // keeps reporting the reset as running and offers no Allow.
     access.set(Accessibility, Ok(NotGranted));
     return_to_settings(cx);
     assert_eq!(
         notice(&window, Accessibility, cx),
         Some(RecoveryNotice::Resetting)
     );
-    assert!(!action_enabled(&window, Accessibility, cx));
-    click(ACCESSIBILITY.set_up, cx);
-    assert!(access.prepared.borrow().is_empty());
+    assert_eq!(shown_state(&window, Accessibility, cx), Some("Waiting"));
+    assert!(cx.debug_bounds(ACCESSIBILITY.row.allow).is_none());
 
     access.take_reset()(Ok(()));
     cx.run_until_parked();
@@ -431,9 +474,8 @@ fn troubleshoot_resets_one_permission_and_sets_it_up_again(cx: &mut TestAppConte
     assert_eq!(notice(&window, Accessibility, cx), None);
     assert_eq!(
         action(&window, Accessibility, cx),
-        Some(PermissionAccessAction::CancelSetup)
+        Some(AccessAction::Cancel)
     );
-    assert!(action_enabled(&window, Accessibility, cx));
     // The other permission keeps its grant and its presentation.
     assert_eq!(
         status(&window, ScreenRecording, cx),
@@ -449,8 +491,8 @@ fn a_reset_without_a_permission_setup_opens_system_settings(cx: &mut TestAppCont
     let (window, cx) = open_settings(Some(access.clone()), None, cx);
     click("settings-navigation-settings-section-privacy", cx);
 
-    click(SCREEN_RECORDING.troubleshoot, cx);
-    click_modal_action(SCREEN_RECORDING.troubleshoot_reset, cx);
+    click(SCREEN_RECORDING_RESET, cx);
+    click_modal_action(SCREEN_RECORDING.reset_confirm, cx);
     access.set(ScreenRecording, Ok(NotGranted));
     access.take_reset()(Ok(()));
     cx.run_until_parked();
@@ -459,31 +501,33 @@ fn a_reset_without_a_permission_setup_opens_system_settings(cx: &mut TestAppCont
     assert!(access.prepared.borrow().is_empty());
     assert_eq!(
         action(&window, ScreenRecording, cx),
-        Some(PermissionAccessAction::OpenSettings)
+        Some(AccessAction::OpenSettings)
     );
 }
 
 #[gpui::test]
-fn a_cancelled_troubleshoot_changes_nothing(cx: &mut TestAppContext) {
+fn a_cancelled_reset_changes_nothing(cx: &mut TestAppContext) {
     let access = ScriptedPermissionAccess::new(Ok(Granted), Ok(Granted));
     let (window, cx) = open_privacy(&access, cx);
     let guidance = explanation(&window, ScreenRecording, cx);
 
-    click(SCREEN_RECORDING.troubleshoot, cx);
-    click_modal_action(SCREEN_RECORDING.troubleshoot_cancel, cx);
+    click(SCREEN_RECORDING_RESET, cx);
+    click_modal_action(SCREEN_RECORDING.reset_cancel, cx);
 
     assert!(access.resets.borrow().is_empty());
     assert!(access.opened.borrow().is_empty());
     assert_eq!(explanation(&window, ScreenRecording, cx), guidance);
 }
 
+/// A failed reset leaves the grant as it was and says so, without sending the person to remove
+/// the entry by hand: Permission Setup clears the entry itself.
 #[gpui::test]
-fn a_failed_reset_reports_failure_and_explains_the_manual_recovery(cx: &mut TestAppContext) {
+fn a_failed_reset_reports_failure_and_offers_the_reset_again(cx: &mut TestAppContext) {
     let access = ScriptedPermissionAccess::new(Ok(Granted), Ok(Granted));
     let (window, cx) = open_privacy(&access, cx);
 
-    click(SCREEN_RECORDING.troubleshoot, cx);
-    click_modal_action(SCREEN_RECORDING.troubleshoot_reset, cx);
+    click(SCREEN_RECORDING_RESET, cx);
+    click_modal_action(SCREEN_RECORDING.reset_confirm, cx);
     access.take_reset()(Err(PermissionAccessError::PlatformRejected));
     cx.run_until_parked();
 
@@ -491,10 +535,16 @@ fn a_failed_reset_reports_failure_and_explains_the_manual_recovery(cx: &mut Test
         notice(&window, ScreenRecording, cx),
         Some(RecoveryNotice::ResetFailed)
     );
-    let failure = explanation(&window, ScreenRecording, cx);
-    assert!(failure.contains("Couldn\u{2019}t reset"));
-    assert!(failure.contains("Privacy & Security > Screen & System Audio Recording"));
-    assert!(!failure.contains("PlatformRejected"));
+    assert_eq!(
+        explanation(&window, ScreenRecording, cx),
+        "Couldn\u{2019}t reset Screen Recording. Try again."
+    );
+    assert_eq!(
+        caption_kind(&window, ScreenRecording, cx),
+        CaptionKind::Error
+    );
+    assert_eq!(shown_state(&window, ScreenRecording, cx), Some("Allowed"));
+    assert!(cx.debug_bounds(SCREEN_RECORDING_RESET).is_some());
     // A failed reset starts no setup.
     assert!(access.prepared.borrow().is_empty());
 
@@ -502,8 +552,8 @@ fn a_failed_reset_reports_failure_and_explains_the_manual_recovery(cx: &mut Test
     access
         .reset_failure
         .set(Some(PermissionAccessError::PlatformUnavailable));
-    click(SCREEN_RECORDING.troubleshoot, cx);
-    click_modal_action(SCREEN_RECORDING.troubleshoot_reset, cx);
+    click(SCREEN_RECORDING_RESET, cx);
+    click_modal_action(SCREEN_RECORDING.reset_confirm, cx);
     assert_eq!(
         notice(&window, ScreenRecording, cx),
         Some(RecoveryNotice::ResetFailed)
@@ -517,8 +567,8 @@ fn a_reset_dropped_without_a_result_reports_failure(cx: &mut TestAppContext) {
     let access = ScriptedPermissionAccess::new(Ok(Granted), Ok(Granted));
     let (window, cx) = open_privacy(&access, cx);
 
-    click(SCREEN_RECORDING.troubleshoot, cx);
-    click_modal_action(SCREEN_RECORDING.troubleshoot_reset, cx);
+    click(SCREEN_RECORDING_RESET, cx);
+    click_modal_action(SCREEN_RECORDING.reset_confirm, cx);
     drop(access.take_reset());
     cx.run_until_parked();
 
@@ -529,26 +579,28 @@ fn a_reset_dropped_without_a_result_reports_failure(cx: &mut TestAppContext) {
     assert!(access.prepared.borrow().is_empty());
 }
 
-/// A running bundle that is not this build's identity is offered the manual steps only.
+/// SpaceTerm resets only its own entry, so a grant held by the application that started SpaceTerm
+/// Core offers no reset at all.
 #[gpui::test]
-fn troubleshoot_offers_system_settings_when_the_identity_cannot_be_reset(cx: &mut TestAppContext) {
+fn a_grant_the_holder_cannot_reset_offers_no_reset(cx: &mut TestAppContext) {
     let access = ScriptedPermissionAccess::new(Ok(Granted), Ok(Granted));
     access.resettable.set(false);
     let (window, cx) = open_privacy(&access, cx);
 
-    click(SCREEN_RECORDING.troubleshoot, cx);
-
-    assert!(
-        cx.debug_bounds(modal_action(SCREEN_RECORDING.troubleshoot_reset))
-            .is_none()
-    );
-    click_modal_action(SCREEN_RECORDING.troubleshoot_open_settings, cx);
-    assert_eq!(*access.opened.borrow(), [ScreenRecording]);
-    cx.update(|_, cx| {
+    assert!(cx.debug_bounds(SCREEN_RECORDING_RESET).is_none());
+    assert!(cx.debug_bounds(ACCESSIBILITY_RESET).is_none());
+    assert_eq!(shown_state(&window, ScreenRecording, cx), Some("Allowed"));
+    cx.update(|window_context, cx| {
         window.update(cx, |settings, cx| {
+            settings.confirm_permission_reset(ScreenRecording, window_context, cx);
             settings.reset_permission(ScreenRecording, cx);
         });
     });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds(modal_action(SCREEN_RECORDING.reset_confirm))
+            .is_none()
+    );
     assert!(access.resets.borrow().is_empty());
 }
 
@@ -561,7 +613,7 @@ fn a_setup_that_cannot_open_system_settings_explains_where_to_go(cx: &mut TestAp
     let (window, cx) = open_privacy(&access, cx);
     let guidance = explanation(&window, Accessibility, cx);
 
-    click(ACCESSIBILITY.set_up, cx);
+    click(ACCESSIBILITY.row.allow, cx);
 
     assert_eq!(
         status(&window, Accessibility, cx),
@@ -569,17 +621,21 @@ fn a_setup_that_cannot_open_system_settings_explains_where_to_go(cx: &mut TestAp
     );
     assert_eq!(
         action(&window, Accessibility, cx),
-        Some(PermissionAccessAction::SetUp)
+        Some(AccessAction::Allow)
     );
     let failure = explanation(&window, Accessibility, cx);
     assert_ne!(failure, guidance);
+    assert_eq!(caption_kind(&window, Accessibility, cx), CaptionKind::Error);
     assert!(failure.contains("Open System Settings and allow"));
     assert!(failure.contains("Privacy & Security > Device Control and Data Access"));
     assert!(failure.contains(APPLICATION));
 
     access.open_failure.set(None);
-    click(ACCESSIBILITY.set_up, cx);
-    assert!(explanation(&window, Accessibility, cx).contains("Continue in System Settings"));
+    click(ACCESSIBILITY.row.allow, cx);
+    assert_eq!(
+        explanation(&window, Accessibility, cx),
+        "Continue in System Settings."
+    );
 }
 
 /// A system whose System Settings calls the list Accessibility sends the person there.
@@ -592,7 +648,7 @@ fn an_earlier_system_names_the_accessibility_list(cx: &mut TestAppContext) {
         .set(Some(PermissionAccessError::PlatformRejected));
     let (window, cx) = open_privacy(&access, cx);
 
-    click(ACCESSIBILITY.set_up, cx);
+    click(ACCESSIBILITY.row.allow, cx);
 
     let failure = explanation(&window, Accessibility, cx);
     assert!(failure.contains("Privacy & Security > Accessibility"));
@@ -613,25 +669,26 @@ fn an_unreadable_authorization_reports_failure_and_checks_again(cx: &mut TestApp
         status(&window, ScreenRecording, cx),
         PermissionAccessStatus::Failed(PermissionAccessError::PlatformUnavailable)
     );
-    assert!(
-        cx.debug_bounds(SCREEN_RECORDING.state_unavailable)
-            .is_some()
-    );
     assert_eq!(
         action(&window, ScreenRecording, cx),
-        Some(PermissionAccessAction::CheckAgain)
+        Some(AccessAction::CheckAgain)
+    );
+    assert_eq!(
+        caption_kind(&window, ScreenRecording, cx),
+        CaptionKind::Error
     );
     // Neither success nor recovery is offered for a state the system did not report.
-    assert!(cx.debug_bounds(SCREEN_RECORDING.troubleshoot).is_none());
+    assert!(cx.debug_bounds(SCREEN_RECORDING.row.status).is_none());
+    assert!(cx.debug_bounds(SCREEN_RECORDING_RESET).is_none());
 
     access.set(ScreenRecording, Ok(NotGranted));
-    click(SCREEN_RECORDING.check_again, cx);
+    click(SCREEN_RECORDING.row.check_again, cx);
 
     assert_eq!(
         status(&window, ScreenRecording, cx),
         PermissionAccessStatus::Authorization(NotGranted)
     );
-    assert!(cx.debug_bounds(SCREEN_RECORDING.set_up).is_some());
+    assert!(cx.debug_bounds(SCREEN_RECORDING.row.allow).is_some());
 }
 
 /// Every typed failure produces its independent fixed product copy.
@@ -662,22 +719,25 @@ fn a_host_without_the_capability_presents_both_permissions_as_unavailable(cx: &m
     let (window, cx) = open_settings(None, Some(ScriptedSetupGuideHost::new()), cx);
     click("settings-navigation-settings-section-privacy", cx);
 
-    for (permission, text) in [
-        (ScreenRecording, &SCREEN_RECORDING),
-        (Accessibility, &ACCESSIBILITY),
+    for (permission, text, reset) in [
+        (ScreenRecording, &SCREEN_RECORDING, SCREEN_RECORDING_RESET),
+        (Accessibility, &ACCESSIBILITY, ACCESSIBILITY_RESET),
     ] {
         assert_eq!(
             status(&window, permission, cx),
             PermissionAccessStatus::Unsupported
         );
-        assert!(cx.debug_bounds(text.state_unavailable).is_some());
-        assert_eq!(action(&window, permission, cx), None);
+        assert_eq!(shown_state(&window, permission, cx), Some("Unavailable"));
+        assert_eq!(
+            explanation(&window, permission, cx),
+            "Unavailable on this platform."
+        );
         for selector in [
-            text.set_up,
-            text.cancel_setup,
-            text.open_settings,
-            text.check_again,
-            text.troubleshoot,
+            text.row.allow,
+            text.row.cancel,
+            text.row.open_settings,
+            text.row.check_again,
+            reset,
         ] {
             assert!(
                 cx.debug_bounds(selector).is_none(),
@@ -687,11 +747,11 @@ fn a_host_without_the_capability_presents_both_permissions_as_unavailable(cx: &m
     }
 }
 
-/// The badge and its button share the control column with wrapped guidance, so every state keeps
-/// each row at its natural height with the control centered on it.
+/// Every state ends its row in one control on the card's trailing edge, so a button and a state
+/// line up, and the control stays centered on a row at its natural height.
 #[gpui::test]
-fn permission_rows_keep_their_natural_height_beside_their_action(cx: &mut TestAppContext) {
-    let access = ScriptedPermissionAccess::new(Ok(NotGranted), Ok(NotGranted));
+fn every_state_ends_the_row_in_one_control_on_the_trailing_edge(cx: &mut TestAppContext) {
+    let access = ScriptedPermissionAccess::new(Ok(NotGranted), Ok(Granted));
     let (window, cx) = open_privacy(&access, cx);
     let states = [
         Ok(NotGranted),
@@ -711,6 +771,12 @@ fn permission_rows_keep_their_natural_height_beside_their_action(cx: &mut TestAp
             });
             cx.run_until_parked();
 
+            let shown = match action(&window, ScreenRecording, cx) {
+                Some(AccessAction::Allow) => SCREEN_RECORDING.row.allow,
+                Some(AccessAction::CheckAgain) => SCREEN_RECORDING.row.check_again,
+                Some(other) => panic!("unexpected {other:?}"),
+                None => SCREEN_RECORDING.row.status,
+            };
             let mut bounds = |selector: &'static str| {
                 cx.debug_bounds(selector)
                     .unwrap_or_else(|| panic!("{selector} should render"))
@@ -718,7 +784,10 @@ fn permission_rows_keep_their_natural_height_beside_their_action(cx: &mut TestAp
             let row = bounds(SCREEN_RECORDING_ROW);
             let label = bounds("settings-row-screen-recording-access-label");
             let description = bounds("settings-row-screen-recording-access-description");
-            let control = bounds(SCREEN_RECORDING.control);
+            let control = bounds(shown);
+            // The other row shows its allowed state, so the two trailing edges compare a button
+            // or a failure with a state.
+            let reference = bounds(ACCESSIBILITY.row.status);
             let context = format!("{state:?} at {width}px");
 
             let padding_above = label.top() - row.top();
@@ -732,9 +801,35 @@ fn permission_rows_keep_their_natural_height_beside_their_action(cx: &mut TestAp
                 "{context}: the control should be centered on the row"
             );
             assert!(
-                control.right() <= row.right(),
-                "{context}: the control should stay inside the row"
+                (control.right() - reference.right()).abs() <= gpui::px(1.0),
+                "{context}: every row's control should end on the same trailing edge"
             );
         }
     }
+}
+
+/// A read that fails while a reset runs cannot replace the reset with Check Again.
+#[gpui::test]
+fn a_failed_read_during_a_reset_keeps_the_reset_running(cx: &mut TestAppContext) {
+    let access = ScriptedPermissionAccess::new(Ok(Granted), Ok(Granted));
+    let (window, cx) = open_privacy(&access, cx);
+    click(SCREEN_RECORDING_RESET, cx);
+    click_modal_action(SCREEN_RECORDING.reset_confirm, cx);
+
+    access.set(
+        ScreenRecording,
+        Err(PermissionAccessError::PlatformUnavailable),
+    );
+    return_to_settings(cx);
+
+    assert_eq!(
+        status(&window, ScreenRecording, cx),
+        PermissionAccessStatus::Failed(PermissionAccessError::PlatformUnavailable)
+    );
+    assert_eq!(shown_state(&window, ScreenRecording, cx), Some("Waiting"));
+    assert_eq!(action(&window, ScreenRecording, cx), None);
+    assert_eq!(
+        explanation(&window, ScreenRecording, cx),
+        "Resetting Screen Recording\u{2026}"
+    );
 }

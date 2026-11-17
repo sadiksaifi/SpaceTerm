@@ -18,7 +18,7 @@ use spaceterm_core::service::lane::{LaneReply, LaneRequest};
 
 use super::capture_access::{
     CaptureAccess, CaptureAccessError, CaptureAuthorization, CaptureAuthorizationCompletion,
-    CaptureDevice,
+    CaptureDevice, CaptureResetCompletion,
 };
 use super::permission_access::{
     AccessibilityNaming, PermissionAccess, PermissionAccessError, PermissionAccessObservation,
@@ -240,6 +240,27 @@ impl CorePermissionAccess {
         }
     }
 
+    /// Asks the server to forget the system's decision for `permission`, its own entry only. The
+    /// completion follows a fresh read, so a read made on completion reflects the reset. Returns
+    /// whether the work started.
+    fn reset_permission(
+        &self,
+        permission: core_permissions::SystemPermission,
+        completion: Box<dyn FnOnce(Result<(), Failure>) + Send>,
+    ) -> bool {
+        let request = LaneRequest::ResetPermission { permission };
+        self.spawn("spaceterm-permission-reset", move |shared| {
+            let result = shared
+                .call(&request, CHANGE_LIMIT)
+                .and_then(|reply| match reply {
+                    LaneReply::PermissionReset => Ok(()),
+                    _ => Err(Failure::Unavailable),
+                });
+            shared.record(shared.read());
+            completion(result);
+        })
+    }
+
     fn spawn(&self, name: &str, work: impl FnOnce(&Arc<Shared>) + Send + 'static) -> bool {
         let shared = Arc::clone(&self.shared);
         std::thread::Builder::new()
@@ -446,23 +467,12 @@ impl PermissionAccess for CorePermissionAccess {
         permission: SystemPermission,
         completion: PermissionResetCompletion,
     ) -> Result<(), PermissionAccessError> {
-        let request = LaneRequest::ResetPermission {
-            permission: core_permission(permission),
-        };
-        let spawned = self.spawn("spaceterm-permission-reset", move |shared| {
-            let result = shared
-                .call(&request, CHANGE_LIMIT)
-                .and_then(|reply| match reply {
-                    LaneReply::PermissionReset => Ok(()),
-                    _ => Err(Failure::Unavailable),
-                });
-            // The completion follows a fresh read, so a read made on completion reflects the reset.
-            shared.record(shared.read());
-            completion(result.map_err(Into::into));
-        });
-        spawned
-            .then_some(())
-            .ok_or(PermissionAccessError::PlatformUnavailable)
+        self.reset_permission(
+            core_permission(permission),
+            Box::new(move |result| completion(result.map_err(Into::into))),
+        )
+        .then_some(())
+        .ok_or(PermissionAccessError::PlatformUnavailable)
     }
 }
 
@@ -525,6 +535,23 @@ impl CaptureAccess for CorePermissionAccess {
         (self.open)(core_permissions::settings_uri(capture_permission(device)))
             .then_some(())
             .ok_or(CaptureAccessError::PlatformRejected)
+    }
+
+    fn can_reset(&self) -> bool {
+        matches!(self.shared.latest(), Some(Ok(report)) if report.resettable)
+    }
+
+    fn reset(
+        &self,
+        device: CaptureDevice,
+        completion: CaptureResetCompletion,
+    ) -> Result<(), CaptureAccessError> {
+        self.reset_permission(
+            capture_permission(device),
+            Box::new(move |result| completion(result.map_err(Into::into))),
+        )
+        .then_some(())
+        .ok_or(CaptureAccessError::PlatformUnavailable)
     }
 }
 
@@ -654,7 +681,11 @@ mod tests {
             access.accessibility_naming(),
             AccessibilityNaming::Accessibility
         );
-        assert!(access.can_reset());
+        assert!(PermissionAccess::can_reset(&access));
+        assert!(
+            CaptureAccess::can_reset(&access),
+            "the server resets its own capture grants too"
+        );
         assert_eq!(
             PermissionAccess::holder(&access),
             PermissionHolder::Core {
@@ -678,7 +709,8 @@ mod tests {
             CaptureAccess::authorization(&access, CaptureDevice::Microphone),
             Err(CaptureAccessError::PlatformUnavailable)
         );
-        assert!(!access.can_reset());
+        assert!(!PermissionAccess::can_reset(&access));
+        assert!(!CaptureAccess::can_reset(&access));
         assert_eq!(
             PermissionAccess::holder(&access),
             PermissionHolder::Core {
@@ -885,15 +917,42 @@ mod tests {
         });
         let access = access(&lane);
         let (sender, reset) = std::sync::mpsc::channel();
-        access
-            .reset(
-                SystemPermission::ScreenRecording,
-                Box::new(move |result| sender.send(result).unwrap()),
-            )
-            .unwrap();
+        PermissionAccess::reset(
+            &access,
+            SystemPermission::ScreenRecording,
+            Box::new(move |result| sender.send(result).unwrap()),
+        )
+        .unwrap();
         assert_eq!(
             reset.recv_timeout(Duration::from_secs(5)).unwrap(),
             Err(PermissionAccessError::PlatformRejected)
+        );
+    }
+
+    /// A capture reset asks the server to forget exactly that device's decision.
+    #[test]
+    fn a_capture_reset_asks_the_server_to_forget_that_device() {
+        let lane = Arc::new(ScriptedLane::default());
+        lane.replies
+            .lock()
+            .unwrap()
+            .push(LaneReply::PermissionReset);
+        let access = access(&lane);
+        let (sender, reset) = std::sync::mpsc::channel();
+        CaptureAccess::reset(
+            &access,
+            CaptureDevice::Camera,
+            Box::new(move |result| sender.send(result).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(reset.recv_timeout(Duration::from_secs(5)).unwrap(), Ok(()));
+        assert!(
+            lane.requests
+                .lock()
+                .unwrap()
+                .contains(&LaneRequest::ResetPermission {
+                    permission: core_permissions::SystemPermission::Camera,
+                })
         );
     }
 

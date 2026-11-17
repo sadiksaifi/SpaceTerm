@@ -16,11 +16,14 @@ use crate::settings::SettingsDocument;
 use crate::settings::storage::testing::MemoryStorage;
 use crate::ui::appearance_runtime;
 
+use super::super::access_row::{AccessAction, AccessControl, CaptionKind};
 use super::super::{SettingsSectionId, SettingsWindow};
-use super::{
-    CHECK_AGAIN, CONTROL, NotificationAccessAction, NotificationAccessStatus, OPEN_SETTINGS,
-    REQUEST,
-};
+use super::{NotificationAccessStatus, SELECTORS};
+
+const CONTROL: &str = SELECTORS.control;
+const ALLOW: &str = SELECTORS.allow;
+const OPEN_SETTINGS: &str = SELECTORS.open_settings;
+const CHECK_AGAIN: &str = SELECTORS.check_again;
 
 type ReadResult = Result<NotificationAccessState, NotificationAccessError>;
 
@@ -118,18 +121,41 @@ fn status(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> Notifi
     window.read_with(cx, |window, _| window.notification_access.status)
 }
 
-fn action(
-    window: &Entity<SettingsWindow>,
-    cx: &mut VisualTestContext,
-) -> Option<NotificationAccessAction> {
+fn action(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> Option<AccessAction> {
     window.read_with(cx, |window, _| {
-        window.notification_access.presentation().action
+        match window.notification_access.presentation().control {
+            AccessControl::Action(action) => Some(action),
+            AccessControl::Status { .. } => None,
+        }
     })
 }
 
-fn explanation(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> &'static str {
+/// The state the row shows in place of a button, when it has no next step.
+fn shown_state(
+    window: &Entity<SettingsWindow>,
+    cx: &mut VisualTestContext,
+) -> Option<&'static str> {
     window.read_with(cx, |window, _| {
-        window.notification_access.presentation().explanation
+        match window.notification_access.presentation().control {
+            AccessControl::Status { label, .. } => Some(label),
+            AccessControl::Action(_) => None,
+        }
+    })
+}
+
+fn explanation(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> String {
+    window.read_with(cx, |window, _| {
+        window
+            .notification_access
+            .presentation()
+            .caption
+            .to_string()
+    })
+}
+
+fn caption_kind(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> CaptionKind {
+    window.read_with(cx, |window, _| {
+        window.notification_access.presentation().caption_kind
     })
 }
 
@@ -146,8 +172,7 @@ fn privacy_section_presents_notifications_as_their_own_group(cx: &mut TestAppCon
         "settings-section-privacy-group-notifications",
         "settings-row-notifications-access",
         CONTROL,
-        "settings-notifications-access-state-not-requested",
-        REQUEST,
+        ALLOW,
         "settings-row-terminal-attention-notifications",
         super::TERMINAL_ATTENTION,
     ] {
@@ -160,19 +185,18 @@ fn request_access_asks_once_and_presents_the_decision_read_afterwards(cx: &mut T
     let access = ScriptedNotificationAccess::new(Ok(NotificationAccessState::NotDetermined));
     let (window, cx) = open_privacy(Some(access.clone()), cx);
 
-    click(REQUEST, cx);
+    click(ALLOW, cx);
     assert_eq!(status(&window, cx), NotificationAccessStatus::Requesting);
-    assert_eq!(
-        action(&window, cx),
-        Some(NotificationAccessAction::Requesting)
-    );
+    assert_eq!(action(&window, cx), None);
+    assert_eq!(shown_state(&window, cx), Some("Waiting"));
+    assert_eq!(caption_kind(&window, cx), CaptionKind::Waiting);
     // The prompt activates and deactivates the window; that read cannot replace the request.
     let reads = access.reads.get();
     cx.deactivate_window();
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     assert_eq!(access.reads.get(), reads);
-    click(REQUEST, cx);
+    window.update(cx, |settings, cx| settings.request_notification_access(cx));
     assert_eq!(access.requests.get(), 1);
 
     access.state.set(Ok(NotificationAccessState::Allowed));
@@ -184,6 +208,7 @@ fn request_access_asks_once_and_presents_the_decision_read_afterwards(cx: &mut T
         NotificationAccessStatus::State(NotificationAccessState::Allowed)
     );
     assert_eq!(action(&window, cx), None);
+    assert_eq!(shown_state(&window, cx), Some("Allowed"));
 }
 
 #[gpui::test]
@@ -191,7 +216,7 @@ fn a_failed_request_offers_check_again(cx: &mut TestAppContext) {
     let access = ScriptedNotificationAccess::new(Ok(NotificationAccessState::NotDetermined));
     let (window, cx) = open_privacy(Some(access.clone()), cx);
 
-    click(REQUEST, cx);
+    click(ALLOW, cx);
     access.take_request()(Err(NotificationAccessError::Rejected));
     cx.run_until_parked();
 
@@ -200,10 +225,8 @@ fn a_failed_request_offers_check_again(cx: &mut TestAppContext) {
         NotificationAccessStatus::Failed(NotificationAccessError::Rejected)
     );
     assert_eq!(explanation(&window, cx), "Notification request failed.");
-    assert_eq!(
-        action(&window, cx),
-        Some(NotificationAccessAction::CheckAgain)
-    );
+    assert_eq!(caption_kind(&window, cx), CaptionKind::Error);
+    assert_eq!(action(&window, cx), Some(AccessAction::CheckAgain));
 }
 
 #[gpui::test]
@@ -221,7 +244,7 @@ fn each_state_that_hides_notifications_opens_system_settings(cx: &mut TestAppCon
         cx.run_until_parked();
         assert_eq!(
             action(&window, cx),
-            Some(NotificationAccessAction::OpenSettings),
+            Some(AccessAction::OpenSettings),
             "{state:?}"
         );
     }
@@ -282,10 +305,7 @@ fn a_failed_read_offers_check_again_which_reads_again(cx: &mut TestAppContext) {
         explanation(&window, cx),
         "Couldn\u{2019}t check notifications."
     );
-    assert_eq!(
-        action(&window, cx),
-        Some(NotificationAccessAction::CheckAgain)
-    );
+    assert_eq!(action(&window, cx), Some(AccessAction::CheckAgain));
     access.state.set(Ok(NotificationAccessState::Allowed));
     click(CHECK_AGAIN, cx);
 
@@ -306,21 +326,16 @@ fn a_desktop_without_per_application_grants_reports_its_notification_service(
         explanation(&window, cx),
         "No notification service is running on this desktop."
     );
-    assert_eq!(
-        action(&window, cx),
-        Some(NotificationAccessAction::CheckAgain)
-    );
+    assert_eq!(action(&window, cx), Some(AccessAction::CheckAgain));
     access
         .state
         .set(Ok(NotificationAccessState::ServiceAvailable));
     click(CHECK_AGAIN, cx);
 
     assert_eq!(action(&window, cx), None);
-    assert!(
-        cx.debug_bounds("settings-notifications-access-state-available")
-            .is_some()
-    );
-    assert!(cx.debug_bounds(REQUEST).is_none());
+    assert_eq!(shown_state(&window, cx), Some("Available"));
+    assert!(cx.debug_bounds(SELECTORS.status).is_some());
+    assert!(cx.debug_bounds(ALLOW).is_none());
     assert!(cx.debug_bounds(OPEN_SETTINGS).is_none());
 }
 
@@ -330,8 +345,6 @@ fn without_a_capability_the_row_says_notifications_are_unavailable(cx: &mut Test
 
     assert_eq!(status(&window, cx), NotificationAccessStatus::Unsupported);
     assert_eq!(action(&window, cx), None);
-    assert!(
-        cx.debug_bounds("settings-notifications-access-state-unavailable")
-            .is_some()
-    );
+    assert_eq!(shown_state(&window, cx), Some("Unavailable"));
+    assert_eq!(explanation(&window, cx), "Unavailable on this platform.");
 }

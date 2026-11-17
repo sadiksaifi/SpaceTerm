@@ -1,11 +1,12 @@
 //! The server's macOS System Permissions, which TCC keys to the server bundle's identifier and
 //! signature.
 //!
-//! Reads run in a probe child. Requests run in the server itself, the responsible process whose
-//! prompt and System Settings entry name the server.
+//! Reads run in a probe child, and requests run in a request child. Each child inherits the
+//! server's responsibility, so its prompt and System Settings entry name the server, and a fresh
+//! process holds no cached answer: a request made after a reset prompts again.
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use super::probe::{self, Probe};
@@ -19,6 +20,13 @@ use crate::service::{Layout, bundle_identifier, bundle_name};
 const TCCUTIL: &str = "/usr/bin/tccutil";
 /// Both tools answer within a second. A slower one is stuck and is stopped.
 const TOOL_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a capture request waits for the person to answer the system prompt. The desktop reads
+/// the decision for as long.
+const PROMPT_LIMIT: Duration = Duration::from_secs(600);
+/// The time a capture request child is given beyond its own limit before the server stops it.
+const PROMPT_GRACE: Duration = Duration::from_secs(5);
+/// How often a waiting capture request child checks that its server still runs.
+const PARENT_POLL: Duration = Duration::from_millis(500);
 
 /// The privacy service `tccutil` names for each permission.
 const fn tcc_service(permission: SystemPermission) -> &'static str {
@@ -70,7 +78,7 @@ impl MacosSystemPermissions {
             )
             .and_then(|(layout, executable)| own_bundle(&executable, layout))
             .filter(|_| launched);
-        Self::with(identity, bundle, Box::new(System))
+        Self::with(identity, bundle, Box::new(System::default()))
     }
 
     /// `bundle` is the server's own bundle when launchd started the server from it, which makes
@@ -311,29 +319,29 @@ fn capture_state(capture: Capture) -> PermissionState {
 }
 
 /// The system itself.
-struct System;
+#[derive(Default)]
+struct System {
+    prompts: PromptChildren,
+}
 
 impl Native for System {
     fn probe(&self) -> Result<Probe, PermissionError> {
         probe::run()
     }
 
-    /// Screen Recording and Accessibility list the requesting process only once per process, so
-    /// each request runs in a fresh child, which inherits the server's responsibility as a
-    /// Terminal Session's programs do.
+    /// Each request runs in a fresh child, which inherits the server's responsibility as a
+    /// Terminal Session's programs do. A process lists itself and shows a prompt only once, so the
+    /// long-running server could not ask again after a reset.
     fn request(&self, permission: SystemPermission) -> Result<(), PermissionError> {
-        match permission {
-            SystemPermission::Microphone => request_capture(Capture::Audio),
-            SystemPermission::Camera => request_capture(Capture::Video),
-            SystemPermission::ScreenRecording | SystemPermission::Accessibility => {
-                let executable =
-                    std::env::current_exe().map_err(|_| PermissionError::Unavailable)?;
-                run_tool(
-                    Command::new(executable)
-                        .args(request_arguments(permission))
-                        .env_clear(),
-                )
-            }
+        let executable = std::env::current_exe().map_err(|_| PermissionError::Unavailable)?;
+        let mut command = Command::new(executable);
+        command.args(request_arguments(permission)).env_clear();
+        if permission.prompts() {
+            // The child waits for the person's answer, so the request returns once it starts.
+            self.prompts
+                .start(permission, &mut command, PROMPT_LIMIT + PROMPT_GRACE)
+        } else {
+            run_tool(&mut command)
         }
     }
 
@@ -388,7 +396,8 @@ fn request_arguments(permission: SystemPermission) -> [&'static str; 3] {
 }
 
 /// The request role: asks the system for `permission` from this process, which lists this
-/// process's responsible bundle in System Settings and may show the system's prompt.
+/// process's responsible bundle in System Settings and may show the system's prompt. A capture
+/// request waits for the person's answer, up to [`PROMPT_LIMIT`].
 pub(super) fn request_in_process(permission: SystemPermission) -> Result<(), PermissionError> {
     match permission {
         SystemPermission::Microphone => request_capture(Capture::Audio),
@@ -407,14 +416,46 @@ fn request_capture(capture: Capture) -> Result<(), PermissionError> {
     use objc2::runtime::Bool;
     use objc2_av_foundation::AVCaptureDevice;
     let media_type = Capture::media_type()(capture).ok_or(PermissionError::Unavailable)?;
-    // The decision reaches the probe's next read, so the completion keeps nothing.
-    let completion = RcBlock::new(|_: Bool| {});
+    // The decision reaches the probe's next read, so the completion only reports that it came.
+    let (sender, decided) = std::sync::mpsc::sync_channel(1);
+    let completion = RcBlock::new(move |_: Bool| {
+        let _ = sender.try_send(());
+    });
     // SAFETY: The media type is valid here. AVCaptureDevice copies the escaping block, which
-    // captures nothing and runs on an arbitrary queue.
+    // captures only a sender that may be used from any thread, and runs it on an arbitrary queue.
     unsafe {
         AVCaptureDevice::requestAccessForMediaType_completionHandler(media_type, &completion);
     }
+    // SAFETY: getppid reads this process's parent and cannot fail.
+    let parent = unsafe { libc::getppid() };
+    // SAFETY: As above.
+    wait_for_answer(&decided, PROMPT_LIMIT, PARENT_POLL, || unsafe {
+        libc::getppid() == parent
+    });
     Ok(())
+}
+
+/// Keeps a capture request child, which owns its prompt, until the person answers, `limit`
+/// passes, or the server that asked ends. A child whose server ended has no one to report to, so
+/// it stops asking instead of outliving the server.
+fn wait_for_answer(
+    decided: &std::sync::mpsc::Receiver<()>,
+    limit: Duration,
+    poll: Duration,
+    server_runs: impl Fn() -> bool,
+) {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        match decided.recv_timeout(poll.min(left)) {
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if !server_runs() => return,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
 }
 
 fn request_accessibility() -> Result<(), PermissionError> {
@@ -441,6 +482,56 @@ fn request_accessibility() -> Result<(), PermissionError> {
     Ok(())
 }
 
+/// The capture request children still waiting for an answer, at most one for each permission.
+#[derive(Default)]
+struct PromptChildren {
+    waiting: Arc<Mutex<Vec<SystemPermission>>>,
+}
+
+impl PromptChildren {
+    /// Starts `command` as the child that asks for `permission` and returns. A child already
+    /// waiting for the same permission keeps asking, so a repeated request starts nothing. A
+    /// thread owns each child from the start: it reaps the child, stops one that outlives
+    /// `limit`, and then lets the permission be asked again.
+    fn start(
+        &self,
+        permission: SystemPermission,
+        command: &mut Command,
+        limit: std::time::Duration,
+    ) -> Result<(), PermissionError> {
+        let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
+        if waiting.contains(&permission) {
+            return Ok(());
+        }
+        // The owner starts before the child, so no child is ever left without one.
+        let (hand_over, owned) = std::sync::mpsc::channel::<std::process::Child>();
+        let release = Arc::clone(&self.waiting);
+        std::thread::Builder::new()
+            .name("spaceterm-permission-prompt".to_owned())
+            .spawn(move || {
+                if let Ok(mut child) = owned.recv() {
+                    let _ = probe::wait_bounded(&mut child, limit);
+                }
+                release
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .retain(|waiting| *waiting != permission);
+            })
+            .map_err(|_| PermissionError::Unavailable)?;
+        // The owner waits for this lock before it releases the permission, so the entry made
+        // here is the one it removes, also when the child fails to start.
+        waiting.push(permission);
+        let child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| PermissionError::Unavailable)?;
+        let _ = hand_over.send(child);
+        Ok(())
+    }
+}
+
 fn run_tool(command: &mut Command) -> Result<(), PermissionError> {
     let mut child = command
         .stdin(Stdio::null())
@@ -458,7 +549,6 @@ fn run_tool(command: &mut Command) -> Result<(), PermissionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     /// Native effects whose readings and failures the test scripts, recording each effect.
     #[derive(Default)]
@@ -824,6 +914,113 @@ mod tests {
 
     #[test]
     fn this_macos_reports_its_major_version() {
-        assert!(System.os_major().is_some_and(|major| major >= 26));
+        assert!(
+            System::default()
+                .os_major()
+                .is_some_and(|major| major >= 26)
+        );
+    }
+
+    /// Waits until no child asks for `permission`, as its owner thread reports.
+    fn released(prompts: &PromptChildren, permission: SystemPermission) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if !prompts.waiting.lock().unwrap().contains(&permission) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    /// A child still waiting for an answer takes every repeated request for its permission, so
+    /// repeated requests never stack children; another permission asks for itself.
+    #[test]
+    fn a_waiting_prompt_child_takes_repeated_requests_for_its_permission() {
+        let prompts = PromptChildren::default();
+        let limit = Duration::from_millis(500);
+        let mut waiting = Command::new("/bin/sleep");
+        waiting.arg("30");
+        assert_eq!(
+            prompts.start(SystemPermission::Microphone, &mut waiting, limit),
+            Ok(())
+        );
+
+        // This command cannot start, so success proves the waiting child took the request.
+        let mut missing = Command::new("/nonexistent/spaceterm");
+        assert_eq!(
+            prompts.start(SystemPermission::Microphone, &mut missing, limit),
+            Ok(())
+        );
+        assert_eq!(
+            prompts.start(SystemPermission::Camera, &mut missing, limit),
+            Err(PermissionError::Unavailable)
+        );
+
+        // The owner stops the child at its limit, and the permission can be asked again.
+        assert!(released(&prompts, SystemPermission::Microphone));
+        assert_eq!(
+            prompts.start(SystemPermission::Microphone, &mut missing, limit),
+            Err(PermissionError::Unavailable)
+        );
+    }
+
+    /// A child that ends, or never starts, leaves its permission free to be asked again.
+    #[test]
+    fn an_ended_prompt_child_releases_its_permission() {
+        let prompts = PromptChildren::default();
+        let limit = Duration::from_secs(5);
+        let mut missing = Command::new("/nonexistent/spaceterm");
+        assert_eq!(
+            prompts.start(SystemPermission::Camera, &mut missing, limit),
+            Err(PermissionError::Unavailable)
+        );
+        assert!(released(&prompts, SystemPermission::Camera));
+
+        let mut answered = Command::new("/usr/bin/true");
+        assert_eq!(
+            prompts.start(SystemPermission::Camera, &mut answered, limit),
+            Ok(())
+        );
+        assert!(released(&prompts, SystemPermission::Camera));
+    }
+
+    /// A waiting capture request child returns when the person answers, when its server ends, or
+    /// at its limit, whichever comes first.
+    #[test]
+    fn a_waiting_capture_child_stops_when_answered_or_when_its_server_ends() {
+        let poll = Duration::from_millis(5);
+        let limit = Duration::from_secs(30);
+
+        let (answer, decided) = std::sync::mpsc::sync_channel(1);
+        answer.send(()).unwrap();
+        let started = std::time::Instant::now();
+        wait_for_answer(&decided, limit, poll, || true);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "an answer ends the wait"
+        );
+
+        let (_answer, decided) = std::sync::mpsc::sync_channel::<()>(1);
+        let checks = std::cell::Cell::new(0);
+        let started = std::time::Instant::now();
+        wait_for_answer(&decided, limit, poll, || {
+            checks.set(checks.get() + 1);
+            checks.get() < 3
+        });
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "an ended server ends the wait"
+        );
+        assert_eq!(checks.get(), 3);
+
+        let (_answer, decided) = std::sync::mpsc::sync_channel::<()>(1);
+        let started = std::time::Instant::now();
+        wait_for_answer(&decided, Duration::from_millis(50), poll, || true);
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the limit ends the wait"
+        );
     }
 }

@@ -273,12 +273,21 @@ impl PermissionSetup {
         self.failures
             .retain(|(permission, _)| !requested.contains(permission));
         if let Some(run) = &mut self.run {
+            // A permission asked for again after its grant, as a reset asks, starts over. Its
+            // guide would otherwise keep reporting the grant the reset removed.
+            let restart = run.step == SetupStep::Granted && requested.contains(&run.permission);
             for permission in requested {
                 if permission != run.permission && !run.queued.contains(&permission) {
                     run.queued.push_back(permission);
                 }
             }
             match run.step {
+                SetupStep::Granted if restart => {
+                    self.dismiss_guide(cx);
+                    self.prepare(cx);
+                    cx.notify();
+                    return;
+                }
                 SetupStep::Opening | SetupStep::Guiding => {
                     let _ = self.access.open_settings(run.permission);
                 }

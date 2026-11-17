@@ -5,7 +5,7 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Task, div};
+use gpui::{AnyElement, Task};
 use spaceterm_ui::{Switch, ToggleSize};
 
 use crate::platform::notification_access::{
@@ -13,14 +13,21 @@ use crate::platform::notification_access::{
 };
 use crate::settings::notifications::NotificationPreferences;
 use crate::ui::appearance::ChromeAppearance;
-use crate::ui::sidebar_window::form::{action_button, badge};
 
+use super::access_row::{
+    self, AccessAction, AccessControl, AccessPresentation, AccessSelectors, CaptionKind,
+};
 use super::{SettingsRowId, SettingsWindow};
 
-pub(super) const CONTROL: &str = "settings-notifications-access-control";
-pub(super) const REQUEST: &str = "settings-notifications-access-request";
-pub(super) const OPEN_SETTINGS: &str = "settings-notifications-access-open-settings";
-pub(super) const CHECK_AGAIN: &str = "settings-notifications-access-check-again";
+pub(super) const SELECTORS: AccessSelectors = AccessSelectors {
+    control: "settings-notifications-access-control",
+    status: "settings-notifications-access-status",
+    allow: "settings-notifications-access-allow",
+    open_settings: "settings-notifications-access-open-settings",
+    cancel: "settings-notifications-access-cancel",
+    check_again: "settings-notifications-access-check-again",
+    progress: "settings-notifications-access-progress",
+};
 pub(super) const TERMINAL_ATTENTION: &str = "settings-terminal-attention-notifications";
 
 const PURPOSE: &str = "SpaceTerm notifies you when a terminal needs attention or an update is due.";
@@ -49,26 +56,6 @@ pub(super) enum NotificationAccessStatus {
     Requesting,
     /// Authorization could not be read or requested.
     Failed(NotificationAccessError),
-}
-
-/// The action the row offers for its status, when there is one worth offering.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum NotificationAccessAction {
-    Request,
-    /// The request button, withheld while the system prompt is answered.
-    Requesting,
-    OpenSettings,
-    CheckAgain,
-}
-
-/// The row's complete presentation, derived from status alone so every state reads one way.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct NotificationAccessPresentation {
-    pub(super) state: &'static str,
-    /// Names the state badge, so a test can tell each state apart by geometry.
-    pub(super) state_selector: &'static str,
-    pub(super) explanation: &'static str,
-    pub(super) action: Option<NotificationAccessAction>,
 }
 
 /// Owns the injected capability, the last known status, and the bridges that return native
@@ -116,92 +103,73 @@ impl NotificationAccessRow {
         )
     }
 
-    pub(super) fn presentation(&self) -> NotificationAccessPresentation {
-        use NotificationAccessAction as Action;
+    pub(super) fn presentation(&self) -> AccessPresentation {
         use NotificationAccessState as State;
         use NotificationAccessStatus as Status;
 
-        let (state, state_selector, explanation, action) = match self.status {
+        let status = |label, allowed| AccessControl::Status { label, allowed };
+        let open_settings = AccessControl::Action(AccessAction::OpenSettings);
+        let check_again = AccessControl::Action(AccessAction::CheckAgain);
+        let (control, caption_kind, caption) = match self.status {
             Status::Unsupported => (
-                "Unavailable",
-                "settings-notifications-access-state-unavailable",
+                status("Unavailable", false),
+                CaptionKind::Guidance,
                 "Unavailable on this platform.",
-                None,
             ),
-            Status::Checking => (
-                "Checking",
-                "settings-notifications-access-state-checking",
-                PURPOSE,
-                None,
-            ),
+            Status::Checking => (status("Checking", false), CaptionKind::Guidance, PURPOSE),
             Status::State(State::NotDetermined) => (
-                "Not requested",
-                "settings-notifications-access-state-not-requested",
+                AccessControl::Action(AccessAction::Allow),
+                CaptionKind::Guidance,
                 PURPOSE,
-                Some(Action::Request),
             ),
             Status::Requesting => (
-                "Requesting",
-                "settings-notifications-access-state-requesting",
+                status("Waiting", false),
+                CaptionKind::Waiting,
                 "Respond to the system prompt.",
-                Some(Action::Requesting),
             ),
-            Status::State(State::Allowed) => (
-                "Allowed",
-                "settings-notifications-access-state-allowed",
-                PURPOSE,
-                None,
-            ),
+            Status::State(State::Allowed) => {
+                (status("Allowed", true), CaptionKind::Guidance, PURPOSE)
+            }
             Status::State(State::Quiet) => (
-                "Delivered quietly",
-                "settings-notifications-access-state-quiet",
+                open_settings,
+                CaptionKind::Guidance,
                 "Notifications appear only in Notification Center, without alerts.",
-                Some(Action::OpenSettings),
             ),
             Status::State(State::Hidden) => (
-                "Hidden",
-                "settings-notifications-access-state-hidden",
+                open_settings,
+                CaptionKind::Guidance,
                 "Alerts and Notification Center are both off, so notifications don\u{2019}t appear.",
-                Some(Action::OpenSettings),
             ),
-            Status::State(State::Denied) => (
-                "Denied",
-                "settings-notifications-access-state-denied",
-                PURPOSE,
-                Some(Action::OpenSettings),
-            ),
+            Status::State(State::Denied) => (open_settings, CaptionKind::Guidance, PURPOSE),
             Status::State(State::ServiceAvailable) => (
-                "Available",
-                "settings-notifications-access-state-available",
+                status("Available", true),
+                CaptionKind::Guidance,
                 "This desktop\u{2019}s notification service shows SpaceTerm\u{2019}s notifications.",
-                None,
             ),
             Status::State(State::ServiceUnavailable) => (
-                "Unavailable",
-                "settings-notifications-access-state-unavailable",
+                check_again,
+                CaptionKind::Error,
                 "No notification service is running on this desktop.",
-                Some(Action::CheckAgain),
             ),
             Status::Failed(error) => (
-                "Unavailable",
-                "settings-notifications-access-state-unavailable",
+                check_again,
+                CaptionKind::Error,
                 match error {
                     NotificationAccessError::Unavailable => "Couldn\u{2019}t check notifications.",
                     NotificationAccessError::Rejected => "Notification request failed.",
                 },
-                Some(Action::CheckAgain),
             ),
         };
-        let explanation = if self.recovery_failure.is_some() && self.opens_settings() {
-            open_failed()
+        let (caption_kind, caption) = if self.recovery_failure.is_some() && self.opens_settings() {
+            (CaptionKind::Error, open_failed())
         } else {
-            explanation
+            (caption_kind, caption)
         };
-        NotificationAccessPresentation {
-            state,
-            state_selector,
-            explanation,
-            action,
+        AccessPresentation {
+            control,
+            caption: caption.into(),
+            caption_kind,
+            resettable: false,
         }
     }
 }
@@ -289,56 +257,22 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    /// The state badge and, when one applies, the action beside it.
+    /// The row's one trailing control: its next step, or its state.
     pub(super) fn render_notification_access(
         &mut self,
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let presentation = self.notification_access.presentation();
-        let state_selector = presentation.state_selector;
+        let control = self.notification_access.presentation().control;
         let owner = cx.weak_entity();
-        let action = presentation.action.map(|action| match action {
-            NotificationAccessAction::Request | NotificationAccessAction::Requesting => {
-                action_button(
-                    REQUEST,
-                    "Request Access\u{2026}",
-                    action == NotificationAccessAction::Request,
-                    move |_, cx| {
-                        let _ = owner.update(cx, |settings, cx| {
-                            settings.request_notification_access(cx);
-                        });
-                    },
-                )
-            }
-            NotificationAccessAction::OpenSettings => {
-                action_button(OPEN_SETTINGS, "Open System Settings", true, move |_, cx| {
-                    let _ = owner.update(cx, |settings, cx| {
-                        settings.open_notification_settings(cx);
-                    });
-                })
-            }
-            NotificationAccessAction::CheckAgain => {
-                action_button(CHECK_AGAIN, "Check Again", true, move |_, cx| {
-                    let _ = owner.update(cx, |settings, cx| {
-                        settings.refresh_notification_access(cx);
-                    });
-                })
-            }
-        });
-        div()
-            .debug_selector(|| CONTROL.to_owned())
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(appearance.spacing(8.0))
-            .child(
-                div()
-                    .debug_selector(move || state_selector.to_owned())
-                    .child(badge(state_selector, presentation.state, appearance)),
-            )
-            .children(action)
-            .into_any_element()
+        access_row::render_control(&SELECTORS, control, appearance, move |action, _, cx| {
+            let _ = owner.update(cx, |settings, cx| match action {
+                AccessAction::Allow => settings.request_notification_access(cx),
+                AccessAction::OpenSettings => settings.open_notification_settings(cx),
+                AccessAction::CheckAgain => settings.refresh_notification_access(cx),
+                AccessAction::Cancel => {}
+            });
+        })
     }
 
     pub(super) fn render_terminal_attention_notifications(
