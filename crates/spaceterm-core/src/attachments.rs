@@ -363,6 +363,13 @@ impl AttachmentPermit {
             Request::StartRestored {
                 core, size, style, ..
             } => (AttachmentClaim::Start { core: *core }, *size, style.clone()),
+            Request::PrepareRestored {
+                core, size, style, ..
+            } => (
+                AttachmentClaim::Prepare { core: *core },
+                *size,
+                style.clone(),
+            ),
             Request::TakeOver {
                 target,
                 size,

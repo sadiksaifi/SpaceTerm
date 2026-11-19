@@ -76,9 +76,41 @@ impl CorePaneHost {
             })?;
         self.start_directory(device, connection, size, style, directory)
     }
+    /// Starts this Pane's first Session in its startup directory with no client in control.
+    pub(super) fn start_unclaimed(
+        &mut self,
+        connection: [u8; 32],
+        size: PaneSize,
+        style: Option<PresentationStyle>,
+    ) -> Result<Lease, Refusal> {
+        size.validate().map_err(|_| Refusal::Unsupported)?;
+        let directory = local_filesystem()
+            .validate_directory(
+                self.identity
+                    .as_ref()
+                    .ok_or(Refusal::Missing)?
+                    .startup_directory(),
+            )
+            .map_err(|_| {
+                self.directory_unavailable = true;
+                Refusal::DirectoryUnavailable
+            })?;
+        self.start_controlled(None, connection, size, style, directory)
+    }
     pub(super) fn start_directory(
         &mut self,
         device: [u8; 32],
+        connection: [u8; 32],
+        size: PaneSize,
+        style: Option<PresentationStyle>,
+        directory: ValidatedLocalDirectory,
+    ) -> Result<Lease, Refusal> {
+        self.start_controlled(Some(device), connection, size, style, directory)
+    }
+    /// Starts a Session in `directory`, controlled by `device`, or by nobody.
+    fn start_controlled(
+        &mut self,
+        device: Option<[u8; 32]>,
         connection: [u8; 32],
         size: PaneSize,
         style: Option<PresentationStyle>,
@@ -116,11 +148,11 @@ impl CorePaneHost {
                 .map(|notifier| notifier(lease.session)),
         );
         self.pane = Some(OwnedPane {
-            device: Some(device),
+            device,
             attachment_generation: None,
             control_epoch: 1,
             lease,
-            connected: true,
+            connected: device.is_some(),
             runtime,
             subscription,
             screen: None,

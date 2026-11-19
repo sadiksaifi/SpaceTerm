@@ -229,12 +229,21 @@ pub struct PresentationStyle {
     pub bold_as_bright: bool,
 }
 
+/// The work minor that adds [`AttachmentClaim::Prepare`]. A client sends it only to a Core whose
+/// admission selected this minor or later (ADR 0035).
+pub const MINOR_PREPARE: u16 = 4;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum AttachmentClaim {
     Select {
         explicit: bool,
     },
     Start {
+        core: [u8; 32],
+    },
+    /// Starts a retained Pane's first Session in the background without granting control to
+    /// anyone, fenced by the current server boot. Work 1.4 adds it ([`MINOR_PREPARE`]).
+    Prepare {
         core: [u8; 32],
     },
     Repair {
@@ -326,6 +335,14 @@ pub enum Request {
     },
     /// Explicit first use of a retained Pane, fenced by stable identity and current server boot.
     StartRestored {
+        core: [u8; 32],
+        pane: [u8; 32],
+        size: PaneSize,
+        style: Option<PresentationStyle>,
+    },
+    /// Background first use of a retained Pane that no client controls afterwards, fenced by
+    /// stable identity and current server boot. Replied `Takeover`, naming no controller.
+    PrepareRestored {
         core: [u8; 32],
         pane: [u8; 32],
         size: PaneSize,

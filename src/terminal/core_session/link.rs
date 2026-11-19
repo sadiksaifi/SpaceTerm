@@ -1363,6 +1363,7 @@ impl PaneLink {
             // Claims need this Pane's attachment permit.
             Request::SelectPane { .. }
             | Request::StartRestored { .. }
+            | Request::PrepareRestored { .. }
             | Request::TakeOver { .. }
             | Request::RepairDirectory { .. }
             | Request::ClaimPane { .. } => Err(CoreError::Unsupported),

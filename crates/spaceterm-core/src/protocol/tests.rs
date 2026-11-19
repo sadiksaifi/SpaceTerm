@@ -293,6 +293,7 @@ fn every_operation_round_trips() {
     let claims = [
         AttachmentClaim::Select { explicit: true },
         AttachmentClaim::Start { core: [5; 32] },
+        AttachmentClaim::Prepare { core: [5; 32] },
         AttachmentClaim::Repair {
             target: target.clone(),
             replacement: Some(PathBuf::from("/tmp")),

@@ -23,6 +23,9 @@ mod runs;
 #[path = "workspaces/session_end_tests.rs"]
 mod session_end_tests;
 #[cfg(test)]
+#[path = "workspaces/prepare_tests.rs"]
+mod prepare_tests;
+#[cfg(test)]
 #[path = "workspaces/shell_exit_tests.rs"]
 mod shell_exit_tests;
 mod worktrees;
@@ -559,6 +562,31 @@ impl WorkspaceHost {
         }
         Ok(reply)
     }
+    /// Starts the first Session of a retained Pane in the background, with no client holding
+    /// its control, so a client prepares the Panes the person is likely to use without taking
+    /// them (ADR 0022). Only an unclaimed Pane with nothing running and no ended Session in this
+    /// run starts; anything else is observed as a plain selection observes it. A Pane another
+    /// client created stays theirs to start.
+    fn prepare(
+        &mut self,
+        device: Id,
+        connection: Id,
+        id: Id,
+        size: PaneSize,
+        style: Option<PresentationStyle>,
+    ) -> Result<Reply, Refusal> {
+        size.validate().map_err(|_| Refusal::Unsupported)?;
+        let creator = self.state.pane(id).ok_or(Refusal::Missing)?.2.creator;
+        let host = self.pane_host(id)?;
+        if host.pane.is_some()
+            || host.dormant.is_some()
+            || creator.is_some_and(|owner| owner != device)
+        {
+            return self.select(device, connection, id, Selection::Observe, size, style);
+        }
+        let lease = host.start_unclaimed(connection, size, style)?;
+        Ok(host.takeover(lease.into(), None, device))
+    }
     fn repair_directory(
         &mut self,
         device: Id,
@@ -837,6 +865,12 @@ impl WorkspaceHost {
                             return Err(Refusal::Stale);
                         }
                         self.select(device, connection, id, Selection::Start, size, style)?
+                    }
+                    AttachmentClaim::Prepare { core } => {
+                        if core != self.prototype.boot {
+                            return Err(Refusal::Stale);
+                        }
+                        self.prepare(device, connection, id, size, style)?
                     }
                     AttachmentClaim::TakeOver { target } => {
                         let host = self.pane_host(id)?;
