@@ -928,6 +928,15 @@ mod connection {
             CoreRestart::of(core.update_facts()?.as_ref())
         }
 
+        /// Whether the Core announced a confirmed Stop in its update facts, so losing its
+        /// connection is the Stop rather than an interruption.
+        fn stop_announced(&self) -> bool {
+            use spaceterm_core::update::facts::Operation;
+            self.directory_core()
+                .and_then(|core| core.update_facts())
+                .is_some_and(|facts| matches!(facts.operation, Some(Operation::Stopping)))
+        }
+
         /// The version the Core last failed to start into, as its update facts report it.
         fn start_failure(&self) -> Option<spaceterm_core::update::facts::Version> {
             use spaceterm_core::update::facts::FailureKind;
@@ -1155,6 +1164,8 @@ mod connection {
         start_failure: Option<spaceterm_core::update::facts::Version>,
         /// The announced restart, until its deadline passes.
         restart: Option<CoreRestart>,
+        /// The Core announced a confirmed Stop, so its lost connection reads as that Stop.
+        stopping: bool,
         /// When this Pane first read the restart the Core announces now.
         restart_since: Option<std::time::Instant>,
         /// The last restart the Core announced since this Pane's Terminal Session ran.
@@ -1212,6 +1223,7 @@ mod connection {
                 running_version: connection.running_version(),
                 start_failure: connection.start_failure(),
                 restart: None,
+                stopping: false,
                 restart_since: None,
                 announced: None,
                 session_ran: None,
@@ -1274,8 +1286,10 @@ mod connection {
                     None
                 }
             };
-            let changed = restart != self.restart;
+            let stopping = self.connection.stop_announced();
+            let changed = restart != self.restart || stopping != self.stopping;
             self.restart = restart;
+            self.stopping = stopping;
             changed
         }
 
@@ -1661,6 +1675,13 @@ mod connection {
                 return None;
             }
             match self.status {
+                // A confirmed Stop ends the connection on purpose. Input stays paused and nothing
+                // says reconnecting; the stopped state follows once the Core is gone.
+                CorePaneStatus::Reconnecting | CorePaneStatus::TakeoverReconnecting
+                    if self.stopping =>
+                {
+                    None
+                }
                 CorePaneStatus::Reconnecting | CorePaneStatus::TakeoverReconnecting => Some((
                     SharedString::new_static("Reconnecting…"),
                     // The screen explains the unconfirmed start and offers its check, so the notice
