@@ -467,27 +467,32 @@ impl GroupMotion {
             .into_iter()
             .filter_map(|(row, (worktree, position))| {
                 let index = ids.iter().position(|id| *id == row)?;
+                // Everything comes from the frame the slot was last painted in.
                 let height = self.items.bounds_for_item(index)?.size.height;
-                let motion = self.rows.motion(row, cx);
+                let painted_at = self.rows.painted_at(cx);
+                let motion = self.rows.painted_motion(row, cx);
                 let reveal = motion.reveal(view::ROW_REVEAL);
-                let shown = |rows: Vec<DepartedRow<'_>>| {
-                    rows.into_iter()
-                        .map(|departed| {
+                let (before, after) = self.rows.leaving_beside(row);
+                let shown = |rows: &[super::drag_and_drop::Leaving<GroupRow>]| {
+                    rows.iter()
+                        .map(|leaving| {
                             (
-                                departed.row.cloned(),
-                                departed.extent,
-                                departed.opacity * departed.motion.reveal(view::ROW_REVEAL),
+                                leaving.id.and_then(|id| self.departed.get(&id)).cloned(),
+                                leaving.extent,
+                                leaving.opacity_at(painted_at)
+                                    * leaving.motion().reveal(view::ROW_REVEAL),
                             )
                         })
                         .collect()
                 };
-                let (before, after) = self.departed_beside(row, cx);
                 Some(DepartedSlot {
                     worktree: worktree.clone(),
                     position,
                     height,
                     reveal,
                     grows_from_end: motion.grows_from_end,
+                    leading_gap: motion.leading_gap,
+                    trailing_gap: motion.trailing_gap,
                     before: shown(before),
                     after: shown(after),
                 })
@@ -539,6 +544,9 @@ struct DepartedSlot {
     /// How opaque the row was as it grew in, and whether it grew from its slot's far end.
     reveal: f32,
     grows_from_end: bool,
+    /// How tall the closing gaps before it and after it were drawn.
+    leading_gap: Pixels,
+    trailing_gap: Pixels,
     /// The rows that had left from beside it and still drew in its gaps, as much of each as
     /// showed and how opaque each was.
     before: Vec<(Option<WorktreeRowViewModel>, Pixels, f32)>,

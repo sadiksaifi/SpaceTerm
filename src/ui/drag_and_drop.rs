@@ -95,7 +95,7 @@ pub(crate) struct ReorderableStrip<Id, Row = ()> {
     /// The selection moving to the selected row.
     flight: Option<Flight<Id, Row>>,
     /// The selection a removed item held, where it was last drawn, and when the item left.
-    departing_selection: Option<(Span, Instant)>,
+    departing_selection: Vec<DepartingSelection>,
     /// How far the strip was scrolled along its axis in the last frame.
     scrolled: Pixels,
     /// Whether the items of the last frame ran past the strip's visible end.
@@ -168,6 +168,26 @@ struct Flight<Id, Row> {
     ease: Ease,
 }
 
+/// The selection a removed item held, fading where it was last drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DepartingSelection {
+    span: Span,
+    /// When the item left.
+    left_at: Instant,
+    /// How opaque the selection was drawn as the item left, which a selection still fading in
+    /// had not reached in full.
+    from: f32,
+}
+
+impl DepartingSelection {
+    /// How opaque the selection still is at `now`.
+    fn opacity(&self, now: Instant) -> f32 {
+        let faded =
+            now.saturating_duration_since(self.left_at).as_secs_f32() / LEAVING_FADE.as_secs_f32();
+        self.from * (1.0 - faded.min(1.0))
+    }
+}
+
 /// Where a [`SelectionOverlay`] drew the selection, and when.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct DrawnSelection {
@@ -236,7 +256,7 @@ pub(crate) struct SelectionMotion {
     at: Instant,
     /// The selection a removed item held, where it was last drawn, and how opaque it still is as
     /// it fades there.
-    departing: Option<(Span, f32)>,
+    departing: Vec<(Span, f32)>,
     /// Where the overlay drew the selection last, and records where it draws it.
     drawn: Rc<Cell<Option<DrawnSelection>>>,
 }
@@ -348,7 +368,7 @@ impl Element for SelectionOverlay {
         let visible_length = viewport.size.along(axis);
         let target = self.place.take().and_then(|place| place(cx));
         let mut chips = Vec::new();
-        if let Some((span, opacity)) = self.motion.departing {
+        for (span, opacity) in self.motion.departing.iter().copied() {
             chips.push((
                 span.bounds(axis, visible_start, target.unwrap_or(viewport)),
                 opacity,
@@ -659,7 +679,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
             selected: None,
             drawn_selection: Rc::new(Cell::new(None)),
             flight: None,
-            departing_selection: None,
+            departing_selection: Vec::new(),
             scrolled: px(0.0),
             overflowing: false,
             natural_extent: None,
@@ -993,10 +1013,22 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
             });
             let drawn = self.drawn_selection.get().filter(|_| previous.is_some());
             // The selection a removed item held fades where it was last drawn, wherever that was
-            // on its way, with the item it fades beside.
-            self.departing_selection = drawn
-                .filter(|_| removed && motion != spaceterm_ui::ControlMotion::Reduced)
-                .map(|drawn| (drawn.span, now));
+            // on its way, and from as opaque as it was drawn, with the item it fades beside. A
+            // selection that only moves leaves every fading one to finish.
+            if let Some(drawn) =
+                drawn.filter(|_| removed && motion != spaceterm_ui::ControlMotion::Reduced)
+            {
+                let from = self
+                    .flight
+                    .as_ref()
+                    .filter(|flight| Some((flight.id, flight.row)) == previous && !flight.glides)
+                    .map_or(1.0, |flight| flight.ease.progress(now));
+                self.departing_selection.push(DepartingSelection {
+                    span: drawn.span,
+                    left_at: now,
+                    from,
+                });
+            }
             self.flight = selected
                 .filter(|_| self.lift.is_none() && motion != spaceterm_ui::ControlMotion::Reduced)
                 .and_then(|(id, row)| {
@@ -1036,13 +1068,9 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         {
             self.flight = None;
         }
-        if self
-            .departing_selection
-            .is_some_and(|(_, left_at)| now.saturating_duration_since(left_at) >= LEAVING_FADE)
-        {
-            self.departing_selection = None;
-        }
-        if self.flight.is_some() || self.departing_selection.is_some() {
+        self.departing_selection
+            .retain(|departing| now.saturating_duration_since(departing.left_at) < LEAVING_FADE);
+        if self.flight.is_some() || !self.departing_selection.is_empty() {
             window.request_animation_frame();
         }
     }
@@ -1073,12 +1101,10 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
             at: now,
             departing: self
                 .departing_selection
+                .iter()
                 .filter(|_| self.lift.is_none())
-                .map(|(span, left_at)| {
-                    let faded = now.saturating_duration_since(left_at).as_secs_f32()
-                        / LEAVING_FADE.as_secs_f32();
-                    (span, 1.0 - faded.min(1.0))
-                }),
+                .map(|departing| (departing.span, departing.opacity(now)))
+                .collect(),
             drawn: Rc::clone(&self.drawn_selection),
         }
     }
@@ -1441,6 +1467,11 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         }
     }
 
+    /// When the strip prepared its last frame.
+    pub(crate) fn painted_at(&self, cx: &App) -> Instant {
+        self.refreshed_at.unwrap_or_else(|| now(cx))
+    }
+
     /// The removed items whose place still closes before the item `id`, and after it, in
     /// presentation order.
     pub(crate) fn leaving_beside(&self, id: Id) -> (&[Leaving<Id>], &[Leaving<Id>]) {
@@ -1579,7 +1610,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
             self.leading_gaps.clear();
             self.trailing_gaps.clear();
             self.flight = None;
-            self.departing_selection = None;
+            self.departing_selection.clear();
             self.arriving = None;
             self.arrival = None;
         }
@@ -1715,7 +1746,16 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
 
     /// How the item `id` presents this frame.
     pub(crate) fn motion(&self, id: Id, cx: &App) -> ItemMotion {
-        let now = now(cx);
+        self.motion_at(id, now(cx))
+    }
+
+    /// How the item `id` presented in the last frame the strip prepared, which the strip's
+    /// last layout shows.
+    pub(crate) fn painted_motion(&self, id: Id, cx: &App) -> ItemMotion {
+        self.motion_at(id, self.painted_at(cx))
+    }
+
+    fn motion_at(&self, id: Id, now: Instant) -> ItemMotion {
         let slide = self.slides.get(&id);
         let entering = self
             .entering
@@ -2452,10 +2492,13 @@ impl<Id> Leaving<Id> {
         if presence_motion(cx) == spaceterm_ui::ControlMotion::Reduced {
             return 0.0;
         }
-        let faded = now(cx)
-            .saturating_duration_since(self.left_at)
-            .as_secs_f32()
-            / LEAVING_FADE.as_secs_f32();
+        self.opacity_at(now(cx))
+    }
+
+    /// How opaque the removed item drew at `now`.
+    pub(crate) fn opacity_at(&self, now: Instant) -> f32 {
+        let faded =
+            now.saturating_duration_since(self.left_at).as_secs_f32() / LEAVING_FADE.as_secs_f32();
         1.0 - faded.min(1.0)
     }
 }

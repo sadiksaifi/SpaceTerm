@@ -1327,6 +1327,9 @@ mod core_workspaces {
         views: BTreeMap<PaneId, CorePaneView>,
         screen_focus: BTreeMap<PaneId, gpui::FocusHandle>,
         pending_starts: std::cell::RefCell<std::collections::BTreeSet<PaneId>>,
+        /// The Panes this client created and asked to start a shell in, until the shell starts,
+        /// fails or ends.
+        shell_starts: std::cell::RefCell<std::collections::BTreeSet<PaneId>>,
         /// One hint for a change to any registered Pane's connection.
         changes: (async_channel::Sender<()>, async_channel::Receiver<()>),
     }
@@ -1356,6 +1359,7 @@ mod core_workspaces {
                 views: BTreeMap::new(),
                 screen_focus: BTreeMap::new(),
                 pending_starts: Default::default(),
+                shell_starts: Default::default(),
                 changes: async_channel::bounded(1),
             }
         }
@@ -1380,6 +1384,7 @@ mod core_workspaces {
                 self.pending_starts.borrow_mut().insert(pane_id);
             } else if self.pending_starts.borrow_mut().remove(&pane_id) {
                 state.start_created();
+                self.shell_starts.borrow_mut().insert(pane_id);
             }
             state.observe(self.changes.0.clone());
             self.opened
@@ -1389,6 +1394,25 @@ mod core_workspaces {
             view.set_machine_name(self.sessions.machine_name());
             self.views.insert(pane_id, view);
             self.screen_focus.insert(pane_id, screen_focus);
+        }
+
+        /// Whether this client created Pane `pane_id` and its shell is still starting or has just
+        /// attached, so a Pane the server reports no Terminal Session for is about to have one.
+        /// A shell that failed or ended, or whose Pane went offline or was taken over, is no
+        /// longer starting.
+        pub(crate) fn shell_starting(&self, pane_id: PaneId) -> bool {
+            use crate::terminal::core_session::CorePaneStatus;
+            let starting = self.views.get(&pane_id).is_some_and(|view| {
+                matches!(
+                    view.connection().status(),
+                    CorePaneStatus::Connecting | CorePaneStatus::Connected
+                )
+            });
+            let mut starts = self.shell_starts.borrow_mut();
+            if !starting {
+                starts.remove(&pane_id);
+            }
+            starting && starts.contains(&pane_id)
         }
 
         /// Hints after any registered Pane's connection changes. Read every view after each.
@@ -1401,6 +1425,7 @@ mod core_workspaces {
                 self.edits.defer_alias_retirement(previous);
             }
             self.pending_starts.borrow_mut().remove(&pane_id);
+            self.shell_starts.borrow_mut().remove(&pane_id);
             self.opened.remove(&pane_id);
             self.views.remove(&pane_id);
             self.screen_focus.remove(&pane_id);
@@ -3303,6 +3328,15 @@ mod core_workspaces {
     }
 
     impl WorkspaceCloseApproval {
+        /// The reviewed Panes that run no Terminal Session the server has reported.
+        pub(crate) fn panes_without_session(&self) -> impl Iterator<Item = Id> + '_ {
+            self.confirmation
+                .panes
+                .iter()
+                .filter(|pane| pane.session.is_none())
+                .map(|pane| pane.id)
+        }
+
         /// A direct close binds every reviewed Pane to its exact control grant. A Pane without a
         /// reported grant requires explicit confirmation.
         pub(crate) fn direct_close(

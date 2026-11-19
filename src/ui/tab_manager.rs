@@ -474,13 +474,14 @@ pub(crate) struct TabManager {
     tab_strip_merge: Option<TabId>,
     /// The closed Tabs whose faces still fade in the Tab bar.
     leaving_tabs: std::collections::HashMap<TabId, LeavingTab>,
-    /// The visible Tabs of the last frame, or `None` before the first.
-    presented_tabs: Option<Vec<TabId>>,
-    /// When each Tab that arrived in the strip started waiting for its Terminal Session to name
-    /// it, which hides the word Terminal it says until then, for at most [`TAB_NAME_WAIT`].
+    /// Whether the strip has drawn a frame. Tabs it holds before then were already there.
+    presented: bool,
+    /// When each Tab created since the strip first drew started waiting for its Terminal
+    /// Session to name it, which hides the word Terminal it says until then, for at most
+    /// [`TAB_NAME_WAIT`].
     unnamed_since: std::collections::HashMap<TabId, std::time::Instant>,
-    /// Draws the strip again once the longest wait for a name ends.
-    naming_wake: Option<gpui::Task<()>>,
+    /// When the strip draws again for the earliest wait for a name to end, and what wakes it.
+    naming_wake: Option<(std::time::Instant, gpui::Task<()>)>,
     #[cfg(test)]
     rendered_active_close_icon: Rc<Cell<gpui::Rgba>>,
     #[cfg(test)]
@@ -554,7 +555,7 @@ impl TabManager {
             tab_over_layout: false,
             tab_strip_merge: None,
             leaving_tabs: std::collections::HashMap::new(),
-            presented_tabs: None,
+            presented: false,
             unnamed_since: std::collections::HashMap::new(),
             naming_wake: None,
             #[cfg(test)]
@@ -1448,38 +1449,40 @@ impl TabManager {
         }
     }
 
-    /// Starts each Tab that arrived since the last frame waiting for its name, and ends the wait
-    /// of each Tab that got one or waited [`TAB_NAME_WAIT`]. Tabs the strip showed from its first
-    /// frame say what they are called, or Terminal, at once.
-    fn wait_for_tab_names(&mut self, ids: &[TabId], cx: &mut Context<Self>) {
+    /// Ends the wait for a name of each Tab that got one or waited [`TAB_NAME_WAIT`], and draws
+    /// the strip again when the earliest remaining wait ends.
+    fn wait_for_tab_names(&mut self, cx: &mut Context<Self>) {
         let now = super::drag_and_drop::now(cx);
-        if let Some(presented) = self.presented_tabs.replace(ids.to_vec()) {
-            for tab_id in ids.iter().filter(|tab_id| !presented.contains(tab_id)) {
-                self.unnamed_since.entry(*tab_id).or_insert(now);
-            }
-        }
+        self.presented = true;
         let tabs = &self.tabs;
         self.unnamed_since.retain(|tab_id, since| {
-            ids.contains(tab_id)
-                && now.saturating_duration_since(*since) < TAB_NAME_WAIT
+            now.saturating_duration_since(*since) < TAB_NAME_WAIT
                 && tabs
                     .tab(*tab_id)
                     .is_some_and(|view| !view.read(cx).tab_identity().is_named())
         });
-        let longest = self
+        // The strip draws again when the earliest wait ends, and then for the next one.
+        let earliest = self
             .unnamed_since
             .values()
-            .map(|since| TAB_NAME_WAIT.saturating_sub(now.saturating_duration_since(*since)))
-            .max();
-        match longest {
-            Some(remaining) if self.naming_wake.is_none() => {
-                self.naming_wake = Some(cx.spawn(async move |manager, cx| {
+            .map(|since| *since + TAB_NAME_WAIT)
+            .min();
+        match earliest {
+            Some(deadline)
+                if self
+                    .naming_wake
+                    .as_ref()
+                    .is_none_or(|(scheduled, _)| deadline < *scheduled) =>
+            {
+                let remaining = deadline.saturating_duration_since(now);
+                let task = cx.spawn(async move |manager, cx| {
                     cx.background_executor().timer(remaining).await;
                     let _ = manager.update(cx, |manager, cx| {
                         manager.naming_wake = None;
                         cx.notify();
                     });
-                }));
+                });
+                self.naming_wake = Some((deadline, task));
             }
             None => self.naming_wake = None,
             Some(_) => {}
@@ -2527,20 +2530,28 @@ impl TabManager {
             .filter(|_| cx.has_active_drag())
             .zip(self.tab_reorder.incoming_gap(&self.tab_bar_scroll_handle))
             .zip(self.tab_bar_scroll_handle.bounds_for_item(0))
-            .map(|((bar, (start, extent)), slot)| {
-                div()
-                    .debug_selector(|| "tab-bar-incoming-landing".to_owned())
-                    .absolute()
-                    .left(start - bar.origin.x)
-                    .top(slot.origin.y - bar.origin.y)
-                    .w(extent)
-                    .h(slot.size.height)
-                    .child(
-                        presentation
-                            .tab_chip(false, appearance, cx)
-                            .landing(presentation.tab_foreground(false))
-                            .render("tab-bar-incoming-landing-chip".to_owned(), 0.0),
-                    )
+            .and_then(|((bar, (start, extent)), slot)| {
+                // The place shows only as much of itself as the strip shows, as a Tab does, so it
+                // never paints over New Tab past the strip's end. A place that only begins to
+                // open there has no width yet.
+                let strip = self.tab_bar_scroll_handle.bounds();
+                let shown_start = start.max(strip.left());
+                let shown_end = (start + extent).min(strip.right());
+                (shown_end >= shown_start).then(|| {
+                    div()
+                        .debug_selector(|| "tab-bar-incoming-landing".to_owned())
+                        .absolute()
+                        .left(shown_start - bar.origin.x)
+                        .top(slot.origin.y - bar.origin.y)
+                        .w(shown_end - shown_start)
+                        .h(slot.size.height)
+                        .child(
+                            presentation
+                                .tab_chip(false, appearance, cx)
+                                .landing(presentation.tab_foreground(false))
+                                .render("tab-bar-incoming-landing-chip".to_owned(), 0.0),
+                        )
+                })
             });
         let drag_manager = manager.clone();
         let create_manager = manager.clone();
@@ -2741,10 +2752,8 @@ impl Render for TabManager {
             let departed = self.leaving_tabs.keys().copied().collect::<Vec<_>>();
             self.tab_reorder
                 .take_place(&self.tab_bar_scroll_handle, &ids, &departed, cx);
-            // Another Worktree's Tabs did not just arrive.
-            self.presented_tabs = Some(ids.clone());
         }
-        self.wait_for_tab_names(&ids, cx);
+        self.wait_for_tab_names(cx);
         // A Pane drag that ended without a drop on the Tab bar closes the gap it opened. A Pane
         // drag still in progress follows the strip as it moves beneath a still pointer.
         if !cx.has_active_drag() {
@@ -3753,6 +3762,13 @@ impl TabManager {
                 return None;
             }
         };
+        // A Tab created after the strip first drew waits for its Terminal Session to name it,
+        // in whichever Worktree it shows. One the strip held from the start says what it is
+        // called, or Terminal, at once.
+        if self.presented {
+            self.unnamed_since
+                .insert(tab_id, super::drag_and_drop::now(cx));
+        }
         // Creating a Tab activates it. The Active Tab is this client's own view state, so it
         // returns to where a person left it. Restoring it is not a Pane selection, so it asks the
         // server for nothing: a publication must never start a retained shell.
@@ -4285,6 +4301,19 @@ impl TabManager {
         cx: &App,
     ) -> Option<spaceterm_core::hierarchy::Id> {
         self.tabs.tab(tab_id)?.read(cx).core_pane(pane_id)
+    }
+
+    /// Whether the Pane `core`, which this strip presents, is still starting its Terminal
+    /// Session.
+    pub(crate) fn pane_shell_starting(
+        &self,
+        core: spaceterm_core::hierarchy::Id,
+        cx: &App,
+    ) -> bool {
+        self.tabs
+            .iter()
+            .find_map(|(_, view)| view.read(cx).pane_shell_starting(core))
+            .unwrap_or(false)
     }
 
     pub(crate) fn pane_closes_directly(
@@ -5571,6 +5600,48 @@ mod tests {
         assert!(
             strip.left() <= landed.left() && landed.right() <= strip.right(),
             "the new Active Tab must end in view where it landed, got {landed:?} in {strip:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn a_pane_held_past_the_last_tab_of_a_full_bar_should_show_its_place_only_in_the_strip(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        narrow_window(cx);
+        for _ in 0..12 {
+            click("create-tab-button", cx);
+        }
+        cx.dispatch_action(SplitRight);
+        cx.run_until_parked();
+        finish_slides(cx);
+        let strip = cx.debug_bounds("tab-items").unwrap();
+        let create = cx.debug_bounds("create-tab-area").unwrap();
+        // Just inside the strip's end, past the middle of the last Tab it shows, so the place
+        // opens after the last Tab, beyond the strip's visible end.
+        let held = point(strip.right() - px(4.0), strip.center().y);
+
+        drag_focused_pane(2, &[held, held + point(px(1.0), px(0.0))], cx);
+        let mut places = Vec::new();
+        for _ in 0..12 {
+            next_frame_after(50, cx);
+            places.extend(cx.debug_bounds("tab-bar-incoming-landing"));
+        }
+        cx.simulate_mouse_up(held, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            places
+                .iter()
+                .all(|place| place.right() <= strip.right() + px(0.5)
+                    && place.right() <= create.left() + px(0.5)),
+            "the held place must show only inside the strip, never over New Tab, got {places:?} \
+             in {strip:?}"
+        );
+        assert_eq!(
+            tab_order(&manager, cx).last(),
+            Some(&14),
+            "the release still lands the new Tab after the last Tab"
         );
     }
 
@@ -8807,8 +8878,121 @@ mod tests {
         assert_eq!(
             (started, waiting, named, unnamed, fallback),
             (None, true, true, true, true),
-            "the first Tab says what it is at once; a new Tab says nothing until it is named, \\
+            "the first Tab says what it is at once; a new Tab says nothing until it is named, \
              and says Terminal once its wait ends without a name"
+        );
+    }
+
+    /// How opaque the window painted a chip whose bounds are `chip`, if it painted one there.
+    fn chip_opacity_at(chip: gpui::Bounds<Pixels>, cx: &mut VisualTestContext) -> Option<f32> {
+        cx.update(|window, _| {
+            let scale = window.scale_factor();
+            window
+                .painted_quads()
+                .into_iter()
+                .filter(|quad| {
+                    (px(quad.bounds.origin.x.0 / scale) - chip.origin.x).abs() < px(1.0)
+                        && (px(quad.bounds.size.width.0 / scale) - chip.size.width).abs() < px(1.0)
+                        && (px(quad.bounds.origin.y.0 / scale) - chip.origin.y).abs() < px(1.0)
+                })
+                .filter_map(|quad| quad.background.as_solid())
+                .map(|fill| fill.a)
+                .reduce(f32::max)
+        })
+    }
+
+    #[gpui::test]
+    fn fading_selections_should_keep_fading_from_where_they_stand_through_switches_and_closes(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        for _ in 0..3 {
+            click("create-tab-button", cx);
+        }
+        finish_slides(cx);
+        let on_fourth = cx.debug_bounds("tab-item-4-chip").unwrap();
+        let fourth = cx.debug_bounds("tab-item-4-active").unwrap();
+        let third = cx.debug_bounds("tab-item-3-inactive").unwrap();
+        let on_third = gpui::Bounds::new(
+            on_fourth.origin - point(fourth.left() - third.left(), px(0.0)),
+            on_fourth.size,
+        );
+        let opacity = |chip, cx: &mut VisualTestContext| chip_opacity_at(chip, cx).unwrap_or(0.0);
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+        // The active fourth Tab closes, and the third fades the selection in.
+        click("tab-close-button-4", cx);
+        next_frame_after(40, cx);
+        let (departing, arriving) = (opacity(on_fourth, cx), opacity(on_third, cx));
+        // The third Tab closes before its selection has fully faded in.
+        click("tab-close-button-3", cx);
+        next_frame_after(0, cx);
+        let (first_departing, second_departing) = (opacity(on_fourth, cx), opacity(on_third, cx));
+        // The person selects the first Tab while both still fade.
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.activate_tab_at(0, window, cx));
+        });
+        next_frame_after(20, cx);
+        let switched = manager.read_with(cx, |manager, _| manager.tabs.active_tab_id());
+        let (first_after, second_after) = (opacity(on_fourth, cx), opacity(on_third, cx));
+        finish_slides(cx);
+
+        assert!(
+            departing < 1.0 && departing > 0.0 && arriving > 0.0 && arriving < 1.0,
+            "the closed Tab's selection fades out as the next fades in, got {departing} and \
+             {arriving}"
+        );
+        assert!(
+            (first_departing - departing).abs() < 0.05
+                && (second_departing - arriving).abs() < 0.05,
+            "a second close must leave the first selection fading and fade the second from how \
+             far it had faded in, got {first_departing} and {second_departing}"
+        );
+        assert_eq!(switched, TabId::new(1), "the person selected the first Tab");
+        assert!(
+            first_after > 0.0
+                && first_after < first_departing
+                && second_after > 0.0
+                && second_after < second_departing,
+            "a new selection must leave both still fading, got {first_after} and {second_after}"
+        );
+    }
+
+    #[gpui::test]
+    fn tabs_waiting_for_names_should_each_say_terminal_when_their_own_wait_ends(
+        cx: &mut TestAppContext,
+    ) {
+        let (_manager, _records, cx) = tab_manager(cx);
+        let pending = |tab: u64, cx: &mut VisualTestContext| {
+            cx.debug_bounds(format!("tab-name-pending-{tab}").leak())
+                .is_some()
+        };
+        let wait = |ms: u64, cx: &mut VisualTestContext| {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(ms));
+            cx.run_until_parked();
+        };
+        // Three unnamed Tabs arrive 300ms and then 600ms apart, and nothing else draws.
+        click("create-tab-button", cx);
+        wait(300, cx);
+        click("create-tab-button", cx);
+        wait(600, cx);
+        click("create-tab-button", cx);
+        wait(100, cx);
+        let at_first_deadline = [pending(2, cx), pending(3, cx), pending(4, cx)];
+        wait(300, cx);
+        let at_second_deadline = [pending(2, cx), pending(3, cx), pending(4, cx)];
+        wait(600, cx);
+        let at_third_deadline = [pending(2, cx), pending(3, cx), pending(4, cx)];
+
+        assert_eq!(
+            [at_first_deadline, at_second_deadline, at_third_deadline],
+            [
+                [false, true, true],
+                [false, false, true],
+                [false, false, false]
+            ],
+            "each Tab must say Terminal as its own wait ends"
         );
     }
 

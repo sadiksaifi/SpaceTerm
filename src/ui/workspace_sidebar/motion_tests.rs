@@ -473,3 +473,70 @@ fn a_workspace_group_leaving_mid_motion_should_keep_its_rows_as_drawn(cx: &mut T
         "the leaving group must keep the height it was drawn at, got {leaving:?} for {group:?}"
     );
 }
+
+/// A Workspace group that leaves while a removed Worktree row's place is closing keeps that
+/// place as tall as it was drawn, so the row after it stays where it drew, inside its slot.
+#[gpui::test]
+fn a_workspace_group_leaving_as_a_worktree_place_closes_should_keep_the_place_as_drawn(
+    cx: &mut TestAppContext,
+) {
+    let (sidebar, cx) = sidebar(cx);
+    let other = WorkspaceRowViewModel {
+        workspace_id: WorkspaceId::new(2),
+        name: "Docs".into(),
+        worktrees: None,
+        active: false,
+        ..workspace(Vec::new())
+    };
+    let rows = |rows: Vec<WorkspaceRowViewModel>, cx: &mut VisualTestContext| {
+        cx.update(|_, cx| sidebar.update(cx, |sidebar, cx| sidebar.set_rows(rows, Vec::new(), cx)));
+        cx.run_until_parked();
+    };
+    rows(
+        vec![
+            workspace(vec![
+                worktree(1, None),
+                worktree(2, None),
+                worktree(3, None),
+            ]),
+            other.clone(),
+        ],
+        cx,
+    );
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    // The second row leaves, and its place has closed part way.
+    rows(
+        vec![
+            workspace(vec![worktree(1, None), worktree(3, None)]),
+            other.clone(),
+        ],
+        cx,
+    );
+    cx.executor()
+        .advance_clock(LEAVING_FADE + PRESENCE_DURATION / 8);
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    let survivor = row(3, cx);
+    rows(
+        vec![WorkspaceRowViewModel {
+            active: true,
+            ..other
+        }],
+        cx,
+    );
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    let slot = cx
+        .debug_bounds(format!("worktree-slot-leaving-{}-3", WORKSPACE.get()).leak())
+        .expect("the surviving row must keep drawing as its group leaves");
+    let leaving = closing(3, cx).expect("the surviving row must keep drawing");
+
+    assert!(
+        (leaving.top() - survivor.top()).abs() <= px(1.0)
+            && leaving.bottom() <= slot.bottom() + px(0.5),
+        "the surviving row must stay where it drew, inside its slot, got {leaving:?} in \
+         {slot:?} from {survivor:?}"
+    );
+}

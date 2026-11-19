@@ -2902,6 +2902,14 @@ impl TabView {
         self.binding.holds(core)
     }
 
+    /// Whether the Pane `core`, which this Tab presents, is still starting the Terminal Session
+    /// this client created it with, so what closing it would end is about to change. `None` for
+    /// a Pane elsewhere.
+    pub(crate) fn pane_shell_starting(&self, core: spaceterm_core::hierarchy::Id) -> Option<bool> {
+        let pane = self.binding.local_pane(core)?;
+        Some(self.binding.shell_starting(pane))
+    }
+
     pub(crate) fn pane_closes_directly(
         &self,
         core: spaceterm_core::hierarchy::Id,

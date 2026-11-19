@@ -14700,6 +14700,60 @@ mod workspace_repositories {
         assert_the_closed_tab_fades_and_the_next_takes_the_selection_in_place(&frames);
     }
 
+    /// New Tab from another Worktree's menu opens that Worktree's strip on its new Tab at once.
+    /// The new Tab waits for its name there, without motion too, rather than saying Terminal.
+    #[gpui::test]
+    fn a_new_tab_opened_from_another_worktree_should_wait_for_its_name(cx: &mut TestAppContext) {
+        let (harness, cx) = harness(cx, published(1, "main", true));
+        let (_, feature) = worktree_ids(&harness, cx);
+        cx.update(|window, cx| {
+            harness.manager.update(cx, |manager, cx| {
+                manager.activate_workspace(harness.binding, window, cx);
+            });
+        });
+        crate::ui::drag_and_drop::finish_slides(cx);
+        let tabs = harness.manager.read_with(cx, |manager, _| {
+            manager
+                .workspaces
+                .workspace(harness.binding)
+                .expect("the Workspace")
+                .payload()
+                .clone()
+        });
+        let before = tabs.read_with(cx, |tabs, cx| tabs.active_terminal_identity(cx).0);
+
+        // Tests see reduced motion unless they opt into presence motion.
+        cx.update(|window, cx| {
+            harness.manager.update(cx, |manager, cx| {
+                manager.handle_sidebar_event(
+                    SidebarEvent::WorktreeCommand {
+                        workspace_id: harness.binding,
+                        worktree_id: feature,
+                        command: crate::ui::workspace_sidebar::WorktreeMenuCommand::NewTab,
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+        super::redraw(cx);
+        let (worktree, created) = tabs.read_with(cx, |tabs, cx| {
+            (tabs.active_worktree(), tabs.active_terminal_identity(cx).0)
+        });
+
+        assert_eq!(
+            worktree,
+            Some(feature),
+            "the feature Worktree's strip shows"
+        );
+        assert_ne!(created, before, "the new Tab is active");
+        assert!(
+            cx.debug_bounds(format!("tab-name-pending-{}", created.get()).leak())
+                .is_some(),
+            "the new Tab must wait for its name instead of saying Terminal"
+        );
+    }
+
     #[gpui::test]
     fn a_removed_worktree_row_should_keep_drawing_until_its_place_closes(cx: &mut TestAppContext) {
         let (harness, cx) = harness(cx, published(1, "main", true));

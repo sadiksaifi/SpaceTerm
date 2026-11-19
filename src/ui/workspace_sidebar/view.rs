@@ -901,9 +901,16 @@ impl WorkspaceSidebar {
         );
         // Each Worktree row keeps the slot it was drawn in, how far it had grown, and the rows
         // fading beside it, so nothing it showed comes back and nothing it hid shows.
-        let gap = |rows: &[(Option<WorktreeRowViewModel>, Pixels, f32)]| {
-            div().w_full().flex().flex_col().children(rows.iter().map(
-                |(departed, extent, opacity)| {
+        // A closing gap shows as much of the rows in it as its drawn height holds.
+        let gap = |extent: Pixels, rows: &[(Option<WorktreeRowViewModel>, Pixels, f32)]| {
+            div()
+                .w_full()
+                .h(extent)
+                .flex_shrink_0()
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .children(rows.iter().map(|(departed, extent, opacity)| {
                     div()
                         .w_full()
                         .h(*extent)
@@ -923,8 +930,7 @@ impl WorkspaceSidebar {
                                 cx,
                             )
                         }))
-                },
-            ))
+                }))
         };
         let worktrees = group.slots.iter().map(|slot| {
             let key = SidebarRowKey::Worktree(workspace_id, slot.worktree.worktree_id);
@@ -955,9 +961,9 @@ impl WorkspaceSidebar {
                 .when(slot.grows_from_end, |slot| slot.justify_end())
                 // Worktree rows fade as they disclose, and keep how far they had.
                 .opacity(group.disclosure.disclosed)
-                .child(gap(&slot.before))
+                .child(gap(slot.leading_gap, &slot.before))
                 .child(row)
-                .child(gap(&slot.after))
+                .child(gap(slot.trailing_gap, &slot.after))
         });
         div()
             .debug_selector(move || format!("workspace-group-leaving-{}", workspace_id.get()))

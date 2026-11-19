@@ -292,6 +292,9 @@ pub(crate) struct WorkspaceManager {
     /// it. It is kept by confirmation generation, and a Review hands it to the fresh confirmation,
     /// because each confirmation takes the keyboard before an approved close moves it.
     close_keyboard: WorkspaceCloseKeyboard,
+    /// A close waiting for a shell its target is still starting, and the close a wait that ran
+    /// out lets through to review.
+    close_start: CloseStartWait,
     /// Reads every server again once the window's modal closes, while a reading waits on it.
     modal_reread: Option<gpui::Subscription>,
     sidebar_worktrees: worktrees::SidebarWorktrees,
@@ -433,6 +436,7 @@ impl WorkspaceManager {
             close_empty_after_removal: false,
             close_confirmation: CloseConfirmation::default(),
             close_keyboard: WorkspaceCloseKeyboard::default(),
+            close_start: CloseStartWait::default(),
             modal_reread: None,
             sidebar_worktrees: worktrees::SidebarWorktrees::default(),
             workspace_repositories: workspace_repositories::WorkspaceRepositories::default(),
@@ -3499,6 +3503,18 @@ impl WorkspaceManager {
                 return true;
             }
         };
+        // A Pane whose shell is still starting has no Terminal Session to review yet, and will
+        // have one in a moment, which would make any review stale before the person answers.
+        // The close waits for the shell to start, fail or end, and then reviews what it ends.
+        let starting = approval.panes_without_session().any(|pane| {
+            self.workspaces
+                .workspace(workspace_id)
+                .is_some_and(|entry| entry.payload().read(cx).pane_shell_starting(pane, cx))
+        });
+        if starting && self.close_start.waits(target) {
+            self.wait_for_starting_shell(target, window, cx);
+            return true;
+        }
         let direct = approval.direct_close(|pane, live_session| {
             self.workspaces
                 .workspace(workspace_id)
@@ -5177,6 +5193,89 @@ impl WorkspaceManager {
         );
         self.pane_construction
             .assert_application_capabilities(expected);
+    }
+}
+
+/// How often a close waiting for a starting shell looks again.
+const CLOSE_START_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+/// The longest a close waits for a starting shell before it reviews what it ends as it stands.
+const CLOSE_START_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// A close that waits for a shell its target is still starting.
+#[derive(Default)]
+struct CloseStartWait {
+    /// The waiting close and what looks again.
+    waiting: Option<(CloseTarget, gpui::Task<()>)>,
+    /// A close whose wait ran out, which reviews without waiting again.
+    expired: Option<CloseTarget>,
+}
+
+impl CloseStartWait {
+    /// Whether a close of `target` waits for its starting shell now. A close whose wait ran out
+    /// does not wait again.
+    fn waits(&mut self, target: CloseTarget) -> bool {
+        self.expired.take() != Some(target)
+    }
+}
+
+impl WorkspaceManager {
+    /// Holds the close of `target` until the shells it would end have started, failed or ended,
+    /// or [`CLOSE_START_LIMIT`] passed, then asks for it again. Asking again while it waits
+    /// changes nothing.
+    fn wait_for_starting_shell(
+        &mut self,
+        target: CloseTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .close_start
+            .waiting
+            .as_ref()
+            .is_some_and(|(waiting, _)| *waiting == target)
+        {
+            return;
+        }
+        let task = cx.spawn_in(window, async move |manager, cx| {
+            let mut waited = std::time::Duration::ZERO;
+            loop {
+                cx.background_executor().timer(CLOSE_START_POLL).await;
+                waited += CLOSE_START_POLL;
+                let settled = manager.update_in(cx, |manager, window, cx| {
+                    let starting = manager.close_shell_starting(target, cx);
+                    if starting && waited < CLOSE_START_LIMIT {
+                        return false;
+                    }
+                    manager.close_start.waiting = None;
+                    if starting {
+                        manager.close_start.expired = Some(target);
+                    }
+                    manager.request_close(target, window, cx);
+                    true
+                });
+                if !matches!(settled, Ok(false)) {
+                    break;
+                }
+            }
+        });
+        self.close_start.waiting = Some((target, task));
+    }
+
+    /// Whether a Pane the close of `target` would end is still starting its shell.
+    fn close_shell_starting(&self, target: CloseTarget, cx: &App) -> bool {
+        let workspace_id = close_target_workspace(target);
+        let Some(approval) = self
+            .close_target(target, cx)
+            .zip(self.binding.owning(workspace_id))
+            .and_then(|(machine_target, binding)| binding.close_approval(machine_target).ok())
+        else {
+            return false;
+        };
+        approval.panes_without_session().any(|pane| {
+            self.workspaces
+                .workspace(workspace_id)
+                .is_some_and(|entry| entry.payload().read(cx).pane_shell_starting(pane, cx))
+        })
     }
 }
 
