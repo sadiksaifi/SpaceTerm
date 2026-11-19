@@ -36,6 +36,14 @@ pub const RETURN_WAIT: Duration = Duration::from_secs(180);
 /// itself only delays an unconfirmed outcome.
 pub const NETWORK_WAIT: Duration = Duration::from_secs(30);
 
+/// How long an approved action waits for another SpaceTerm Core operation to settle, as a
+/// desktop launch waits for the service lock under ADR 0034.
+pub const BUSY_WAIT: Duration = Duration::from_secs(180);
+/// How often a waiting approval asks again whether SpaceTerm Core is still busy.
+const BUSY_POLL: Duration = Duration::from_secs(1);
+/// The lane code of a refusal because another service operation holds SpaceTerm Core.
+const BUSY: &str = "service_busy";
+
 /// How long an action is followed after its `Execute`. Only Stop and Uninstall end the lane they
 /// are followed over, so every other action, including one added later, is followed until it
 /// settles.
@@ -400,6 +408,143 @@ pub fn execute(
         let _ = pending.remove(&receipt.operation);
     }
     Ok(outcome)
+}
+
+/// What an approved action came to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Approved {
+    /// The approval covered the action, which was dispatched and followed.
+    Performed(Outcome),
+    /// What the action affects changed while it waited for another operation, so nothing was
+    /// dispatched. Its fresh preview asks the person again.
+    Changed(Preview),
+}
+
+/// Whether `error` is a refusal because another service operation holds SpaceTerm Core, which
+/// ends when that operation settles. A full ledger or an unresolved activation is not.
+pub fn busy(error: &LaneError) -> bool {
+    matches!(error, LaneError::Code(code) if code == BUSY)
+        || *error == LaneError::Core(CoreError::ServiceBusy)
+}
+
+/// Asks the server to preview `action`, waiting up to [`BUSY_WAIT`] while another operation
+/// holds it. `waiting` runs once, when the wait begins, so the client can say so.
+pub fn preview_when_ready(
+    lane: &Lane,
+    session: Session,
+    action: LaneAction,
+    interrupted: &dyn Fn() -> Option<Instant>,
+    waiting: &mut dyn FnMut(),
+) -> Result<(Session, Preview), LaneError> {
+    let mut session = session;
+    let mut wait = BusyWait::new(waiting);
+    loop {
+        match preview(&mut session, action.clone()) {
+            Ok(preview) => return Ok((session, preview)),
+            Err(error) if busy(&error) => {
+                session = wait.for_lane(lane, interrupted, error)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Executes the person's approved `approved` and follows it as [`execute`] does. A refusal
+/// because another operation holds SpaceTerm Core admitted nothing and spent the token, so the
+/// approval waits up to [`BUSY_WAIT`] for that operation, previews again and executes the fresh
+/// token only while the fresh preview's effects equal the approved ones. Otherwise it returns
+/// [`Approved::Changed`] without dispatching anything. `waiting` runs once, when the wait begins.
+#[allow(clippy::too_many_arguments, reason = "one approval's parts, used once")]
+pub fn execute_approved(
+    lane: &Lane,
+    session: Session,
+    approved: &Preview,
+    wait: Duration,
+    pending: &PendingOperations,
+    share: &mut dyn Share,
+    dispatch: &mut dyn FnMut() -> Result<(), LaneError>,
+    interrupted: &dyn Fn() -> Option<Instant>,
+    waiting: &mut dyn FnMut(),
+) -> Result<Approved, LaneError> {
+    let mut busy_wait = BusyWait::new(waiting);
+    let mut session = session;
+    let mut token = approved.token.clone();
+    loop {
+        let error = match execute(
+            lane,
+            session,
+            approved.action.clone(),
+            token,
+            wait,
+            pending,
+            share,
+            dispatch,
+            interrupted,
+        ) {
+            Err(error) if busy(&error) => error,
+            outcome => return outcome.map(Approved::Performed),
+        };
+        let mut refused = error;
+        loop {
+            let mut fresh = busy_wait.for_lane(lane, interrupted, refused)?;
+            match preview(&mut fresh, approved.action.clone()) {
+                Ok(preview) if preview.effects == approved.effects => {
+                    session = fresh;
+                    token = preview.token;
+                    break;
+                }
+                Ok(preview) => return Ok(Approved::Changed(preview)),
+                Err(error) if busy(&error) => refused = error,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
+/// One approval's wait for another operation: until [`BUSY_WAIT`] after it began.
+struct BusyWait<'a> {
+    deadline: Instant,
+    /// Runs once, when the wait begins.
+    waiting: Option<&'a mut dyn FnMut()>,
+}
+
+impl<'a> BusyWait<'a> {
+    fn new(waiting: &'a mut dyn FnMut()) -> Self {
+        Self {
+            deadline: Instant::now() + BUSY_WAIT,
+            waiting: Some(waiting),
+        }
+    }
+
+    /// Waits [`BUSY_POLL`] for the operation that refused with `refused`, then opens a new lane
+    /// connection. A server that restarts meanwhile answers again later, so a connection that
+    /// fails keeps waiting. Once the deadline passes or the caller is interrupted, it returns
+    /// `refused`.
+    fn for_lane(
+        &mut self,
+        lane: &Lane,
+        interrupted: &dyn Fn() -> Option<Instant>,
+        refused: LaneError,
+    ) -> Result<Session, LaneError> {
+        if let Some(waiting) = self.waiting.take() {
+            waiting();
+        }
+        loop {
+            if interrupted().is_some() || Instant::now() + BUSY_POLL >= self.deadline {
+                return Err(refused);
+            }
+            std::thread::sleep(BUSY_POLL);
+            if interrupted().is_some() {
+                return Err(refused);
+            }
+            match lane.session() {
+                Ok(session) => return Ok(session),
+                // A stopped SpaceTerm Core answers no lane until the person starts it.
+                Err(CoreError::Stopped) => return Err(LaneError::Core(CoreError::Stopped)),
+                Err(_) => {}
+            }
+        }
+    }
 }
 
 /// What a finished flow establishes about its action.

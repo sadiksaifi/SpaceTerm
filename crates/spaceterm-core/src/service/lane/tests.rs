@@ -1523,7 +1523,8 @@ fn the_lane_answers_until_the_peer_closes_and_refuses_malformed_requests() {
 mod flow {
     //! The client flow against a served lane whose server goes away and comes back.
     use super::*;
-    use crate::service::lane::client::{self, Connector, Leftover, Outcome, Session};
+    use crate::service::lane::admin;
+    use crate::service::lane::client::{self, Connector, LaneError, Leftover, Outcome, Session};
     use std::os::unix::net::UnixStream;
 
     /// Connects to whichever run of the server is up. `None` means no server runs.
@@ -1759,6 +1760,137 @@ mod flow {
             };
             assert_eq!(boot, hex(&lane.lane.boot));
             assert_eq!(last, None);
+        });
+    }
+
+    /// Another client's admitted Restart, which holds SpaceTerm Core until `settle` runs.
+    fn another_clients_restart(lane: &Lane) -> impl FnOnce() + Send + 'static {
+        let (token, _) = preview(&lane.lane, LaneAction::Restart);
+        assert!(matches!(
+            execute(&lane.lane, LaneAction::Restart, &token, 1),
+            LaneReply::Accepted { .. }
+        ));
+        let core = lane.lane.clone();
+        move || {
+            let id = OperationId([1; 16]);
+            let _helper = helper_lock(&core);
+            let mut ledger = core.ledger().unwrap();
+            ledger.claim(&id).unwrap();
+            ledger.mark(&id, State::Done).unwrap();
+        }
+    }
+
+    /// The person's approved Stop, previewed before another client's Restart admitted.
+    fn approved_stop(lane: &Lane) -> (client::Lane, Session, admin::Preview) {
+        let switch = Arc::new(Switch::default());
+        switch.up(lane.lane.clone());
+        let client = client::Lane::over(switch);
+        let mut session = client.session().unwrap();
+        let approved = admin::preview(&mut session, LaneAction::Stop).unwrap();
+        (client, session, approved)
+    }
+
+    fn pending(lane: &Lane) -> admin::PendingOperations {
+        admin::PendingOperations::new(
+            Directory::open(&lane.service.paths.data.with_extension("pending"), true).unwrap(),
+        )
+    }
+
+    #[test]
+    fn an_approved_stop_waits_for_another_operation_then_runs_once() {
+        with_lane(|lane| {
+            lane.host.sessions.lock().unwrap().push([3; 32]);
+            let (client, session, approved) = approved_stop(&lane);
+            let settle = another_clients_restart(&lane);
+            let settled = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(1500));
+                settle();
+            });
+            let mut waits = 0;
+            let outcome = admin::execute_approved(
+                &client,
+                session,
+                &approved,
+                Duration::from_secs(2),
+                &pending(&lane),
+                &mut admin::Unshared,
+                &mut || Ok(()),
+                &|| None,
+                &mut || waits += 1,
+            )
+            .unwrap();
+            settled.join().unwrap();
+            assert!(
+                matches!(outcome, admin::Approved::Performed(_)),
+                "{outcome:?}"
+            );
+            assert_eq!(waits, 1, "the wait is said once");
+            assert_eq!(
+                lane.launches.load(Ordering::SeqCst),
+                2,
+                "the Restart and then the Stop each launched once"
+            );
+        });
+    }
+
+    #[test]
+    fn an_approved_stop_asks_again_when_its_sessions_change_while_it_waits() {
+        with_lane(|lane| {
+            lane.host.sessions.lock().unwrap().push([3; 32]);
+            let (client, session, approved) = approved_stop(&lane);
+            let settle = another_clients_restart(&lane);
+            let host = lane.host.clone();
+            let settled = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(1500));
+                // A new shell starts once the other operation ends.
+                host.sessions.lock().unwrap().push([4; 32]);
+                settle();
+            });
+            let outcome = admin::execute_approved(
+                &client,
+                session,
+                &approved,
+                Duration::from_secs(2),
+                &pending(&lane),
+                &mut admin::Unshared,
+                &mut || Ok(()),
+                &|| None,
+                &mut || {},
+            )
+            .unwrap();
+            settled.join().unwrap();
+            let admin::Approved::Changed(fresh) = outcome else {
+                panic!("expected a fresh preview, got {outcome:?}");
+            };
+            assert_eq!(fresh.effects.ends_sessions, 2);
+            assert_eq!(
+                lane.launches.load(Ordering::SeqCst),
+                1,
+                "the changed Stop dispatched nothing"
+            );
+        });
+    }
+
+    #[test]
+    fn an_interrupted_approval_stops_waiting_and_reports_busy() {
+        with_lane(|lane| {
+            let (client, session, approved) = approved_stop(&lane);
+            let _settle = another_clients_restart(&lane);
+            // The person interrupts once the wait began.
+            let interrupted = std::cell::Cell::new(None);
+            let outcome = admin::execute_approved(
+                &client,
+                session,
+                &approved,
+                Duration::from_secs(2),
+                &pending(&lane),
+                &mut admin::Unshared,
+                &mut || Ok(()),
+                &|| interrupted.get(),
+                &mut || interrupted.set(Some(Instant::now())),
+            );
+            assert_eq!(outcome, Err(LaneError::Code("service_busy".into())));
+            assert_eq!(lane.launches.load(Ordering::SeqCst), 1);
         });
     }
 
