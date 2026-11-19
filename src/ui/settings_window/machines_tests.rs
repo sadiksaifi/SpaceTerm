@@ -855,7 +855,7 @@ fn only_actions_that_end_sessions_or_remove_the_service_ask_first() {
         assert_eq!(confirmation.message.as_ref(), question);
         let kept = match action {
             ServiceAction::Stop => {
-                "Workspaces are kept, and SpaceTerm Core stays stopped until you start it again."
+                "Workspaces are kept, and SpaceTerm Core stays stopped until you start it again or open SpaceTerm."
             }
             ServiceAction::Restart => {
                 "Workspaces are kept, and each Pane starts a new shell when you use it."
@@ -1566,7 +1566,7 @@ fn boot_wording_names_boot_and_logout_and_keeps_lingering_after_uninstall() {
     assert_eq!(
         stop.detail.as_ref(),
         "All Terminal Sessions on it end for every client. Workspaces are kept, and SpaceTerm Core \
-         stays stopped until you start it again."
+         stays stopped until you start it again or open SpaceTerm."
     );
     let uninstall =
         ServiceConfirmation::for_action(ServiceAction::Uninstall, false, boot).expect("uninstall");

@@ -96,7 +96,7 @@ impl Wording {
         const ENDS: &str = "All Terminal Sessions on it end for every client.";
         match self.action {
             Action::Stop => format!(
-                "{ENDS} Workspaces are kept, and SpaceTerm Core stays stopped until you start it again."
+                "{ENDS} Workspaces are kept, and SpaceTerm Core stays stopped until you start it again or open SpaceTerm."
             ),
             Action::Restart => format!(
                 "{ENDS} Workspaces are kept, and each Pane starts a new shell when you use it."
@@ -257,7 +257,7 @@ mod tests {
         assert_eq!(
             local.detail(),
             "All Terminal Sessions on it end for every client. Workspaces are kept, and SpaceTerm \
-             Core stays stopped until you start it again."
+             Core stays stopped until you start it again or open SpaceTerm."
         );
     }
 

@@ -570,7 +570,7 @@ pub(crate) const INCOMPATIBLE_PROTOCOL: &str =
 /// The connection row's guidance once the person has stopped the server. A stopped server stays
 /// stopped through account login and computer startup alike.
 const STOPPED_GUIDANCE: &str = "You stopped SpaceTerm Core. It stays stopped, even after you \
-                                restart the computer, until you start it.";
+                                restart the computer, until you start it or open SpaceTerm.";
 
 pub(super) const SERVICE_CHECK_SELECTOR: &str = "settings-server-service-check";
 pub(super) const INSTALL_SELECTOR: &str = "settings-server-service-install";
@@ -1121,10 +1121,10 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
                     "settings-server-service-state-stopped",
                     guidance(if at_boot {
                         "You stopped SpaceTerm Core. It stays stopped, even after the computer \
-                         restarts or you open SpaceTerm, until you start it."
+                         restarts, until you start it or open SpaceTerm."
                     } else {
-                        "You stopped SpaceTerm Core. It stays stopped, even after you log in again \
-                         or open SpaceTerm, until you start it."
+                        "You stopped SpaceTerm Core. It stays stopped, even after you log in again, \
+                         until you start it or open SpaceTerm."
                     }),
                 ),
                 // Turning SpaceTerm Core off was the person's choice, so nothing warns.

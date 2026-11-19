@@ -95,7 +95,7 @@ pub(crate) fn stop(described: &[Previewed]) -> (SharedString, SharedString, Shar
     (
         format!("Stop SpaceTerm Core on {name}?").into(),
         format!(
-            "{} SpaceTerm Core stays stopped until you start it again.",
+            "{} SpaceTerm Core stays stopped until you start it again or open SpaceTerm.",
             this_ends(sessions)
         )
         .into(),
