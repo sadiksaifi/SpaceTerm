@@ -5359,7 +5359,7 @@ mod empty;
 mod launch;
 #[cfg(test)]
 pub(crate) use launch::testing as launch_testing;
-pub(crate) use launch::{LocalCoreAdapters, resume_waiting_launches, start_local_core};
+pub(crate) use launch::{LaunchIntent, LocalCoreAdapters, resume_waiting_launches, start_local_core};
 mod core_bindings;
 use core_bindings::CoreBindings;
 pub(crate) use core_bindings::{MachineKey, MachineOrigin};

@@ -79,7 +79,8 @@ pub(crate) use workspace_manager::launch_testing;
 #[cfg(test)]
 pub(crate) use workspace_manager::tests::assert_scroll_shortcuts_from_sidebar_focus;
 pub(crate) use workspace_manager::{
-    LocalCoreAdapters, WorkspaceManager, WorkspaceManagerAdapters, serve_desktop_requests,
+    LaunchIntent, LocalCoreAdapters, WorkspaceManager, WorkspaceManagerAdapters,
+    serve_desktop_requests,
 };
 pub(crate) use workspace_sidebar::MachineTarget;
 

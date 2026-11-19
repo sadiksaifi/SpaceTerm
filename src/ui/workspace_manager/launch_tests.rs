@@ -178,7 +178,14 @@ fn launch_harness_restoring(
     for answer in answers {
         launch.answer(answer);
     }
-    scripted_harness(launch, edits, selections, remembered, cx)
+    scripted_harness(
+        launch,
+        edits,
+        selections,
+        remembered,
+        launch::LaunchIntent::Passive,
+        cx,
+    )
 }
 
 /// A launch harness whose background item reads answer `off` in order before launch begins.
@@ -192,7 +199,14 @@ fn launch_harness_reading_background_item(
         launch.answer(answer);
     }
     launch.background_item(off);
-    scripted_harness(launch, ScriptedEdits::new(Some(inventory())), [], None, cx)
+    scripted_harness(
+        launch,
+        ScriptedEdits::new(Some(inventory())),
+        [],
+        None,
+        launch::LaunchIntent::Passive,
+        cx,
+    )
 }
 
 fn scripted_harness(
@@ -202,6 +216,7 @@ fn scripted_harness(
         Item = Result<Option<PathBuf>, crate::directory_selection::DirectoryChooserError>,
     >,
     remembered: Option<crate::ui::remembered_view::WindowView>,
+    intent: launch::LaunchIntent,
     cx: &mut TestAppContext,
 ) -> (LaunchHarness, &mut VisualTestContext) {
     cx.update(crate::ui::init)
@@ -219,6 +234,7 @@ fn scripted_harness(
     let adapters = LocalCoreAdapters {
         launch: Arc::clone(&launch) as Arc<_>,
         connector,
+        intent,
     };
     let (manager, cx) = cx.add_window_view(|window, cx| {
         let mut manager = WorkspaceManager::new_with_adapters(
@@ -425,6 +441,75 @@ fn a_stopped_core_stays_stopped_until_start_core(cx: &mut TestAppContext) {
     sync(&harness, cx);
     assert_eq!(harness.rows(cx), 1);
     assert_eq!(harness.launch_title(cx), None);
+}
+
+/// A launch harness whose window opens for the person's own launch of SpaceTerm.
+fn foreground_harness(
+    launch: ScriptedLaunch,
+    cx: &mut TestAppContext,
+) -> (LaunchHarness, &mut VisualTestContext) {
+    scripted_harness(
+        launch,
+        ScriptedEdits::new(Some(inventory())),
+        [],
+        None,
+        launch::LaunchIntent::Foreground,
+        cx,
+    )
+}
+
+#[gpui::test]
+fn the_persons_launch_starts_core_once_and_later_launches_keep_a_stop(cx: &mut TestAppContext) {
+    let launch = ScriptedLaunch::default();
+    // Another operation holds the service first, so the same launch runs again after the wait.
+    launch.answer(Ok(LaunchOutcome::ServiceBusy));
+    launch.answer(ready());
+    launch.answer(Ok(LaunchOutcome::Stopped));
+    let (harness, cx) = foreground_harness(launch, cx);
+    sync(&harness, cx);
+    assert_eq!(harness.rows(cx), 1);
+    assert_eq!(
+        harness.launch.intents(),
+        [
+            launch::LaunchIntent::Foreground,
+            launch::LaunchIntent::Foreground
+        ]
+    );
+
+    // A Stop chosen later stays in force when this window launches again.
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.run_local_launch(None, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        harness.launch.intents().last(),
+        Some(&launch::LaunchIntent::Passive)
+    );
+}
+
+#[gpui::test]
+fn a_reopened_window_launches_passively(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped)], cx);
+    cx.run_until_parked();
+    assert_eq!(harness.launch.intents(), [launch::LaunchIntent::Passive]);
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+}
+
+#[gpui::test]
+fn starting_core_shows_its_loader_at_once(cx: &mut TestAppContext) {
+    let launch = ScriptedLaunch::default();
+    // The run starts SpaceTerm Core and has not answered yet.
+    launch.start_core();
+    let (harness, cx) = foreground_harness(launch, cx);
+    cx.run_until_parked();
+    assert_eq!(harness.launch_title(cx), Some(launch::STARTING_TITLE));
+    assert!(
+        cx.debug_bounds(LAUNCH_SELECTOR).is_some(),
+        "starting SpaceTerm Core shows inside the quiet period"
+    );
+    assert!(cx.debug_bounds(LAUNCH_START_SELECTOR).is_none());
 }
 
 /// SpaceTerm Core is off in Login Items, so the service refuses launch's start. The window says so
@@ -1367,6 +1452,7 @@ fn a_second_launched_window_brings_the_presenting_one_forward(cx: &mut TestAppCo
             edits: Rc::clone(&harness.edits),
             panes: Rc::clone(&harness.panes),
         }),
+        intent: launch::LaunchIntent::Passive,
     };
     let second = cx.add_window(|window, cx| {
         WorkspaceManager::new_with_adapters(

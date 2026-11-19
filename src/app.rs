@@ -1290,6 +1290,15 @@ pub(crate) fn open(
     cx: &mut App,
     host: &HostComposition,
 ) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
+    open_launching(cx, host, crate::ui::LaunchIntent::Passive)
+}
+
+/// Opens the Workspace Window, whose launch of this computer's SpaceTerm Core runs for `intent`.
+fn open_launching(
+    cx: &mut App,
+    host: &HostComposition,
+    intent: crate::ui::LaunchIntent,
+) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
     let adapters = crate::ui::WorkspaceManagerAdapters {
         local_filesystem: host.adapters.local_filesystem.clone(),
         key_input: Rc::clone(&host.adapters.key_input),
@@ -1301,7 +1310,7 @@ pub(crate) fn open(
         },
         directory_selection: Rc::new(crate::directory_selection::GpuiDirectorySelection),
         window_drag: host.window_movement.create(),
-        local_core: host.adapters.local_core.clone(),
+        local_core: host.adapters.local_core.clone().launching(intent),
         core_directories: crate::ui::directory_picker::owning_core_directories(),
     };
     let home_directory = host.home_directory.clone();
@@ -1814,6 +1823,12 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
         restore_default_window(cx, &reopened_host);
     });
     application.run(move |cx| {
+        // Read while AppKit finishes launching, before any later event replaces it.
+        let intent = if crate::platform::launched_at_login() {
+            crate::ui::LaunchIntent::Passive
+        } else {
+            crate::ui::LaunchIntent::Foreground
+        };
         if crate::local_startup::leave_disk_image() {
             cx.quit();
             return;
@@ -1838,7 +1853,7 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
             }
             // Workspaces open at once. The update service checks in the background and installs
             // nothing until the person chooses Relaunch.
-            if let Err(error) = open_initial_workspace(cx, &host) {
+            if let Err(error) = open_initial_workspace(cx, &host, intent) {
                 reported_failure.set(Some(error));
                 cx.quit();
                 return;
@@ -2099,14 +2114,17 @@ fn start_application(
     host: &HostComposition,
 ) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
     initialize_application(cx, host)?;
-    open_initial_workspace(cx, host)
+    open_initial_workspace(cx, host, crate::ui::LaunchIntent::Foreground)
 }
 
+/// Opens the window of SpaceTerm's own launch. A person who opens SpaceTerm wants their shell, so
+/// its launch starts a SpaceTerm Core they stopped. One macOS opens at login leaves the Stop.
 fn open_initial_workspace(
     cx: &mut App,
     host: &HostComposition,
+    intent: crate::ui::LaunchIntent,
 ) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
-    let workspace = open(cx, host)?;
+    let workspace = open_launching(cx, host, intent)?;
     crate::ui::settings_recovery::offer_at_launch(workspace, cx);
     crate::ui::data_reset::offer_notice(workspace, cx);
     #[cfg(feature = "developer-tools")]
@@ -3560,7 +3578,9 @@ mod runtime_tests {
             UpdateState::Checking
         );
 
-        cx.update(|cx| open_initial_workspace(cx, &host).unwrap());
+        cx.update(|cx| {
+            open_initial_workspace(cx, &host, crate::ui::LaunchIntent::Foreground).unwrap()
+        });
         cx.run_until_parked();
         assert_eq!(cx.update(|cx| workspace_windows(cx).len()), 1);
 

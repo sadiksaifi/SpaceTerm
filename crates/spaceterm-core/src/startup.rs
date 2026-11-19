@@ -3,7 +3,19 @@ use crate::{AuthenticatedStatus, CoreError, MachineConnection, service::Service}
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-/// The observed result of normal launch. Only explicit Start can reverse Stop.
+/// Why a client launches the account's SpaceTerm Core.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LaunchIntent {
+    /// The person opened the desktop. Launch starts a SpaceTerm Core they stopped, as explicit
+    /// Start does.
+    Foreground,
+    /// Login, reconnecting, or a window reopened in the running desktop. A deliberate Stop
+    /// stays in force.
+    Passive,
+}
+
+/// The observed result of normal launch. Only explicit Start and a foreground launch reverse
+/// Stop.
 pub enum StartupOutcome {
     Ready {
         core: MachineConnection,
@@ -50,8 +62,23 @@ impl LocalStartup {
         provision: impl FnOnce() -> Result<PathBuf, CoreError>,
         cancelled: impl Fn() -> bool,
     ) -> Result<StartupOutcome, CoreError> {
+        self.launch(LaunchIntent::Passive, provision, cancelled, &|| {})
+    }
+
+    /// [`Self::run`] for `intent`. `starting` runs once, right before this launch installs or
+    /// starts the server, so the client can say SpaceTerm Core is starting.
+    pub fn launch(
+        &self,
+        intent: LaunchIntent,
+        provision: impl FnOnce() -> Result<PathBuf, CoreError>,
+        cancelled: impl Fn() -> bool,
+        starting: &dyn Fn(),
+    ) -> Result<StartupOutcome, CoreError> {
         let result = (|| {
-            let Some(status) = self.service.launch(provision, &cancelled)? else {
+            let Some(status) = self
+                .service
+                .launch(intent, provision, &cancelled, starting)?
+            else {
                 return Ok(StartupOutcome::Cancelled);
             };
             if status.stopped {

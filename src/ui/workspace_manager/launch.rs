@@ -2,9 +2,11 @@
 //!
 //! The Workspace Window opens at once and owns no local Workspace of its own. A worker prepares
 //! or reuses the server for this account off the event thread, and the window's empty stage says
-//! what is happening until the server's Workspaces arrive. Launch never reverses a deliberate
-//! Stop and never asks for authorization by itself: Start Server and startup authorization
-//! run only when the person chooses them here, and each then runs launch again.
+//! what is happening until the server's Workspaces arrive. Only the window a person's own launch
+//! of SpaceTerm opens starts a SpaceTerm Core they stopped, as Start Core does; a window reopened
+//! in the running desktop and every later launch leave the Stop in force. Launch never asks for
+//! authorization by itself: startup authorization runs only when the person chooses it here, and
+//! then runs launch again.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -22,6 +24,7 @@ use crate::ui::pane_lifecycle::PaneConstruction;
 use crate::ui::settings_window::{AuthorizationPrompt, AuthorizedRequest};
 use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
 use crate::updates::copy::pane::{AppRelease, BlockedAction};
+pub(crate) use spaceterm_core::LaunchIntent;
 use spaceterm_core::protocol::version::Incompatible;
 
 pub(super) const LAUNCH_SELECTOR: &str = "server-launch";
@@ -62,10 +65,17 @@ pub(crate) enum LaunchOutcome {
 
 /// The blocking steps of local launch. Each runs on a background thread.
 pub(crate) trait LocalLaunch: Send + Sync {
-    /// Prepares or reuses the account's service and connects. Never reverses Stop and never asks
-    /// for authorization. It may install, enable and start the service, except one off in Login
-    /// Items, which it refuses with [`CoreError::LoginItemOff`].
-    fn run(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<LaunchOutcome, CoreError>;
+    /// Prepares or reuses the account's service and connects. Only a
+    /// [`LaunchIntent::Foreground`] run reverses Stop, and no run asks for authorization. It may
+    /// install, enable and start the service, except one off in Login Items, which it refuses
+    /// with [`CoreError::LoginItemOff`]. `starting` runs once, right before it installs or
+    /// starts the server.
+    fn run(
+        &self,
+        intent: LaunchIntent,
+        starting: &(dyn Fn() + Sync),
+        cancelled: &(dyn Fn() -> bool + Sync),
+    ) -> Result<LaunchOutcome, CoreError>;
     /// Whether macOS keeps SpaceTerm Core's background item off, because the person turned it
     /// off in Login Items or has not approved it yet. Reads only: it changes nothing. Launch reads
     /// it when an open connection fails, since only [`Self::run`] and [`Self::start`] refuse.
@@ -113,6 +123,9 @@ pub(crate) trait WorkspaceCoreConnector {
 pub(crate) struct LocalCoreAdapters {
     pub(crate) launch: Arc<dyn LocalLaunch>,
     pub(crate) connector: Rc<dyn WorkspaceCoreConnector>,
+    /// Why this window launches: only the window a person's launch of SpaceTerm opens is
+    /// [`LaunchIntent::Foreground`].
+    pub(crate) intent: LaunchIntent,
 }
 
 impl LocalCoreAdapters {
@@ -121,7 +134,13 @@ impl LocalCoreAdapters {
         Self {
             launch: Arc::new(AccountLaunch),
             connector: Rc::new(AccountConnector),
+            intent: LaunchIntent::Passive,
         }
+    }
+
+    /// These adapters for a window that launches for `intent`.
+    pub(crate) fn launching(self, intent: LaunchIntent) -> Self {
+        Self { intent, ..self }
     }
 }
 
@@ -136,9 +155,14 @@ impl AccountLaunch {
 }
 
 impl LocalLaunch for AccountLaunch {
-    fn run(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<LaunchOutcome, CoreError> {
+    fn run(
+        &self,
+        intent: LaunchIntent,
+        starting: &(dyn Fn() + Sync),
+        cancelled: &(dyn Fn() -> bool + Sync),
+    ) -> Result<LaunchOutcome, CoreError> {
         use spaceterm_core::StartupOutcome;
-        Ok(match crate::local_startup::run(cancelled)? {
+        Ok(match crate::local_startup::run(intent, starting, cancelled)? {
             StartupOutcome::Ready { .. } => LaunchOutcome::Ready,
             StartupOutcome::Stopped => LaunchOutcome::Stopped,
             StartupOutcome::AuthorizationRequired => LaunchOutcome::AuthorizationRequired,
@@ -224,6 +248,8 @@ pub(super) enum LaunchStep {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum LaunchState {
     Launching,
+    /// Launch is starting or installing SpaceTerm Core itself.
+    Starting,
     Working(LaunchStep),
     Stopped,
     /// `declined` is whether the person's last authorization did not complete.
@@ -335,6 +361,13 @@ pub(super) const OPENING_TITLE: &str = "Opening Workspaces";
 // Launch reuses a running server or starts it, so the detail claims neither.
 const OPENING_DETAIL: &str = "SpaceTerm is waiting for SpaceTerm Core.";
 pub(super) const STOPPED_TITLE: &str = "SpaceTerm Core is stopped";
+pub(super) const STARTING_TITLE: &str = "Starting SpaceTerm Core\u{2026}";
+
+/// What the window waits for while SpaceTerm Core starts. `place` is the host's name for this
+/// computer, such as "This Mac".
+fn starting_detail(place: &str) -> SharedString {
+    format!("Your Workspaces on {place} open as soon as it\u{2019}s ready.").into()
+}
 
 /// Why this computer's Workspaces are closed while its server is stopped. `place` is the host's
 /// name for this computer, such as "This Mac".
@@ -429,10 +462,11 @@ pub(super) fn present(state: LaunchState, place: &str) -> LaunchPresentation {
             waiting: true,
             blocked: None,
         },
-        LaunchState::Working(LaunchStep::Start) => LaunchPresentation {
-            title: STOPPED_TITLE,
-            detail: stopped_detail(place),
-            progress: Some("Starting SpaceTerm Core\u{2026}"),
+        // Starting SpaceTerm Core is progress the person waits for, so it shows at once.
+        LaunchState::Starting | LaunchState::Working(LaunchStep::Start) => LaunchPresentation {
+            title: STARTING_TITLE,
+            detail: starting_detail(place),
+            progress: Some(STARTING_TITLE),
             actions: &[],
             icon: None,
             waiting: false,
@@ -551,6 +585,12 @@ pub(super) struct LocalLaunchState {
     _background_item: Option<Task<()>>,
     cancelled: Arc<AtomicBool>,
     _task: Option<Task<()>>,
+    /// Says SpaceTerm Core is starting once the running launch starts it.
+    _starting: Option<Task<()>>,
+    /// Why the next launch runs. A foreground launch stays foreground through a wait for another
+    /// service operation, and every launch after it is passive, so a Stop the person chooses
+    /// later stays in force.
+    intent: LaunchIntent,
     /// The server was started elsewhere while this launch was answering. A launch that then
     /// finishes waiting runs once more, because its answer may predate that start.
     resume: bool,
@@ -581,6 +621,7 @@ impl LocalLaunchState {
     /// `place` is the host's name for this computer, such as "This Mac".
     pub(super) fn new(adapters: LocalCoreAdapters, place: &'static str) -> Self {
         Self {
+            intent: adapters.intent,
             adapters,
             state: LaunchState::Launching,
             place,
@@ -590,6 +631,7 @@ impl LocalLaunchState {
             _background_item: None,
             cancelled: Arc::new(AtomicBool::new(false)),
             _task: None,
+            _starting: None,
             resume: false,
             announced: std::cell::RefCell::default(),
             quiet_until: None,
@@ -735,6 +777,18 @@ impl WorkspaceManager {
         }
         let adapter = Arc::clone(&launch.adapters.launch);
         let cancelled = Arc::clone(&launch.cancelled);
+        let intent = launch.intent;
+        let (started, starting) = async_channel::bounded::<()>(1);
+        launch._starting = Some(cx.spawn_in(window, async move |manager, cx| {
+            if starting.recv().await.is_ok() {
+                let _ = manager.update(cx, |manager, cx| {
+                    if matches!(manager.launch.state, LaunchState::Launching) {
+                        manager.launch.state = LaunchState::Starting;
+                        cx.notify();
+                    }
+                });
+            }
+        }));
         let work = cx.background_spawn(async move {
             // The service refuses to start what is off in Login Items, so neither the person's
             // Start nor launch turns it back on.
@@ -756,7 +810,10 @@ impl WorkspaceManager {
                 return refused;
             }
             let observed = move || cancelled.load(Ordering::Acquire);
-            match adapter.run(&observed) {
+            let starting = move || {
+                let _ = started.try_send(());
+            };
+            match adapter.run(intent, &starting, &observed) {
                 Ok(outcome) => StepResult::Outcome(outcome),
                 Err(error) => StepResult::Failed(error),
             }
@@ -776,6 +833,12 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Only the launch the person's own opening of SpaceTerm ran is foreground. A wait for
+        // another operation runs that same launch again.
+        if !matches!(result, StepResult::Outcome(LaunchOutcome::ServiceBusy)) {
+            self.launch.intent = LaunchIntent::Passive;
+        }
+        self.launch._starting = None;
         let state = match result {
             StepResult::Outcome(LaunchOutcome::Ready) => self.connect_local_core(window, cx),
             StepResult::Outcome(LaunchOutcome::Stopped) => LaunchState::Stopped,
@@ -1409,7 +1472,9 @@ pub(crate) mod testing {
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
 
-    use super::{LaunchOutcome, LocalCoreAdapters, LocalLaunch, WorkspaceCoreConnector};
+    use super::{
+        LaunchIntent, LaunchOutcome, LocalCoreAdapters, LocalLaunch, WorkspaceCoreConnector,
+    };
     use crate::machine_connection::CoreError;
 
     /// A ready server presenting one Workspace, "Default", whose Panes run in `session_factory`.
@@ -1477,6 +1542,7 @@ pub(crate) mod testing {
                 ..ScriptedLaunch::default()
             }),
             connector: Rc::new(Presenting(session_factory)),
+            intent: LaunchIntent::Passive,
         }
     }
 
@@ -1496,6 +1562,7 @@ pub(crate) mod testing {
         LocalCoreAdapters {
             launch: Arc::new(ScriptedLaunch::default()),
             connector: Rc::new(Unreachable),
+            intent: LaunchIntent::Passive,
         }
     }
 
@@ -1510,6 +1577,10 @@ pub(crate) mod testing {
         authorize: Mutex<Option<CoreError>>,
         /// Each background item read in order. It is on once the queue is empty.
         background_item_off: Mutex<VecDeque<bool>>,
+        /// The intent of each run, in order.
+        intents: Mutex<Vec<LaunchIntent>>,
+        /// The next run starts SpaceTerm Core before it answers.
+        starts_core: std::sync::atomic::AtomicBool,
     }
 
     impl ScriptedLaunch {
@@ -1533,11 +1604,32 @@ pub(crate) mod testing {
         pub(crate) fn steps(&self) -> Vec<&'static str> {
             self.steps.lock().unwrap().clone()
         }
+        /// The intent of each run, in order.
+        pub(crate) fn intents(&self) -> Vec<LaunchIntent> {
+            self.intents.lock().unwrap().clone()
+        }
+        /// The next run says it starts SpaceTerm Core before it answers.
+        pub(crate) fn start_core(&self) {
+            self.starts_core
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     impl LocalLaunch for ScriptedLaunch {
-        fn run(&self, _: &(dyn Fn() -> bool + Sync)) -> Result<LaunchOutcome, CoreError> {
+        fn run(
+            &self,
+            intent: LaunchIntent,
+            starting: &(dyn Fn() + Sync),
+            _: &(dyn Fn() -> bool + Sync),
+        ) -> Result<LaunchOutcome, CoreError> {
             self.steps.lock().unwrap().push("run");
+            self.intents.lock().unwrap().push(intent);
+            if self
+                .starts_core
+                .swap(false, std::sync::atomic::Ordering::Relaxed)
+            {
+                starting();
+            }
             self.runs
                 .lock()
                 .unwrap()

@@ -1,12 +1,17 @@
 //! Account-local startup composition for the desktop host.
 //!
 //! The UI host runs this operation off its event thread and presents the typed outcome.
-use spaceterm_core::{CoreError, LocalStartup, StartupOutcome, service::Service};
+use spaceterm_core::{CoreError, LaunchIntent, LocalStartup, StartupOutcome, service::Service};
 use std::path::{Path, PathBuf};
 
-/// Prepare or reuse the account service. Only explicit Start reverses deliberate Stop.
-/// Existing service policy bypasses candidate discovery.
-pub fn run(cancelled: impl Fn() -> bool) -> Result<StartupOutcome, CoreError> {
+/// Prepare or reuse the account service. Only explicit Start and a
+/// [`LaunchIntent::Foreground`] launch reverse deliberate Stop. Existing service policy bypasses
+/// candidate discovery. `starting` runs once, right before launch installs or starts the server.
+pub fn run(
+    intent: LaunchIntent,
+    starting: &dyn Fn(),
+    cancelled: impl Fn() -> bool,
+) -> Result<StartupOutcome, CoreError> {
     let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
     if owned_foreground() {
         if cancelled() {
@@ -19,13 +24,15 @@ pub fn run(cancelled: impl Fn() -> bool) -> Result<StartupOutcome, CoreError> {
         };
         return Ok(StartupOutcome::Ready { core, status });
     }
-    LocalStartup::for_identity(identity)?.run(
+    LocalStartup::for_identity(identity)?.launch(
+        intent,
         || {
             discover_candidate()
                 .map_err(CoreError::from)
                 .and_then(|candidate| candidate.stage().map(|installation| installation.directory))
         },
         cancelled,
+        starting,
     )
 }
 
