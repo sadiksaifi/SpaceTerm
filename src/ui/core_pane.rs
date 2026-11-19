@@ -1166,6 +1166,11 @@ mod connection {
         restart: Option<CoreRestart>,
         /// The Core announced a confirmed Stop, so its lost connection reads as that Stop.
         stopping: bool,
+        /// When this Pane last lost its connection, while the loss is unexplained.
+        lost_since: Option<std::time::Instant>,
+        /// The loss outlasted [`CLASSIFY_LIMIT`] without an explanation, so it is an
+        /// interruption the Pane says it reconnects from.
+        interrupted: bool,
         /// When this Pane first read the restart the Core announces now.
         restart_since: Option<std::time::Instant>,
         /// The last restart the Core announced since this Pane's Terminal Session ran.
@@ -1206,7 +1211,18 @@ mod connection {
     /// Hints `hint` once an announced restart's deadline passes. Without the thread, the deadline
     /// still passes at the next reading.
     fn wake_at_deadline(hint: async_channel::Sender<()>, since: std::time::Instant) {
-        let deadline = since + crate::terminal::core_session::restart::RECONNECT_LIMIT;
+        wake_at(
+            hint,
+            since + crate::terminal::core_session::restart::RECONNECT_LIMIT,
+        );
+    }
+
+    /// How long a lost connection stays unclassified, with input paused and no notice, while
+    /// SpaceTerm reads whether SpaceTerm Core stopped on purpose.
+    pub(crate) const CLASSIFY_LIMIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+    /// Hints `hint` once `deadline` passes, so the Pane reads its connection again then.
+    fn wake_at(hint: async_channel::Sender<()>, deadline: std::time::Instant) {
         let _ = std::thread::Builder::new()
             .name("spaceterm-pane-restart-deadline".into())
             .spawn(move || {
@@ -1224,6 +1240,8 @@ mod connection {
                 start_failure: connection.start_failure(),
                 restart: None,
                 stopping: false,
+                lost_since: None,
+                interrupted: false,
                 restart_since: None,
                 announced: None,
                 session_ran: None,
@@ -1293,6 +1311,33 @@ mod connection {
             changed
         }
 
+        /// Times how long a lost connection has gone unexplained and reports whether the Pane
+        /// now calls it an interruption. Input pauses at once; the notice waits for
+        /// [`CLASSIFY_LIMIT`], so a Stop or Restart SpaceTerm Core announces meanwhile never
+        /// reads as one.
+        fn read_interruption(&mut self, status: CorePaneStatus) -> bool {
+            let lost = matches!(
+                status,
+                CorePaneStatus::Reconnecting | CorePaneStatus::TakeoverReconnecting
+            );
+            let interrupted = if lost {
+                let now = self.connection.now();
+                let since = *self.lost_since.get_or_insert_with(|| {
+                    if let Some(hint) = self.deadline_hint.clone() {
+                        wake_at(hint, now + CLASSIFY_LIMIT);
+                    }
+                    now
+                });
+                now.saturating_duration_since(since) >= CLASSIFY_LIMIT
+            } else {
+                self.lost_since = None;
+                false
+            };
+            let changed = interrupted != self.interrupted;
+            self.interrupted = interrupted;
+            changed
+        }
+
         /// Asks the server for this Pane, which starts or acquires only this Pane. Only an
         /// explicit Pane selection or Tab opening calls it; rendering and reconciliation never do.
         pub(crate) fn select(&self) {
@@ -1309,7 +1354,7 @@ mod connection {
             // Status first, because a connection publishes its generation before it reports
             // Connected.
             let status = self.connection.status();
-            let restart_changed = self.read_restart();
+            let restart_changed = self.read_restart() | self.read_interruption(status);
             let version = self.connection.running_version();
             let version_changed = version.is_some() && version != self.running_version;
             if version_changed {
@@ -1678,7 +1723,7 @@ mod connection {
                 // A confirmed Stop ends the connection on purpose. Input stays paused and nothing
                 // says reconnecting; the stopped state follows once the Core is gone.
                 CorePaneStatus::Reconnecting | CorePaneStatus::TakeoverReconnecting
-                    if self.stopping =>
+                    if self.stopping || !self.interrupted =>
                 {
                     None
                 }

@@ -155,6 +155,9 @@ fn lost_start() -> (Arc<Connection>, CorePaneView) {
     view.start_shell();
     connection.set(CorePaneStatus::Reconnecting);
     view.sync();
+    // Nothing explained the loss in time, so it is an interruption.
+    connection.advance(super::connection::CLASSIFY_LIMIT);
+    view.sync();
     (connection, view)
 }
 
@@ -744,12 +747,15 @@ fn a_confirmed_stop_never_says_reconnecting_and_ends_in_its_stopped_state() {
 }
 
 #[test]
-fn an_unexplained_loss_still_says_reconnecting() {
+fn an_unexplained_loss_says_reconnecting_once_nothing_explains_it() {
     let connection = Connection::new(CorePaneStatus::Connected);
     let mut view = CorePaneView::new(connection.clone());
     view.sync();
     connection.set(CorePaneStatus::Reconnecting);
     view.sync();
+    assert_eq!(notice(&view), None, "SpaceTerm reads why first");
+    connection.advance(super::connection::CLASSIFY_LIMIT);
+    assert!(view.sync().changed, "the classification repaints the Pane");
     assert_eq!(
         notice(&view).map(|(title, _)| title),
         Some("Reconnecting…".to_owned())
