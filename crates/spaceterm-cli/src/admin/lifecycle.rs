@@ -130,6 +130,17 @@ fn not_running(context: &Context<'_>, routed: &Routed, command: &str, failure: F
     Reply::failure(command, Some(routed.machine.clone()), failure)
 }
 
+/// Says once, to a person at the terminal, that the command waits for another SpaceTerm Core
+/// operation to finish before it goes on.
+fn say_waiting(context: &Context<'_>) -> impl FnMut() + use<> {
+    let interactive = context.interactive();
+    move || {
+        if interactive {
+            eprintln!("Waiting for another SpaceTerm Core operation to finish\u{2026}");
+        }
+    }
+}
+
 fn preview(
     context: &Context<'_>,
     kind: Kind,
@@ -145,15 +156,29 @@ fn preview(
             .map(|(_, facts)| facts),
         Kind::Stop => None,
     };
-    let previewed = admin::preview(&mut opened.session, kind.action());
+    // Another operation, such as an update check, may hold SpaceTerm Core for a while. The
+    // preview waits for it rather than refusing at once.
+    let previewed = admin::preview_when_ready(
+        &opened.lane,
+        opened.session,
+        kind.action(),
+        &crate::interrupt::settle_by,
+        &mut say_waiting(context),
+    );
     let admin::Preview {
         token,
         expires_at,
         effects,
         ..
     } = match previewed {
-        Ok(preview) => preview,
+        Ok((session, preview)) => {
+            opened.session = session;
+            preview
+        }
         Err(error) => {
+            if let Err(failure) = crate::interrupt::dispatch() {
+                return Reply::failure(command, Some(routed.machine), failure);
+            }
             return Reply::failure(command, Some(routed.machine), super::lane_failure(error));
         }
     };
@@ -350,8 +375,10 @@ fn execute(
         .as_ref()
         .and_then(|facts| facts.pending.as_ref())
         .map(|pending| pending.version.to_string());
-    let deadline = Instant::now() + context.timeout(kind.wait());
-    let outcome = admin::execute(
+    // An approved Stop or Restart waits for another operation that holds SpaceTerm Core, then
+    // runs under the same approval. SpaceTerm Core refuses it as changed when what it affects
+    // changed meanwhile.
+    let outcome = admin::execute_approved(
         &lane,
         session,
         kind.action(),
@@ -361,7 +388,9 @@ fn execute(
         &mut *context.state.borrow_mut(),
         &mut super::dispatch,
         &crate::interrupt::settle_by,
+        &mut say_waiting(context),
     );
+    let deadline = Instant::now() + context.timeout(kind.wait());
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(error) => {
