@@ -92,6 +92,10 @@ pub(crate) struct CorePaneState {
     preparing: AtomicBool,
     /// This Pane's worker is starting its shell, or presents one that has not attached yet.
     shell_starting: AtomicBool,
+    /// The worker waits for a turn to start this Pane's shell in the background.
+    turn_wanted: AtomicBool,
+    /// The window's start queue gave this Pane its turn, which the worker has not used yet.
+    turn: AtomicBool,
     created_start: Arc<AtomicBool>,
     take_over: AtomicBool,
     start_restored: Arc<AtomicBool>,
@@ -141,6 +145,8 @@ impl CorePaneState {
             prepared: Mutex::default(),
             preparing: AtomicBool::new(false),
             shell_starting: AtomicBool::new(false),
+            turn_wanted: AtomicBool::new(false),
+            turn: AtomicBool::new(false),
             created_start: Arc::default(),
             take_over: AtomicBool::new(false),
             start_restored: Arc::default(),
@@ -284,6 +290,49 @@ impl CorePaneState {
     pub(crate) fn take_prepare(&self, boot: [u8; 32]) -> bool {
         let mut prepared = self.prepared.lock().unwrap_or_else(|e| e.into_inner());
         prepared.replace(boot) != Some(boot)
+    }
+
+    /// SpaceTerm Core refused this Pane's background start before admitting anything, so a later
+    /// turn may ask Core `boot` again.
+    pub(crate) fn release_prepare(&self, boot: [u8; 32]) {
+        let mut prepared = self.prepared.lock().unwrap_or_else(|e| e.into_inner());
+        if *prepared == Some(boot) {
+            *prepared = None;
+        }
+    }
+
+    /// The worker waits for this Pane's turn to start its shell in the background.
+    pub(crate) fn want_turn(&self) {
+        if !self.turn_wanted.swap(true, Ordering::AcqRel) {
+            self.changed();
+        }
+    }
+
+    /// Whether the worker waits for a turn the window's start queue has not given yet.
+    pub(crate) fn awaiting_turn(&self) -> bool {
+        self.turn_wanted.load(Ordering::Acquire) && !self.turn.load(Ordering::Acquire)
+    }
+
+    /// Whether this Pane holds a turn its worker has not used yet.
+    pub(crate) fn turn_granted(&self) -> bool {
+        self.turn.load(Ordering::Acquire)
+    }
+
+    /// Gives this Pane its turn to start its shell in the background, and wakes its worker.
+    pub(crate) fn grant_turn(&self) {
+        if self.turn_wanted.load(Ordering::Acquire) && !self.turn.swap(true, Ordering::AcqRel) {
+            self.wake.notify();
+        }
+    }
+
+    /// Uses the turn this Pane holds, if any.
+    pub(crate) fn take_turn(&self) -> bool {
+        if self.turn.swap(false, Ordering::AcqRel) {
+            self.turn_wanted.store(false, Ordering::Release);
+            true
+        } else {
+            false
+        }
     }
 
     /// Whether this Pane's Core starts a retained shell in the background without granting
@@ -668,6 +717,14 @@ impl CorePaneState {
         if status != CorePaneStatus::Connecting {
             self.shell_starting.store(false, Ordering::Release);
         }
+        // Only a restored Pane waits for a background start, or is about to use its turn.
+        if !matches!(
+            status,
+            CorePaneStatus::Restored | CorePaneStatus::Connecting
+        ) {
+            self.turn_wanted.store(false, Ordering::Release);
+            self.turn.store(false, Ordering::Release);
+        }
         if status != CorePaneStatus::Connected {
             self.reading
                 .lock()
@@ -720,6 +777,8 @@ impl CorePaneState {
         }
         *status = CorePaneStatus::Connected;
         self.shell_starting.store(false, Ordering::Release);
+        self.turn_wanted.store(false, Ordering::Release);
+        self.turn.store(false, Ordering::Release);
         drop(status);
         // Each frame reaches here. Only a new status or generation concerns a view.
         if changed {

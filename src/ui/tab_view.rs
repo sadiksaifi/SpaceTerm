@@ -747,6 +747,9 @@ pub(crate) struct TabView {
     title_waits: BTreeMap<PaneId, Option<std::time::Instant>>,
     /// Ends the earliest title wait.
     _title_wait: Option<gpui::Task<()>>,
+    /// A Pane of this Tab waited for or used a background start turn at the last reading, so the
+    /// next reading wakes the start queue once more when the last turn ends.
+    background_turns: bool,
     /// Each Pane's connection loss waiting to be classified, and when the Tab saw it begin.
     losses: BTreeMap<PaneId, (u64, std::time::Instant)>,
     /// Classifies the connection losses no announcement explained, when the earliest wait ends.
@@ -851,6 +854,7 @@ impl TabView {
             parked_panes: BTreeMap::new(),
             directory_recovery: None,
             _blocked_updates: blocked_updates,
+            background_turns: false,
             losses: BTreeMap::new(),
             _classify: None,
             title_waits: BTreeMap::new(),
@@ -1907,6 +1911,30 @@ impl TabView {
         let right = place.right();
         let bottom = place.bottom();
         Some(Bounds::from_corners(point(left, top), point(right, bottom)))
+    }
+
+    /// What Pane `pane_id` needs from the window's start queue for its background start: whether
+    /// its Core starts shells in the background, whether it waits for a turn, and whether it
+    /// holds or uses one now.
+    pub(crate) fn readiness_background(&self, pane_id: PaneId) -> (bool, bool, bool) {
+        self.binding
+            .view(pane_id)
+            .map(|view| {
+                let connection = view.connection();
+                (
+                    connection.background_starts(),
+                    connection.awaiting_turn(),
+                    connection.starting_in_background(),
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    /// Gives Pane `pane_id` its turn to start its shell in the background.
+    pub(crate) fn grant_background_turn(&self, pane_id: PaneId) {
+        if let Some(view) = self.binding.view(pane_id) {
+            view.connection().grant_turn();
+        }
     }
 
     pub(crate) fn readiness_starting(&self, pane_id: PaneId) -> bool {
@@ -3211,6 +3239,15 @@ impl TabView {
         }
         if changed {
             cx.notify();
+        }
+        // A Pane that wants a background start turn, or uses one, lets the window's start queue
+        // move on as each turn ends.
+        let background = self.binding.pane_ids().into_iter().any(|pane_id| {
+            let (_, awaiting, in_flight) = self.readiness_background(pane_id);
+            awaiting || in_flight
+        });
+        if std::mem::replace(&mut self.background_turns, background) || background {
+            super::terminal_readiness::Readiness::for_window(window, cx).wake();
         }
         self.track_title_waits(window, cx);
         self.schedule_classification(window, cx);

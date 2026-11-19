@@ -8,6 +8,9 @@ const HEALTHY_CONNECTION: Duration = Duration::from_secs(5);
 struct Start {
     boot: [u8; 32],
     cause: Option<CoreError>,
+    /// A background start, which grants control to nobody. Seeing its exact Pane run a Session
+    /// in the same Core run with nobody in control proves it started.
+    background: bool,
 }
 
 #[derive(Default)]
@@ -102,13 +105,18 @@ impl Recovery {
         }
     }
 
-    pub fn begin_start(&mut self, boot: Option<[u8; 32]>) -> Result<(), CoreError> {
+    pub fn begin_start(
+        &mut self,
+        boot: Option<[u8; 32]>,
+        background: bool,
+    ) -> Result<(), CoreError> {
         if let Some(start) = &self.start {
             return Err(start.cause.unwrap_or(CoreError::Protocol));
         }
         self.start = Some(Start {
             boot: boot.or(self.observed_boot).ok_or(CoreError::Protocol)?,
             cause: None,
+            background,
         });
         Ok(())
     }
@@ -141,16 +149,31 @@ impl Recovery {
     }
 
     /// A same-boot dormant observation can overtake the original request on its old transport.
-    /// Only a live grant or proof that the original server run ended unlocks another start.
-    /// Any validated observation ends a restart wait, also for a Pane that stays dormant.
-    pub fn observed(&mut self, reply: &Reply) -> Result<(), CoreError> {
+    /// Only a live grant, proof that the original server run ended, or for a background start
+    /// its Pane `pane` running a Session in that run with nobody in control unlocks another
+    /// start. Any validated observation ends a restart wait, also for a Pane that stays dormant.
+    pub fn observed(&mut self, reply: &Reply, pane: [u8; 32]) -> Result<(), CoreError> {
         let boot = match reply {
             Reply::Attached { lease } => {
                 self.start = None;
                 Some(lease.core)
             }
             Reply::Restored { core, .. } => Some(*core),
-            Reply::Takeover { target, .. } => Some(target.core),
+            Reply::Takeover {
+                target, controller, ..
+            } => {
+                let live_and_unowned = target.session != pane
+                    && *controller == spaceterm_core::pane::control::Controller::Nobody;
+                if live_and_unowned
+                    && self
+                        .start
+                        .as_ref()
+                        .is_some_and(|start| start.background && start.boot == target.core)
+                {
+                    self.start = None;
+                }
+                Some(target.core)
+            }
             _ => return Err(CoreError::Protocol),
         };
         self.observed_boot = boot;
@@ -197,7 +220,7 @@ mod tests {
             directory_unavailable: false,
             session_ended: None,
         };
-        recovery.observed(&restored).unwrap();
+        recovery.observed(&restored, [2; 32]).unwrap();
         // The connection drops again after the first wait's deadline.
         let later = now + Duration::from_secs(200);
         assert!(!recovery.restart_expired(later));
@@ -206,6 +229,63 @@ mod tests {
             recovery.restart_wait(later),
             "a new restart gets its own wait"
         );
+    }
+
+    /// A background start whose reply was lost settles once the same Core run shows its Pane
+    /// running a Session nobody controls. A dormant observation in that run, or one naming a
+    /// controller, keeps the guard, and so does any such observation of an ordinary start.
+    #[test]
+    fn a_lost_background_start_settles_on_its_live_unowned_session() {
+        use spaceterm_core::pane::control::Controller;
+        let pane = [2; 32];
+        let takeover = |session: [u8; 32], controller: Controller| Reply::Takeover {
+            target: spaceterm_core::pane::PaneTarget {
+                core: [7; 32],
+                session,
+            },
+            controller,
+            session_ended: None,
+        };
+        let lost = |background: bool| {
+            let mut recovery = Recovery::default();
+            recovery.begin_start(Some([7; 32]), background).unwrap();
+            recovery.started(&Err(CoreError::Direct(DirectError::Transport)));
+            recovery
+        };
+
+        let mut recovery = lost(true);
+        assert!(
+            recovery
+                .observed(&takeover(pane, Controller::Nobody), pane)
+                .is_err()
+        );
+        assert!(
+            recovery
+                .observed(
+                    &takeover(
+                        [9; 32],
+                        Controller::Client {
+                            name: "Other".try_into().unwrap(),
+                            this_client: false,
+                        },
+                    ),
+                    pane,
+                )
+                .is_err(),
+            "another client's Session proves nothing about this start"
+        );
+        recovery
+            .observed(&takeover([9; 32], Controller::Nobody), pane)
+            .unwrap();
+        assert!(!recovery.start_unconfirmed());
+
+        let mut ordinary = lost(false);
+        assert!(
+            ordinary
+                .observed(&takeover([9; 32], Controller::Nobody), pane)
+                .is_err()
+        );
+        assert!(ordinary.start_unconfirmed());
     }
 
     #[test]

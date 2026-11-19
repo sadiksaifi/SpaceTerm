@@ -275,6 +275,37 @@ impl Readiness {
             }
             .rank(selected_order, direction)
         });
+        // Background shell starts follow the same order. A Pane whose Core starts shells in the
+        // background gets its worker even before anyone shows it, and at most
+        // BACKGROUND_START_LIMIT Panes hold or use a start turn at once. The Pane the person
+        // selects starts at once through its own selection, outside these turns.
+        let mut background = 0;
+        let mut requested = false;
+        let mut waiting = Vec::new();
+        for entry in &mut entries {
+            let (Some(tab), Some(pane)) = (entry.tab.upgrade(), entry.pane.upgrade()) else {
+                continue;
+            };
+            let (supported, awaiting, in_flight) = tab.read(cx).readiness_background(entry.pane_id);
+            if !supported {
+                continue;
+            }
+            if pane.update(cx, |pane, cx| pane.request_worker(cx)) {
+                entry.dirty = true;
+                requested = true;
+            }
+            background += usize::from(in_flight);
+            if awaiting {
+                waiting.push((tab, entry.pane_id));
+            }
+        }
+        for (tab, pane_id) in waiting {
+            if background >= BACKGROUND_START_LIMIT {
+                break;
+            }
+            tab.read(cx).grant_background_turn(pane_id);
+            background += 1;
+        }
         // Screen demand follows the same bounded likely-return set as hidden CPU caches. It
         // changes transport demand only; the Pane's drawing and focus lifecycle stays hidden.
         let mut preparation_panes = 0;
@@ -301,7 +332,7 @@ impl Readiness {
         }
         let mut starting = entries.iter().filter(|entry| entry.starting).count();
         let mut worked = false;
-        let mut more = starting > 0;
+        let mut more = starting > 0 || requested;
         for entry in &mut entries {
             if worked && executor.now().duration_since(began) >= SLICE {
                 more |= entry.dirty;

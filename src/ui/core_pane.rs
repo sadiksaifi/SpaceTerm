@@ -1002,6 +1002,25 @@ mod connection {
             false
         }
 
+        /// Whether this Pane's Core starts retained shells in the background, so the window
+        /// opens a worker for the Pane even before the person shows it.
+        fn background_starts(&self) -> bool {
+            false
+        }
+
+        /// Whether this Pane waits for a turn to start its shell in the background.
+        fn awaiting_turn(&self) -> bool {
+            false
+        }
+
+        /// Whether this Pane holds a background start turn or uses one now.
+        fn starting_in_background(&self) -> bool {
+            self.preparing()
+        }
+
+        /// Gives this Pane its turn to start its shell in the background.
+        fn grant_turn(&self) {}
+
         /// Leaves this client's view of the Pane for the next window that presents it.
         fn retain_view(&self) {}
 
@@ -1093,6 +1112,22 @@ mod connection {
 
         fn shell_starting(&self) -> bool {
             Self::shell_starting(self)
+        }
+
+        fn background_starts(&self) -> bool {
+            Self::prepares(self)
+        }
+
+        fn awaiting_turn(&self) -> bool {
+            Self::awaiting_turn(self)
+        }
+
+        fn starting_in_background(&self) -> bool {
+            Self::preparing(self) || Self::turn_granted(self)
+        }
+
+        fn grant_turn(&self) {
+            Self::grant_turn(self);
         }
 
         fn retain_view(&self) {

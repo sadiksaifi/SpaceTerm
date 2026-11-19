@@ -156,7 +156,7 @@ fn bookkept(
             .connection_recovery
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .begin_start(boot)?;
+            .begin_start(boot, matches!(request, Request::PrepareRestored { .. }))?;
         state.directory_busy.store(true, Ordering::Release);
         state.admission(Admission::Pending);
     }
@@ -183,7 +183,7 @@ fn bookkept(
         .connection_recovery
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .observed(&reply)?;
+        .observed(&reply, pane_id)?;
     if !state.start_unconfirmed() {
         state
             .directory_note
@@ -304,14 +304,18 @@ impl ClaimWorker<'_> {
                 state.admission(Admission::Waiting);
                 // A shell about to start for a first use stays an ordinary start: the Pane keeps
                 // its blank surface rather than flashing the restored screen.
+                // A background start waits for its turn, so only a granted one is starting.
+                let background = !unavailable
+                    && session_ended.is_none()
+                    && !state.start_unconfirmed()
+                    && state.prepares()
+                    && state.will_prepare(boot);
                 let starting = session_ended.is_none()
                     && (created_start
                         || state.start_restored.load(Ordering::Acquire)
                         || state.selected.load(Ordering::Acquire)
                         || (was_attached && state.foreground())
-                        || (!state.start_unconfirmed()
-                            && state.prepares()
-                            && state.will_prepare(boot)));
+                        || (background && state.turn_granted()));
                 if !unavailable && (fresh || starting) {
                     state.starting_shell();
                 }
@@ -399,15 +403,10 @@ impl ClaimWorker<'_> {
                         }
                         Ok(reply) => reply,
                     };
-                } else if !unavailable
-                    && session_ended.is_none()
-                    && !state.start_unconfirmed()
-                    && state.prepares()
-                    && state.take_prepare(boot)
-                {
+                } else if background && state.take_turn() && state.take_prepare(boot) {
                     // Nobody asked for this Pane yet. Its shell starts in the background with no
-                    // client in control, once per Core boot, so it is ready when the person
-                    // opens it.
+                    // client in control, once per Core boot, when the window's start queue gives
+                    // it a turn, so it is ready when the person opens it.
                     grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
                     let update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     grant_appearance = None;
@@ -419,15 +418,27 @@ impl ClaimWorker<'_> {
                         style: Some(encode_style(&update)),
                     });
                     state.preparing.store(false, Ordering::Release);
+                    state.changed();
                     reply = match prepared {
                         Err(CoreError::DirectoryUnavailable) => {
                             unavailable = true;
                             state.invalidate();
                             reply
                         }
+                        // SpaceTerm Core admitted nothing, so the Pane asks again on a later turn.
+                        Err(CoreError::ServiceBusy) => {
+                            state.release_prepare(boot);
+                            return Err(CoreError::ServiceBusy);
+                        }
+                        // A Core that selected an older minor cannot start it in the background.
+                        Err(CoreError::Unsupported) => reply,
                         other => other?,
                     };
                 } else {
+                    if background {
+                        // The window's start queue wakes this wait with the Pane's turn.
+                        state.want_turn();
+                    }
                     // Start, selection, repair and dismissal wake this wait, and so does
                     // anything `ControlWatch` sees that can change the server's answer.
                     state.wake.wait(None);

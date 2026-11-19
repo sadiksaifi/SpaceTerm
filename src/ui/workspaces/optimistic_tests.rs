@@ -1278,6 +1278,50 @@ fn optimistic_rapid_tabs_keep_each_start_intent_after_later_navigation(cx: &mut 
     assert_eq!(cx.update(|window, cx| window.focused(cx)), focus);
 }
 
+/// After SpaceTerm Core restarts, every restored Pane of the layout waits for a background start
+/// turn. The window gives at most three at once, the visible Pane first, and the rest as turns
+/// finish, whatever the person selects meanwhile.
+#[gpui::test]
+fn background_starts_after_a_restart_take_bounded_turns_visible_first(cx: &mut TestAppContext) {
+    let (harness, cx) = window_harness(cx);
+    for _ in 0..7 {
+        cx.dispatch_action(crate::ui::NewTab);
+    }
+    for _ in 0..7 {
+        harness.core.finish(true, true);
+        project_window(&harness, cx);
+    }
+    cx.dispatch_action(crate::ui::ActivateTab1);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(16));
+    cx.run_until_parked();
+    let panes = harness.panes.opened();
+    assert_eq!(panes.len(), 8);
+    for pane in &panes {
+        pane.admitted();
+        pane.await_turn();
+    }
+    let visible = harness
+        .panes
+        .pane(harness.core.inventory().workspaces[0].tabs[0].root_pane);
+    let turns = |cx: &mut VisualTestContext| {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(16));
+        cx.run_until_parked();
+        panes.iter().filter(|pane| pane.holds_turn()).count()
+    };
+    assert_eq!(turns(cx), 3, "three background starts run at once");
+    assert!(visible.holds_turn(), "the visible Pane goes first");
+
+    // The person moves on while the turns run. Selection starts its own Pane outside the turns.
+    cx.dispatch_action(crate::ui::ActivateTab5);
+    assert_eq!(turns(cx), 3, "a selection never widens the bound");
+    for pane in panes.iter().filter(|pane| pane.holds_turn()) {
+        pane.finish_turn();
+    }
+    assert_eq!(turns(cx), 3, "finished turns pass to the waiting Panes");
+}
+
 #[gpui::test]
 fn readiness_reserves_foreground_start_capacity_during_a_hidden_creation_burst(
     cx: &mut TestAppContext,

@@ -3651,6 +3651,11 @@ mod core_workspaces {
         pub(crate) struct ScriptedPane {
             /// The worker starts this Pane's shell, which has not attached yet.
             shell_starting: std::sync::atomic::AtomicBool,
+            /// The Core starts shells in the background, and this Pane waits for a turn.
+            background: std::sync::atomic::AtomicBool,
+            awaiting_turn: std::sync::atomic::AtomicBool,
+            /// This Pane holds a turn or uses one.
+            in_background: std::sync::atomic::AtomicBool,
             status: Mutex<crate::terminal::core_session::CorePaneStatus>,
             startup_pending: std::sync::atomic::AtomicBool,
             controller: Mutex<Option<spaceterm_core::pane::control::Controller>>,
@@ -3675,6 +3680,9 @@ mod core_workspaces {
                     status: Mutex::new(crate::terminal::core_session::CorePaneStatus::Connecting),
                     startup_pending: std::sync::atomic::AtomicBool::new(true),
                     shell_starting: std::sync::atomic::AtomicBool::new(false),
+                    background: std::sync::atomic::AtomicBool::new(false),
+                    awaiting_turn: std::sync::atomic::AtomicBool::new(false),
+                    in_background: std::sync::atomic::AtomicBool::new(false),
                     controller: Mutex::default(),
                     session_end: Mutex::default(),
                     generation: std::sync::atomic::AtomicU64::new(0),
@@ -3703,6 +3711,27 @@ mod core_workspaces {
                 unsent: Option<crate::terminal::core_session::unsent::UnsentInput>,
             ) {
                 *self.unsent.lock().expect("unsent") = unsent;
+                self.changes.publish();
+            }
+
+            /// The restarted Core starts shells in the background, and this Pane's worker waits for
+            /// its turn.
+            pub(crate) fn await_turn(&self) {
+                use std::sync::atomic::Ordering::SeqCst;
+                self.background.store(true, SeqCst);
+                self.awaiting_turn.store(true, SeqCst);
+                self.changes.publish();
+            }
+
+            /// Whether the window's start queue gave this Pane a turn it still uses.
+            pub(crate) fn holds_turn(&self) -> bool {
+                self.in_background.load(std::sync::atomic::Ordering::SeqCst)
+            }
+
+            /// The Core answered the background start this Pane's turn sent.
+            pub(crate) fn finish_turn(&self) {
+                self.in_background
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
                 self.changes.publish();
             }
 
@@ -3803,6 +3832,25 @@ mod core_workspaces {
             fn shell_starting(&self) -> bool {
                 self.shell_starting
                     .load(std::sync::atomic::Ordering::SeqCst)
+            }
+
+            fn background_starts(&self) -> bool {
+                self.background.load(std::sync::atomic::Ordering::SeqCst)
+            }
+
+            fn awaiting_turn(&self) -> bool {
+                self.awaiting_turn.load(std::sync::atomic::Ordering::SeqCst)
+            }
+
+            fn starting_in_background(&self) -> bool {
+                self.in_background.load(std::sync::atomic::Ordering::SeqCst)
+            }
+
+            fn grant_turn(&self) {
+                use std::sync::atomic::Ordering::SeqCst;
+                if self.awaiting_turn.swap(false, SeqCst) {
+                    self.in_background.store(true, SeqCst);
+                }
             }
 
             fn running_version(&self) -> Option<spaceterm_core::update::facts::Version> {

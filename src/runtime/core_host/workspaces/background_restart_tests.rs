@@ -18,6 +18,21 @@ impl DirectConnector for Away {
     }
 }
 
+/// Gives each Pane of `states` its background start turn once it waits for one, as a window's
+/// start queue does, or leaves it when it never waits for one in time.
+fn grant_turns(states: &[Arc<crate::terminal::core_session::CorePaneState>]) {
+    for state in states {
+        let until = Instant::now() + Duration::from_secs(10);
+        while !state.awaiting_turn() && state.status() != CorePaneStatus::Takeover {
+            if Instant::now() >= until {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        state.grant_turn();
+    }
+}
+
 #[test]
 fn three_panes_observe_restart_after_the_window_reopens_offline() {
     let mut original = crate::runtime::directory_testing::terminal_host();
@@ -96,8 +111,15 @@ fn three_panes_observe_restart_after_the_window_reopens_offline() {
     core.stop_core();
     core.restore_core(restored());
     (core.reconnect)();
-    // Each Pane's fresh shell starts once in the background, and no client controls it.
+    // Each Pane waits for a background start turn, which a window's start queue gives. Each
+    // fresh shell then starts once, and no client controls it.
     let starts = core.starts();
+    grant_turns(
+        &window
+            .iter()
+            .map(|(_, state)| state.clone())
+            .collect::<Vec<_>>(),
+    );
     for (_, state) in &window {
         await_status(state, CorePaneStatus::Takeover);
     }
@@ -149,8 +171,10 @@ fn three_panes_observe_restart_after_the_window_reopens_offline() {
     );
     reopened[2].0.handle.focus(true);
     for (index, (_, state)) in reopened.iter().enumerate() {
+        // A Pane whose returning connection closed asks for its turn again.
         let until = Instant::now() + Duration::from_secs(10);
         while state.status() != CorePaneStatus::Takeover && Instant::now() < until {
+            state.grant_turn();
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(

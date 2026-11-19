@@ -2155,6 +2155,17 @@ impl TerminalPane {
     }
 
     /// Whether readiness may ask this Pane's session for hidden screens to prepare.
+    /// Asks the window's start queue to open this Pane's worker although nobody showed the Pane
+    /// yet, so its Core can start its shell in the background.
+    pub(crate) fn request_worker(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.readiness_requested || self.terminal_session.session.is_some() {
+            return false;
+        }
+        self.readiness_requested = true;
+        self.readiness.dirty(cx.entity_id());
+        true
+    }
+
     pub(crate) fn readiness_preparation_eligible(&self) -> bool {
         self.native_attention_pane.is_some()
             && !self.terminal_session.session_factory.is_pending()
