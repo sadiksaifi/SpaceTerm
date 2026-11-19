@@ -564,10 +564,8 @@ fn build() -> Deck {
                         }
                         None => "OK".to_owned(),
                     };
-                    deck.dialogs.insert(format!(
-                        "{} | {} | {buttons}",
-                        alert.title, alert.message
-                    ));
+                    deck.dialogs
+                        .insert(format!("{} | {} | {buttons}", alert.title, alert.message));
                 }
             }
         }

@@ -19,7 +19,13 @@ fn restarted() -> (WorkspaceHost, Id, Id) {
     (restored, workspace.id, workspace.tabs[0].root_pane)
 }
 
-fn claim(host: &mut WorkspaceHost, device: u8, workspace: Id, pane: Id, claim: AttachmentClaim) -> Reply {
+fn claim(
+    host: &mut WorkspaceHost,
+    device: u8,
+    workspace: Id,
+    pane: Id,
+    claim: AttachmentClaim,
+) -> Reply {
     host.request(
         [device; 32],
         [device; 32],
@@ -50,7 +56,13 @@ fn session(host: &mut WorkspaceHost, pane: Id) -> Option<Id> {
 fn a_prepared_pane_starts_once_without_control_and_a_selection_acquires_it() {
     let (mut host, workspace, pane) = restarted();
     let boot = host.prototype.boot;
-    let reply = claim(&mut host, 1, workspace, pane, AttachmentClaim::Prepare { core: boot });
+    let reply = claim(
+        &mut host,
+        1,
+        workspace,
+        pane,
+        AttachmentClaim::Prepare { core: boot },
+    );
     assert!(
         matches!(
             reply,
@@ -73,7 +85,13 @@ fn a_prepared_pane_starts_once_without_control_and_a_selection_acquires_it() {
     );
 
     // Preparing again observes the running shell and starts no second one.
-    let again = claim(&mut host, 2, workspace, pane, AttachmentClaim::Prepare { core: boot });
+    let again = claim(
+        &mut host,
+        2,
+        workspace,
+        pane,
+        AttachmentClaim::Prepare { core: boot },
+    );
     assert!(matches!(again, Reply::Takeover { .. }), "{again:?}");
     assert_eq!(session(&mut host, pane), Some(started));
 
@@ -95,7 +113,13 @@ fn a_prepared_pane_starts_once_without_control_and_a_selection_acquires_it() {
 #[test]
 fn a_prepare_from_another_boot_is_stale() {
     let (mut host, workspace, pane) = restarted();
-    let reply = claim(&mut host, 1, workspace, pane, AttachmentClaim::Prepare { core: [9; 32] });
+    let reply = claim(
+        &mut host,
+        1,
+        workspace,
+        pane,
+        AttachmentClaim::Prepare { core: [9; 32] },
+    );
     assert!(matches!(reply, Reply::Refused(Refusal::Stale)), "{reply:?}");
     assert_eq!(session(&mut host, pane), None);
     host.shutdown().unwrap();

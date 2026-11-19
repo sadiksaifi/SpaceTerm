@@ -249,7 +249,10 @@ fn a_stop_without_a_confirmed_outcome_offers_check_status_and_a_failed_one_try_a
             assert_eq!(fixture.machines.performed(), [(LOCAL, then)]);
         } else {
             // Try Again previews the Stop again, so the person reviews it before it runs.
-            assert_eq!(fixture.machines.asked(), [(LOCAL, then.clone()), (LOCAL, then)]);
+            assert_eq!(
+                fixture.machines.asked(),
+                [(LOCAL, then.clone()), (LOCAL, then)]
+            );
         }
         assert_eq!(
             fixture.machines.executed_actions(),

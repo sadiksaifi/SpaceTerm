@@ -2014,8 +2014,8 @@ impl TabManager {
         // A Tab that arrived says nothing until its Terminal Session names it, however fast it
         // grows in, so its first words are its real name. One that never gets a name says
         // Terminal once its wait ends.
-        let named = identity.is_named()
-            || (!identity.pending && !self.unnamed_since.contains_key(&tab_id));
+        let named =
+            identity.is_named() || (!identity.pending && !self.unnamed_since.contains_key(&tab_id));
         // A Tab growing in offers its close control once the control shows whole, so no part of
         // it cut off by the Tab's slot takes a press or reaches assistive technology.
         let close_control = if role != TabItemRole::InBar || reveal.close <= 0.0 {

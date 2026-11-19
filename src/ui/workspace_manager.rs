@@ -2849,17 +2849,14 @@ impl WorkspaceManager {
             .initial
             .filter(|_| !self.restores_remembered_view())
             .and_then(|core| self.binding.get(key)?.local(core));
-        let landed = initial.is_some_and(|workspace_id| self.activate_workspace(workspace_id, window, cx));
+        let landed =
+            initial.is_some_and(|workspace_id| self.activate_workspace(workspace_id, window, cx));
         if landed {
             self.focus(window, cx);
         }
         // The person's own launch of SpaceTerm lands in a shell once this computer's Workspaces
         // and this client's attachments are known.
-        if key == MachineKey::LOCAL
-            && inventory_applied
-            && self.launch.take_landing()
-            && !landed
-        {
+        if key == MachineKey::LOCAL && inventory_applied && self.launch.take_landing() && !landed {
             self.land(window, cx);
         }
         // The client that asked for a creation opens it, once, after the server published it.
@@ -5389,7 +5386,9 @@ mod empty;
 mod launch;
 #[cfg(test)]
 pub(crate) use launch::testing as launch_testing;
-pub(crate) use launch::{LaunchIntent, LocalCoreAdapters, resume_waiting_launches, start_local_core};
+pub(crate) use launch::{
+    LaunchIntent, LocalCoreAdapters, resume_waiting_launches, start_local_core,
+};
 mod core_bindings;
 use core_bindings::CoreBindings;
 pub(crate) use core_bindings::{MachineKey, MachineOrigin};

@@ -383,19 +383,33 @@ fn a_restored_pane_whose_start_is_in_flight_stays_blank() {
 fn selecting_or_starting_a_restored_pane_blanks_it_at_once() {
     let connection = Connection::new(CorePaneStatus::Restored);
     let mut view = CorePaneView::new(connection.clone());
-    assert!(matches!(view.screen(), Some(CorePaneScreen::Restored { .. })));
+    assert!(matches!(
+        view.screen(),
+        Some(CorePaneScreen::Restored { .. })
+    ));
     view.select();
-    assert_eq!(view.screen(), None, "the selected Pane waits for its prompt");
+    assert_eq!(
+        view.screen(),
+        None,
+        "the selected Pane waits for its prompt"
+    );
 
     // Another client took the Pane meanwhile, so the selection ends.
     connection.set(CorePaneStatus::Takeover);
     view.sync();
     connection.set(CorePaneStatus::Restored);
     view.sync();
-    assert!(matches!(view.screen(), Some(CorePaneScreen::Restored { .. })));
+    assert!(matches!(
+        view.screen(),
+        Some(CorePaneScreen::Restored { .. })
+    ));
 
     view.start_shell();
-    assert_eq!(view.screen(), None, "Start Session waits for the prompt too");
+    assert_eq!(
+        view.screen(),
+        None,
+        "Start Session waits for the prompt too"
+    );
 }
 
 #[test]
@@ -768,7 +782,10 @@ fn an_unexplained_loss_says_reconnecting_once_nothing_explains_it() {
     view.sync();
     assert_eq!(notice(&view), None, "SpaceTerm reads why first");
     assert!(view.classifying());
-    assert!(view.classify().changed, "the classification repaints the Pane");
+    assert!(
+        view.classify().changed,
+        "the classification repaints the Pane"
+    );
     assert_eq!(
         notice(&view).map(|(title, _)| title),
         Some("Reconnecting…".to_owned())

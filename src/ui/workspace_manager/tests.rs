@@ -9692,9 +9692,11 @@ fn a_starting_shell_waits_for_its_name_in_its_tab_and_caption(cx: &mut TestAppCo
             .active_terminal_identity(cx)
     });
     let tab_pending: &'static str = format!("tab-name-pending-{}", tab.get()).leak();
-    let caption_pending: &'static str =
-        format!("pane-caption-name-pending-{}", pane.get()).leak();
-    harness.panes.pane(CLOSE_ROOT_PANE).set(CorePaneStatus::Connecting);
+    let caption_pending: &'static str = format!("pane-caption-name-pending-{}", pane.get()).leak();
+    harness
+        .panes
+        .pane(CLOSE_ROOT_PANE)
+        .set(CorePaneStatus::Connecting);
     settle_panes(cx);
     assert!(cx.debug_bounds(caption_pending).is_some());
     assert!(cx.debug_bounds(tab_pending).is_some());

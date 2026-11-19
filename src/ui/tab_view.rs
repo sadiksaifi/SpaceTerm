@@ -1047,7 +1047,11 @@ impl TabView {
     /// A starting shell's caption and Tab wait for its first confirmed name rather than saying
     /// Terminal, so its first words are its real name.
     fn caption_text(&self, pane_id: PaneId) -> PaneCaptionText {
-        let mut text = self.pane_captions.get(&pane_id).cloned().unwrap_or_default();
+        let mut text = self
+            .pane_captions
+            .get(&pane_id)
+            .cloned()
+            .unwrap_or_default();
         let starting = self.binding.view(pane_id).is_some_and(|view| {
             view.connection().status() == crate::terminal::core_session::CorePaneStatus::Connecting
         });
@@ -4789,7 +4793,9 @@ fn render_caption_identity(
     let pending = text.pending;
     let waiting = move |segment: gpui::Div| segment.when(pending, |segment| segment.opacity(0.0));
     caption_content = caption_content.when(pending, |row| {
-        row.child(div().debug_selector(move || format!("pane-caption-name-pending-{}", pane_id.get())))
+        row.child(
+            div().debug_selector(move || format!("pane-caption-name-pending-{}", pane_id.get())),
+        )
     });
     if text.has_directory {
         caption_content = caption_content

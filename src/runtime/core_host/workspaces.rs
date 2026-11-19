@@ -17,14 +17,14 @@ mod close_control_tests;
 mod create_control_tests;
 mod edits;
 mod journal;
+#[cfg(test)]
+#[path = "workspaces/prepare_tests.rs"]
+mod prepare_tests;
 mod publication;
 mod runs;
 #[cfg(test)]
 #[path = "workspaces/session_end_tests.rs"]
 mod session_end_tests;
-#[cfg(test)]
-#[path = "workspaces/prepare_tests.rs"]
-mod prepare_tests;
 #[cfg(test)]
 #[path = "workspaces/shell_exit_tests.rs"]
 mod shell_exit_tests;

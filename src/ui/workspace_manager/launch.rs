@@ -162,13 +162,15 @@ impl LocalLaunch for AccountLaunch {
         cancelled: &(dyn Fn() -> bool + Sync),
     ) -> Result<LaunchOutcome, CoreError> {
         use spaceterm_core::StartupOutcome;
-        Ok(match crate::local_startup::run(intent, starting, cancelled)? {
-            StartupOutcome::Ready { .. } => LaunchOutcome::Ready,
-            StartupOutcome::Stopped => LaunchOutcome::Stopped,
-            StartupOutcome::AuthorizationRequired => LaunchOutcome::AuthorizationRequired,
-            StartupOutcome::ServiceBusy => LaunchOutcome::ServiceBusy,
-            StartupOutcome::Cancelled => LaunchOutcome::Cancelled,
-        })
+        Ok(
+            match crate::local_startup::run(intent, starting, cancelled)? {
+                StartupOutcome::Ready { .. } => LaunchOutcome::Ready,
+                StartupOutcome::Stopped => LaunchOutcome::Stopped,
+                StartupOutcome::AuthorizationRequired => LaunchOutcome::AuthorizationRequired,
+                StartupOutcome::ServiceBusy => LaunchOutcome::ServiceBusy,
+                StartupOutcome::Cancelled => LaunchOutcome::Cancelled,
+            },
+        )
     }
 
     fn background_item_off(&self) -> bool {
