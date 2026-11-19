@@ -471,11 +471,23 @@ impl GroupMotion {
                     row: leaving.id.and_then(|id| self.departed.get(&id)),
                     extent: leaving.extent,
                     opacity: leaving.opacity(cx),
+                    motion: leaving.motion(),
                 })
                 .collect::<Vec<_>>()
         };
         (departed(before), departed(after))
     }
+}
+
+/// A Workspace group that left the list, as it drew as it left, which fades in its closing gap.
+struct DepartedGroup {
+    row: WorkspaceRowViewModel,
+    /// The Worktree rows the group drew below the Workspace row.
+    worktrees: Option<WorktreeSection>,
+    /// How far the Worktree rows had disclosed.
+    disclosure: view::RowDisclosure,
+    /// The row of the group that carried the selection.
+    selected: Option<SidebarRowKey>,
 }
 
 /// A row that left a Workspace group and still draws in a closing gap, as much of it as shows
@@ -484,6 +496,8 @@ struct DepartedRow<'a> {
     row: Option<&'a WorktreeRowViewModel>,
     extent: Pixels,
     opacity: f32,
+    /// How far the row had grown in as it left.
+    motion: super::drag_and_drop::ItemMotion,
 }
 
 /// Each row a Worktree section draws below its Workspace row, in order, with what it shows.
@@ -517,9 +531,9 @@ struct DraggedWorkspace {
 /// Owns sidebar layout, scrolling, menus, inline rename, reordering, and focus transitions.
 pub(super) struct WorkspaceSidebar {
     rows: Vec<WorkspaceRowViewModel>,
-    /// The rows of Workspaces that left the list, which fade where they stood before their
+    /// The groups of Workspaces that left the list, which fade where they stood before their
     /// places close.
-    departed_rows: std::collections::HashMap<WorkspaceId, WorkspaceRowViewModel>,
+    departed_groups: std::collections::HashMap<WorkspaceId, DepartedGroup>,
     /// The saved paired servers the creation menu offers.
     remote_machines: Vec<RemoteCreationMachine>,
     layout: SidebarLayout,
@@ -601,7 +615,7 @@ impl WorkspaceSidebar {
         .detach();
         Self {
             rows: Vec::new(),
-            departed_rows: std::collections::HashMap::new(),
+            departed_groups: std::collections::HashMap::new(),
             remote_machines: Vec::new(),
             layout: SidebarLayout {
                 visible,
@@ -1019,13 +1033,36 @@ impl WorkspaceSidebar {
         if self.rows == rows && self.remote_machines == remote_machines {
             return false;
         }
+        let selected = self.selected_key();
         for departed in std::mem::take(&mut self.rows) {
-            if !rows
-                .iter()
-                .any(|row| row.workspace_id == departed.workspace_id)
-            {
-                self.departed_rows.insert(departed.workspace_id, departed);
+            let workspace_id = departed.workspace_id;
+            if rows.iter().any(|row| row.workspace_id == workspace_id) {
+                continue;
             }
+            // A group that leaves keeps what it drew as it left: its rows, how far they had
+            // disclosed, and which of them carried the selection.
+            let group = self.groups.get(&workspace_id);
+            let frame = group.map_or_else(
+                || GroupFrame::at_rest(departed.worktrees.as_ref()),
+                |group| group.frame,
+            );
+            let worktrees = departed
+                .worktrees
+                .clone()
+                .or_else(|| group.and_then(|group| group.section.clone()))
+                .filter(|_| frame.draws_worktrees());
+            self.departed_groups.insert(
+                workspace_id,
+                DepartedGroup {
+                    row: departed,
+                    worktrees,
+                    disclosure: view::RowDisclosure {
+                        disclosed: frame.disclosed.reveal,
+                        chevron: frame.disclosing.reveal,
+                    },
+                    selected: selected.filter(|key| key.workspace_id() == workspace_id),
+                },
+            );
         }
         self.rows = rows;
         self.remote_machines = remote_machines;
@@ -1223,7 +1260,7 @@ impl Render for WorkspaceSidebar {
         self.workspace_reorder
             .refresh(&self.scroll_handle, &ids, window, cx);
         let leaving = self.workspace_reorder.leaving().collect::<Vec<_>>();
-        self.departed_rows
+        self.departed_groups
             .retain(|workspace_id, _| leaving.contains(workspace_id));
         if let Some(active) = self.rows.iter().find(|row| row.active) {
             self.workspace_reorder.reveal_while_entering(

@@ -14566,6 +14566,140 @@ mod workspace_repositories {
     }
 
     /// A Worktree row that leaves keeps drawing its content, clipped, until its place closes.
+    /// One frame of a closing Tab: where its face draws, where the selection it held draws and
+    /// how opaque it is, and the same for the selection on the Tab that takes over.
+    type CloseFrame = (
+        Option<gpui::Point<Pixels>>,
+        Option<(gpui::Point<Pixels>, f32)>,
+        Option<(gpui::Point<Pixels>, f32)>,
+    );
+
+    /// Opens the feature Worktree's only Tab, then closes it, as a close the server publishes
+    /// does. Returns the frames that follow:
+    /// where the closed Tab's face and the selection it held draw and how opaque that selection
+    /// is, and where the main Worktree's Tab and its selection draw and how opaque that is.
+    fn close_the_only_tab_of_the_active_worktree(cx: &mut TestAppContext) -> Vec<CloseFrame> {
+        use crate::ui::drag_and_drop::painted_quad;
+
+        let (harness, cx) = harness(cx, published(1, "main", true));
+        let (_, feature) = worktree_ids(&harness, cx);
+        cx.update(|window, cx| {
+            harness.manager.update(cx, |manager, cx| {
+                manager.activate_workspace(harness.binding, window, cx);
+                manager.handle_sidebar_event(
+                    SidebarEvent::ActivateWorktree {
+                        workspace_id: harness.binding,
+                        worktree_id: feature,
+                        focus_pane: true,
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+        crate::ui::drag_and_drop::finish_slides(cx);
+        let tabs = harness.manager.read_with(cx, |manager, _| {
+            manager
+                .workspaces
+                .workspace(harness.binding)
+                .expect("the Workspace")
+                .payload()
+                .clone()
+        });
+        let closed = tabs.read_with(cx, |tabs, cx| tabs.active_terminal_identity(cx).0.get());
+        animate(cx);
+
+        {
+            let mut without = published(2, "main", true);
+            without.workspaces[0]
+                .tabs
+                .retain(|tab| tab.id != FEATURE_TAB);
+            harness.publish(without, cx);
+        }
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let next = tabs.read_with(cx, |tabs, cx| tabs.active_terminal_identity(cx).0.get());
+        assert_ne!(next, closed, "the main Worktree's Tab takes over");
+        let leaving = format!("tab-leaving-{closed}-active").leak();
+        let chip = format!("tab-item-{next}-chip").leak();
+        let mut frames = Vec::new();
+        for _ in 0..6 {
+            frames.push((
+                cx.debug_bounds(leaving).map(|face| face.origin),
+                painted_quad("tab-departing-selection-chip", cx)
+                    .map(|(bounds, _, opacity)| (bounds.origin, opacity)),
+                painted_quad(chip, cx).map(|(bounds, _, opacity)| (bounds.origin, opacity)),
+            ));
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(20));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+        }
+        crate::ui::drag_and_drop::finish_slides(cx);
+        assert!(
+            cx.debug_bounds(leaving).is_none(),
+            "the closed Tab's face leaves once its place closed"
+        );
+        frames
+    }
+
+    /// The closed Tab and the selection it held fade where they stood, while the Tab that takes
+    /// the selection fades it in where it stands, across the change of Worktree.
+    fn assert_the_closed_tab_fades_and_the_next_takes_the_selection_in_place(
+        frames: &[CloseFrame],
+    ) {
+        // The next Tab's selection starts fully faded, which paints nothing.
+        let (Some(face), Some((departing, _))) = (frames[0].0, frames[0].1) else {
+            panic!("the closed Tab and its selection must draw, got {frames:?}");
+        };
+        let Some((selection, _)) = frames.iter().find_map(|(_, _, selection)| *selection) else {
+            panic!("the next Tab's selection must draw, got {frames:?}");
+        };
+        assert!(
+            frames
+                .iter()
+                .take_while(|(_, departing, _)| departing.is_some())
+                .all(|(drawn, gone, _)| *drawn == Some(face)
+                    && gone.is_some_and(|(origin, _)| origin == departing)),
+            "the closed Tab and its selection must hold still where they stood, got {frames:?}"
+        );
+        let fading = frames
+            .iter()
+            .filter_map(|(_, departing, _)| departing.map(|(_, opacity)| opacity))
+            .collect::<Vec<_>>();
+        let rising = frames
+            .iter()
+            .filter_map(|(_, _, selection)| selection.map(|(_, opacity)| opacity))
+            .collect::<Vec<_>>();
+        assert!(
+            fading.windows(2).all(|pair| pair[1] < pair[0]),
+            "the closed Tab's selection must fade out, got {fading:?}"
+        );
+        assert!(
+            rising.windows(2).all(|pair| pair[1] >= pair[0])
+                && rising[0] < rising[rising.len() - 1],
+            "the next Tab's selection must fade in, got {rising:?}"
+        );
+        assert!(
+            frames
+                .iter()
+                .filter_map(|(_, _, selection)| *selection)
+                .all(|(origin, _)| (origin.x - selection.x).abs() <= px(0.5)
+                    || origin.x < selection.x),
+            "the next Tab's selection must start where that Tab stands, not glide from the \
+             closed one, got {frames:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn closing_the_only_tab_of_the_active_worktree_should_fade_it_as_the_next_takes_the_selection(
+        cx: &mut TestAppContext,
+    ) {
+        let frames = close_the_only_tab_of_the_active_worktree(cx);
+
+        assert_the_closed_tab_fades_and_the_next_takes_the_selection_in_place(&frames);
+    }
+
     #[gpui::test]
     fn a_removed_worktree_row_should_keep_drawing_until_its_place_closes(cx: &mut TestAppContext) {
         let (harness, cx) = harness(cx, published(1, "main", true));

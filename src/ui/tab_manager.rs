@@ -9,8 +9,8 @@ use std::rc::Rc;
 use super::chrome_icons::IconRole;
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use super::drag_and_drop::{
-    DragPreview, DragSession, ItemMotion, Leaving, ReorderableStrip, SelectionOverlay, StripShape,
-    drag_release_observer, lift_shadow, prepaint_selection_last,
+    DragPreview, DragSession, ItemMotion, Leaving, ReorderableStrip, SelectionOverlay,
+    SelectionPart, StripShape, drag_release_observer, lift_shadow, prepaint_selection_last,
 };
 use super::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 use super::tab_view::{DragFace, DragPicture, TabFace};
@@ -347,11 +347,12 @@ impl std::fmt::Debug for TabManagerEvent {
 
 /// Whether a Tab face is the Tab in the Tab bar, its lifted copy following the pointer, or a
 /// closed Tab fading where it stood before its place closes.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum TabItemRole {
     InBar,
     Lifted,
-    Leaving,
+    /// A closed Tab, which shows as much of its growth as it had made when it closed.
+    Leaving(ItemMotion),
 }
 
 /// What a closed Tab showed, which its face keeps while it fades from the Tab bar.
@@ -1899,7 +1900,7 @@ impl TabManager {
         let element_name = match role {
             TabItemRole::InBar => "tab-item",
             TabItemRole::Lifted => "tab-preview",
-            TabItemRole::Leaving => "tab-leaving",
+            TabItemRole::Leaving(_) => "tab-leaving",
         };
         // The lifted copy shows its whole lift. A Tab in the bar slides aside, shows a faded face
         // where a release would land it, and shows what remains of its lift as it settles.
@@ -1909,14 +1910,15 @@ impl TabManager {
                 lift: 1.0,
                 ..ItemMotion::default()
             },
-            TabItemRole::Leaving => ItemMotion::default(),
+            TabItemRole::Leaving(motion) => motion,
         };
         let chip_selector = format!("{element_name}-{}-chip", tab_id.get());
-        // The Tab bar draws the selection beneath every Tab, so nothing a Tab clips cuts it off.
-        // The selected Tab draws its own chip only as the place a release would land it.
+        // The Tab bar draws the selection beneath every Tab, so nothing a Tab clips cuts it off,
+        // and fades the selection a closed Tab held where it was drawn. The selected Tab draws
+        // its own chip only as the place a release would land it.
         let chip = if motion.lifted {
             Some(chip.landing(foreground))
-        } else if active && role == TabItemRole::InBar {
+        } else if active && role != TabItemRole::Lifted {
             None
         } else {
             Some(chip)
@@ -2024,13 +2026,14 @@ impl TabManager {
             );
         // A Tab in the bar fills its slot. While it grows in, its parts keep the width the Tab
         // reaches, from the end of the slot it grows from, which then shows as much as fits.
+        // A Tab's slot grows in proportion to the width its resting neighbors take, so the Tab
+        // reaches its slot's width over how far it has grown.
         let content = match (role, motion.entering) {
-            (TabItemRole::InBar, Some(presence)) => content
+            (TabItemRole::InBar | TabItemRole::Leaving(_), Some(presence)) => content
                 .relative()
                 .w(relative(1.0 / presence.max(f32::EPSILON)))
                 .min_w(appearance.spacing(TAB_ITEM_MINIMUM_WIDTH))
                 .max_w(appearance.spacing(TAB_ITEM_WIDTH)),
-            (TabItemRole::InBar, None) => content.relative().w_full(),
             _ => content.relative().w_full(),
         };
         let content = div()
@@ -2129,18 +2132,25 @@ impl TabManager {
             &self.tab_bar_scroll_handle,
             self.tab_reorder.selection_motion(selected, (), cx),
             move |cx| if lifted { None } else { place(cx) },
-            move |size, opacity| {
-                div()
+            move |size, opacity, part| {
+                let face = div()
                     .relative()
                     .w(size.width)
                     .h(size.height)
-                    .opacity(opacity)
-                    .child(if lift > 0.0 {
-                        chip.render_lifted(selector, hover.max(lift), shadow)
-                    } else {
-                        chip.render(selector, hover)
-                    })
-                    .into_any_element()
+                    .opacity(opacity);
+                match part {
+                    // The selection a closed Tab held fades where it was drawn.
+                    SelectionPart::Departing => {
+                        face.child(chip.render("tab-departing-selection-chip".to_owned(), 0.0))
+                    }
+                    SelectionPart::Selected if lift > 0.0 => face.child(chip.render_lifted(
+                        selector.clone(),
+                        hover.max(lift),
+                        shadow.clone(),
+                    )),
+                    SelectionPart::Selected => face.child(chip.render(selector.clone(), hover)),
+                }
+                .into_any_element()
             },
         )
     }
@@ -2174,7 +2184,7 @@ impl TabManager {
                         tab_id,
                         shown.identity.clone(),
                         shown.active,
-                        TabItemRole::Leaving,
+                        TabItemRole::Leaving(leaving.motion()),
                         TabHover {
                             level: 0.0,
                             under_pointer: false,
@@ -2448,15 +2458,15 @@ impl TabManager {
         let incoming_landing = self
             .tab_bar_bounds
             .filter(|_| cx.has_active_drag())
-            .zip(self.tab_reorder.incoming_start(&self.tab_bar_scroll_handle))
+            .zip(self.tab_reorder.incoming_gap(&self.tab_bar_scroll_handle))
             .zip(self.tab_bar_scroll_handle.bounds_for_item(0))
-            .map(|((bar, start), slot)| {
+            .map(|((bar, (start, extent)), slot)| {
                 div()
                     .debug_selector(|| "tab-bar-incoming-landing".to_owned())
                     .absolute()
                     .left(start - bar.origin.x)
                     .top(slot.origin.y - bar.origin.y)
-                    .w(slot.size.width)
+                    .w(extent)
                     .h(slot.size.height)
                     .child(
                         presentation
@@ -2659,8 +2669,11 @@ impl Render for TabManager {
             .replace(scope)
             .is_some_and(|presented| presented != scope)
         {
+            // A Tab closed as the last of its Worktree's Tabs fades where it stood while the
+            // other Worktree's Tabs take its strip's place.
+            let departed = self.leaving_tabs.keys().copied().collect::<Vec<_>>();
             self.tab_reorder
-                .take_place(&self.tab_bar_scroll_handle, &ids, cx);
+                .take_place(&self.tab_bar_scroll_handle, &ids, &departed, cx);
         }
         // A Pane drag that ended without a drop on the Tab bar closes the gap it opened. A Pane
         // drag still in progress follows the strip as it moves beneath a still pointer.
@@ -3754,9 +3767,15 @@ impl TabManager {
             (Some(StripDrop::Tab(_)), _) => DragFace::Joining {
                 below: bar.bottom(),
             },
+            // The picture takes the width the new Tab lands at.
             (Some(StripDrop::NewTab { .. }), Some(slot)) => DragFace::Tab {
                 top: slot.origin.y,
-                size: slot.size,
+                size: gpui::size(
+                    self.tab_reorder
+                        .incoming_length()
+                        .unwrap_or(slot.size.width),
+                    slot.size.height,
+                ),
             },
             _ => DragFace::Pane,
         };
@@ -5352,6 +5371,48 @@ mod tests {
             ),
             "Tab 2 slides aside, the landing chip takes its place, and the new Tab lands there"
         );
+    }
+
+    #[gpui::test]
+    fn a_pane_dropped_between_narrowed_tabs_should_land_where_its_place_was_held(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        // The bar has room for about two and a half Tabs at the roomy width.
+        cx.simulate_resize(gpui::size(px(724.0), px(600.0)));
+        cx.run_until_parked();
+        click("create-tab-button", cx);
+        click("create-tab-button", cx);
+        cx.dispatch_action(SplitRight);
+        cx.run_until_parked();
+        finish_slides(cx);
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
+        let between = point(first.right(), first.center().y);
+
+        drag_focused_pane(2, &[between, between + point(px(1.0), px(0.0))], cx);
+        for _ in 0..12 {
+            next_frame_after(50, cx);
+        }
+        let held = cx
+            .debug_bounds("tab-bar-incoming-landing")
+            .expect("the place the new Tab lands must show");
+        let beside = cx.debug_bounds("tab-item-2-inactive").unwrap();
+        cx.simulate_mouse_up(between, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        let landed = cx.debug_bounds("tab-item-4-active").unwrap();
+
+        assert!(
+            (held.size.width - beside.size.width).abs() <= px(1.0),
+            "the Tabs must narrow for the held place as they will for the new Tab, got {held:?} \
+             beside {beside:?}"
+        );
+        assert!(
+            (landed.left() - held.left()).abs() <= px(1.0)
+                && (landed.size.width - held.size.width).abs() <= px(1.0),
+            "the new Tab must land where its place was held, got {landed:?} for {held:?}"
+        );
+        assert_eq!(tab_order(&manager, cx), vec![1, 4, 2, 3]);
     }
 
     #[gpui::test]
@@ -7339,7 +7400,7 @@ mod tests {
         assert!(active.right() <= strip.right());
     }
 
-    use crate::ui::drag_and_drop::{AnimatePresence, finish_slides};
+    use crate::ui::drag_and_drop::{AnimatePresence, finish_slides, painted_quad, within};
 
     fn tab_order(manager: &Entity<TabManager>, cx: &mut VisualTestContext) -> Vec<u64> {
         manager.read_with(cx, |manager, _| {
@@ -7520,6 +7581,47 @@ mod tests {
             lifted,
             Some(full),
             "a Tab lifted while it grows must lift at its full size"
+        );
+    }
+
+    #[gpui::test]
+    fn a_tab_lifted_while_it_grows_into_a_full_bar_should_lift_as_wide_as_the_tabs_beside_it(
+        cx: &mut TestAppContext,
+    ) {
+        let (_manager, _records, cx) = tab_manager(cx);
+        narrow_window(cx);
+        for _ in 0..10 {
+            click("create-tab-button", cx);
+        }
+        finish_slides(cx);
+        let resting = cx.debug_bounds("tab-item-10-inactive").unwrap().size;
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        click("create-tab-button", cx);
+        next_frame_after(60, cx);
+        let strip = cx.debug_bounds("tab-items").unwrap();
+        let grabbed = cx
+            .debug_bounds("tab-item-12-active")
+            .unwrap()
+            .intersect(&strip)
+            .center();
+
+        drag_tab(grabbed, &[grabbed - point(px(8.0), px(0.0))], cx);
+        let lifted = cx
+            .debug_bounds("tab-preview-12-active")
+            .map(|preview| preview.size);
+        cx.simulate_mouse_up(
+            grabbed - point(px(8.0), px(0.0)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        finish_slides(cx);
+        let landed = cx.debug_bounds("tab-item-12-active").unwrap().size;
+
+        assert_eq!(
+            (lifted, landed),
+            (Some(resting), resting),
+            "a Tab lifted while it grows into a bar of Tabs at their readable minimum must lift \
+             as wide as the Tabs beside it, which it ends as"
         );
     }
 
@@ -7727,7 +7829,7 @@ mod tests {
         let fading = (
             cx.debug_bounds("tab-leaving-2-active")
                 .map(|face| face.origin),
-            cx.debug_bounds("tab-leaving-2-chip")
+            cx.debug_bounds("tab-departing-selection-chip")
                 .map(|chip| chip.origin),
         );
         // The closed Tab fades where it stood before its place starts to close.
@@ -8272,6 +8374,125 @@ mod tests {
                 && strip.left() <= active.left()
                 && active.right() <= strip.right(),
             "the bar must end scrolled with the newest Tab whole in view"
+        );
+    }
+
+    #[gpui::test]
+    fn closing_the_active_tab_mid_glide_should_fade_its_selection_from_where_it_was_drawn(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        click("create-tab-button", cx);
+        finish_slides(cx);
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
+
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.activate_tab_at(0, window, cx));
+        });
+        cx.run_until_parked();
+        next_frame_after(40, cx);
+        let (drawn, _, _) = painted_quad("tab-item-1-chip", cx).unwrap();
+        click("tab-close-button-1", cx);
+        let mut departing = Vec::new();
+        for _ in 0..4 {
+            departing.push(
+                painted_quad("tab-departing-selection-chip", cx)
+                    .map(|(bounds, _, opacity)| (bounds.origin, opacity)),
+            );
+            next_frame_after(20, cx);
+        }
+
+        assert!(
+            drawn.origin.x > first.origin.x + px(10.0),
+            "the selection must still be on its way to the first Tab, got {drawn:?}"
+        );
+        let Some((origin, _)) = departing[0] else {
+            panic!("the closed Tab's selection must draw, got {departing:?}");
+        };
+        assert_eq!(
+            origin, drawn.origin,
+            "the closed Tab's selection must fade from where it was drawn on its way"
+        );
+        let opacities = departing
+            .iter()
+            .flatten()
+            .map(|(_, opacity)| *opacity)
+            .collect::<Vec<_>>();
+        assert!(
+            departing.iter().flatten().all(|(at, _)| *at == origin)
+                && opacities.windows(2).all(|pair| pair[1] < pair[0]),
+            "the closed Tab's selection must hold still as it fades, got {departing:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn a_tab_closed_while_it_grows_should_fade_only_what_it_showed(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
+        finish_slides(cx);
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+        click("create-tab-button", cx);
+        next_frame_after(10, cx);
+        let growing = (
+            cx.debug_bounds("tab-item-2-active").unwrap(),
+            cx.debug_bounds("tab-title-2").unwrap(),
+        );
+        // The Tab closes before its close control even shows, as another client's close can.
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.close_tab(TabId::new(2), window, cx)
+            });
+        });
+        cx.run_until_parked();
+        let leaving = (
+            cx.debug_bounds("tab-leaving-2-active")
+                .expect("the closed Tab's face must fade where it stood"),
+            cx.debug_bounds("tab-title-2").unwrap(),
+        );
+
+        assert!(
+            growing.0.size.width < px(60.0),
+            "the Tab must have barely grown in, got {growing:?}"
+        );
+        // Each part shows by how much of its whole width the face holds, so a face that keeps
+        // its parts where they stood shows exactly the parts that showed.
+        assert_eq!(
+            (leaving.0.origin, leaving.1),
+            (growing.0.origin, growing.1),
+            "the closed Tab must keep its parts laid out as they were while it grew"
+        );
+    }
+
+    #[gpui::test]
+    fn the_selection_should_paint_whole_while_a_new_tab_grows_in_or_fills_the_bar(
+        cx: &mut TestAppContext,
+    ) {
+        let (_manager, _records, cx) = tab_manager(cx);
+        cx.simulate_resize(gpui::size(px(900.0), px(580.0)));
+        cx.run_until_parked();
+        finish_slides(cx);
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        let mut clipped = Vec::new();
+        // The second Tab grows in with room; the fourth fills the bar as it grows.
+        for tab in 2..=4 {
+            click("create-tab-button", cx);
+            let chip = leaked_selector(format!("tab-item-{tab}-chip"));
+            for frame in 0..12 {
+                next_frame_after(if frame == 0 { 0 } else { 16 }, cx);
+                let (bounds, mask, _) =
+                    painted_quad(chip, cx).expect("the selection was not painted");
+                if !within(bounds, mask) {
+                    clipped.push((tab, frame, bounds, mask));
+                }
+            }
+            finish_slides(cx);
+        }
+
+        assert!(
+            clipped.is_empty(),
+            "the selection must paint whole inside its clip, got {clipped:?}"
         );
     }
 
