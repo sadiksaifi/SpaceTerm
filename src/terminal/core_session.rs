@@ -90,6 +90,8 @@ pub(crate) struct CorePaneState {
     prepared: Mutex<Option<[u8; 32]>>,
     /// A background start is on its way to the Core and unanswered.
     preparing: AtomicBool,
+    /// This Pane's worker is starting its shell, or presents one that has not attached yet.
+    shell_starting: AtomicBool,
     created_start: Arc<AtomicBool>,
     take_over: AtomicBool,
     start_restored: Arc<AtomicBool>,
@@ -138,6 +140,7 @@ impl CorePaneState {
             foreground: AtomicBool::new(false),
             prepared: Mutex::default(),
             preparing: AtomicBool::new(false),
+            shell_starting: AtomicBool::new(false),
             created_start: Arc::default(),
             take_over: AtomicBool::new(false),
             start_restored: Arc::default(),
@@ -254,6 +257,16 @@ impl CorePaneState {
 
     pub(crate) fn foreground(&self) -> bool {
         self.foreground.load(Ordering::Acquire)
+    }
+
+    /// Whether this Pane's worker is starting its shell, which has not attached yet.
+    pub(crate) fn shell_starting(&self) -> bool {
+        self.shell_starting.load(Ordering::Acquire)
+    }
+
+    /// Records that this Pane's worker starts its shell now.
+    pub(crate) fn starting_shell(&self) {
+        self.shell_starting.store(true, Ordering::Release);
     }
 
     /// Whether a background start of this Pane is on its way and unanswered.
@@ -652,6 +665,9 @@ impl CorePaneState {
     }
     fn set(&self, status: CorePaneStatus) {
         let mut current = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        if status != CorePaneStatus::Connecting {
+            self.shell_starting.store(false, Ordering::Release);
+        }
         if status != CorePaneStatus::Connected {
             self.reading
                 .lock()
@@ -703,6 +719,7 @@ impl CorePaneState {
                 .client_focus(Some(interaction.target == pane::FocusTarget::Terminal));
         }
         *status = CorePaneStatus::Connected;
+        self.shell_starting.store(false, Ordering::Release);
         drop(status);
         // Each frame reaches here. Only a new status or generation concerns a view.
         if changed {

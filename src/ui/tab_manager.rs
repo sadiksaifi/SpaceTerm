@@ -2483,7 +2483,9 @@ impl TabManager {
             previous_inactive_tab = (!active).then_some(tab_id);
             let identity = view.read(cx).tab_identity();
             let tab_focus = view.read(cx).tab_focus().clone();
-            let title = if identity.activity.is_empty() {
+            let title = if identity.pending && !identity.is_named() {
+                super::tab_view::STARTING_NAME
+            } else if identity.activity.is_empty() {
                 "Terminal"
             } else {
                 identity.activity.as_ref()

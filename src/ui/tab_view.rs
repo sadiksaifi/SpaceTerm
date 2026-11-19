@@ -741,6 +741,12 @@ pub(crate) struct TabView {
     parked_panes: BTreeMap<PaneId, crate::domain::tab::ParkedPane<Entity<TerminalPane>>>,
     directory_recovery: Option<Entity<super::core_pane::DirectoryRecovery>>,
     /// Reads every Pane's connection status while the Tab lives.
+    /// The Panes whose shell started or is starting without a name yet. `None` while it
+    /// starts; once it started, when it did. Their Tab and Pane Caption wait for the first
+    /// real name together, at most [`NAME_WAIT`] after the start.
+    title_waits: BTreeMap<PaneId, Option<std::time::Instant>>,
+    /// Ends the earliest title wait.
+    _title_wait: Option<gpui::Task<()>>,
     /// Each Pane's connection loss waiting to be classified, and when the Tab saw it begin.
     losses: BTreeMap<PaneId, (u64, std::time::Instant)>,
     /// Classifies the connection losses no announcement explained, when the earliest wait ends.
@@ -847,6 +853,8 @@ impl TabView {
             _blocked_updates: blocked_updates,
             losses: BTreeMap::new(),
             _classify: None,
+            title_waits: BTreeMap::new(),
+            _title_wait: None,
             _workspace_status: cx.spawn_in(window, async move |view, cx| {
                 while changes.recv().await.is_ok() {
                     if view
@@ -880,6 +888,7 @@ impl TabView {
                 TerminalPaneEvent::SurfaceBackgroundChanged => cx.notify(),
                 TerminalPaneEvent::TitleChanged(title) => {
                     view.pane_titles.insert(pane_id, title.clone());
+                    view.track_title_waits(window, cx);
                     cx.emit(TabViewEvent::PresentationChanged {
                         tab_id: view.tab.id(),
                     });
@@ -889,6 +898,7 @@ impl TabView {
                     let caption = PaneCaptionText::from_terminal(terminal.read(cx));
                     if view.pane_captions.get(&pane_id) != Some(&caption) {
                         view.pane_captions.insert(pane_id, caption);
+                        view.track_title_waits(window, cx);
                         if pane_id == view.tab.root_pane_id()
                             || pane_id == view.tab.focused_pane_id()
                         {
@@ -1046,21 +1056,81 @@ impl TabView {
             .unwrap_or_else(|| "Terminal".into())
     }
 
-    /// What Pane `pane_id`'s caption says, and whether its shell is starting without a name yet.
-    /// A starting shell's caption and Tab wait for its first confirmed name rather than saying
-    /// Terminal, so its first words are its real name.
+    /// What Pane `pane_id`'s caption says, and whether it still waits for its shell's first
+    /// name. A starting shell's caption and Tab wait for that name together rather than saying
+    /// Terminal, so their first words are its real name.
     fn caption_text(&self, pane_id: PaneId) -> PaneCaptionText {
-        let mut text = self
-            .pane_captions
+        let mut text = self.named_caption(pane_id);
+        text.pending = self.title_waits.contains_key(&pane_id) && !self.pane_named(pane_id);
+        text
+    }
+
+    fn named_caption(&self, pane_id: PaneId) -> PaneCaptionText {
+        self.pane_captions
             .get(&pane_id)
             .cloned()
-            .unwrap_or_default();
-        let starting = self.binding.view(pane_id).is_some_and(|view| {
-            view.connection().status() == crate::terminal::core_session::CorePaneStatus::Connecting
+            .unwrap_or_default()
+    }
+
+    /// Whether Pane `pane_id` has a real name, rather than only Terminal.
+    fn pane_named(&self, pane_id: PaneId) -> bool {
+        TabIdentity::resolve(self.named_caption(pane_id), self.pane_title(pane_id), false)
+            .is_named()
+    }
+
+    /// Follows which Panes wait for their shell's first name. A Pane waits while its shell
+    /// starts, and for [`NAME_WAIT`] after the start, which a blank first screen can end
+    /// before the shell names itself. A name, a shell that is not starting, or the end of
+    /// the wait ends it, and the Tab and Pane Caption show what the Pane has.
+    fn track_title_waits(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::terminal::core_session::CorePaneStatus;
+        let now = cx.background_executor().now();
+        let mut changed = false;
+        for pane_id in self.binding.pane_ids() {
+            let status = self
+                .binding
+                .view(pane_id)
+                .map(|view| view.connection().status());
+            let named = self.pane_named(pane_id);
+            let starting = self.binding.title_starting(pane_id);
+            let wait = match (status, self.title_waits.get(&pane_id).copied()) {
+                _ if named => None,
+                _ if starting => Some(None),
+                (Some(CorePaneStatus::Connected), Some(None)) => Some(Some(now)),
+                (Some(CorePaneStatus::Connected), Some(Some(since)))
+                    if now.saturating_duration_since(since) < NAME_WAIT =>
+                {
+                    Some(Some(since))
+                }
+                _ => None,
+            };
+            let previous = match wait {
+                Some(wait) => self.title_waits.insert(pane_id, wait),
+                None => self.title_waits.remove(&pane_id),
+            };
+            changed |= previous.is_some() != wait.is_some();
+        }
+        self.title_waits
+            .retain(|pane_id, _| self.binding.view(*pane_id).is_some());
+        if changed {
+            cx.emit(TabViewEvent::PresentationChanged {
+                tab_id: self.tab.id(),
+            });
+            cx.notify();
+        }
+        let earliest = self
+            .title_waits
+            .values()
+            .flatten()
+            .map(|since| *since + NAME_WAIT)
+            .min();
+        self._title_wait = earliest.map(|deadline| {
+            let remaining = deadline.saturating_duration_since(now);
+            cx.spawn_in(window, async move |view, cx| {
+                cx.background_executor().timer(remaining).await;
+                let _ = view.update_in(cx, |view, window, cx| view.track_title_waits(window, cx));
+            })
         });
-        text.pending = starting
-            && !TabIdentity::resolve(text.clone(), self.pane_title(pane_id), false).is_named();
-        text
     }
 
     /// Records unread attention for one Pane as its Terminal Session would report it.
@@ -3140,12 +3210,9 @@ impl TabView {
             self.apply_sync(pane_id, sync, window, cx);
         }
         if changed {
-            // A Pane whose shell starts or stops starting changes what its Tab says.
-            cx.emit(TabViewEvent::PresentationChanged {
-                tab_id: self.tab.id(),
-            });
             cx.notify();
         }
+        self.track_title_waits(window, cx);
         self.schedule_classification(window, cx);
     }
 
@@ -4053,6 +4120,13 @@ impl Render for TabView {
     }
 }
 
+/// How long a Pane whose shell started waits for its first name before its Tab and Pane Caption
+/// say what they have, such as Terminal.
+pub(crate) const NAME_WAIT: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// What assistive technology hears for a Pane or Tab whose shell is still starting.
+pub(crate) const STARTING_NAME: &str = "Starting shell";
+
 /// What one Tab presents about the Terminal Session its Focused Pane runs. A Tab never composes a
 /// path or interprets a title, and leaves a segment empty rather than inventing one.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -4582,7 +4656,13 @@ fn render_pane_caption_content(
             )
         };
     }
-    let caption_name = format!("Pane Caption, {}", text.name);
+    // While the shell starts, assistive technology hears that rather than a name the caption
+    // does not show yet.
+    let caption_name = if text.pending {
+        format!("Pane Caption, {STARTING_NAME}")
+    } else {
+        format!("Pane Caption, {}", text.name)
+    };
     let repository = text.repository.clone();
     let caption_content =
         render_caption_identity(pane_id, text, attention, layout, appearance, &paint);

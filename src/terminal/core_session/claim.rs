@@ -312,6 +312,9 @@ impl ClaimWorker<'_> {
                         || (!state.start_unconfirmed()
                             && state.prepares()
                             && state.will_prepare(boot)));
+                if !unavailable && (fresh || starting) {
+                    state.starting_shell();
+                }
                 state.set(if unavailable {
                     CorePaneStatus::Failed(CoreError::DirectoryUnavailable)
                 } else if let Some(end) = session_ended {

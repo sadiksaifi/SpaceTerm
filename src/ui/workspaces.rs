@@ -1422,6 +1422,21 @@ mod core_workspaces {
             starting && starts.contains(&pane_id)
         }
 
+        /// Whether Pane `pane_id`'s shell is starting: its creation is still provisional, its
+        /// worker starts it, or this client created it and it has not attached yet.
+        pub(crate) fn title_starting(&self, pane_id: PaneId) -> bool {
+            use crate::terminal::core_session::CorePaneStatus;
+            if self.pending_starts.borrow().contains(&pane_id) {
+                return true;
+            }
+            let Some(connection) = self.views.get(&pane_id).map(CorePaneView::connection) else {
+                return false;
+            };
+            connection.shell_starting()
+                || (connection.status() == CorePaneStatus::Connecting
+                    && self.shell_starts.borrow().contains(&pane_id))
+        }
+
         /// Hints after any registered Pane's connection changes. Read every view after each.
         pub(crate) fn changes(&self) -> async_channel::Receiver<()> {
             self.changes.1.clone()
@@ -3634,6 +3649,8 @@ mod core_workspaces {
 
         /// A scripted Pane whose status a test sets and whose explicit requests it counts.
         pub(crate) struct ScriptedPane {
+            /// The worker starts this Pane's shell, which has not attached yet.
+            shell_starting: std::sync::atomic::AtomicBool,
             status: Mutex<crate::terminal::core_session::CorePaneStatus>,
             startup_pending: std::sync::atomic::AtomicBool,
             controller: Mutex<Option<spaceterm_core::pane::control::Controller>>,
@@ -3657,6 +3674,7 @@ mod core_workspaces {
                 std::sync::Arc::new(Self {
                     status: Mutex::new(crate::terminal::core_session::CorePaneStatus::Connecting),
                     startup_pending: std::sync::atomic::AtomicBool::new(true),
+                    shell_starting: std::sync::atomic::AtomicBool::new(false),
                     controller: Mutex::default(),
                     session_end: Mutex::default(),
                     generation: std::sync::atomic::AtomicU64::new(0),
@@ -3688,7 +3706,18 @@ mod core_workspaces {
                 self.changes.publish();
             }
 
+            /// The worker starts this Pane's shell now, as for its first use.
+            pub(crate) fn start_shell(&self) {
+                self.shell_starting
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                self.set(crate::terminal::core_session::CorePaneStatus::Connecting);
+            }
+
             pub(crate) fn set(&self, status: crate::terminal::core_session::CorePaneStatus) {
+                if status != crate::terminal::core_session::CorePaneStatus::Connecting {
+                    self.shell_starting
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
+                }
                 self.startup_pending.store(
                     matches!(
                         status,
@@ -3769,6 +3798,11 @@ mod core_workspaces {
         impl crate::ui::core_pane::MachinePaneConnection for ScriptedPane {
             fn status(&self) -> crate::terminal::core_session::CorePaneStatus {
                 *self.status.lock().expect("status")
+            }
+
+            fn shell_starting(&self) -> bool {
+                self.shell_starting
+                    .load(std::sync::atomic::Ordering::SeqCst)
             }
 
             fn running_version(&self) -> Option<spaceterm_core::update::facts::Version> {

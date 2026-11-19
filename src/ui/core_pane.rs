@@ -997,6 +997,11 @@ mod connection {
             false
         }
 
+        /// Whether this Pane's shell is starting and has not attached yet.
+        fn shell_starting(&self) -> bool {
+            false
+        }
+
         /// Leaves this client's view of the Pane for the next window that presents it.
         fn retain_view(&self) {}
 
@@ -1084,6 +1089,10 @@ mod connection {
 
         fn preparing(&self) -> bool {
             Self::preparing(self)
+        }
+
+        fn shell_starting(&self) -> bool {
+            Self::shell_starting(self)
         }
 
         fn retain_view(&self) {

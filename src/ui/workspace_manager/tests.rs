@@ -9682,7 +9682,6 @@ fn close_pane_should_ask_when_core_verifies_a_running_command(cx: &mut TestAppCo
 /// as long as it starts. Neither says Terminal first and then its real name.
 #[gpui::test]
 fn a_starting_shell_waits_for_its_name_in_its_tab_and_caption(cx: &mut TestAppContext) {
-    use crate::terminal::core_session::CorePaneStatus;
     let (harness, cx) = close_harness(cx);
     let (tab, pane) = harness.manager.read_with(cx, |manager, cx| {
         manager
@@ -9693,10 +9692,7 @@ fn a_starting_shell_waits_for_its_name_in_its_tab_and_caption(cx: &mut TestAppCo
     });
     let tab_pending: &'static str = format!("tab-name-pending-{}", tab.get()).leak();
     let caption_pending: &'static str = format!("pane-caption-name-pending-{}", pane.get()).leak();
-    harness
-        .panes
-        .pane(CLOSE_ROOT_PANE)
-        .set(CorePaneStatus::Connecting);
+    harness.panes.pane(CLOSE_ROOT_PANE).start_shell();
     settle_panes(cx);
     assert!(cx.debug_bounds(caption_pending).is_some());
     assert!(cx.debug_bounds(tab_pending).is_some());
@@ -9708,18 +9704,21 @@ fn a_starting_shell_waits_for_its_name_in_its_tab_and_caption(cx: &mut TestAppCo
     assert!(cx.debug_bounds(caption_pending).is_some());
     assert!(cx.debug_bounds(tab_pending).is_some());
 
+    // The shell attached with a blank first screen and no name yet. Both keep waiting.
     harness.panes.pane(CLOSE_ROOT_PANE).reconnect();
     settle_panes(cx);
     assert!(
-        cx.debug_bounds(caption_pending).is_none(),
-        "a started shell's caption shows what it has"
+        cx.debug_bounds(caption_pending).is_some(),
+        "a blank first screen is no name"
     );
+    assert!(cx.debug_bounds(tab_pending).is_some());
+    spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Pane Caption, Starting shell");
     cx.executor()
         .advance_clock(std::time::Duration::from_secs(2));
     settle_panes(cx);
     assert!(
-        cx.debug_bounds(tab_pending).is_none(),
-        "a started shell that never names itself says Terminal once its wait ends"
+        cx.debug_bounds(caption_pending).is_none() && cx.debug_bounds(tab_pending).is_none(),
+        "a started shell that never names itself says Terminal on both once its wait ends"
     );
 }
 
