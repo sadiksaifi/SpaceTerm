@@ -765,7 +765,12 @@ impl MachineConnection {
     ) -> Result<CoreLink, CoreError> {
         let (carrier, scope) = self.connect_admitted(cancelled)?;
         self.bind_scope(scope)?;
-        crate::connection::io::spawn_link(carrier, events).map_err(|_| CoreError::Protocol)
+        let link =
+            crate::connection::io::spawn_link(carrier, events).map_err(|_| CoreError::Protocol)?;
+        if let Ok(work) = self.admissions().capabilities(true).work() {
+            link.select_work(work);
+        }
+        Ok(link)
     }
     /// The one live connection this handle and its clones share with the server. Connects when
     /// none is live. A link that ended is never reused; its pending requests already failed.
@@ -852,6 +857,7 @@ impl MachineConnection {
             selected: protocol::version::WORK,
             core: protocol::CoreVersions::current(version),
         }));
+        link.select_work(protocol::version::WORK);
         *self.shared.link.lock().unwrap_or_else(|e| e.into_inner()) = Some(link);
     }
     /// Identifies the shared link: it changes each time [`Self::link`] connects a new one, and no

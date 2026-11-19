@@ -203,6 +203,8 @@ struct State {
     detailed_update_facts: Option<Arc<crate::update::facts::DetailedUpdateFacts>>,
     /// Bytes of every frame received, headers included.
     received_bytes: u64,
+    /// The work version this link's admission selected, once its owner records it.
+    work: Option<crate::protocol::version::ProtocolVersion>,
 }
 
 struct Queued {
@@ -242,6 +244,7 @@ impl CoreLink {
                     update_facts: None,
                     detailed_update_facts: None,
                     received_bytes: 0,
+                    work: None,
                 }),
                 revisions: Condvar::new(),
                 wake,
@@ -280,6 +283,17 @@ impl CoreLink {
     /// it holds.
     pub fn inventory(&self) -> Option<(u64, Arc<InventoryRevision>)> {
         self.lock().inventory.clone()
+    }
+
+    /// Records the work version this link's admission selected. Requests a minor added stay
+    /// unsent on a link that selected an older one (ADR 0035).
+    pub fn select_work(&self, work: crate::protocol::version::ProtocolVersion) {
+        self.lock().work = Some(work);
+    }
+
+    /// The work version this link's admission selected, when its owner recorded it.
+    pub fn work(&self) -> Option<crate::protocol::version::ProtocolVersion> {
+        self.lock().work
     }
 
     /// The newest update facts this link received. The Core pushes them as its first message

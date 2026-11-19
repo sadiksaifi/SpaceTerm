@@ -241,17 +241,19 @@ pub enum AttachmentClaim {
     Start {
         core: [u8; 32],
     },
-    /// Starts a retained Pane's first Session in the background without granting control to
-    /// anyone, fenced by the current server boot. Work 1.4 adds it ([`MINOR_PREPARE`]).
-    Prepare {
-        core: [u8; 32],
-    },
     Repair {
         target: directories::Target,
         replacement: Option<std::path::PathBuf>,
     },
     TakeOver {
         target: PaneTarget,
+    },
+    /// Starts a retained Pane's first Session in the background without granting control to
+    /// anyone, fenced by the current server boot. Work 1.4 adds it ([`MINOR_PREPARE`]). It stays
+    /// the last variant: postcard encodes each variant by its position, and released Cores and
+    /// clients read the earlier positions.
+    Prepare {
+        core: [u8; 32],
     },
 }
 
