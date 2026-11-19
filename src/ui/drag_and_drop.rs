@@ -29,9 +29,12 @@ pub(super) const PRESENCE_DURATION: Duration = Duration::from_millis(440);
 const SELECTION_DURATION: Duration = Duration::from_millis(310);
 /// The longest a selection keeps gliding after an item that keeps moving, before it lands on it.
 const SELECTION_LIMIT: Duration = Duration::from_millis(1000);
-/// How long a removed item, and the selection it held, take to fade where they stood. Its place
-/// starts closing once it has faded, so the closing gap never cuts through what it shows.
+/// How long a removed item, and the selection it held, take to fade where they stood.
 pub(super) const LEAVING_FADE: Duration = Duration::from_millis(100);
+/// How long the place a removed item leaves takes to close, from the moment it leaves: its fade
+/// and then [`PRESENCE_DURATION`]. The place starts closing slowly, so it moves at once yet takes
+/// less than 3% of itself while the item fades in it, and the item fades whole.
+pub(super) const CLOSING_DURATION: Duration = Duration::from_millis(540);
 /// How much more of its growth an item makes after a part of it first shows whole, while that
 /// part fades in.
 const REVEAL_SPAN: f32 = 0.08;
@@ -905,11 +908,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         if let Some(carrier) = carrier {
             self.trailing_gaps.insert(
                 carrier,
-                Gap {
-                    extent: px(0.0),
-                    ease: Ease::new(PRESENCE_DURATION, now, motion),
-                    leaving: Vec::new(),
-                },
+                Gap::closing(px(0.0), Ease::new(PRESENCE_DURATION, now, motion)),
             );
         }
         // The selection leaves from where the other strip drew it, which the overlay finds
@@ -977,9 +976,12 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
                 Some((carrier, (arrival.from.end - end).max(px(0.0))))
             });
         if let Some((carrier, extent)) = close
-            && let Some(gap) = self.trailing_gaps.get_mut(&carrier)
+            && let Some(place) = self
+                .trailing_gaps
+                .get_mut(&carrier)
+                .and_then(|gap| gap.places.first_mut())
         {
-            gap.extent = extent;
+            place.extent = extent;
         }
         if close.is_none() {
             self.arrival = None;
@@ -1356,13 +1358,9 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
                 leaving.id = None;
             }
         }
-        // Items that replace removed ones start growing once those have faded, as their places
-        // start to close, so the strip keeps its length through the exchange.
-        let delay = if known.iter().any(|id| !ids.contains(id)) {
-            LEAVING_FADE
-        } else {
-            Duration::ZERO
-        };
+        // Items that replace removed ones grow as those places close, on the same curve, so the
+        // strip keeps its length through the exchange.
+        let exchange = known.iter().any(|id| !ids.contains(id));
         for (position, id) in ids.iter().enumerate() {
             if known.contains(id) {
                 continue;
@@ -1373,13 +1371,13 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
             if estimate.is_some() {
                 self.growing_from_end.insert(*id);
             }
-            self.entering.insert(
-                *id,
-                (
-                    Ease::after(delay, PRESENCE_DURATION, now, motion),
-                    self.natural_extent.or(estimate),
-                ),
-            );
+            let ease = if exchange {
+                Ease::closing(now, motion)
+            } else {
+                Ease::new(PRESENCE_DURATION, now, motion)
+            };
+            self.entering
+                .insert(*id, (ease, self.natural_extent.or(estimate)));
         }
         let bounds = (0..known.len())
             .map(|position| items.bounds_for_item(position))
@@ -1413,6 +1411,17 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
             let painted =
                 |gap: &Option<Gap<Id>>| gap.as_ref().map_or(px(0.0), |gap| gap.at(painted_at));
             let face = (extent - painted(&lead) - painted(&trail)).max(px(0.0));
+            // The slot's own gaps keep closing as they were, and its item's place starts
+            // closing now.
+            let mut places = lead
+                .iter()
+                .chain(trail.iter())
+                .flat_map(|gap| gap.places.iter().copied())
+                .chain([Closing {
+                    extent: face,
+                    ease: Ease::closing(now, motion),
+                }])
+                .collect::<Vec<_>>();
             let shown = |gap: Option<Gap<Id>>| {
                 gap.map_or_else(Vec::new, |gap| {
                     let open = gap.at(painted_at);
@@ -1438,6 +1447,7 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
                 (None, None) => continue,
             };
             let open = gap.as_ref().map_or(px(0.0), |gap| gap.at(painted_at));
+            let older_places = gap.as_ref().map_or_else(Vec::new, |gap| gap.places.clone());
             let mut older = gap.map_or_else(Vec::new, |gap| shown_leaving(gap.leaving, open));
             // Items this change removes stand in order before an older leading gap, which is
             // nearer its carrier, and after an older trailing gap.
@@ -1455,12 +1465,12 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
             } else {
                 &mut self.trailing_gaps
             };
+            // The carrier's gap keeps closing as it was, and gains these places.
+            places.splice(0..0, older_places);
             gaps.insert(
                 carrier,
                 Gap {
-                    extent: open + extent,
-                    // The place closes once what left it has faded.
-                    ease: Ease::after(LEAVING_FADE, PRESENCE_DURATION, now, motion),
+                    places,
                     leaving: older,
                 },
             );
@@ -1579,8 +1589,15 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
         });
         let entering = &self.entering;
         self.growing_from_end.retain(|id| entering.contains_key(id));
-        self.leading_gaps.retain(|_, gap| !gap.ease.finished(now));
-        self.trailing_gaps.retain(|_, gap| !gap.ease.finished(now));
+        for gap in self
+            .leading_gaps
+            .values_mut()
+            .chain(self.trailing_gaps.values_mut())
+        {
+            gap.places.retain(|place| !place.ease.finished(now));
+        }
+        self.leading_gaps.retain(|_, gap| !gap.closed(now));
+        self.trailing_gaps.retain(|_, gap| !gap.closed(now));
         self.refreshed_at = Some(now);
         if !self.entering.is_empty()
             || !self.leading_gaps.is_empty()
@@ -1714,12 +1731,11 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
             } else {
                 &mut self.trailing_gaps
             };
-            let gap = gaps.entry(carrier).or_insert_with(|| Gap {
-                extent: px(0.0),
-                ease: Ease::after(LEAVING_FADE, PRESENCE_DURATION, now, motion),
-                leaving: Vec::new(),
+            let gap = gaps.entry(carrier).or_default();
+            gap.places.push(Closing {
+                extent: leaving.extent,
+                ease: Ease::closing(now, motion),
             });
-            gap.extent += leaving.extent;
             gap.leaving.push(leaving);
         }
         // The selection that left with a departing item fades where it was drawn, and in on the
@@ -2378,11 +2394,22 @@ pub(super) fn presence_motion(cx: &App) -> spaceterm_ui::ControlMotion {
     super::appearance_runtime::control_motion(cx)
 }
 
-/// A progress from 0 to 1 that starts at `since`, fast at first and slowing to a stop.
+/// A progress from 0 to 1 that starts at `since`, fast at first and slowing to a stop, or, for a
+/// closing place, slow at first.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Ease {
     since: Instant,
     duration: Duration,
+    curve: Curve,
+}
+
+/// How an [`Ease`] moves along its duration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Curve {
+    /// Fast at first, slowing to a stop: [`decay`].
+    Decay,
+    /// Slow at first, fastest midway, slowing to a stop: [`settle`].
+    Settle,
 }
 
 impl Ease {
@@ -2401,23 +2428,6 @@ impl Ease {
         }
     }
 
-    /// An ease that starts `delay` after `now`, or ends at once when motion is reduced.
-    fn after(
-        delay: Duration,
-        duration: Duration,
-        now: Instant,
-        motion: spaceterm_ui::ControlMotion,
-    ) -> Self {
-        let ease = Self::new(duration, now, motion);
-        if ease.duration.is_zero() {
-            return ease;
-        }
-        Self {
-            since: now + delay,
-            ..ease
-        }
-    }
-
     /// An ease that starts at `now`, or ends at once when motion is reduced.
     pub(super) fn new(
         duration: Duration,
@@ -2431,6 +2441,16 @@ impl Ease {
             } else {
                 duration
             },
+            curve: Curve::Decay,
+        }
+    }
+
+    /// How the place an item leaves at `now` closes over [`CLOSING_DURATION`], or at once when
+    /// motion is reduced.
+    fn closing(now: Instant, motion: spaceterm_ui::ControlMotion) -> Self {
+        Self {
+            curve: Curve::Settle,
+            ..Self::new(CLOSING_DURATION, now, motion)
         }
     }
 
@@ -2447,18 +2467,30 @@ impl Ease {
     }
 
     pub(super) fn at(&self, now: Instant) -> f32 {
-        decay(self.progress(now))
+        let progress = self.progress(now);
+        match self.curve {
+            Curve::Decay => decay(progress),
+            Curve::Settle => settle(progress),
+        }
     }
 }
 
-/// The space removed items left in the strip, closing from `extent` to nothing.
+/// The space removed items left in the strip. Each removal's place closes on its own from the
+/// moment it left, so a removal that joins a gap already closing leaves the rest of it moving as
+/// it was.
 #[derive(Clone, Debug)]
 struct Gap<Id> {
-    extent: Pixels,
-    ease: Ease,
+    places: Vec<Closing>,
     /// The removed items whose place the gap holds, in presentation order, which a strip may
     /// draw in it while it closes.
     leaving: Vec<Leaving<Id>>,
+}
+
+/// One removal's place in a [`Gap`], closing from `extent` to nothing.
+#[derive(Clone, Copy, Debug)]
+struct Closing {
+    extent: Pixels,
+    ease: Ease,
 }
 
 /// A removed item a closing gap holds, and how much of it shows from its start: all of it when
@@ -2516,9 +2548,34 @@ fn shown_leaving<Id>(leaving: Vec<Leaving<Id>>, open: Pixels) -> Vec<Leaving<Id>
         .collect()
 }
 
+impl<Id> Default for Gap<Id> {
+    fn default() -> Self {
+        Self {
+            places: Vec::new(),
+            leaving: Vec::new(),
+        }
+    }
+}
+
 impl<Id> Gap<Id> {
+    /// A gap with one place, closing from `extent` on `ease`.
+    fn closing(extent: Pixels, ease: Ease) -> Self {
+        Self {
+            places: vec![Closing { extent, ease }],
+            leaving: Vec::new(),
+        }
+    }
+
+    /// How long the gap is at `now`.
     fn at(&self, now: Instant) -> Pixels {
-        self.extent * (1.0 - self.ease.at(now))
+        self.places.iter().fold(px(0.0), |open, place| {
+            open + place.extent * (1.0 - place.ease.at(now))
+        })
+    }
+
+    /// Whether every place in the gap has closed by `now`.
+    fn closed(&self, now: Instant) -> bool {
+        self.places.iter().all(|place| place.ease.finished(now))
     }
 }
 
@@ -2591,6 +2648,16 @@ fn decay(progress: f32) -> f32 {
     (1.0 - (-TIME_CONSTANTS * progress).exp()) / (1.0 - (-TIME_CONSTANTS).exp())
 }
 
+/// Starts slowly, moves fastest midway and slows to a stop, symmetrically: a cubic ease in and out.
+fn settle(progress: f32) -> f32 {
+    let progress = progress.clamp(0.0, 1.0);
+    if progress < 0.5 {
+        4.0 * progress.powi(3)
+    } else {
+        1.0 - (2.0 - 2.0 * progress).powi(3) / 2.0
+    }
+}
+
 /// The progress at which [`decay`] reaches `eased`, from 0 to 1.
 fn undecay(eased: f32) -> f32 {
     let eased = eased.clamp(0.0, 1.0);
@@ -2635,7 +2702,8 @@ pub(crate) fn finish_slides(cx: &mut gpui::VisualTestContext) {
     cx.executor().advance_clock(
         SHIFT_DURATION
             .max(SETTLE_DURATION)
-            .max(PRESENCE_DURATION + LEAVING_FADE)
+            .max(PRESENCE_DURATION)
+            .max(CLOSING_DURATION)
             .max(SELECTION_DURATION)
             .max(MORPH_DURATION),
     );
@@ -3395,6 +3463,17 @@ mod tests {
         for progress in [0.1, 0.25, 0.5, 0.9] {
             assert!((undecay(decay(progress)) - progress).abs() < 1e-4);
         }
+    }
+
+    #[test]
+    fn a_closing_place_should_move_at_once_yet_keep_its_fading_item_whole() {
+        let faded = LEAVING_FADE.as_secs_f32() / CLOSING_DURATION.as_secs_f32();
+        assert_eq!((settle(0.0), settle(1.0)), (0.0, 1.0));
+        assert!(
+            settle(faded / 4.0) > 0.0 && settle(faded) < 0.03,
+            "the place closes at once, by under 3% while its item fades"
+        );
+        assert!((settle(0.5) - 0.5).abs() < 1e-6 && settle(0.75) < settle(0.9));
     }
 
     #[test]

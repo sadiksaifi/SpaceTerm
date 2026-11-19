@@ -4,7 +4,9 @@ use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 
 use super::*;
 use crate::repository_status::presentation::{PullRequestHover, PullRequestState, SidebarBadge};
-use crate::ui::drag_and_drop::{AnimatePresence, LEAVING_FADE, PRESENCE_DURATION, finish_slides};
+use crate::ui::drag_and_drop::{
+    AnimatePresence, CLOSING_DURATION, LEAVING_FADE, PRESENCE_DURATION, finish_slides,
+};
 
 const WORKSPACE: WorkspaceId = WorkspaceId::new(1);
 const PULL_REQUEST_URL: &str = "https://github.com/owner/app/pull/7";
@@ -193,11 +195,17 @@ fn removing_a_gaps_row_after_an_unpainted_moment_should_keep_the_rows_where_they
     cx.executor().advance_clock(PRESENCE_DURATION / 8);
     present(&sidebar, rows(&[1, 4]), cx);
     let leaving = closing(3, cx).expect("the row that left second must draw");
+    // The first row's place keeps closing through the unpainted moment, as it was.
+    let closed = fourth.top() - row(4, cx).top();
 
     assert_eq!(
-        (leaving.top(), row(4, cx).top()),
-        (third.top(), fourth.top()),
-        "the rows must start from where the last frame drew them"
+        leaving.top(),
+        third.top(),
+        "the row that left must start from where the last frame drew it"
+    );
+    assert!(
+        closed >= px(0.0) && closed < third.size.height * 0.05,
+        "the rows after must keep moving as they were, without a jump, got {closed:?}"
     );
 }
 
@@ -215,8 +223,7 @@ fn a_row_returning_into_a_closing_gap_should_keep_the_rows_after_it_hidden(
     cx.update(|_, cx| cx.set_global(AnimatePresence));
 
     present(&sidebar, rows(&[1, 4]), cx);
-    cx.executor()
-        .advance_clock(LEAVING_FADE + PRESENCE_DURATION / 4);
+    cx.executor().advance_clock(CLOSING_DURATION * 3 / 5);
     cx.update(|window, cx| window.simulate_next_frame(cx));
     cx.run_until_parked();
     let gap = row(4, cx).top() - row(1, cx).bottom();

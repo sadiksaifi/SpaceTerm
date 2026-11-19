@@ -2436,7 +2436,8 @@ impl TabManager {
             // Each slot asks for the roomy width, of which a new Tab asks for as much as it has
             // grown, and gives up width in proportion as the bar fills, down to the readable
             // minimum. The Tabs narrow together, and a new Tab keeps its share as it grows. The
-            // closing gaps beside a Tab stay inside its slot and keep their size.
+            // closing gaps beside a Tab stay inside its slot as padding, which keeps its size as
+            // the slot gives up width, so the Tab narrows as much as its neighbours do.
             let presence = motion.presence();
             let gaps = motion.leading_gap + motion.trailing_gap;
             let (before, after) = self.tab_reorder.leaving_beside(tab_id);
@@ -8104,9 +8105,10 @@ mod tests {
             cx.debug_bounds("tab-departing-selection-chip")
                 .map(|chip| chip.origin),
         );
-        // The closed Tab fades where it stood before its place starts to close.
+        // The closed Tab fades where it stood, as its place starts to close slowly.
         next_frame_after(60, cx);
         let faded = frame(cx);
+        let started = third.origin.x - faded.0.x;
         next_frame_after(100, cx);
         let (moving, moving_selection) = frame(cx);
         finish_slides(cx);
@@ -8114,14 +8116,19 @@ mod tests {
 
         let on_third = selection.origin + (third.origin - second.origin);
         assert_eq!(
-            (closing, fading, faded),
+            (closing, fading, faded.1 - faded.0),
             (
                 (third.origin, on_third),
                 (Some(second.origin), Some(selection.origin)),
-                (third.origin, on_third),
+                on_third - third.origin,
             ),
             "the closed Tab must fade with its selection where it stood, while the next Tab takes \
              the selection where it stands"
+        );
+        assert!(
+            started >= px(0.0) && started < (third.origin.x - second.origin.x) * 0.03,
+            "the next Tab must start toward the closed Tab's place slowly while it fades, so the \
+             closed Tab fades whole, got {started:?}"
         );
         assert!(
             second.origin.x < moving.x && moving.x < third.origin.x,
@@ -8138,6 +8145,223 @@ mod tests {
         assert!(
             cx.debug_bounds("tab-leaving-2-active").is_none(),
             "the closed Tab's face must leave with its place"
+        );
+    }
+
+    /// One frame of the Tab bar while Tabs close: when, in ms from the first close, where New
+    /// Tab stands, where the strip ends, and the width of each Tab it draws, by Tab.
+    struct ClosingFrame {
+        at: u64,
+        create: Pixels,
+        strip_end: Pixels,
+        tabs: Vec<(u64, gpui::Bounds<Pixels>)>,
+    }
+
+    /// Closes the Active Tab at each of `closes`, in ms from the first, and records a frame every
+    /// 16ms until `until`.
+    fn record_trailing_closes(
+        manager: &Entity<TabManager>,
+        closes: &[u64],
+        until: u64,
+        cx: &mut VisualTestContext,
+    ) -> Vec<ClosingFrame> {
+        let mut frames = Vec::new();
+        let mut at = 0;
+        while at <= until {
+            if closes.contains(&at) {
+                // Closes in quick succession, as a person's repeated Close presses do; clicks this
+                // close together would read as a double click.
+                cx.update(|window, cx| {
+                    manager.update(cx, |manager, cx| {
+                        let active = manager.tabs.active_tab_id();
+                        manager.close_tab(active, window, cx);
+                    });
+                });
+                cx.run_until_parked();
+            }
+            let tabs = tab_order(manager, cx)
+                .into_iter()
+                .filter_map(|tab| {
+                    ["active", "inactive"].into_iter().find_map(|state| {
+                        cx.debug_bounds(leaked_selector(format!("tab-item-{tab}-{state}")))
+                            .map(|bounds| (tab, bounds))
+                    })
+                })
+                .collect();
+            frames.push(ClosingFrame {
+                at,
+                create: cx.debug_bounds("create-tab-area").unwrap().left(),
+                strip_end: cx.debug_bounds("tab-items").unwrap().right(),
+                tabs,
+            });
+            next_frame_after(16, cx);
+            at += 16;
+        }
+        frames
+    }
+
+    /// Checks what every repeated close shows, from `frames`: New Tab stays beside the strip's
+    /// end and moves only toward the Tabs, without a step that jumps. Each closed Tab's place
+    /// starts closing while the Tab fades, the first slowly enough that it fades whole, and keeps
+    /// closing when a later close joins it.
+    fn assert_new_tab_follows_the_closing_strip(frames: &[ClosingFrame], closes: &[u64]) {
+        for frame in frames {
+            assert!(
+                (frame.create - frame.strip_end).abs() <= px(1.0),
+                "New Tab must stand beside the strip's end at {}ms, got {:?} beside {:?}",
+                frame.at,
+                frame.create,
+                frame.strip_end
+            );
+        }
+        for pair in frames.windows(2) {
+            let step = pair[0].create - pair[1].create;
+            assert!(
+                step >= px(-0.5) && step < px(24.0),
+                "New Tab must move only toward the Tabs, without a jump, got {step:?} at {}ms",
+                pair[1].at
+            );
+        }
+        // The place the closed Tabs leave, between the last Tab that stays and New Tab.
+        let gap = |ms: u64| {
+            let frame = frames.iter().find(|frame| frame.at == ms).unwrap();
+            frame.create
+                - frame
+                    .tabs
+                    .last()
+                    .map_or(px(0.0), |(_, bounds)| bounds.right())
+        };
+        for close in closes {
+            let fading = gap(close + 32) - gap(close + 96);
+            assert!(
+                fading > px(0.0),
+                "the place must already close while the Tab closed at {close}ms fades"
+            );
+        }
+        // The first place starts closing at once, slowly, so the closed Tab fades whole.
+        let first = closes[0];
+        let before = gap(first) - gap(first + 64);
+        assert!(
+            before < px(4.0),
+            "the place must close slowly while its Tab fades, got {before:?}"
+        );
+        assert!(
+            gap(frames.last().unwrap().at).abs() <= px(1.0),
+            "every place must have closed, leaving New Tab beside the last Tab"
+        );
+    }
+
+    #[gpui::test]
+    fn repeated_trailing_closes_with_room_should_move_new_tab_with_the_strips_end(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        for _ in 0..3 {
+            click("create-tab-button", cx);
+        }
+        finish_slides(cx);
+        let rest = |cx: &mut VisualTestContext| {
+            (
+                cx.debug_bounds("tab-item-1-inactive").unwrap(),
+                cx.debug_bounds("create-tab-area").unwrap().left(),
+            )
+        };
+        let (first, _) = rest(cx);
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+        // The last Tab closes, then the next one while the first place still closes.
+        let closes = [0, 160];
+        let frames = record_trailing_closes(&manager, &closes, 800, cx);
+        finish_slides(cx);
+        let second = cx.debug_bounds("tab-item-2-active").unwrap();
+        let create = cx.debug_bounds("create-tab-area").unwrap().left();
+
+        assert_new_tab_follows_the_closing_strip(&frames, &closes);
+        assert!(
+            frames.iter().all(|frame| frame
+                .tabs
+                .iter()
+                .all(|(_, bounds)| (bounds.size.width - first.size.width).abs() <= px(0.5))),
+            "Tabs with room keep their width as others close"
+        );
+        assert!(
+            (create - second.right()).abs() <= px(1.0),
+            "New Tab must rest beside the last Tab, got {create:?} beside {second:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn repeated_trailing_closes_in_a_full_bar_should_widen_the_tabs_and_free_new_tab_smoothly(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        narrow_window(cx);
+        for _ in 0..9 {
+            click("create-tab-button", cx);
+        }
+        finish_slides(cx);
+        let strip = cx.debug_bounds("tab-items").unwrap();
+        let full_end = cx.debug_bounds("create-tab-area").unwrap().left();
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+        // Ten Tabs overflow the bar; five closes in quick succession leave room for the rest.
+        let closes = [0, 192, 400, 592, 800];
+        let frames = record_trailing_closes(&manager, &closes, 1500, cx);
+        finish_slides(cx);
+        let widths = tab_widths(&manager, cx);
+        let last = cx.debug_bounds("tab-item-5-active").unwrap();
+        let create = cx.debug_bounds("create-tab-area").unwrap().left();
+
+        assert_new_tab_follows_the_closing_strip(&frames, &closes);
+        // The Tabs that stay share the bar alike, the one beside a closing place included, and
+        // widen without a jump.
+        for frame in &frames {
+            let shown = frame
+                .tabs
+                .iter()
+                .filter(|(_, bounds)| {
+                    bounds.left() >= strip.left() && bounds.right() <= frame.strip_end
+                })
+                .map(|(_, bounds)| bounds.size.width)
+                .collect::<Vec<_>>();
+            let narrowest = shown.iter().copied().fold(px(f32::MAX), Pixels::min);
+            let widest = shown.iter().copied().fold(px(0.0), Pixels::max);
+            assert!(
+                widest - narrowest <= px(1.0),
+                "the Tabs must share the bar alike at {}ms, got {shown:?}",
+                frame.at
+            );
+        }
+        for pair in frames.windows(2) {
+            for (tab, bounds) in &pair[1].tabs {
+                if let Some((_, before)) = pair[0].tabs.iter().find(|(other, _)| other == tab) {
+                    let (moved, widened) = (
+                        (bounds.left() - before.left()).abs(),
+                        (bounds.size.width - before.size.width).abs(),
+                    );
+                    assert!(
+                        moved < px(14.0) && widened < px(6.0),
+                        "Tab {tab} must move and widen without a jump at {}ms, moved {moved:?} \
+                         and widened {widened:?}",
+                        pair[1].at
+                    );
+                }
+            }
+        }
+        assert!(
+            frames
+                .first()
+                .is_some_and(|frame| (frame.create - full_end).abs() <= px(0.5)),
+            "New Tab starts at the full bar's end"
+        );
+        assert!(
+            widths
+                .iter()
+                .all(|width| (*width - px(TAB_ITEM_WIDTH)).abs() <= px(1.0))
+                && (create - last.right()).abs() <= px(1.0)
+                && create < full_end,
+            "the Tabs must rest at their roomy width with New Tab beside the last, got {widths:?} \
+             and {create:?} beside {last:?}"
         );
     }
 
