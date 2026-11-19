@@ -1188,6 +1188,8 @@ mod connection {
         stopping: bool,
         /// The Pane lost its connection, and nothing has explained the loss yet.
         lost: bool,
+        /// Counts the Pane's connection losses, so a classification names the exact one.
+        losses: u64,
         /// The person selected this restored Pane, so its ordinary shell start is on the way and
         /// the Pane stays blank instead of showing the restored screen.
         selecting: bool,
@@ -1257,6 +1259,7 @@ mod connection {
                 restart: None,
                 stopping: false,
                 lost: false,
+                losses: 0,
                 selecting: false,
                 interrupted: false,
                 restart_since: None,
@@ -1340,17 +1343,21 @@ mod connection {
                 return false;
             }
             self.lost = lost;
+            if lost {
+                self.losses = self.losses.wrapping_add(1);
+            }
             std::mem::take(&mut self.interrupted)
         }
 
-        /// Whether the Pane lost its connection and waits for [`Self::classify`].
-        pub(crate) fn classifying(&self) -> bool {
-            self.lost && !self.interrupted
+        /// The loss the Pane waits to classify with [`Self::classify`], if any.
+        pub(crate) fn classifying(&self) -> Option<u64> {
+            (self.lost && !self.interrupted).then_some(self.losses)
         }
 
-        /// Calls a loss that nothing explained within [`CLASSIFY_LIMIT`] an interruption.
-        pub(crate) fn classify(&mut self) -> CorePaneSync {
-            if !self.classifying() {
+        /// Calls `loss`, which nothing explained within [`CLASSIFY_LIMIT`], an interruption. A
+        /// loss that ended, or one that a later loss replaced, is left alone.
+        pub(crate) fn classify(&mut self, loss: u64) -> CorePaneSync {
+            if self.classifying() != Some(loss) {
                 return CorePaneSync::default();
             }
             self.interrupted = true;

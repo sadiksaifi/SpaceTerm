@@ -803,6 +803,33 @@ fn start_session_on_another_clients_ended_pane_should_take_it_over(cx: &mut Test
     assert!(cx.debug_bounds("pane-session-ended-1").is_none());
 }
 
+/// A loss that recovers and comes back inside the classification wait waits its own time, so an
+/// earlier loss's timer never says Reconnecting for the later one.
+#[gpui::test]
+fn a_second_loss_waits_its_own_time_before_saying_reconnecting(cx: &mut TestAppContext) {
+    use std::time::Duration;
+    let (harness, cx) = tab_manager(cx);
+    let pane = harness.panes.pane(ROOT_PANE);
+    pane.set(CorePaneStatus::Reconnecting);
+    settle(&harness, cx);
+    cx.executor().advance_clock(Duration::from_millis(600));
+    settle(&harness, cx);
+    pane.reconnect();
+    settle(&harness, cx);
+    pane.set(CorePaneStatus::Reconnecting);
+    settle(&harness, cx);
+    // The first loss's wait would end now.
+    cx.executor().advance_clock(Duration::from_millis(500));
+    settle(&harness, cx);
+    assert!(
+        cx.debug_bounds("pane-notice-1").is_none(),
+        "the second loss is still being read"
+    );
+    cx.executor().advance_clock(Duration::from_millis(500));
+    settle(&harness, cx);
+    assert!(cx.debug_bounds("pane-notice-1").is_some());
+}
+
 #[gpui::test]
 fn an_interrupted_pane_should_offer_retry_until_its_screen_returns(cx: &mut TestAppContext) {
     let (harness, cx) = tab_manager(cx);

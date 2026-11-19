@@ -156,7 +156,8 @@ fn lost_start() -> (Arc<Connection>, CorePaneView) {
     connection.set(CorePaneStatus::Reconnecting);
     view.sync();
     // Nothing explained the loss in time, so it is an interruption.
-    view.classify();
+    let loss = view.classifying().expect("the loss waits");
+    view.classify(loss);
     (connection, view)
 }
 
@@ -743,7 +744,8 @@ fn an_announced_restart_keeps_one_deadline_through_failed_statuses() {
         connection.answer(CorePaneStatus::Reconnecting);
         view.sync();
         // The Tab classifies the loss while the restart's deadline still hides it.
-        view.classify();
+        let loss = view.classifying().expect("the loss waits");
+        view.classify(loss);
         assert_eq!(notice(&view), None);
         connection.advance(RECONNECT_LIMIT - std::time::Duration::from_secs(120));
         view.sync();
@@ -753,6 +755,34 @@ fn an_announced_restart_keeps_one_deadline_through_failed_statuses() {
             "the deadline counts from the first reading, not from the last failure"
         );
     }
+}
+
+/// A classification meant for an earlier loss never reaches a later one, which waits its own
+/// time for an explanation.
+#[test]
+fn a_classification_names_the_exact_loss_it_waited_for() {
+    let connection = Connection::new(CorePaneStatus::Connected);
+    let mut view = CorePaneView::new(connection.clone());
+    view.sync();
+    connection.set(CorePaneStatus::Reconnecting);
+    view.sync();
+    let first = view.classifying().expect("the first loss waits");
+    connection.set(CorePaneStatus::Connected);
+    view.sync();
+    connection.set(CorePaneStatus::Reconnecting);
+    view.sync();
+    let second = view.classifying().expect("the second loss waits");
+    assert_ne!(first, second);
+    assert!(
+        !view.classify(first).changed,
+        "the earlier timer finds its loss gone"
+    );
+    assert_eq!(notice(&view), None);
+    assert!(view.classify(second).changed);
+    assert_eq!(
+        notice(&view).map(|(title, _)| title),
+        Some("Reconnecting…".to_owned())
+    );
 }
 
 #[test]
@@ -781,9 +811,9 @@ fn an_unexplained_loss_says_reconnecting_once_nothing_explains_it() {
     connection.set(CorePaneStatus::Reconnecting);
     view.sync();
     assert_eq!(notice(&view), None, "SpaceTerm reads why first");
-    assert!(view.classifying());
+    let loss = view.classifying().expect("the loss waits");
     assert!(
-        view.classify().changed,
+        view.classify(loss).changed,
         "the classification repaints the Pane"
     );
     assert_eq!(

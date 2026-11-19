@@ -741,8 +741,10 @@ pub(crate) struct TabView {
     parked_panes: BTreeMap<PaneId, crate::domain::tab::ParkedPane<Entity<TerminalPane>>>,
     directory_recovery: Option<Entity<super::core_pane::DirectoryRecovery>>,
     /// Reads every Pane's connection status while the Tab lives.
-    /// Classifies the connection losses no announcement explained, once their wait ends.
-    _classify: Option<gpui::Task<()>>,
+    /// Each Pane's connection loss waiting to be classified, and when the Tab saw it begin.
+    losses: BTreeMap<PaneId, (u64, std::time::Instant)>,
+    /// Classifies the connection losses no announcement explained, when the earliest wait ends.
+    _classify: Option<(std::time::Instant, gpui::Task<()>)>,
     _workspace_status: gpui::Task<()>,
     /// Repaints a blocked Pane's notice as the Core's download and SpaceTerm's own update move.
     _blocked_updates: Vec<gpui::Subscription>,
@@ -843,6 +845,7 @@ impl TabView {
             parked_panes: BTreeMap::new(),
             directory_recovery: None,
             _blocked_updates: blocked_updates,
+            losses: BTreeMap::new(),
             _classify: None,
             _workspace_status: cx.spawn_in(window, async move |view, cx| {
                 while changes.recv().await.is_ok() {
@@ -3146,37 +3149,60 @@ impl TabView {
         self.schedule_classification(window, cx);
     }
 
-    /// Calls each Pane whose connection loss nothing explained within
-    /// [`crate::ui::core_pane::CLASSIFY_LIMIT`] an interruption, so only then does it say it
-    /// reconnects. Input paused when the loss began.
+    /// Calls each Pane connection loss that nothing explained within
+    /// [`crate::ui::core_pane::CLASSIFY_LIMIT`] an interruption, so only then does the Pane say
+    /// it reconnects. Input paused when the loss began. Each loss waits from its own beginning,
+    /// and a timer only classifies the exact loss it waited for.
     fn schedule_classification(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self._classify.is_some() {
-            return;
-        }
-        let waiting: Vec<PaneId> = self
+        let now = cx.background_executor().now();
+        let waiting: BTreeMap<PaneId, u64> = self
             .binding
             .pane_ids()
             .into_iter()
-            .filter(|pane_id| {
-                self.binding
-                    .view(*pane_id)
-                    .is_some_and(crate::ui::core_pane::CorePaneView::classifying)
+            .filter_map(|pane_id| {
+                let loss = self.binding.view(pane_id)?.classifying()?;
+                Some((pane_id, loss))
             })
             .collect();
-        if waiting.is_empty() {
+        self.losses
+            .retain(|pane_id, (loss, _)| waiting.get(pane_id) == Some(loss));
+        for (pane_id, loss) in waiting {
+            self.losses.entry(pane_id).or_insert((loss, now));
+        }
+        let Some(deadline) = self
+            .losses
+            .values()
+            .map(|(_, since)| *since + crate::ui::core_pane::CLASSIFY_LIMIT)
+            .min()
+        else {
+            self._classify = None;
+            return;
+        };
+        if self
+            ._classify
+            .as_ref()
+            .is_some_and(|(scheduled, _)| *scheduled == deadline)
+        {
             return;
         }
-        self._classify = Some(cx.spawn_in(window, async move |view, cx| {
-            cx.background_executor()
-                .timer(crate::ui::core_pane::CLASSIFY_LIMIT)
-                .await;
+        let remaining = deadline.saturating_duration_since(now);
+        let task = cx.spawn_in(window, async move |view, cx| {
+            cx.background_executor().timer(remaining).await;
             let _ = view.update_in(cx, |view, window, cx| {
                 view._classify = None;
-                for pane_id in waiting {
+                let now = cx.background_executor().now();
+                let due: Vec<(PaneId, u64)> = view
+                    .losses
+                    .iter()
+                    .filter(|(_, (_, since))| *since + crate::ui::core_pane::CLASSIFY_LIMIT <= now)
+                    .map(|(pane_id, (loss, _))| (*pane_id, *loss))
+                    .collect();
+                for (pane_id, loss) in due {
+                    view.losses.remove(&pane_id);
                     let Some(sync) = view
                         .binding
                         .view_mut(pane_id)
-                        .map(crate::ui::core_pane::CorePaneView::classify)
+                        .map(|core| core.classify(loss))
                     else {
                         continue;
                     };
@@ -3187,7 +3213,8 @@ impl TabView {
                 }
                 view.schedule_classification(window, cx);
             });
-        }));
+        });
+        self._classify = Some((deadline, task));
     }
 
     fn apply_sync(
