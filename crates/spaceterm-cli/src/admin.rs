@@ -608,6 +608,49 @@ fn settle_journals(
     .unwrap_or_default()
 }
 
+/// What this machine's own ledger records about the operations this identity admitted and has
+/// not settled, read without SpaceTerm Core, as after a Stop. The records stay for the next lane
+/// connection to acknowledge, because only SpaceTerm Core acknowledges ledger records. An
+/// operation the ledger no longer holds, or cannot be read now, is left out.
+pub fn offline_receipts(context: &Context<'_>) -> Vec<RecoveredOperation> {
+    use spaceterm_core::service::operations::{Ledger, OperationId, State};
+    let identity = context.identity_kind();
+    let (Ok(pending), Ok(ledger)) = (
+        Pending::open(context, &RouteKey::Local),
+        Ledger::open(context.identity),
+    ) else {
+        return Vec::new();
+    };
+    pending
+        .list()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|operation| {
+            let id = OperationId::parse(operation)?;
+            let record = ledger.resolve_now(&id).ok()??;
+            let (state, code) = match record.state {
+                State::Done => (RecoveredState::Applied, None),
+                State::Failed { code } => (
+                    RecoveredState::Refused,
+                    Some(contract::from_lane_code(&code).code),
+                ),
+                State::NotPerformed(_) => (RecoveredState::Refused, Some(Code::OperationFailed)),
+                _ => (RecoveredState::Unknown, None),
+            };
+            Some(RecoveredOperation {
+                operation: operation.clone(),
+                identity: identity.clone(),
+                kind: RecoveredKind::Service,
+                outcome: RecoveredOutcome {
+                    state,
+                    code,
+                    target: None,
+                },
+            })
+        })
+        .collect()
+}
+
 fn recovered_operation(receipt: &LaneReceipt, identity: &RecoveredIdentity) -> RecoveredOperation {
     let (state, code) = match receipt.state {
         LaneOperationState::Done => (RecoveredState::Applied, None),

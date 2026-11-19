@@ -140,6 +140,26 @@ pub(crate) enum MachineAction {
     DismissFailure(u64),
     Start,
     Stop,
+    /// Reads what became of the Stop or Restart this desktop sent whose outcome nothing
+    /// confirmed, from that operation's own receipt. It never runs the action again.
+    CheckStatus(Checked),
+}
+
+/// The action a [`MachineAction::CheckStatus`] reads the outcome of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Checked {
+    Stop,
+    Restart,
+}
+
+impl Checked {
+    /// The action whose outcome this reads.
+    pub(crate) const fn action(self) -> MachineAction {
+        match self {
+            Self::Stop => MachineAction::Stop,
+            Self::Restart => MachineAction::Restart,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

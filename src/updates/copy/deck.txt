@@ -531,11 +531,11 @@ Restart SpaceTerm Core on penguin? | SpaceTerm Core restarts from 0.11.3 to 0.11
 Restart SpaceTerm Core on penguin? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 3 Terminal Sessions. Workspaces, Tabs and Panes stay. SpaceTerm on iPad can’t connect to penguin until it updates. | Restart Core, Remind Me Tomorrow
 Restart SpaceTerm Core on penguin? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 3 Terminal Sessions. Workspaces, Tabs and Panes stay. | Restart Core, Cancel
 Restart SpaceTerm Core on penguin? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 3 Terminal Sessions. Workspaces, Tabs and Panes stay. | Restart Core, Remind Me Tomorrow
-SpaceTerm Can’t Confirm the Restart on This Computer | This Computer stopped responding while SpaceTerm Core restarted into 0.11.5. | Check Again, Cancel
+SpaceTerm Can’t Confirm the Restart on This Computer | This Computer stopped responding while SpaceTerm Core restarted into 0.11.5. | Check Status, Cancel
 SpaceTerm Can’t Confirm the Restart on This Mac | SpaceTerm lost touch with SpaceTerm Core on This Mac before it confirmed that it restarted. Check Status reads what happened. | Check Status, Cancel
-SpaceTerm Can’t Confirm the Restart on This Mac | This Mac stopped responding while SpaceTerm Core restarted into 0.11.5. | Check Again, Cancel
+SpaceTerm Can’t Confirm the Restart on This Mac | This Mac stopped responding while SpaceTerm Core restarted into 0.11.5. | Check Status, Cancel
 SpaceTerm Can’t Confirm the Restart on penguin | SpaceTerm lost touch with SpaceTerm Core on penguin before it confirmed that it restarted. Check Status reads what happened. | Check Status, Cancel
-SpaceTerm Can’t Confirm the Restart on penguin | penguin stopped responding while SpaceTerm Core restarted into 0.11.5. | Check Again, Cancel
+SpaceTerm Can’t Confirm the Restart on penguin | penguin stopped responding while SpaceTerm Core restarted into 0.11.5. | Check Status, Cancel
 SpaceTerm Can’t Confirm the Start on This Mac | SpaceTerm lost touch with SpaceTerm Core on This Mac before it confirmed that it started. Check Status reads what happened. | Check Status, Cancel
 SpaceTerm Can’t Confirm the Start on penguin | SpaceTerm lost touch with SpaceTerm Core on penguin before it confirmed that it started. Check Status reads what happened. | Check Status, Cancel
 SpaceTerm Can’t Confirm the Stop on This Mac | SpaceTerm lost touch with SpaceTerm Core on This Mac before it confirmed that it stopped. Check Status reads what happened. | Check Status, Cancel

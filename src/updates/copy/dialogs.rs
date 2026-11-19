@@ -6,7 +6,7 @@ use spaceterm_core::update::facts::{CheckFailure, StartFailure};
 use super::{Platform, list_and, this_ends};
 use crate::updates::UpdateError;
 use crate::updates::confirm::{Explanation, Previewed};
-use crate::updates::machines::{ActionFailure, MachineAction, MachineId};
+use crate::updates::machines::{ActionFailure, Checked, MachineAction, MachineId};
 use crate::updates::state::{
     AppRow, AppStage, CheckFailed, Command, DesktopAction, DownloadCause, MachineRow, MachineStage,
     PUSH_FAILURE, STEPPING_STONE,
@@ -385,11 +385,12 @@ pub(crate) fn not_confirmed(row: &MachineRow) -> Explanation {
             "{name} stopped responding while SpaceTerm Core restarted into {version}."
         )
         .into(),
+        // Check Status reads the restart's own receipt, and never restarts again.
         then: Some(Box::new(Command::Machine(
             row.id,
-            MachineAction::CheckAgain,
+            MachineAction::CheckStatus(Checked::Restart),
         ))),
-        proceed: Some(CHECK_AGAIN.into()),
+        proceed: Some(CHECK_STATUS.into()),
         dismiss: None,
     }
 }
@@ -408,7 +409,12 @@ pub(crate) fn action_failure(
             format!("Couldn\u{2019}t Check for Updates on {name}")
         }
         MachineAction::Start => format!("Couldn\u{2019}t Start SpaceTerm Core on {name}"),
-        MachineAction::Stop => format!("Couldn\u{2019}t Stop SpaceTerm Core on {name}"),
+        MachineAction::Stop | MachineAction::CheckStatus(Checked::Stop) => {
+            format!("Couldn\u{2019}t Stop SpaceTerm Core on {name}")
+        }
+        MachineAction::CheckStatus(Checked::Restart) => {
+            format!("Couldn\u{2019}t Restart SpaceTerm Core on {name}")
+        }
         MachineAction::DismissFailure(_) => return None,
     };
     let message = match failure {
@@ -439,7 +445,7 @@ pub(crate) fn action_failure(
 /// The title and message for an action SpaceTerm Core admitted whose outcome nothing confirms.
 fn unconfirmed(name: &str, action: &MachineAction) -> (SharedString, SharedString) {
     let (what, did) = match action {
-        MachineAction::Stop => ("Stop", "stopped"),
+        MachineAction::Stop | MachineAction::CheckStatus(Checked::Stop) => ("Stop", "stopped"),
         MachineAction::Start => ("Start", "started"),
         _ => ("Restart", "restarted"),
     };
@@ -464,8 +470,22 @@ pub(crate) fn action_failure_alert(
     failure: ActionFailure,
 ) -> Option<Explanation> {
     let (title, message) = action_failure(name, action, failure)?;
-    let (then, proceed) = match (failure, action) {
-        (ActionFailure::Unconfirmed, _) => (
+    // Check Status follows the original operation; Try Again asks for the action again.
+    let checked = match action {
+        MachineAction::Stop => Some(Checked::Stop),
+        MachineAction::Restart => Some(Checked::Restart),
+        MachineAction::CheckStatus(checked) => Some(*checked),
+        _ => None,
+    };
+    let (then, proceed) = match (failure, action, checked) {
+        (ActionFailure::Unconfirmed, _, Some(checked)) => (
+            Some(Command::Machine(
+                machine,
+                MachineAction::CheckStatus(checked),
+            )),
+            Some(CHECK_STATUS),
+        ),
+        (ActionFailure::Unconfirmed, _, None) => (
             Some(Command::Machine(machine, MachineAction::CheckAgain)),
             Some(CHECK_STATUS),
         ),
@@ -475,8 +495,20 @@ pub(crate) fn action_failure_alert(
             | ActionFailure::DiskFull
             | ActionFailure::Failed,
             MachineAction::Start | MachineAction::Stop | MachineAction::Restart,
+            _,
         ) => (
             Some(Command::Machine(machine, action.clone())),
+            Some(TRY_AGAIN),
+        ),
+        (
+            ActionFailure::Busy
+            | ActionFailure::Unreachable
+            | ActionFailure::DiskFull
+            | ActionFailure::Failed,
+            MachineAction::CheckStatus(checked),
+            _,
+        ) => (
+            Some(Command::Machine(machine, checked.action())),
             Some(TRY_AGAIN),
         ),
         _ => (None, None),

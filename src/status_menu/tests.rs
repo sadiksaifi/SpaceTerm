@@ -223,7 +223,7 @@ fn a_stop_without_a_confirmed_outcome_offers_check_status_and_a_failed_one_try_a
         (
             ActionFailure::Unconfirmed,
             "Check Status",
-            MachineAction::CheckAgain,
+            MachineAction::CheckStatus(crate::updates::machines::Checked::Stop),
         ),
         (ActionFailure::Failed, "Try Again", MachineAction::Stop),
     ] {
@@ -245,7 +245,7 @@ fn a_stop_without_a_confirmed_outcome_offers_check_status_and_a_failed_one_try_a
             Some(AlertButtons::FollowUp(follow_up.to_owned())),
             "{failure:?}"
         );
-        if then == MachineAction::CheckAgain {
+        if matches!(then, MachineAction::CheckStatus(_)) {
             assert_eq!(fixture.machines.performed(), [(LOCAL, then)]);
         } else {
             // Try Again previews the Stop again, so the person reviews it before it runs.

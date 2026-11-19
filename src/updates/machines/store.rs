@@ -106,7 +106,10 @@ impl MachineUpdatesNotice {
             return None;
         };
         let waiting = self.refused_at_once
-            || matches!(self.action, MachineAction::Start | MachineAction::Stop);
+            || matches!(
+                self.action,
+                MachineAction::Start | MachineAction::Stop | MachineAction::CheckStatus(_)
+            );
         if !waiting {
             return None;
         }
@@ -391,7 +394,10 @@ impl MachineUpdates {
             }
             MachineAction::CheckAgain | MachineAction::ConnectAndCheck => Some(Asked::Check),
             MachineAction::Install => Some(Asked::Install),
-            MachineAction::Restart | MachineAction::Start | MachineAction::Stop => None,
+            MachineAction::Restart
+            | MachineAction::Start
+            | MachineAction::Stop
+            | MachineAction::CheckStatus(_) => None,
         };
         if let Some(asked) = asked {
             self.serial += 1;
@@ -913,12 +919,14 @@ impl MachineUpdates {
         }
         // An approved restart the Core refused without running it leaves no failure in its
         // facts, so the person waiting on the click hears it at once.
+        // So does one whose outcome nothing confirmed: only Check Status reads its receipt.
         let refused = action == MachineAction::Restart
             && matches!(
                 outcome,
                 Err(ActionFailure::Busy
                     | ActionFailure::Unreachable
-                    | ActionFailure::Unavailable(_))
+                    | ActionFailure::Unavailable(_)
+                    | ActionFailure::Unconfirmed)
             );
         self.notify_outcome(machine, action, surface, outcome, refused, cx);
     }

@@ -71,6 +71,8 @@ struct ScriptedLane {
     install_result: Mutex<Result<UpdateFacts, ActionFailure>>,
     /// What each Execute answers.
     execute_result: Mutex<Result<(), ActionFailure>>,
+    /// What each Resolve of an executed operation answers.
+    resolve_result: Mutex<Result<(), ActionFailure>>,
     requests: Mutex<Vec<String>>,
 }
 
@@ -84,6 +86,7 @@ impl ScriptedLane {
             previewed: Mutex::new(0),
             install_result: Mutex::new(Ok(self::facts(2, 0, Some("0.9.0")).facts)),
             execute_result: Mutex::new(Ok(())),
+            resolve_result: Mutex::new(Err(ActionFailure::Unconfirmed)),
             requests: Mutex::new(Vec::new()),
         })
     }
@@ -182,9 +185,19 @@ impl MachineLane for ScriptedLane {
         })
     }
 
-    fn execute(&self, preview: admin::Preview) -> Result<(), ActionFailure> {
+    fn execute(
+        &self,
+        preview: admin::Preview,
+        operation: &mut Option<String>,
+    ) -> Result<(), ActionFailure> {
         self.record(format!("execute {}", preview.token));
+        *operation = Some(format!("operation-{}", preview.token));
         *self.execute_result.lock().unwrap()
+    }
+
+    fn resolve(&self, operation: &str) -> Result<(), ActionFailure> {
+        self.record(format!("resolve {operation}"));
+        self.resolve_result.lock().unwrap().clone()
     }
 }
 
@@ -790,6 +803,61 @@ fn an_unconfirmed_restart_keeps_expecting_the_core_and_then_cannot_confirm_it() 
     changed(&events, "the unconfirmed restart", |update| {
         matches!(update.link, MachineLink::Unconfirmed { .. })
     });
+}
+
+/// Check Status after an unconfirmed restart reads that restart's own receipt, also after an
+/// unrelated action on the same Machine, and restarts nothing again.
+#[test]
+fn check_status_reads_the_original_restarts_receipt() {
+    use crate::updates::machines::Checked;
+    let lane = ScriptedLane::new([Ok(facts(1, 0, None))]);
+    *lane.execute_result.lock().unwrap() = Err(ActionFailure::Unconfirmed);
+    let machine = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
+    let sources = ScriptedSources::with(vec![known(PENGUIN, "penguin", false, &machine)]);
+    let (adapter, events) = started(&sources, RESTART_LIMIT);
+    changed(&events, "the facts", |update| update.facts.is_some());
+
+    let preview = previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap();
+    adapter.execute(preview);
+    assert_eq!(
+        finished(&events, &MachineAction::Restart),
+        Err(ActionFailure::Unconfirmed)
+    );
+    let original = lane
+        .requests()
+        .into_iter()
+        .find_map(|request| request.strip_prefix("execute ").map(str::to_owned))
+        .expect("the restart executed");
+
+    // An unrelated check runs on the same Machine first.
+    adapter.perform(PENGUIN, MachineAction::CheckAgain);
+    let _ = finished(&events, &MachineAction::CheckAgain);
+    // The receipt has not settled yet.
+    adapter.perform(PENGUIN, MachineAction::CheckStatus(Checked::Restart));
+    assert_eq!(
+        finished(&events, &MachineAction::CheckStatus(Checked::Restart)),
+        Err(ActionFailure::Unconfirmed)
+    );
+    // Later it says the restart was done.
+    *lane.resolve_result.lock().unwrap() = Ok(());
+    adapter.perform(PENGUIN, MachineAction::CheckStatus(Checked::Restart));
+    assert_eq!(
+        finished(&events, &MachineAction::CheckStatus(Checked::Restart)),
+        Ok(())
+    );
+    let resolved: Vec<_> = lane
+        .requests()
+        .into_iter()
+        .filter(|request| request.starts_with("resolve "))
+        .collect();
+    assert_eq!(
+        resolved,
+        [
+            format!("resolve operation-{original}"),
+            format!("resolve operation-{original}")
+        ]
+    );
+    assert_eq!(lane.count("execute"), 1, "Check Status restarts nothing");
 }
 
 /// An incompatible Core that restarts into a compatible version and answers again before the

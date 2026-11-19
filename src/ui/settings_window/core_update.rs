@@ -354,8 +354,14 @@ impl SettingsWindow {
                 // Settings and every waiting Workspace Window read it again.
                 if notice.local
                     && let Some(running) = match notice.action {
-                        MachineAction::Stop => Some(false),
-                        MachineAction::Restart => Some(true),
+                        MachineAction::Stop
+                        | MachineAction::CheckStatus(crate::updates::machines::Checked::Stop) => {
+                            Some(false)
+                        }
+                        MachineAction::Restart
+                        | MachineAction::CheckStatus(
+                            crate::updates::machines::Checked::Restart,
+                        ) => Some(true),
                         _ => None,
                     }
                 {

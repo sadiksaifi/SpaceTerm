@@ -42,7 +42,7 @@ use spaceterm_core::update::facts::{Operation, UpdateFacts, Version};
 use crate::updates::push::{EmbeddedCore, EmbeddedCores};
 
 use super::{
-    ActionFailure, MachineAction, MachineId, MachineLink, MachinePreview, MachineUpdate,
+    ActionFailure, Checked, MachineAction, MachineId, MachineLink, MachinePreview, MachineUpdate,
     MachineUpdatesAdapter, MachineUpdatesError, MachineUpdatesEvent, PreviewAnswer,
 };
 
@@ -95,8 +95,19 @@ pub(crate) trait MachineLane: Send + Sync {
     fn install(&self, build: Option<&EmbeddedCore>) -> Result<UpdateFacts, ActionFailure>;
     /// `Preview` of `change`: the Core's token and what it affects.
     fn preview(&self, change: LaneChange) -> Result<admin::Preview, ActionFailure>;
-    /// `Execute` of exactly `preview`, followed until it settles.
-    fn execute(&self, preview: admin::Preview) -> Result<(), ActionFailure>;
+    /// `Execute` of exactly `preview`, followed until it settles. `operation` receives the
+    /// operation ID once the request may have reached the Core, so its outcome can be read
+    /// later when nothing confirms it now.
+    fn execute(
+        &self,
+        preview: admin::Preview,
+        operation: &mut Option<String>,
+    ) -> Result<(), ActionFailure>;
+    /// What the receipt of `operation`, which this desktop executed, says now. `Unconfirmed`
+    /// while it has not settled or the Core cannot answer.
+    fn resolve(&self, _operation: &str) -> Result<(), ActionFailure> {
+        Err(ActionFailure::Unconfirmed)
+    }
 }
 
 /// How a Machine can be reached now.
@@ -135,6 +146,11 @@ pub(crate) trait Machine: Send + Sync {
     fn connect(&self);
     /// Whether a route to the Machine is connecting or connected, so its lane may answer soon.
     fn connecting(&self) -> bool;
+    /// What this Machine's own ledger records about `operation`, read without its Core, as
+    /// after a Stop. `None` where no ledger is readable here.
+    fn resolve_offline(&self, _operation: &str) -> Option<Result<(), ActionFailure>> {
+        None
+    }
 }
 
 /// A Machine its source knows, with every route it has.
@@ -291,6 +307,12 @@ impl MachineUpdatesAdapter for LiveMachines {
             return;
         };
         let performed = action.clone();
+        if let MachineAction::CheckStatus(checked) = action {
+            self.spawn_action(shared, machine, action, move |shared| {
+                check_status(shared, machine, &target, checked)
+            });
+            return;
+        }
         if action == MachineAction::ConnectAndCheck {
             self.spawn_action(shared, machine, action, move |shared| {
                 connect_and_check(shared, machine, &target)
@@ -413,7 +435,24 @@ fn run_previewed(
     if restart {
         shared.expect_restart(machine, preview.target.clone());
     }
-    let outcome = lane.execute(lane_preview);
+    let mut operation = None;
+    let outcome = lane.execute(lane_preview, &mut operation);
+    let checked = if restart {
+        Checked::Restart
+    } else {
+        Checked::Stop
+    };
+    {
+        let mut state = shared.lock();
+        match (&outcome, operation) {
+            (Err(ActionFailure::Unconfirmed), Some(operation)) => {
+                state.unconfirmed.insert(machine, (checked, operation));
+            }
+            _ => {
+                state.unconfirmed.remove(&machine);
+            }
+        }
+    }
     // A restart whose outcome nothing confirmed may still be running, so the Machine keeps
     // expecting its return, which says it can't confirm the restart until that settles.
     if restart && outcome.is_err() && outcome != Err(ActionFailure::Unconfirmed) {
@@ -422,8 +461,47 @@ fn run_previewed(
     outcome
 }
 
+/// Check Status: reads the receipt of the Stop or Restart this desktop ran whose outcome nothing
+/// confirmed, from this Machine's own ledger when its Core is down and from its Core otherwise.
+/// It runs nothing again. With no such operation left, it only asks the Machine's routes to
+/// answer again, so the latest facts say what runs.
+fn check_status(
+    shared: &Shared,
+    machine: MachineId,
+    target: &Target,
+    checked: Checked,
+) -> Result<(), ActionFailure> {
+    let recorded = shared
+        .lock()
+        .unconfirmed
+        .get(&machine)
+        .filter(|(kind, _)| *kind == checked)
+        .map(|(_, operation)| operation.clone());
+    let Some(operation) = recorded else {
+        target.known.machine.retry();
+        return Ok(());
+    };
+    let offline = target.known.machine.resolve_offline(&operation);
+    let outcome = match offline {
+        Some(outcome) if outcome != Err(ActionFailure::Unconfirmed) => outcome,
+        _ => match target.known.machine.reach() {
+            Reach::Lane { lane, .. } => lane.resolve(&operation),
+            _ => Err(ActionFailure::Unconfirmed),
+        },
+    };
+    if outcome != Err(ActionFailure::Unconfirmed) {
+        shared.lock().unconfirmed.remove(&machine);
+        if checked == Checked::Restart && outcome.is_err() {
+            shared.forget_restart(machine);
+        }
+    }
+    target.known.machine.retry();
+    outcome
+}
+
 fn act(target: &Target, action: &MachineAction) -> Result<(), ActionFailure> {
     match action {
+        MachineAction::CheckStatus(_) => return Err(ActionFailure::Failed),
         MachineAction::DismissFailure(_) => return Ok(()),
         MachineAction::Start if target.known.local => return target.known.machine.start(),
         // Restart and Stop run only through `execute`, on a preview the person confirmed. Start
@@ -577,6 +655,9 @@ struct State {
     /// Previews the Core issued that nobody executed yet, oldest first.
     previews: VecDeque<(MachinePreview, admin::Preview)>,
     next_preview: u64,
+    /// The Stop or Restart each Machine ran last whose outcome nothing confirmed, with its
+    /// operation ID, until Check Status reads its settled receipt.
+    unconfirmed: HashMap<MachineId, (Checked, String)>,
 }
 
 struct Entry {

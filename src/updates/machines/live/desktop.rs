@@ -71,6 +71,7 @@ impl Sources for DesktopSources {
                     name: THIS_MACHINE.into(),
                     local: true,
                     machine: Arc::new(LocalMachine {
+                        ledger: Some(identity.clone()),
                         service: Arc::new(controller.clone()),
                         connect: Arc::new(move || {
                             let lane = CoreLane::local(core.clone(), identity.clone());
@@ -205,6 +206,9 @@ type Connect = Arc<
 pub(crate) struct LocalMachine {
     pub(crate) service: Arc<dyn LocalService>,
     pub(crate) connect: Connect,
+    /// The desktop build's identity, whose ledger records a Stop's outcome after its Core
+    /// exited.
+    pub(crate) ledger: Option<String>,
 }
 
 impl Machine for LocalMachine {
@@ -244,6 +248,29 @@ impl Machine for LocalMachine {
 
     fn connecting(&self) -> bool {
         false
+    }
+
+    fn resolve_offline(&self, operation: &str) -> Option<Result<(), ActionFailure>> {
+        let identity = self.ledger.as_deref()?;
+        Some(ledger_outcome(identity, operation))
+    }
+}
+
+/// What the ledger of the build `identity` records about `operation` now. `Unconfirmed` while it
+/// has not settled, or the ledger is unreadable or busy.
+fn ledger_outcome(identity: &str, operation: &str) -> Result<(), ActionFailure> {
+    use spaceterm_core::service::operations::{Ledger, OperationId, State};
+    let id = OperationId::parse(operation).ok_or(ActionFailure::Unconfirmed)?;
+    let state = Ledger::open(identity)
+        .and_then(|ledger| ledger.resolve_now(&id))
+        .ok()
+        .flatten()
+        .map(|record| record.state);
+    match state {
+        Some(State::Done) => Ok(()),
+        Some(State::Failed { code }) => Err(failure_of_code(&code)),
+        Some(State::NotPerformed(_)) => Err(ActionFailure::Failed),
+        _ => Err(ActionFailure::Unconfirmed),
     }
 }
 
@@ -422,23 +449,15 @@ impl CoreLane {
     /// records it in the ledger after the Core exited. A closed lane alone proves nothing about
     /// native cleanup, so without a terminal record by `deadline` the outcome stays unconfirmed.
     fn confirm_stop(&self, operation: &str, deadline: Instant) -> Result<(), ActionFailure> {
-        use spaceterm_core::service::operations::{Ledger, OperationId, State};
-        let (Some(identity), Some(id)) = (&self.ledger, OperationId::parse(operation)) else {
+        let Some(identity) = &self.ledger else {
             return Err(ActionFailure::Unconfirmed);
         };
         loop {
-            let state = Ledger::open(identity)
-                .and_then(|ledger| ledger.resolve_now(&id))
-                .ok()
-                .flatten()
-                .map(|record| record.state);
-            match state {
-                Some(State::Done) => return Ok(()),
-                Some(State::Failed { code }) => return Err(failure_of_code(&code)),
-                Some(State::NotPerformed(_)) => return Err(ActionFailure::Failed),
-                Some(State::Unresolved) => return Err(ActionFailure::Unconfirmed),
-                _ if Instant::now() + LEDGER_POLL < deadline => std::thread::sleep(LEDGER_POLL),
-                _ => return Err(ActionFailure::Unconfirmed),
+            match ledger_outcome(identity, operation) {
+                Err(ActionFailure::Unconfirmed) if Instant::now() + LEDGER_POLL < deadline => {
+                    std::thread::sleep(LEDGER_POLL);
+                }
+                outcome => return outcome,
             }
         }
     }
@@ -603,7 +622,40 @@ impl MachineLane for CoreLane {
             .map_err(lane_failure)
     }
 
-    fn execute(&self, preview: admin::Preview) -> Result<(), ActionFailure> {
+    fn resolve(&self, operation: &str) -> Result<(), ActionFailure> {
+        let lane = self
+            .core
+            .service_lane()
+            .map_err(|_| ActionFailure::Unconfirmed)?;
+        let mut session = lane.session().map_err(|_| ActionFailure::Unconfirmed)?;
+        let Some(id) = spaceterm_core::service::operations::OperationId::parse(operation) else {
+            return Err(ActionFailure::Unconfirmed);
+        };
+        match lane_client::settle_leftover(&mut session, &id) {
+            Ok(lane_client::Leftover::Settled(receipt)) => {
+                if let Ok(pending) = self.core.service_operations() {
+                    let _ = pending.remove(operation);
+                }
+                match admin::receipt_verdict(&receipt) {
+                    admin::Verdict::Done => Ok(()),
+                    admin::Verdict::Failed(Some(code)) => Err(failure_of_code(&code)),
+                    admin::Verdict::Failed(None) | admin::Verdict::NotPerformed => {
+                        Err(ActionFailure::Failed)
+                    }
+                    admin::Verdict::Uncertain | admin::Verdict::Shutdown => {
+                        Err(ActionFailure::Unconfirmed)
+                    }
+                }
+            }
+            _ => Err(ActionFailure::Unconfirmed),
+        }
+    }
+
+    fn execute(
+        &self,
+        preview: admin::Preview,
+        operation: &mut Option<String>,
+    ) -> Result<(), ActionFailure> {
         let lane = self
             .core
             .service_lane()
@@ -631,6 +683,11 @@ impl MachineLane for CoreLane {
             &mut || {},
         )
         .map_err(lane_failure)?;
+        *operation = Some(match &outcome {
+            lane_client::Outcome::Shutdown { operation, .. }
+            | lane_client::Outcome::Unconfirmed { operation, .. } => operation.clone(),
+            lane_client::Outcome::Settled { receipt, .. } => receipt.operation.clone(),
+        });
         match (admin::verdict(&outcome), outcome) {
             (admin::Verdict::Done, _) => Ok(()),
             (admin::Verdict::Shutdown, lane_client::Outcome::Shutdown { operation, .. }) => {
@@ -721,7 +778,7 @@ mod tests {
         fn preview(&self, _: LaneChange) -> Result<admin::Preview, ActionFailure> {
             Err(ActionFailure::Unreachable)
         }
-        fn execute(&self, _: admin::Preview) -> Result<(), ActionFailure> {
+        fn execute(&self, _: admin::Preview, _: &mut Option<String>) -> Result<(), ActionFailure> {
             Ok(())
         }
     }
@@ -738,6 +795,7 @@ mod tests {
     fn local(status: ServiceStatus, dialed: &Arc<AtomicUsize>) -> LocalMachine {
         let dialed = Arc::clone(dialed);
         LocalMachine {
+            ledger: None,
             service: Arc::new(Service(status)),
             connect: Arc::new(move || {
                 dialed.fetch_add(1, Ordering::SeqCst);
@@ -807,6 +865,7 @@ mod tests {
             ),
         ] {
             let machine = LocalMachine {
+                ledger: None,
                 service: Arc::new(Service(ServiceStatus {
                     installed: true,
                     enabled: true,
@@ -841,6 +900,7 @@ mod tests {
     #[test]
     fn a_start_refused_by_login_items_stays_that_failure() {
         let machine = LocalMachine {
+            ledger: None,
             service: Arc::new(OffInLoginItems),
             connect: Arc::new(|| Err(ActionFailure::Unreachable)),
         };

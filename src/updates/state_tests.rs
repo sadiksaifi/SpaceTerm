@@ -1346,7 +1346,7 @@ fn a_restart_approved_here_is_not_confirmed_after_the_deadline(cx: &mut gpui::Te
         let Command::Explain(alert) = pill.main else {
             panic!("D4 opens from the main area");
         };
-        assert_eq!(alert.proceed.as_deref(), Some("Check Again"));
+        assert_eq!(alert.proceed.as_deref(), Some("Check Status"));
 
         // The Core answers again on the new version: the restart settled.
         adapter.emit(MachineUpdatesEvent::Changed(Box::new(returned())));

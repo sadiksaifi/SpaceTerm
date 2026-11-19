@@ -415,7 +415,9 @@ fn plan(
         MachineAction::CheckAgain | MachineAction::ConnectAndCheck => check_again(),
         MachineAction::Stop if !update.local => return Err(ActionFailure::Failed),
         MachineAction::Stop => stop(),
-        MachineAction::Start | MachineAction::DismissFailure(_) => Vec::new(),
+        MachineAction::Start | MachineAction::DismissFailure(_) | MachineAction::CheckStatus(_) => {
+            Vec::new()
+        }
     })
 }
 

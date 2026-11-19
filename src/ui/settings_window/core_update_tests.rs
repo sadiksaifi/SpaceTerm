@@ -295,14 +295,27 @@ fn a_failed_settings_preview_explains_the_failure(cx: &mut TestAppContext) {
 #[gpui::test]
 fn an_unconfirmed_settings_restart_offers_check_status(cx: &mut TestAppContext) {
     let (_, adapter, cx) = open(cx, Some("1.6.0"));
-    adapter.hold_previews();
     click(UPDATE_SELECTOR, cx);
-    adapter.answer_preview(|_, _| Err(crate::updates::machines::ActionFailure::Unconfirmed));
+    answer(UPDATE_CONFIRM_SELECTOR, cx);
+    assert_eq!(adapter.executed().len(), 1);
+    // The restart was executed, and nothing confirmed what became of it.
+    adapter.emit(MachineUpdatesEvent::Finished {
+        machine: MACHINE,
+        action: MachineAction::Restart,
+        outcome: Err(crate::updates::machines::ActionFailure::Unconfirmed),
+    });
     cx.run_until_parked();
     A11yTree::read(cx).text("SpaceTerm Can\u{2019}t Confirm the Restart on This Mac");
     answer("settings-update-explanation-proceed", cx);
-    assert!(adapter.executed().is_empty(), "checking runs no restart");
-    assert_eq!(adapter.performed(), [(MACHINE, MachineAction::CheckAgain)]);
+    assert_eq!(adapter.executed().len(), 1, "checking runs no restart");
+    assert_eq!(
+        adapter.performed(),
+        [(
+            MACHINE,
+            MachineAction::CheckStatus(crate::updates::machines::Checked::Restart)
+        )],
+        "Check Status reads the original restart's receipt"
+    );
 }
 
 /// An approved restart the Core refuses without running it opens D5 at once, because the

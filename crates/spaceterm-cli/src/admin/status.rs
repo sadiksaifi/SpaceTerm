@@ -49,7 +49,15 @@ pub fn run(context: &Context<'_>) -> Reply {
         .and_then(|offline| offline.admin().status(None))
         .map_err(contract::from_core_error);
     match status {
-        Ok(status) => report(context, core, &status, None, &RouteKey::Local, Vec::new()),
+        // A Stop's outcome stays readable here after SpaceTerm Core exited.
+        Ok(status) => report(
+            context,
+            core,
+            &status,
+            None,
+            &RouteKey::Local,
+            super::offline_receipts(context),
+        ),
         Err(failure) => Reply::failure(COMMAND, Some(core), failure),
     }
 }
