@@ -52,6 +52,9 @@ use spaceterm_ui::{
 const TAB_BAR_HEIGHT: f32 = TOP_CHROME_HEIGHT;
 /// How wide each Tab is while the Tab bar has room for every Tab at that width.
 const TAB_ITEM_WIDTH: f32 = 178.2;
+/// How long a Tab that arrives in the Tab bar waits for its Terminal Session to name it before it
+/// says Terminal.
+const TAB_NAME_WAIT: std::time::Duration = std::time::Duration::from_millis(1000);
 /// The narrowest the Tabs get as the Tab bar fills, which still shows each Tab's glyph, some of
 /// its words and its close control. Past it the bar scrolls.
 const TAB_ITEM_MINIMUM_WIDTH: f32 = 112.0;
@@ -471,6 +474,13 @@ pub(crate) struct TabManager {
     tab_strip_merge: Option<TabId>,
     /// The closed Tabs whose faces still fade in the Tab bar.
     leaving_tabs: std::collections::HashMap<TabId, LeavingTab>,
+    /// The visible Tabs of the last frame, or `None` before the first.
+    presented_tabs: Option<Vec<TabId>>,
+    /// When each Tab that arrived in the strip started waiting for its Terminal Session to name
+    /// it, which hides the word Terminal it says until then, for at most [`TAB_NAME_WAIT`].
+    unnamed_since: std::collections::HashMap<TabId, std::time::Instant>,
+    /// Draws the strip again once the longest wait for a name ends.
+    naming_wake: Option<gpui::Task<()>>,
     #[cfg(test)]
     rendered_active_close_icon: Rc<Cell<gpui::Rgba>>,
     #[cfg(test)]
@@ -544,6 +554,9 @@ impl TabManager {
             tab_over_layout: false,
             tab_strip_merge: None,
             leaving_tabs: std::collections::HashMap::new(),
+            presented_tabs: None,
+            unnamed_since: std::collections::HashMap::new(),
+            naming_wake: None,
             #[cfg(test)]
             rendered_active_close_icon: Rc::new(Cell::new(rgba(0))),
             #[cfg(test)]
@@ -1129,6 +1142,16 @@ impl TabManager {
             move |pointer, viewport, cx| {
                 let owner = placement.upgrade()?;
                 let owner = owner.read(cx);
+                // The lifted Tab keeps the size its place in the strip has, which narrows with
+                // the other Tabs while the strip fills, so it lands at the size it shows.
+                let lifted = owner
+                    .tab_position(tab_id)
+                    .and_then(|position| {
+                        owner
+                            .tab_reorder
+                            .item_size(&owner.tab_bar_scroll_handle, tab_id, position)
+                    })
+                    .unwrap_or(lifted);
                 let face = owner.tab_drag_face(lifted, cx);
                 placed.present(face, None);
                 let held = matches!(face, DragFace::Tab { .. })
@@ -1422,6 +1445,44 @@ impl TabManager {
     fn scroll_active_tab_into_view(&self) {
         if let Some(index) = self.tab_position(self.tabs.active_tab_id()) {
             self.tab_bar_scroll_handle.scroll_to_item(index);
+        }
+    }
+
+    /// Starts each Tab that arrived since the last frame waiting for its name, and ends the wait
+    /// of each Tab that got one or waited [`TAB_NAME_WAIT`]. Tabs the strip showed from its first
+    /// frame say what they are called, or Terminal, at once.
+    fn wait_for_tab_names(&mut self, ids: &[TabId], cx: &mut Context<Self>) {
+        let now = super::drag_and_drop::now(cx);
+        if let Some(presented) = self.presented_tabs.replace(ids.to_vec()) {
+            for tab_id in ids.iter().filter(|tab_id| !presented.contains(tab_id)) {
+                self.unnamed_since.entry(*tab_id).or_insert(now);
+            }
+        }
+        let tabs = &self.tabs;
+        self.unnamed_since.retain(|tab_id, since| {
+            ids.contains(tab_id)
+                && now.saturating_duration_since(*since) < TAB_NAME_WAIT
+                && tabs
+                    .tab(*tab_id)
+                    .is_some_and(|view| !view.read(cx).tab_identity().is_named())
+        });
+        let longest = self
+            .unnamed_since
+            .values()
+            .map(|since| TAB_NAME_WAIT.saturating_sub(now.saturating_duration_since(*since)))
+            .max();
+        match longest {
+            Some(remaining) if self.naming_wake.is_none() => {
+                self.naming_wake = Some(cx.spawn(async move |manager, cx| {
+                    cx.background_executor().timer(remaining).await;
+                    let _ = manager.update(cx, |manager, cx| {
+                        manager.naming_wake = None;
+                        cx.notify();
+                    });
+                }));
+            }
+            None => self.naming_wake = None,
+            Some(_) => {}
         }
     }
 
@@ -1937,8 +1998,13 @@ impl TabManager {
         // A Tab growing in lays its parts out at its whole width and shows each once its slot
         // holds all of it, so its slot never cuts through a glyph, a word or a control.
         let reveal = TabReveal::new(motion, close_button_size, close_clearance, appearance);
-        let named = motion.entering.is_none() || identity.is_named();
-        let close_control = if role != TabItemRole::InBar {
+        // A Tab that arrived says nothing until its Terminal Session names it, however fast it
+        // grows in, so its first words are its real name. One that never gets a name says
+        // Terminal once its wait ends.
+        let named = identity.is_named() || !self.unnamed_since.contains_key(&tab_id);
+        // A Tab growing in offers its close control once the control shows whole, so no part of
+        // it cut off by the Tab's slot takes a press or reaches assistive technology.
+        let close_control = if role != TabItemRole::InBar || reveal.close <= 0.0 {
             // The close control's glyph at rest, without a control that could take the pointer.
             div()
                 .size(close_button_size)
@@ -2008,6 +2074,7 @@ impl TabManager {
                 TabIdentityReveal {
                     glyph: reveal.glyph,
                     words: if named { reveal.words } else { 0.0 },
+                    naming: !named,
                 },
                 appearance,
             ))
@@ -2674,14 +2741,16 @@ impl Render for TabManager {
             let departed = self.leaving_tabs.keys().copied().collect::<Vec<_>>();
             self.tab_reorder
                 .take_place(&self.tab_bar_scroll_handle, &ids, &departed, cx);
+            // Another Worktree's Tabs did not just arrive.
+            self.presented_tabs = Some(ids.clone());
         }
+        self.wait_for_tab_names(&ids, cx);
         // A Pane drag that ended without a drop on the Tab bar closes the gap it opened. A Pane
         // drag still in progress follows the strip as it moves beneath a still pointer.
         if !cx.has_active_drag() {
             self.pane_strip_drag = None;
-            if self.pane_strip_drop.take().is_some() {
-                self.tab_reorder.hold_incoming(&ids, None, cx);
-            }
+            self.pane_strip_drop = None;
+            self.tab_reorder.hold_incoming(&ids, None, cx);
         } else if let (Some((source, pane_id, pointer)), Some(bar)) =
             (self.pane_strip_drag, self.tab_bar_bounds)
         {
@@ -3185,11 +3254,12 @@ impl TabReveal {
     }
 }
 
-/// How opaque a Tab's status glyph and words are.
+/// How opaque a Tab's status glyph and words are, and whether its words wait for its name.
 #[derive(Clone, Copy, Debug)]
 struct TabIdentityReveal {
     glyph: f32,
     words: f32,
+    naming: bool,
 }
 
 /// One Tab's identity: `<status glyph> <activity> · <place>`. The status glyph never narrows.
@@ -3215,6 +3285,9 @@ fn render_tab_identity(
         .items_center()
         .overflow_hidden()
         .opacity(reveal.words)
+        .when(reveal.naming, |words| {
+            words.child(div().debug_selector(move || format!("tab-name-pending-{}", tab_id.get())))
+        })
         .child(
             div()
                 .debug_selector(move || format!("tab-activity-{}", tab_id.get()))
@@ -3936,18 +4009,18 @@ impl TabManager {
         if !items.bounds().contains(&pointer) {
             return None;
         }
-        let offset = items.offset();
-        self.visible_tabs()
-            .enumerate()
-            .find(|(position, (tab_id, _))| {
-                items.bounds_for_item(*position).is_some_and(|slot| {
-                    let start =
-                        slot.origin.x + offset.x + self.tab_reorder.motion(*tab_id, cx).offset.x;
-                    let inset = slot.size.width * (1.0 - TAB_MERGE_SHARE) / 2.0;
-                    pointer.x >= start + inset && pointer.x <= start + slot.size.width - inset
+        // Only the face a Tab shows takes a drop, never a gap its slot holds open, such as the
+        // one a Pane opens as it would become a new Tab there.
+        let ids = self.visible_tab_ids();
+        ids.iter()
+            .zip(self.tab_reorder.shown_faces(items, &ids, cx))
+            .find(|(_, face)| {
+                face.is_some_and(|face| {
+                    let inset = face.size.width * (1.0 - TAB_MERGE_SHARE) / 2.0;
+                    pointer.x >= face.left() + inset && pointer.x <= face.right() - inset
                 })
             })
-            .map(|(_, (tab_id, _))| tab_id)
+            .map(|(tab_id, _)| *tab_id)
     }
 
     /// Ends a Pane drag that no Pane took. A release over another Tab moves the Pane into that
@@ -3969,14 +4042,13 @@ impl TabManager {
             let bar = self.tab_bar_bounds?;
             self.strip_drop_at(tab_id, window.mouse_position(), bar, cx)
         });
+        // Only a new Tab that lands takes the gap held open for it; every other release closes
+        // it, whatever stops the move.
+        self.tab_reorder.hold_incoming(&ids, None, cx);
         let Some(drop) = drop else {
-            self.tab_reorder.hold_incoming(&ids, None, cx);
             return;
         };
         cx.notify();
-        if !matches!(drop, StripDrop::NewTab { .. }) {
-            self.tab_reorder.hold_incoming(&ids, None, cx);
-        }
         let Some(view) = self.tabs.tab(tab_id) else {
             return;
         };
@@ -4018,15 +4090,14 @@ impl TabManager {
             window,
             cx,
         );
-        // The new Tab takes the gap the strip held open for it, without growing in again.
-        if let StripDrop::NewTab { position } = drop {
-            match created.and_then(|target| self.binding.local_tab(target)) {
-                Some(new_tab) => {
-                    self.move_tab(new_tab, position, cx);
-                    self.tab_reorder.land_incoming(new_tab);
-                }
-                None => self.tab_reorder.hold_incoming(&ids, None, cx),
-            }
+        // The new Tab takes the place of the gap the strip held open for it, without growing in
+        // again, and the strip shows it there.
+        if let StripDrop::NewTab { position } = drop
+            && let Some(new_tab) = created.and_then(|target| self.binding.local_tab(target))
+        {
+            self.move_tab(new_tab, position, cx);
+            self.tab_reorder.land_incoming(new_tab, position);
+            self.scroll_active_tab_into_view();
         }
     }
 
@@ -5370,6 +5441,136 @@ mod tests {
                 (TabId::new(4), moved)
             ),
             "Tab 2 slides aside, the landing chip takes its place, and the new Tab lands there"
+        );
+    }
+
+    /// Two Tabs that fill a narrow bar, the first holding a second Pane that a drag can carry.
+    fn two_full_tabs_with_a_carried_pane(cx: &mut VisualTestContext) -> u64 {
+        cx.simulate_resize(gpui::size(px(630.0), px(600.0)));
+        cx.run_until_parked();
+        click("create-tab-button", cx);
+        click("tab-item-1-inactive", cx);
+        cx.dispatch_action(SplitRight);
+        cx.run_until_parked();
+        finish_slides(cx);
+        // Pane ids count within their Tab, so the split's Pane is the first Tab's second.
+        2
+    }
+
+    #[gpui::test]
+    fn holding_a_pane_still_over_its_opening_gap_should_draw_one_tab_and_land_it_there(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        let pane = two_full_tabs_with_a_carried_pane(cx);
+        // Assistive technology reads the window on every frame, as VoiceOver does.
+        spaceterm_ui::a11y_testing::A11yTree::read(cx);
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+        let strip = cx.debug_bounds("tab-items").unwrap();
+        let second = cx.debug_bounds("tab-item-2-inactive").unwrap();
+        // Just inside the second Tab, where the gap opens before it and narrows both Tabs, so
+        // the pointer ends up deep inside the gap without moving.
+        let held = point(second.left() + px(12.0), second.center().y);
+
+        drag_focused_pane(pane, &[held, held + point(px(1.0), px(0.0))], cx);
+        let mut lit = Vec::new();
+        for _ in 0..12 {
+            next_frame_after(30, cx);
+            spaceterm_ui::a11y_testing::A11yTree::read(cx);
+            lit.push(lit_tab(&manager, cx));
+        }
+        let landing = cx
+            .debug_bounds("tab-bar-incoming-landing")
+            .expect("the place the new Tab lands must show");
+        cx.simulate_mouse_up(
+            held + point(px(1.0), px(0.0)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+        let landed = cx
+            .debug_bounds("tab-item-3-active")
+            .expect("the release must make a new Tab rather than join one");
+
+        assert_eq!(
+            (strip.size.width, held.x - strip.left()),
+            (px(356.0), px(190.0)),
+            "two Tabs fill the bar, and the pointer holds 190pt into it"
+        );
+        assert!(
+            lit.iter().all(Option::is_none),
+            "a still pointer in the gap must never join the Tab the gap pushed aside, got {lit:?}"
+        );
+        assert_eq!(tab_order(&manager, cx), vec![1, 3, 2]);
+        assert!(
+            (landed.left() - landing.left()).abs() <= px(1.0),
+            "the new Tab must land where its place showed, got {landed:?} for {landing:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn a_pane_release_that_lands_no_tab_should_close_the_gap_it_opened(cx: &mut TestAppContext) {
+        let (manager, _records, cx) = tab_manager(cx);
+        let pane = two_full_tabs_with_a_carried_pane(cx);
+        let widths = tab_widths(&manager, cx);
+        let first = cx.debug_bounds("tab-item-1-active").unwrap();
+        let between = point(first.right(), first.center().y);
+        drag_focused_pane(pane, &[between, between + point(px(1.0), px(0.0))], cx);
+        finish_slides(cx);
+        assert!(cx.debug_bounds("tab-bar-incoming-landing").is_some());
+
+        // The server stopped knowing the carried Pane's Tab, as another client's change can,
+        // so the release has nothing to move.
+        manager.update(cx, |manager, _| manager.binding.forget(TabId::new(1)));
+        cx.simulate_mouse_up(between, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        finish_slides(cx);
+
+        assert_eq!(
+            (
+                cx.debug_bounds("tab-bar-incoming-landing"),
+                tab_widths(&manager, cx)
+            ),
+            (None, widths),
+            "a release that lands no Tab must close the gap and give the Tabs back their width"
+        );
+    }
+
+    #[gpui::test]
+    fn a_pane_landing_early_in_a_scrolled_bar_should_keep_its_new_tab_in_view(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        narrow_window(cx);
+        for _ in 0..12 {
+            click("create-tab-button", cx);
+        }
+        cx.dispatch_action(SplitRight);
+        cx.run_until_parked();
+        finish_slides(cx);
+        // The person scrolls back to the first Tabs, leaving the Active Tab out of view.
+        manager.update(cx, |manager, _| {
+            manager
+                .tab_bar_scroll_handle
+                .set_offset(point(px(0.0), px(0.0)));
+        });
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
+        let between = point(first.right(), first.center().y);
+
+        drag_focused_pane(2, &[between, between + point(px(1.0), px(0.0))], cx);
+        finish_slides(cx);
+        cx.simulate_mouse_up(between, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        finish_slides(cx);
+        let strip = cx.debug_bounds("tab-items").unwrap();
+        let landed = cx.debug_bounds("tab-item-14-active").unwrap();
+
+        assert_eq!(tab_order(&manager, cx)[..3], [1, 14, 2]);
+        assert!(
+            strip.left() <= landed.left() && landed.right() <= strip.right(),
+            "the new Active Tab must end in view where it landed, got {landed:?} in {strip:?}"
         );
     }
 
@@ -8462,6 +8663,152 @@ mod tests {
             (leaving.0.origin, leaving.1),
             (growing.0.origin, growing.1),
             "the closed Tab must keep its parts laid out as they were while it grew"
+        );
+    }
+
+    #[gpui::test]
+    fn a_tab_growing_in_should_take_no_close_press_until_its_close_control_shows_whole(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, records, cx) = tab_manager(cx);
+        for _ in 0..10 {
+            click("create-tab-button", cx);
+        }
+        finish_slides(cx);
+        let close_controls = |cx: &mut VisualTestContext| {
+            spaceterm_ui::a11y_testing::A11yTree::read(cx)
+                .with_role("Button")
+                .iter()
+                .filter(|button| button["aria"]["label"] == "Close Tab")
+                .count()
+        };
+        let before = close_controls(cx);
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+        // In a full bar a new Tab grows from the bar's end, where its close control shows first.
+        click("create-tab-button", cx);
+        next_frame_after(8, cx);
+        let growing = cx.debug_bounds("tab-item-12-active").unwrap();
+        let control = cx.debug_bounds("tab-close-button-12");
+        let published = close_controls(cx);
+        // Where the close control's middle stands at the Tab's trailing edge.
+        let edge = point(
+            growing.right() - px(TAB_ITEM_RIGHT_PADDING) - px(10.0),
+            growing.center().y,
+        );
+        cx.simulate_mouse_move(edge, None, Modifiers::none());
+        cx.simulate_click(edge, Modifiers::none());
+        cx.run_until_parked();
+        let pressed = (
+            manager.read_with(cx, |manager, _| manager.tabs.len()),
+            records.dropped_session_ids(),
+        );
+        finish_slides(cx);
+
+        assert!(
+            growing.size.width < px(20.0),
+            "the Tab must have barely grown in, got {growing:?}"
+        );
+        assert_eq!(
+            (control, published, pressed),
+            (None, before, (12, Vec::new())),
+            "a close control cut off by its Tab's slot must offer nothing to press or announce"
+        );
+        assert!(
+            cx.debug_bounds("tab-close-button-12").is_some(),
+            "the close control must offer itself once the Tab has grown in"
+        );
+    }
+
+    #[gpui::test]
+    fn a_tab_lifted_while_the_tabs_narrow_should_lift_and_land_at_its_place_s_width(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, _records, cx) = tab_manager(cx);
+        for _ in 0..8 {
+            click("create-tab-button", cx);
+        }
+        finish_slides(cx);
+        cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+        // A tenth Tab grows in and narrows the others while the first is held.
+        click("create-tab-button", cx);
+        let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
+        let grabbed = first.center();
+        drag_tab(grabbed, &[grabbed + point(px(8.0), px(0.0))], cx);
+        let mut lifted = Vec::new();
+        for _ in 0..8 {
+            next_frame_after(40, cx);
+            let place = cx
+                .debug_bounds("tab-item-1-inactive")
+                .map(|tab| tab.size.width);
+            let preview = cx
+                .debug_bounds("tab-preview-1-inactive")
+                .map(|preview| preview.size.width);
+            lifted.push((place, preview));
+        }
+        cx.simulate_mouse_up(
+            grabbed + point(px(8.0), px(0.0)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+        let (_, last) = lifted[lifted.len() - 1];
+        let landed = cx
+            .debug_bounds("tab-item-1-inactive")
+            .map(|tab| tab.size.width);
+        finish_slides(cx);
+
+        assert!(
+            lifted
+                .first()
+                .is_some_and(|(place, _)| *place > lifted[lifted.len() - 1].0),
+            "the Tabs must narrow while the first is held, got {lifted:?}"
+        );
+        assert!(
+            lifted
+                .iter()
+                .all(|(place, preview)| match (place, preview) {
+                    (Some(place), Some(preview)) => (*place - *preview).abs() <= px(0.5),
+                    _ => false,
+                }),
+            "the lifted Tab must keep its place's width as the Tabs narrow, got {lifted:?}"
+        );
+        assert_eq!(
+            landed, last,
+            "the Tab must land at the width it was lifted at, got {landed:?} after {lifted:?}"
+        );
+        assert_eq!(tab_order(&manager, cx)[0], 1);
+    }
+
+    #[gpui::test]
+    fn a_new_tab_should_wait_for_its_name_without_motion_and_say_terminal_if_none_comes(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::terminal::metadata::TitleProvenance;
+        // Tests see reduced motion unless they opt into presence motion, so the Tab shows at once.
+        let (_manager, _records, cx) = tab_manager(cx);
+        let started = cx.debug_bounds("tab-name-pending-1");
+
+        click("create-tab-button", cx);
+        let waiting = cx.debug_bounds("tab-name-pending-2").is_some();
+        report_metadata(cx, 2, 1, |metadata| {
+            metadata.title.value = Arc::from("zsh");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+        });
+        cx.run_until_parked();
+        let named = cx.debug_bounds("tab-name-pending-2").is_none();
+        click("create-tab-button", cx);
+        let unnamed = cx.debug_bounds("tab-name-pending-3").is_some();
+        cx.executor().advance_clock(TAB_NAME_WAIT);
+        cx.run_until_parked();
+        let fallback = cx.debug_bounds("tab-name-pending-3").is_none();
+
+        assert_eq!(
+            (started, waiting, named, unnamed, fallback),
+            (None, true, true, true, true),
+            "the first Tab says what it is at once; a new Tab says nothing until it is named, \\
+             and says Terminal once its wait ends without a name"
         );
     }
 

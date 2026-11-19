@@ -401,3 +401,75 @@ fn activating_a_workspace_as_it_discloses_should_move_the_selection_whole_into_i
         "the selection must land on the Worktree row"
     );
 }
+
+/// A Workspace group that leaves while one of its Worktree rows still grows in keeps drawing
+/// that row as far as it had grown, rather than at its full height.
+#[gpui::test]
+fn a_workspace_group_leaving_mid_motion_should_keep_its_rows_as_drawn(cx: &mut TestAppContext) {
+    let (sidebar, cx) = sidebar(cx);
+    let other = WorkspaceRowViewModel {
+        workspace_id: WorkspaceId::new(2),
+        name: "Docs".into(),
+        worktrees: None,
+        active: false,
+        ..workspace(Vec::new())
+    };
+    let rows = |rows: Vec<WorkspaceRowViewModel>, cx: &mut VisualTestContext| {
+        cx.update(|_, cx| sidebar.update(cx, |sidebar, cx| sidebar.set_rows(rows, Vec::new(), cx)));
+        cx.run_until_parked();
+    };
+    rows(
+        vec![
+            workspace(vec![worktree(1, None), worktree(2, None)]),
+            other.clone(),
+        ],
+        cx,
+    );
+    finish_slides(cx);
+    let resting = row(2, cx).size.height;
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    // The third row starts growing in.
+    rows(
+        vec![
+            workspace(vec![
+                worktree(1, None),
+                worktree(2, None),
+                worktree(3, None),
+            ]),
+            other.clone(),
+        ],
+        cx,
+    );
+    cx.executor()
+        .advance_clock(LEAVING_FADE + PRESENCE_DURATION / 8);
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    let group = cx
+        .debug_bounds(format!("workspace-group-{}", WORKSPACE.get()).leak())
+        .unwrap();
+    rows(
+        vec![WorkspaceRowViewModel {
+            active: true,
+            ..other
+        }],
+        cx,
+    );
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    let leaving = cx
+        .debug_bounds(format!("workspace-group-leaving-{}", WORKSPACE.get()).leak())
+        .expect("the leaving group must keep drawing");
+    let growing = cx
+        .debug_bounds(format!("worktree-slot-leaving-{}-3", WORKSPACE.get()).leak())
+        .expect("the growing row must keep drawing");
+
+    assert!(
+        growing.size.height < resting - px(1.0),
+        "the row that was growing must keep the height it had grown to, got {growing:?}"
+    );
+    assert!(
+        (leaving.size.height - group.size.height).abs() <= px(1.0),
+        "the leaving group must keep the height it was drawn at, got {leaving:?} for {group:?}"
+    );
+}

@@ -716,6 +716,32 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
             .collect()
     }
 
+    /// Where the strip's `items` showed each of its `ids` in the last frame, in the window: its
+    /// face without the gaps its slot holds, moved by any slide, as far as the strip's visible
+    /// part shows it. An item the strip shows none of is `None`.
+    pub(crate) fn shown_faces(
+        &self,
+        items: &ScrollHandle,
+        ids: &[Id],
+        cx: &App,
+    ) -> Vec<Option<Bounds<Pixels>>> {
+        let viewport = items.bounds();
+        let offset = items.offset();
+        ids.iter()
+            .enumerate()
+            .map(|(position, id)| {
+                let slot = items.bounds_for_item(position)?;
+                let face = self.trim(*id, slot);
+                let face = Bounds::new(
+                    face.origin + offset + self.motion(*id, cx).offset,
+                    face.size,
+                );
+                let shown = face.intersect(&viewport);
+                (shown.size.width > px(0.0) && shown.size.height > px(0.0)).then_some(shown)
+            })
+            .collect()
+    }
+
     /// The size the strip's `items` painted the item `id` at, the one at `position` among them,
     /// without the closing gaps inside its slot, and whole while it grows in.
     pub(crate) fn item_size(
@@ -1987,27 +2013,15 @@ impl<Id: Copy + Eq + Hash, Row: Copy + Eq> ReorderableStrip<Id, Row> {
             .map(|gap| gap.target)
     }
 
-    /// Lands the arriving item `id`, which its owner just placed at the open incoming gap's
-    /// position. It takes the gap's place in the strip's layout at the length the gap held, and
-    /// shows there whole rather than growing in.
-    pub(crate) fn land_incoming(&mut self, id: Id) {
-        let Some(gap) = self
-            .incoming
-            .iter()
-            .find(|gap| gap.target > px(0.0))
-            .copied()
-        else {
-            return;
-        };
+    /// Lands the arriving item `id`, which its owner just placed at `position` among its items,
+    /// where the incoming gap stood. It takes the gap's place in the strip's layout at the length
+    /// the gap held, and shows there whole rather than growing in.
+    pub(crate) fn land_incoming(&mut self, id: Id, position: usize) {
         self.incoming.clear();
         if let Some(known) = self.known.as_mut()
             && !known.contains(&id)
         {
-            let position = gap
-                .before
-                .and_then(|before| known.iter().position(|id| *id == before))
-                .unwrap_or(known.len());
-            known.insert(position, id);
+            known.insert(position.min(known.len()), id);
         }
     }
 

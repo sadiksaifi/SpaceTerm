@@ -456,6 +456,45 @@ impl GroupMotion {
         ids
     }
 
+    /// Each Worktree row of `section` as the group drew it in its last frame, for the group to
+    /// keep drawing as it leaves.
+    fn drawn_slots(&self, section: Option<&WorktreeSection>, cx: &App) -> Vec<DepartedSlot> {
+        let Some(section) = section else {
+            return Vec::new();
+        };
+        let ids = self.row_ids();
+        worktree_group_rows(section)
+            .into_iter()
+            .filter_map(|(row, (worktree, position))| {
+                let index = ids.iter().position(|id| *id == row)?;
+                let height = self.items.bounds_for_item(index)?.size.height;
+                let motion = self.rows.motion(row, cx);
+                let reveal = motion.reveal(view::ROW_REVEAL);
+                let shown = |rows: Vec<DepartedRow<'_>>| {
+                    rows.into_iter()
+                        .map(|departed| {
+                            (
+                                departed.row.cloned(),
+                                departed.extent,
+                                departed.opacity * departed.motion.reveal(view::ROW_REVEAL),
+                            )
+                        })
+                        .collect()
+                };
+                let (before, after) = self.departed_beside(row, cx);
+                Some(DepartedSlot {
+                    worktree: worktree.clone(),
+                    position,
+                    height,
+                    reveal,
+                    grows_from_end: motion.grows_from_end,
+                    before: shown(before),
+                    after: shown(after),
+                })
+            })
+            .collect()
+    }
+
     /// The rows that left from beside `row` and still draw in its closing gaps, before it and
     /// after it, each with how much of it shows from its top. A place with no row to draw, as a
     /// row that returned leaves, stays empty.
@@ -482,12 +521,28 @@ impl GroupMotion {
 /// A Workspace group that left the list, as it drew as it left, which fades in its closing gap.
 struct DepartedGroup {
     row: WorkspaceRowViewModel,
-    /// The Worktree rows the group drew below the Workspace row.
-    worktrees: Option<WorktreeSection>,
+    /// The Worktree rows the group drew below the Workspace row, as it drew them.
+    slots: Vec<DepartedSlot>,
     /// How far the Worktree rows had disclosed.
     disclosure: view::RowDisclosure,
     /// The row of the group that carried the selection.
     selected: Option<SidebarRowKey>,
+}
+
+/// A Worktree row of a Workspace group that left, as the group drew it in its last frame.
+struct DepartedSlot {
+    worktree: WorktreeRowViewModel,
+    /// The row's place in its group, from 1, and how many Worktree rows the group drew.
+    position: (usize, usize),
+    /// How tall the row's slot was drawn, the gaps it held included.
+    height: Pixels,
+    /// How opaque the row was as it grew in, and whether it grew from its slot's far end.
+    reveal: f32,
+    grows_from_end: bool,
+    /// The rows that had left from beside it and still drew in its gaps, as much of each as
+    /// showed and how opaque each was.
+    before: Vec<(Option<WorktreeRowViewModel>, Pixels, f32)>,
+    after: Vec<(Option<WorktreeRowViewModel>, Pixels, f32)>,
 }
 
 /// A row that left a Workspace group and still draws in a closing gap, as much of it as shows
@@ -1046,16 +1101,19 @@ impl WorkspaceSidebar {
                 || GroupFrame::at_rest(departed.worktrees.as_ref()),
                 |group| group.frame,
             );
-            let worktrees = departed
+            let section = departed
                 .worktrees
-                .clone()
-                .or_else(|| group.and_then(|group| group.section.clone()))
+                .as_ref()
+                .or_else(|| group.and_then(|group| group.section.as_ref()))
                 .filter(|_| frame.draws_worktrees());
+            let slots = group
+                .map(|group| group.drawn_slots(section, cx))
+                .unwrap_or_default();
             self.departed_groups.insert(
                 workspace_id,
                 DepartedGroup {
                     row: departed,
-                    worktrees,
+                    slots,
                     disclosure: view::RowDisclosure {
                         disclosed: frame.disclosed.reveal,
                         chevron: frame.disclosing.reveal,

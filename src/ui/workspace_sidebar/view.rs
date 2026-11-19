@@ -13,7 +13,7 @@ use spaceterm_ui::{ContextMenuTarget, HoverFade};
 
 /// How far a new row grows in before it shows, fading in after. Its words sit clear of its
 /// growing edge by then, so its slot never cuts through them.
-const ROW_REVEAL: f32 = 0.85;
+pub(super) const ROW_REVEAL: f32 = 0.85;
 
 /// Where the pointer stands over one row.
 pub(super) struct RowHover {
@@ -899,32 +899,68 @@ impl WorkspaceSidebar {
             appearance,
             cx,
         );
-        let worktrees = group
-            .worktrees
-            .as_ref()
-            .map(worktree_group_rows)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(_, (worktree, position))| {
-                let key = SidebarRowKey::Worktree(workspace_id, worktree.worktree_id);
-                div()
-                    .w_full()
-                    .flex_shrink_0()
-                    // Worktree rows fade as they disclose, and keep how far they had.
-                    .opacity(group.disclosure.disclosed)
-                    .child(self.render_worktree_row(
-                        workspace_id,
-                        worktree,
-                        position,
-                        None,
-                        Some(group.selected == Some(key)),
-                        sidebar.clone(),
-                        window,
-                        appearance,
-                        cx,
-                    ))
-            });
+        // Each Worktree row keeps the slot it was drawn in, how far it had grown, and the rows
+        // fading beside it, so nothing it showed comes back and nothing it hid shows.
+        let gap = |rows: &[(Option<WorktreeRowViewModel>, Pixels, f32)]| {
+            div().w_full().flex().flex_col().children(rows.iter().map(
+                |(departed, extent, opacity)| {
+                    div()
+                        .w_full()
+                        .h(*extent)
+                        .flex_shrink_0()
+                        .overflow_hidden()
+                        .opacity(*opacity)
+                        .children(departed.as_ref().map(|departed| {
+                            self.render_worktree_row(
+                                workspace_id,
+                                departed,
+                                (1, 1),
+                                None,
+                                Some(false),
+                                sidebar.clone(),
+                                window,
+                                appearance,
+                                cx,
+                            )
+                        }))
+                },
+            ))
+        };
+        let worktrees = group.slots.iter().map(|slot| {
+            let key = SidebarRowKey::Worktree(workspace_id, slot.worktree.worktree_id);
+            let row = div().w_full().flex_shrink_0().opacity(slot.reveal).child(
+                self.render_worktree_row(
+                    workspace_id,
+                    &slot.worktree,
+                    slot.position,
+                    None,
+                    Some(group.selected == Some(key)),
+                    sidebar.clone(),
+                    window,
+                    appearance,
+                    cx,
+                ),
+            );
+            let worktree_id = slot.worktree.worktree_id;
+            div()
+                .debug_selector(move || {
+                    format!("worktree-slot-leaving-{}-{worktree_id}", workspace_id.get())
+                })
+                .w_full()
+                .h(slot.height)
+                .flex_shrink_0()
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .when(slot.grows_from_end, |slot| slot.justify_end())
+                // Worktree rows fade as they disclose, and keep how far they had.
+                .opacity(group.disclosure.disclosed)
+                .child(gap(&slot.before))
+                .child(row)
+                .child(gap(&slot.after))
+        });
         div()
+            .debug_selector(move || format!("workspace-group-leaving-{}", workspace_id.get()))
             .w_full()
             .flex()
             .flex_col()
