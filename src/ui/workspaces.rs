@@ -1408,7 +1408,7 @@ mod core_workspaces {
             };
             let status = connection.status();
             // A background start this client asked for is starting too, until it is answered.
-            if status == CorePaneStatus::Connecting && connection.startup_pending() {
+            if connection.preparing() {
                 return true;
             }
             let starting = matches!(

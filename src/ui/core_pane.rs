@@ -992,6 +992,11 @@ mod connection {
         /// at once; every other Pane waits.
         fn set_foreground(&self, _foreground: bool) {}
 
+        /// Whether a background start of this Pane is on its way and unanswered.
+        fn preparing(&self) -> bool {
+            false
+        }
+
         /// Leaves this client's view of the Pane for the next window that presents it.
         fn retain_view(&self) {}
 
@@ -1075,6 +1080,10 @@ mod connection {
 
         fn set_foreground(&self, foreground: bool) {
             Self::set_foreground(self, foreground);
+        }
+
+        fn preparing(&self) -> bool {
+            Self::preparing(self)
         }
 
         fn retain_view(&self) {

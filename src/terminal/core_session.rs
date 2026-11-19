@@ -88,6 +88,8 @@ pub(crate) struct CorePaneState {
     foreground: AtomicBool,
     /// The Core boot whose background start this Pane last asked for, so it asks once per boot.
     prepared: Mutex<Option<[u8; 32]>>,
+    /// A background start is on its way to the Core and unanswered.
+    preparing: AtomicBool,
     created_start: Arc<AtomicBool>,
     take_over: AtomicBool,
     start_restored: Arc<AtomicBool>,
@@ -135,6 +137,7 @@ impl CorePaneState {
             selected: Arc::default(),
             foreground: AtomicBool::new(false),
             prepared: Mutex::default(),
+            preparing: AtomicBool::new(false),
             created_start: Arc::default(),
             take_over: AtomicBool::new(false),
             start_restored: Arc::default(),
@@ -251,6 +254,11 @@ impl CorePaneState {
 
     pub(crate) fn foreground(&self) -> bool {
         self.foreground.load(Ordering::Acquire)
+    }
+
+    /// Whether a background start of this Pane is on its way and unanswered.
+    pub(crate) fn preparing(&self) -> bool {
+        self.preparing.load(Ordering::Acquire)
     }
 
     /// Whether this Pane may still ask Core `boot` for its background start.

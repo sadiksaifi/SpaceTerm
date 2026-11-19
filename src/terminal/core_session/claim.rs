@@ -408,12 +408,15 @@ impl ClaimWorker<'_> {
                     grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
                     let update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     grant_appearance = None;
-                    reply = match exchange(&Request::PrepareRestored {
+                    state.preparing.store(true, Ordering::Release);
+                    let prepared = exchange(&Request::PrepareRestored {
                         core: boot,
                         pane,
                         size: grant_size,
                         style: Some(encode_style(&update)),
-                    }) {
+                    });
+                    state.preparing.store(false, Ordering::Release);
+                    reply = match prepared {
                         Err(CoreError::DirectoryUnavailable) => {
                             unavailable = true;
                             state.invalidate();
