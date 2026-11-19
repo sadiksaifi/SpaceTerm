@@ -3932,6 +3932,12 @@ pub(crate) struct TabIdentity {
 }
 
 impl TabIdentity {
+    /// Whether the Terminal Session has named the Tab yet. Until then the Tab says only
+    /// "Terminal".
+    pub(crate) fn is_named(&self) -> bool {
+        !self.place.is_empty() || !(self.activity.is_empty() || self.activity == "Terminal")
+    }
+
     fn resolve(caption: PaneCaptionText, title: gpui::SharedString, attention: bool) -> Self {
         let (activity, directory) = if caption.label.is_empty() {
             (caption.name.as_ref(), "")

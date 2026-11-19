@@ -4492,6 +4492,10 @@ fn switching_to_a_workspace_with_an_overflowing_tab_strip_should_keep_its_tabs_i
     cx: &mut TestAppContext,
 ) {
     let (_manager, _records, cx) = workspace_manager(cx);
+    // A narrow window leaves the Tab bar too little room for fourteen Tabs at their readable
+    // minimum.
+    cx.simulate_resize(gpui::size(px(1200.0), px(800.0)));
+    cx.run_until_parked();
     for _ in 0..13 {
         cx.simulate_keystrokes("cmd-t");
     }

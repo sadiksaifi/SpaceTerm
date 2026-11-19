@@ -307,6 +307,22 @@ impl SidebarRowKey {
             Self::Workspace(workspace_id) | Self::Worktree(workspace_id, _) => workspace_id,
         }
     }
+
+    /// The Worktree whose row this is, or `None` for a Workspace row.
+    const fn worktree_id(self) -> Option<WorktreeId> {
+        match self {
+            Self::Workspace(_) => None,
+            Self::Worktree(_, worktree_id) => Some(worktree_id),
+        }
+    }
+
+    /// The row as its Workspace group knows it.
+    const fn group_row(self) -> GroupRow {
+        match self {
+            Self::Workspace(_) => GroupRow::Workspace,
+            Self::Worktree(_, worktree_id) => GroupRow::Worktree(worktree_id),
+        }
+    }
 }
 
 /// One row of a Workspace group, by what it shows.
@@ -443,28 +459,31 @@ impl GroupMotion {
     /// The rows that left from beside `row` and still draw in its closing gaps, before it and
     /// after it, each with how much of it shows from its top. A place with no row to draw, as a
     /// row that returned leaves, stays empty.
-    #[expect(
-        clippy::type_complexity,
-        reason = "the rows on either side are the same list of departed rows and their extents"
-    )]
     fn departed_beside(
         &self,
         row: GroupRow,
-    ) -> (
-        Vec<(Option<&WorktreeRowViewModel>, Pixels)>,
-        Vec<(Option<&WorktreeRowViewModel>, Pixels)>,
-    ) {
+        cx: &App,
+    ) -> (Vec<DepartedRow<'_>>, Vec<DepartedRow<'_>>) {
         let (before, after) = self.rows.leaving_beside(row);
         let departed = |rows: &[super::drag_and_drop::Leaving<GroupRow>]| {
             rows.iter()
-                .map(|leaving| {
-                    let departed = leaving.id.and_then(|id| self.departed.get(&id));
-                    (departed, leaving.extent)
+                .map(|leaving| DepartedRow {
+                    row: leaving.id.and_then(|id| self.departed.get(&id)),
+                    extent: leaving.extent,
+                    opacity: leaving.opacity(cx),
                 })
                 .collect::<Vec<_>>()
         };
         (departed(before), departed(after))
     }
+}
+
+/// A row that left a Workspace group and still draws in a closing gap, as much of it as shows
+/// from its top, fading before the gap closes.
+struct DepartedRow<'a> {
+    row: Option<&'a WorktreeRowViewModel>,
+    extent: Pixels,
+    opacity: f32,
 }
 
 /// Each row a Worktree section draws below its Workspace row, in order, with what it shows.
@@ -498,6 +517,9 @@ struct DraggedWorkspace {
 /// Owns sidebar layout, scrolling, menus, inline rename, reordering, and focus transitions.
 pub(super) struct WorkspaceSidebar {
     rows: Vec<WorkspaceRowViewModel>,
+    /// The rows of Workspaces that left the list, which fade where they stood before their
+    /// places close.
+    departed_rows: std::collections::HashMap<WorkspaceId, WorkspaceRowViewModel>,
     /// The saved paired servers the creation menu offers.
     remote_machines: Vec<RemoteCreationMachine>,
     layout: SidebarLayout,
@@ -526,14 +548,6 @@ pub(super) struct WorkspaceSidebar {
     workspace_reorder: ReorderableStrip<WorkspaceId, Option<WorktreeId>>,
     /// How each Workspace group moves as its Worktree rows disclose, come, and go.
     groups: std::collections::HashMap<WorkspaceId, GroupMotion>,
-    /// The row that carried the selection in the last frame, where its chip was painted along the
-    /// list, and how tall the chip was.
-    painted_selection: Option<(SidebarRowKey, Pixels, Pixels)>,
-    /// The row that carried the selection at the last render.
-    selected: Option<SidebarRowKey>,
-    /// The row the selection is moving to, and how much taller than that row's chip the chip it
-    /// left was, so the moving chip starts at the size it was drawn.
-    selection_lengthening: Option<(SidebarRowKey, Pixels)>,
     /// How the sidebar moves as it shows and hides.
     motion: SidebarMotion,
     /// How the current frame presents the sidebar.
@@ -587,6 +601,7 @@ impl WorkspaceSidebar {
         .detach();
         Self {
             rows: Vec::new(),
+            departed_rows: std::collections::HashMap::new(),
             remote_machines: Vec::new(),
             layout: SidebarLayout {
                 visible,
@@ -606,9 +621,6 @@ impl WorkspaceSidebar {
             suppress_pointer_until_release: false,
             workspace_reorder: ReorderableStrip::new(gpui::Axis::Vertical),
             groups: std::collections::HashMap::new(),
-            painted_selection: None,
-            selected: None,
-            selection_lengthening: None,
             motion: SidebarMotion::new(visible),
             frame: SidebarFrame {
                 reveal: if visible { 1.0 } else { 0.0 },
@@ -1007,6 +1019,14 @@ impl WorkspaceSidebar {
         if self.rows == rows && self.remote_machines == remote_machines {
             return false;
         }
+        for departed in std::mem::take(&mut self.rows) {
+            if !rows
+                .iter()
+                .any(|row| row.workspace_id == departed.workspace_id)
+            {
+                self.departed_rows.insert(departed.workspace_id, departed);
+            }
+        }
         self.rows = rows;
         self.remote_machines = remote_machines;
         if self
@@ -1202,6 +1222,9 @@ impl Render for WorkspaceSidebar {
         let ids = self.row_ids();
         self.workspace_reorder
             .refresh(&self.scroll_handle, &ids, window, cx);
+        let leaving = self.workspace_reorder.leaving().collect::<Vec<_>>();
+        self.departed_rows
+            .retain(|workspace_id, _| leaving.contains(workspace_id));
         if let Some(active) = self.rows.iter().find(|row| row.active) {
             self.workspace_reorder.reveal_while_entering(
                 active.workspace_id,
@@ -1210,29 +1233,11 @@ impl Render for WorkspaceSidebar {
             );
         }
         self.present_groups(window, cx);
-        let appearance = super::appearance::chrome(cx);
-        // A selection that moves starts from the rect its chip was painted at, whatever moved
-        // under it since.
-        let selected_key = self.selected_key();
-        if selected_key != self.selected {
-            self.selection_lengthening = None;
-            if let (Some(previous), Some(next)) = (self.selected, selected_key)
-                && let Some((painted, start, height)) = self.painted_selection
-                && painted == previous
-            {
-                self.workspace_reorder.drew_selection_at(start);
-                self.selection_lengthening =
-                    Some((next, height - self.chip_height(next, appearance)));
-            }
-            self.selected = selected_key;
-        }
-        let selected = selected_key.map(|key| {
-            let row = match key {
-                SidebarRowKey::Workspace(_) => None,
-                SidebarRowKey::Worktree(_, worktree_id) => Some(worktree_id),
-            };
-            (key.workspace_id(), row, self.row_inset(key, appearance, cx))
-        });
+        // A selection that moves starts from the rect its chip was drawn at, whatever moved
+        // under it since, and changes size on its way.
+        let selected = self
+            .selected_key()
+            .map(|key| (key.workspace_id(), key.worktree_id()));
         self.workspace_reorder
             .follow_row_selection(selected, window, cx);
         // A selected Worktree row growing in or disclosing stays in view, as a new active

@@ -4,7 +4,7 @@ use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 
 use super::*;
 use crate::repository_status::presentation::{PullRequestHover, PullRequestState, SidebarBadge};
-use crate::ui::drag_and_drop::{AnimatePresence, PRESENCE_DURATION, finish_slides};
+use crate::ui::drag_and_drop::{AnimatePresence, LEAVING_FADE, PRESENCE_DURATION, finish_slides};
 
 const WORKSPACE: WorkspaceId = WorkspaceId::new(1);
 const PULL_REQUEST_URL: &str = "https://github.com/owner/app/pull/7";
@@ -215,7 +215,8 @@ fn a_row_returning_into_a_closing_gap_should_keep_the_rows_after_it_hidden(
     cx.update(|_, cx| cx.set_global(AnimatePresence));
 
     present(&sidebar, rows(&[1, 4]), cx);
-    cx.executor().advance_clock(PRESENCE_DURATION / 4);
+    cx.executor()
+        .advance_clock(LEAVING_FADE + PRESENCE_DURATION / 4);
     cx.update(|window, cx| window.simulate_next_frame(cx));
     cx.run_until_parked();
     let gap = row(4, cx).top() - row(1, cx).bottom();

@@ -1544,7 +1544,7 @@ impl WorkspaceManager {
         let Some(previous) = previous.filter(|previous| *previous != next) else {
             return;
         };
-        if let Some(shape) = previous.read(cx).tab_strip_shape(cx) {
+        if let Some(shape) = previous.read(cx).tab_strip_shape() {
             next.update(cx, |manager, cx| manager.arrive_from(shape, cx));
         }
     }
