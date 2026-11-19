@@ -69,6 +69,8 @@ struct ScriptedLane {
     previewed: Mutex<u32>,
     /// The facts each Install answers with.
     install_result: Mutex<Result<UpdateFacts, ActionFailure>>,
+    /// What each Execute answers.
+    execute_result: Mutex<Result<(), ActionFailure>>,
     requests: Mutex<Vec<String>>,
 }
 
@@ -81,6 +83,7 @@ impl ScriptedLane {
             answer: Mutex::new(answer),
             previewed: Mutex::new(0),
             install_result: Mutex::new(Ok(self::facts(2, 0, Some("0.9.0")).facts)),
+            execute_result: Mutex::new(Ok(())),
             requests: Mutex::new(Vec::new()),
         })
     }
@@ -181,7 +184,7 @@ impl MachineLane for ScriptedLane {
 
     fn execute(&self, preview: admin::Preview) -> Result<(), ActionFailure> {
         self.record(format!("execute {}", preview.token));
-        Ok(())
+        *self.execute_result.lock().unwrap()
     }
 }
 
@@ -764,6 +767,29 @@ fn an_expected_restart_retries_the_machines_routes_until_the_core_returns() {
         1,
         "no restart is expected now"
     );
+}
+
+/// A restart whose outcome nothing confirmed may still be running, so the Machine keeps
+/// expecting it and says it can't confirm the restart once its wait ends, instead of offline.
+#[test]
+fn an_unconfirmed_restart_keeps_expecting_the_core_and_then_cannot_confirm_it() {
+    let lane = ScriptedLane::new([Ok(facts(1, 0, Some("0.9.0")))]);
+    *lane.execute_result.lock().unwrap() = Err(ActionFailure::Unconfirmed);
+    let machine = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
+    let sources = ScriptedSources::with(vec![known(PENGUIN, "penguin", false, &machine)]);
+    let (adapter, events) = started(&sources, Duration::from_millis(300));
+    changed(&events, "the facts", |update| update.facts.is_some());
+
+    adapter.execute(previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap());
+    assert_eq!(
+        finished(&events, &MachineAction::Restart),
+        Err(ActionFailure::Unconfirmed)
+    );
+    machine.set(Script::Offline);
+    lane.answer(Err(ActionFailure::Unreachable));
+    changed(&events, "the unconfirmed restart", |update| {
+        matches!(update.link, MachineLink::Unconfirmed { .. })
+    });
 }
 
 /// An incompatible Core that restarts into a compatible version and answers again before the

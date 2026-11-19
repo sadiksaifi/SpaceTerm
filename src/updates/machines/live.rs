@@ -414,7 +414,9 @@ fn run_previewed(
         shared.expect_restart(machine, preview.target.clone());
     }
     let outcome = lane.execute(lane_preview);
-    if restart && outcome.is_err() {
+    // A restart whose outcome nothing confirmed may still be running, so the Machine keeps
+    // expecting its return, which says it can't confirm the restart until that settles.
+    if restart && outcome.is_err() && outcome != Err(ActionFailure::Unconfirmed) {
         shared.forget_restart(machine);
     }
     outcome
