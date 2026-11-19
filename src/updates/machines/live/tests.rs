@@ -208,7 +208,7 @@ impl MachineLane for ScriptedLane {
 
     fn resolve(&self, operation: &str) -> Result<(), ActionFailure> {
         self.record(format!("resolve {operation}"));
-        self.resolve_result.lock().unwrap().clone()
+        *self.resolve_result.lock().unwrap()
     }
 }
 

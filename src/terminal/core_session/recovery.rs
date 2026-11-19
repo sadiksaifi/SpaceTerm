@@ -265,7 +265,7 @@ mod tests {
                     &takeover(
                         [9; 32],
                         Controller::Client {
-                            name: "Other".try_into().unwrap(),
+                            name: "Other".into(),
                             this_client: false,
                         },
                     ),
