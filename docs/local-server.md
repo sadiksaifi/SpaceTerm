@@ -2,7 +2,7 @@
 
 The desktop and SpaceTerm Core on the same computer use your operating-system account's authority. They do not pair or open a credential store. Independent clients retain nonsecret identities so their views, attachments and Pane control survive relaunch. [ADR 0027](adr/0027-trust-paired-clients-equally.md) owns the trust decision.
 
-Installed Preflight and Release desktop launch connects to the account-local SpaceTerm Core and presents its retained Workspaces in the main Workspace Window. Closing client windows and quitting the client leave Core-owned terminal programs running; [ADR 0049](adr/0049-own-status-controls-in-the-desktop-client.md) defines the client and status-menu lifetime. A deliberately stopped SpaceTerm Core stays stopped until the person chooses Start. Settings > Machines retains service management. The `core:*` mise tasks select the Development identity unless their help asks for an identity; status never starts SpaceTerm Core.
+Installed Preflight and Release desktop launch connects to the account-local SpaceTerm Core and presents its retained Workspaces in the main Workspace Window. Closing client windows and quitting the client leave Core-owned terminal programs running; [ADR 0049](adr/0049-own-status-controls-in-the-desktop-client.md) defines the client and status-menu lifetime. A deliberately stopped SpaceTerm Core stays stopped until the person chooses Start or opens SpaceTerm themselves under [ADR 0030](adr/0030-start-servers-at-boot-independently-of-clients.md). Settings > Machines retains service management. The `core:*` mise tasks select the Development identity unless their help asks for an identity; status never starts SpaceTerm Core.
 
 ## Running current Development source
 
@@ -20,7 +20,7 @@ Install SpaceTerm Core as described in [Install SpaceTerm Core](#install-spacete
 
 ## Signed SpaceTerm Core packages
 
-For installed applications, the desktop startup adapter in [src/local_startup.rs](../src/local_startup.rs) prepares or reuses the account service on a worker. Existing service policy selects the approved installation. Launch does not select a newer package or reverse Stop.
+For installed applications, the desktop startup adapter in [src/local_startup.rs](../src/local_startup.rs) prepares or reuses the account service on a worker. Existing service policy selects the approved installation. Launch does not select a newer package. Only the window the person's own launch of SpaceTerm opens reverses Stop, as Start does; a launch macOS makes at login and a window reopened in the running client leave Stop in force.
 
 Fresh service setup requires an independently signed SpaceTerm Core archive and signature for the desktop's application identity and native target. The signed manifest declares its protocol major. The client requires its own protocol major; client and SpaceTerm Core versions and commits may differ. Packaged desktops carry this pair in their resources. Signing happens during package preparation, never during app launch.
 
