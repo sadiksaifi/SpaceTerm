@@ -349,7 +349,28 @@ impl SettingsWindow {
             if notice.surface != Surface::Settings {
                 return;
             }
-            let Err(failure) = notice.outcome else { return };
+            let Err(failure) = notice.outcome else {
+                // This computer's SpaceTerm Core stopped or restarted as Settings asked, so
+                // Settings and every waiting Workspace Window read it again.
+                if notice.local
+                    && let Some(running) = match notice.action {
+                        MachineAction::Stop => Some(false),
+                        MachineAction::Restart => Some(true),
+                        _ => None,
+                    }
+                {
+                    crate::status_menu::operation_succeeded(
+                        cx,
+                        crate::machine_connection::service::ServiceStatus {
+                            installed: true,
+                            enabled: true,
+                            running,
+                            stopped: !running,
+                        },
+                    );
+                }
+                return;
+            };
             let window = settings.update_window;
             if failure == ActionFailure::Changed
                 && matches!(notice.action, MachineAction::Restart | MachineAction::Stop)

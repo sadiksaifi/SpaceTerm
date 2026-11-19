@@ -1580,6 +1580,30 @@ impl SettingsWindow {
             );
             return;
         }
+        // A running SpaceTerm Core stops through its own preview of the exact Terminal Sessions
+        // that end, with its receipt, its Stopping announcement and its wait through another
+        // operation, as the menu bar and the CLI stop it. Only native cleanup of a Core that no
+        // longer runs uses the service manager here.
+        let running = self
+            .core_service
+            .as_ref()
+            .and_then(|row| row.state.status)
+            .is_some_and(|status| status.running);
+        if action == ServiceAction::Stop
+            && running
+            && let Some(update) =
+                self.machine_update(&super::machine_list::MachineChoice::Local, cx)
+        {
+            self.perform_update_command(
+                crate::updates::state::Command::Machine(
+                    update.machine,
+                    crate::updates::machines::MachineAction::Stop,
+                ),
+                window.window_handle(),
+                cx,
+            );
+            return;
+        }
         match action {
             ServiceAction::Check | ServiceAction::Start => self.run_core_service(action, cx),
             // Settings reads the service again when the person comes back to this window.

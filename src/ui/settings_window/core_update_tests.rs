@@ -249,6 +249,31 @@ fn settings_tracks_the_shared_install_and_restart_without_starting_another(
     assert!(adapter.executed().is_empty());
 }
 
+/// Settings stops a running SpaceTerm Core through the Core's own preview of the exact Terminal
+/// Sessions that end, as the menu bar does, never through the service manager directly. The
+/// Stop runs only once confirmed, and a confirmed Stop reads the service again.
+#[gpui::test]
+fn a_settings_stop_runs_on_the_cores_session_bound_preview(cx: &mut TestAppContext) {
+    let (settings, adapter, cx) = open(cx, None);
+    cx.update(|window, cx| {
+        settings.update(cx, |settings, cx| {
+            settings.request_core_service(ServiceAction::Stop, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(adapter.asked(), [(MACHINE, MachineAction::Stop)]);
+    assert!(adapter.executed().is_empty(), "Stop waits for confirmation");
+    answer(UPDATE_CONFIRM_SELECTOR, cx);
+    assert_eq!(adapter.executed_actions(), [(MACHINE, MachineAction::Stop)]);
+    adapter.emit(MachineUpdatesEvent::Finished {
+        machine: MACHINE,
+        action: MachineAction::Stop,
+        outcome: Ok(()),
+    });
+    cx.run_until_parked();
+    assert_eq!(adapter.executed_actions().len(), 1, "nothing stops twice");
+}
+
 #[gpui::test]
 fn a_failed_settings_preview_explains_the_failure(cx: &mut TestAppContext) {
     let (_, adapter, cx) = open(cx, Some("1.6.0"));
