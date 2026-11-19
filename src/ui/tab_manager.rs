@@ -3551,6 +3551,45 @@ impl TabManager {
         self.restore_active_tab(remembered, window, cx);
     }
 
+    /// What this client presents of this Workspace now, by server identity, for the next launch:
+    /// the Workspace, its Active Tab and that Tab's Focused Pane. A Tab or Pane without a server
+    /// identity yet has none.
+    pub(crate) fn selection(&self, cx: &App) -> Option<spaceterm_core::client_view::Selection> {
+        let tab_id = self.tabs.active_tab_id();
+        let tab = self.tabs.tab(tab_id)?.read(cx);
+        Some(spaceterm_core::client_view::Selection {
+            workspace: self.binding.workspace(),
+            tab: self.binding.core_tab(tab_id)?,
+            pane: tab.core_pane(tab.focused_pane_id())?,
+        })
+    }
+
+    /// Selects the Active Tab and Focused Pane a previous launch left, without selecting a Pane
+    /// for the server. A Tab or Pane that is gone leaves the Root Tab or Root Pane.
+    pub(crate) fn restore_saved_selection(
+        &mut self,
+        saved: spaceterm_core::client_view::Selection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::ui::remembered_view::{RememberedTab, RememberedWorkspace};
+        let remembered = RememberedWorkspace {
+            active_tab: Some(saved.tab),
+            tabs: std::iter::once((
+                saved.tab,
+                RememberedTab {
+                    history: Vec::new(),
+                    focused: saved.pane,
+                    zoomed: false,
+                    panes: std::collections::HashMap::new(),
+                },
+            ))
+            .collect(),
+            worktrees_expanded: None,
+        };
+        self.restore_selection(&remembered, window, cx);
+    }
+
     /// Restores which Tab is active and each Tab's focus another window left. A Tab or Pane
     /// that is gone leaves the Root Tab or Root Pane, which nothing selects.
     pub(crate) fn restore_selection(

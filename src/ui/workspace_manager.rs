@@ -405,6 +405,13 @@ impl WorkspaceManager {
         })
         .detach();
 
+        // The person's own launch opens the selection a previous launch left, unless they choose
+        // something in this window first.
+        let restoration = if local_core.intent == launch::LaunchIntent::Foreground {
+            crate::ui::remembered_view::Restoration::landing()
+        } else {
+            crate::ui::remembered_view::Restoration::none()
+        };
         let mut manager = Self {
             window_appearance,
             window_traffic_lights,
@@ -452,9 +459,10 @@ impl WorkspaceManager {
                     .this_computer,
             ),
             display_order: display_order::DisplayOrder::default(),
-            restoration: crate::ui::remembered_view::Restoration::none(),
+            restoration,
             person_keys: None,
         };
+        manager.follow_person_input(window, cx);
         manager.follow_display_order(window, cx);
         manager.run_local_launch(None, window, cx);
         manager.follow_direct_machines(window, cx);
@@ -1554,11 +1562,19 @@ impl WorkspaceManager {
     }
 
     /// Opens the Active Workspace's Active Tab and Focused Pane for the person who launched
-    /// SpaceTerm, starting that Pane's shell. With no Workspace to present, it creates one Local
-    /// Workspace, whose Root Pane opens once SpaceTerm Core publishes it. Workspaces the person
-    /// detached stay detached.
+    /// SpaceTerm, starting that Pane's shell. The Workspace, Tab and Pane this client last
+    /// presented from this computer come first while this window still presents them and the
+    /// person has chosen nothing in it since it opened. With no Workspace to present, it creates
+    /// one Local Workspace, whose Root Pane opens once SpaceTerm Core publishes it. Workspaces
+    /// the person detached stay detached.
     fn land(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(workspace_id) = self.workspaces.active_workspace_id() {
+        let saved = if self.restoration.take_landing() {
+            self.restore_saved_selection(window, cx)
+        } else {
+            None
+        };
+        self.follow_person_input(window, cx);
+        if let Some(workspace_id) = saved.or_else(|| self.workspaces.active_workspace_id()) {
             if self.activate_workspace(workspace_id, window, cx) {
                 self.focus(window, cx);
             }
@@ -1571,6 +1587,27 @@ impl WorkspaceManager {
                 cx,
             );
         }
+    }
+
+    /// Selects the Tab and Focused Pane a previous launch left in the Workspace it left, and
+    /// returns that Workspace, when this window presents it from this computer's own inventory.
+    /// A Tab or Pane that is gone leaves the Root Tab or Root Pane.
+    fn restore_saved_selection(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<WorkspaceId> {
+        let binding = self.binding.get(MachineKey::LOCAL)?;
+        if binding.presents_retained_copy() {
+            return None;
+        }
+        let saved = binding.saved_selection()?;
+        let workspace_id = binding.local(saved.workspace)?;
+        let manager = self.workspaces.workspace(workspace_id)?.payload().clone();
+        manager.update(cx, |manager, cx| {
+            manager.restore_saved_selection(saved, window, cx);
+        });
+        Some(workspace_id)
     }
 
     fn activate_workspace(
@@ -2856,8 +2893,13 @@ impl WorkspaceManager {
         }
         // The person's own launch of SpaceTerm lands in a shell once this computer's Workspaces
         // and this client's attachments are known.
-        if key == MachineKey::LOCAL && inventory_applied && self.launch.take_landing() && !landed {
-            self.land(window, cx);
+        if key == MachineKey::LOCAL && inventory_applied && self.launch.take_landing() {
+            if landed {
+                self.restoration.take_landing();
+                self.follow_person_input(window, cx);
+            } else {
+                self.land(window, cx);
+            }
         }
         // The client that asked for a creation opens it, once, after the server published it.
         if let Some(accepted) = poll.accepted {
@@ -3030,6 +3072,18 @@ impl WorkspaceManager {
             if let Some(binding) = self.binding.get_mut(key) {
                 binding.save_arrangements(spaceterm_core::client_view::ClientView { workspaces });
             }
+        }
+        // Only the person's launch reads a selection, and it opens this computer's. Another
+        // Machine's Active Workspace leaves this computer's last selection as it was.
+        if let Some(active) = self.workspaces.active_workspace_id()
+            && self.binding.owner(active) == Some(MachineKey::LOCAL)
+            && let Some(selection) = self
+                .workspaces
+                .workspace(active)
+                .and_then(|entry| entry.payload().read(cx).selection(cx))
+            && let Some(binding) = self.binding.get_mut(MachineKey::LOCAL)
+        {
+            binding.save_selection(selection);
         }
     }
 

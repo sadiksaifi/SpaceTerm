@@ -743,6 +743,8 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The person chose a new Workspace, which the launch's saved selection never replaces.
+        self.person_input(cx);
         self.launch.create_when_presented = true;
         self.create_pending_workspace(super::MachineKey::LOCAL, window, cx);
     }

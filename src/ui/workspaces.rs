@@ -1882,6 +1882,9 @@ mod core_workspaces {
         retained_views: Option<crate::ui::client_view_state::RetainedClientViews>,
         saved_views: Option<spaceterm_core::client_view::ClientView>,
         last_saved_view: Option<spaceterm_core::client_view::ClientView>,
+        /// The Workspace, Tab and Focused Pane this client last presented from this Machine, as
+        /// read with the saved arrangement. Only the person's launch of SpaceTerm opens it.
+        saved_selection: Option<spaceterm_core::client_view::Selection>,
         view_error_reported: bool,
         attachment_error: Option<spaceterm_core::CoreError>,
         /// Whether this binding keeps a copy of the inventory it presents, for a paired route.
@@ -1978,6 +1981,7 @@ mod core_workspaces {
                 retained_views: None,
                 saved_views: None,
                 last_saved_view: None,
+                saved_selection: None,
                 view_error_reported: false,
                 attachment_error: None,
                 retains_copies: false,
@@ -2312,6 +2316,10 @@ mod core_workspaces {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner()) = restarts;
                     }
+                    self.saved_selection = self
+                        .retained_views
+                        .as_ref()
+                        .and_then(|views| views.selection());
                     self.saved_views = Some(saved);
                     Ok(true)
                 }
@@ -2366,6 +2374,36 @@ mod core_workspaces {
             }
             self.saved_views = Some(view.clone());
             self.last_saved_view = Some(view);
+        }
+
+        /// The Workspace, Tab and Focused Pane this client last presented from this Machine.
+        pub(crate) const fn saved_selection(
+            &self,
+        ) -> Option<spaceterm_core::client_view::Selection> {
+            self.saved_selection
+        }
+
+        /// Retains `selection` as what this client presents from this Machine now. A provisional
+        /// Workspace, Tab or Pane has no server identity yet, so nothing is retained for it, and
+        /// nothing is retained before the saved selection is read, which it would replace.
+        pub(crate) fn save_selection(&mut self, selection: spaceterm_core::client_view::Selection) {
+            if self.edits.has_pending()
+                || (self.saved_views.is_none() && self.retained_views.is_some())
+            {
+                return;
+            }
+            if let Some(retained) = &self.retained_views {
+                retained.save_selection(selection);
+            }
+            self.saved_selection = Some(selection);
+        }
+
+        #[cfg(test)]
+        pub(crate) fn retain_selection_for_test(
+            &mut self,
+            selection: spaceterm_core::client_view::Selection,
+        ) {
+            self.saved_selection = Some(selection);
         }
 
         pub(crate) fn take_view_error(&mut self) -> Option<ArrangementUnavailable> {

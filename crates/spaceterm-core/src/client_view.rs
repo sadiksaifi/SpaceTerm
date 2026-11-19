@@ -538,6 +538,36 @@ impl RestartsRecord {
 /// a root's admission reads: its store treats a copy it can't read as empty.
 pub const PANE_RESTARTS: &str = "pane-restarts.json";
 
+/// The name of the selection file in a client directory: the Workspace, Tab and Focused Pane
+/// this client last presented. Like [`PANE_RESTARTS`], it only guides presentation, and its
+/// store treats a copy it can't read as none.
+pub const SELECTION: &str = "selection.json";
+
+#[cfg(feature = "client")]
+const SELECTION_FILE: &std::ffi::CStr = c"selection.json";
+
+/// What this client last presented from one Machine: its Active Workspace, that Workspace's
+/// Active Tab and the Tab's Focused Pane, as SpaceTerm Core identifies them. The client uses
+/// each only while the Core's inventory and the client's own attachments still present it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Selection {
+    pub workspace: Id,
+    pub tab: Id,
+    pub pane: Id,
+}
+
+/// `selection.json`: no released client opens it.
+#[cfg(feature = "client")]
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SelectionRecord {
+    version: u32,
+    core: Id,
+    client: Id,
+    selection: Selection,
+}
+
 #[cfg(feature = "client")]
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -591,6 +621,8 @@ pub struct ClientViewStore {
     /// The Pane restart facts as last read or written. A copy that can't be read is empty: the
     /// facts only explain presentation.
     pane_restarts: Vec<PaneRestart>,
+    /// The selection as last read or written. A copy that can't be read is none.
+    selection: Option<Selection>,
 }
 
 #[cfg(feature = "client")]
@@ -663,6 +695,14 @@ impl ClientViewStore {
             })
             .map(|retained| retained.panes)
             .unwrap_or_default();
+        let selection = directory
+            .read_json::<SelectionRecord>(SELECTION)
+            .ok()
+            .flatten()
+            .filter(|retained| {
+                retained.version == 1 && retained.core == core && retained.client == client
+            })
+            .map(|retained| retained.selection);
         Ok(Self {
             directory,
             _lock: lock,
@@ -670,7 +710,30 @@ impl ClientViewStore {
             blocked: false,
             inventory,
             pane_restarts,
+            selection,
         })
+    }
+    /// The Workspace, Tab and Focused Pane this client last presented, if it retains them.
+    pub fn selection(&self) -> Option<Selection> {
+        self.selection
+    }
+    /// Saves what this client presents now. It only guides presentation, so a failed write keeps
+    /// the selection it had and blocks no later write of the arrangements.
+    pub fn save_selection(&mut self, selection: Selection) -> Result<(), CoreError> {
+        if self.selection == Some(selection) {
+            return Ok(());
+        }
+        self.directory.write_json(
+            SELECTION_FILE,
+            &SelectionRecord {
+                version: 1,
+                core: self.record.core,
+                client: self.record.client,
+                selection,
+            },
+        )?;
+        self.selection = Some(selection);
+        Ok(())
     }
     /// The Workspaces and Tabs this client last presented from the server, if it retains them.
     pub fn retained_inventory(&self) -> Option<&RetainedInventory> {
@@ -1371,6 +1434,93 @@ mod pane_restart_tests {
         drop(store);
         let reopened = ClientViewStore::open(directory(), [3; 32], [4; 32]).unwrap();
         assert_eq!(reopened.view(), &view);
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_selection_survives_reopen_and_any_copy_it_cannot_trust_reads_as_none() {
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "st-selection-{:x}",
+            u64::from_be_bytes(crate::protocol::random().unwrap()[..8].try_into().unwrap())
+        ));
+        let directory = || crate::storage::Directory::open(&root, true).unwrap();
+        let view = ClientView {
+            workspaces: vec![WorkspaceView {
+                workspace: [5; 32],
+                tabs: Vec::new(),
+            }],
+        };
+        let selection = Selection {
+            workspace: [5; 32],
+            tab: [6; 32],
+            pane: [7; 32],
+        };
+        let mut store = ClientViewStore::open(directory(), [3; 32], [4; 32]).unwrap();
+        assert_eq!(store.selection(), None);
+        store.save(view.clone()).unwrap();
+        store.save_selection(selection).unwrap();
+        drop(store);
+        let reopened = ClientViewStore::open(directory(), [3; 32], [4; 32]).unwrap();
+        assert_eq!(reopened.selection(), Some(selection));
+        drop(reopened);
+
+        let (core, client, other) = ([3_u8; 32], [4_u8; 32], [9_u8; 32]);
+        let unusable = [
+            serde_json::json!({ "version": 1, "selection": "?" }),
+            serde_json::json!({
+                "version": 2, "core": core, "client": client, "selection": selection,
+            }),
+            serde_json::json!({
+                "version": 1, "core": core, "client": other, "selection": selection,
+            }),
+            serde_json::json!({
+                "version": 1, "core": core, "client": client,
+                "selection": { "workspace": selection.workspace, "tab": selection.tab },
+            }),
+        ];
+        for record in unusable {
+            directory().write_json(SELECTION_FILE, &record).unwrap();
+            let reopened = ClientViewStore::open(directory(), [3; 32], [4; 32]).unwrap();
+            assert_eq!(reopened.selection(), None, "{record}");
+            assert_eq!(reopened.view(), &view);
+        }
+        std::fs::write(root.join(SELECTION), b"{\"version\":").unwrap();
+        let reopened = ClientViewStore::open(directory(), [3; 32], [4; 32]).unwrap();
+        assert_eq!(reopened.selection(), None);
+        assert_eq!(reopened.view(), &view);
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_failed_selection_write_keeps_the_last_one_and_blocks_no_view_write() {
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "st-selection-{:x}",
+            u64::from_be_bytes(crate::protocol::random().unwrap()[..8].try_into().unwrap())
+        ));
+        let directory = || crate::storage::Directory::open(&root, true).unwrap();
+        let mut store = ClientViewStore::open(directory(), [3; 32], [4; 32]).unwrap();
+        // Something the store can't replace stands where the selection goes.
+        std::fs::create_dir(root.join(SELECTION)).unwrap();
+        let selection = Selection {
+            workspace: [5; 32],
+            tab: [6; 32],
+            pane: [7; 32],
+        };
+        assert!(store.save_selection(selection).is_err());
+        assert_eq!(store.selection(), None);
+        let view = ClientView {
+            workspaces: vec![WorkspaceView {
+                workspace: [5; 32],
+                tabs: Vec::new(),
+            }],
+        };
+        store.save(view.clone()).unwrap();
+        drop(store);
+        let reopened = ClientViewStore::open(directory(), [3; 32], [4; 32]).unwrap();
+        assert_eq!(reopened.view(), &view);
+        assert_eq!(reopened.selection(), None);
         drop(reopened);
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -2736,3 +2736,291 @@ fn a_reopened_window_keeps_the_keyboard_in_its_sidebar_through_launch(cx: &mut T
     }));
     assert_eq!(harness.panes.pane(PANE).selections(), 0);
 }
+
+const WORK: [u8; 32] = [41; 32];
+const WORK_ROOT_TAB: [u8; 32] = [42; 32];
+const WORK_ROOT_PANE: [u8; 32] = [43; 32];
+const WORK_TAB: [u8; 32] = [44; 32];
+const WORK_TAB_ROOT: [u8; 32] = [45; 32];
+const WORK_SPLIT: [u8; 32] = [46; 32];
+
+fn server_pane(id: [u8; 32], source: Option<[u8; 32]>) -> Pane {
+    Pane {
+        id,
+        source,
+        side: Side::Right,
+        starting_directory: PathBuf::from("/server/home"),
+        current_directory: None,
+        repository_directory: None,
+        presentation: None,
+        observers: Default::default(),
+        confirmed_directory: None,
+        creator: None,
+    }
+}
+
+fn server_tab(id: [u8; 32], panes: Vec<Pane>) -> Tab {
+    Tab {
+        worktree: None,
+        worktree_membership: spaceterm_core::hierarchy::WorktreeMembership::Following,
+        worktree_repository: None,
+        id,
+        root_pane: panes[0].id,
+        panes,
+    }
+}
+
+/// The Default Workspace and a second Workspace, Work, whose second Tab is split in two.
+fn two_workspaces() -> Inventory {
+    let mut inventory = inventory();
+    inventory.workspaces.push(Workspace {
+        id: WORK,
+        name: "Work".to_owned(),
+        name_version: 0,
+        pin_version: 0,
+        pinned_directory: None,
+        root_tab: WORK_ROOT_TAB,
+        tabs: vec![
+            server_tab(WORK_ROOT_TAB, vec![server_pane(WORK_ROOT_PANE, None)]),
+            server_tab(
+                WORK_TAB,
+                vec![
+                    server_pane(WORK_TAB_ROOT, None),
+                    server_pane(WORK_SPLIT, Some(WORK_TAB_ROOT)),
+                ],
+            ),
+        ],
+    });
+    inventory
+}
+
+fn work_split() -> spaceterm_core::client_view::Selection {
+    spaceterm_core::client_view::Selection {
+        workspace: WORK,
+        tab: WORK_TAB,
+        pane: WORK_SPLIT,
+    }
+}
+
+/// The person's launch of SpaceTerm after an earlier run that left `attached` attached and
+/// `saved` as this computer's selection. `before` runs once the window is open and before this
+/// computer's Workspaces arrive.
+fn relaunch<'a>(
+    saved: Option<spaceterm_core::client_view::Selection>,
+    attached: &[[u8; 32]],
+    before: impl FnOnce(&mut WorkspaceManager, &mut Window, &mut Context<WorkspaceManager>),
+    cx: &'a mut TestAppContext,
+) -> (LaunchHarness, &'a mut VisualTestContext) {
+    let launch = ScriptedLaunch::default();
+    launch.answer(ready());
+    let (harness, cx) = foreground_harness_with(launch, ScriptedEdits::new(None), cx);
+    sync(&harness, cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            let binding = manager
+                .binding
+                .get_mut(MachineKey::LOCAL)
+                .expect("this computer's server is presented");
+            binding.attach_for_test(attached);
+            if let Some(saved) = saved {
+                binding.retain_selection_for_test(saved);
+            }
+            before(manager, window, cx);
+        });
+    });
+    harness.edits.set_inventory(two_workspaces());
+    sync(&harness, cx);
+    (harness, cx)
+}
+
+/// What the window presents of its Active Workspace, by server identity.
+fn presented_selection(
+    harness: &LaunchHarness,
+    cx: &mut VisualTestContext,
+) -> Option<spaceterm_core::client_view::Selection> {
+    harness.manager.read_with(cx, |manager, cx| {
+        manager.active_tab_manager()?.read(cx).selection(cx)
+    })
+}
+
+/// A full relaunch returns to the split Pane of a second Tab in a second Workspace, and starts
+/// only that Pane's shell for the person.
+#[gpui::test]
+fn the_persons_launch_reopens_the_saved_workspace_tab_and_split(cx: &mut TestAppContext) {
+    let (harness, cx) = relaunch(Some(work_split()), &[WORKSPACE, WORK], |_, _, _| {}, cx);
+
+    assert_eq!(harness.rows(cx), 2);
+    assert_eq!(presented_selection(&harness, cx), Some(work_split()));
+    assert_eq!(harness.panes.pane(WORK_SPLIT).selections(), 1);
+    for other in [PANE, WORK_ROOT_PANE, WORK_TAB_ROOT] {
+        assert_eq!(harness.panes.pane(other).selections(), 0);
+    }
+    assert!(harness.edits.submitted().is_empty(), "nothing is created");
+    sync(&harness, cx);
+    assert_eq!(
+        harness.panes.pane(WORK_SPLIT).selections(),
+        1,
+        "the launch opens the Pane once"
+    );
+}
+
+/// What the window presents from this computer becomes the next launch's selection, and another
+/// choice the person makes replaces it.
+#[gpui::test]
+fn the_presented_selection_is_retained_for_the_next_launch(cx: &mut TestAppContext) {
+    let (harness, cx) = relaunch(Some(work_split()), &[WORKSPACE, WORK], |_, _, _| {}, cx);
+    let saved = |harness: &LaunchHarness, cx: &mut VisualTestContext| {
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.binding.local()?.saved_selection())
+    };
+    assert_eq!(saved(&harness, cx), Some(work_split()));
+
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            let default = manager
+                .binding
+                .local()
+                .and_then(|binding| binding.local(WORKSPACE))
+                .expect("the Default Workspace is presented");
+            manager.activate_workspace(default, window, cx);
+            manager.save_arrangements(cx);
+        });
+    });
+    assert_eq!(
+        saved(&harness, cx),
+        Some(spaceterm_core::client_view::Selection {
+            workspace: WORKSPACE,
+            tab: TAB,
+            pane: PANE,
+        })
+    );
+}
+
+/// A saved Tab that is gone leaves its Workspace's Root Tab, and a saved Workspace this client
+/// detached, or none at all, leaves the window's own Active Workspace. Each opens one shell.
+#[gpui::test]
+fn a_saved_selection_that_is_gone_falls_back_without_attaching_anything(cx: &mut TestAppContext) {
+    let gone_tab = spaceterm_core::client_view::Selection {
+        tab: [99; 32],
+        ..work_split()
+    };
+    let (harness, cx) = relaunch(Some(gone_tab), &[WORKSPACE, WORK], |_, _, _| {}, cx);
+    assert_eq!(
+        presented_selection(&harness, cx),
+        Some(spaceterm_core::client_view::Selection {
+            workspace: WORK,
+            tab: WORK_ROOT_TAB,
+            pane: WORK_ROOT_PANE,
+        })
+    );
+    assert_eq!(harness.panes.pane(WORK_ROOT_PANE).selections(), 1);
+    assert_eq!(harness.panes.pane(WORK_SPLIT).selections(), 0);
+}
+
+#[gpui::test]
+fn a_saved_selection_in_a_detached_workspace_leaves_it_detached(cx: &mut TestAppContext) {
+    let (harness, cx) = relaunch(Some(work_split()), &[WORKSPACE], |_, _, _| {}, cx);
+    assert_eq!(harness.rows(cx), 1, "Work stays detached");
+    assert_eq!(harness.panes.pane(PANE).selections(), 1);
+    assert_eq!(harness.panes.opens(WORK_SPLIT), 0);
+}
+
+#[gpui::test]
+fn a_launch_without_a_saved_selection_opens_the_active_workspace(cx: &mut TestAppContext) {
+    let (harness, cx) = relaunch(None, &[WORKSPACE, WORK], |_, _, _| {}, cx);
+    assert_eq!(harness.rows(cx), 2);
+    assert_eq!(harness.panes.pane(PANE).selections(), 1);
+    assert_eq!(harness.panes.pane(WORK_SPLIT).selections(), 0);
+}
+
+/// The person's input while this computer's Workspaces are on the way is their choice, so the
+/// saved selection never takes the view or the keyboard from it.
+#[gpui::test]
+fn a_choice_before_the_workspaces_arrive_keeps_the_saved_selection_away(cx: &mut TestAppContext) {
+    let (harness, cx) = relaunch(
+        Some(work_split()),
+        &[WORKSPACE, WORK],
+        |manager, _, cx| manager.person_input(cx),
+        cx,
+    );
+    assert_eq!(
+        presented_selection(&harness, cx).map(|selection| selection.workspace),
+        Some(WORKSPACE)
+    );
+    assert_eq!(harness.panes.pane(WORK_SPLIT).selections(), 0);
+}
+
+/// A window that opens for anything but the person's own launch never opens a saved selection.
+#[gpui::test]
+fn a_passive_launch_leaves_the_saved_selection_unopened(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness_with(vec![ready()], ScriptedEdits::new(None), [], cx);
+    sync(&harness, cx);
+    cx.update(|_, cx| {
+        harness.manager.update(cx, |manager, _| {
+            let binding = manager
+                .binding
+                .get_mut(MachineKey::LOCAL)
+                .expect("this computer's server is presented");
+            binding.attach_for_test(&[WORKSPACE, WORK]);
+            binding.retain_selection_for_test(work_split());
+        });
+    });
+    harness.edits.set_inventory(two_workspaces());
+    sync(&harness, cx);
+    assert_eq!(harness.panes.pane(WORK_SPLIT).selections(), 0);
+    assert_ne!(
+        presented_selection(&harness, cx).map(|selection| selection.workspace),
+        Some(WORK)
+    );
+}
+
+/// Runs the window's start queue for a while.
+fn run_start_queue(cx: &mut VisualTestContext) {
+    for _ in 0..20 {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(16));
+        cx.run_until_parked();
+    }
+}
+
+/// After a relaunch, SpaceTerm Core restarts. Every retained Pane, including the ones nobody
+/// opened in this run, has a worker that waits for a background start turn, and the window
+/// gives those turns at most three at once. Only the Pane the person opened is selected.
+#[gpui::test]
+fn retained_panes_nobody_opened_take_bounded_background_turns_after_a_restart(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = relaunch(Some(work_split()), &[WORKSPACE, WORK], |_, _, _| {}, cx);
+    run_start_queue(cx);
+    let panes = [PANE, WORK_ROOT_PANE, WORK_TAB_ROOT, WORK_SPLIT];
+    for pane in panes {
+        assert_eq!(harness.panes.opens(pane), 1, "{pane:?} has one worker");
+    }
+
+    // SpaceTerm Core restarts, and each worker sees its Pane restored without a shell.
+    for pane in panes {
+        let pane = harness.panes.pane(pane);
+        pane.admitted();
+        pane.await_turn();
+    }
+    let turns = |cx: &mut VisualTestContext| {
+        run_start_queue(cx);
+        panes
+            .into_iter()
+            .filter(|pane| harness.panes.pane(*pane).holds_turn())
+            .collect::<Vec<_>>()
+    };
+    let first = turns(cx);
+    assert_eq!(first.len(), 3, "three background starts run at once");
+    for pane in &first {
+        harness.panes.pane(*pane).finish_turn();
+    }
+    let rest = turns(cx);
+    assert_eq!(rest.len(), 1, "the last Pane gets the next turn");
+    assert!(!first.contains(&rest[0]));
+    assert_eq!(harness.panes.pane(WORK_SPLIT).selections(), 1);
+    for pane in [PANE, WORK_ROOT_PANE, WORK_TAB_ROOT] {
+        assert_eq!(harness.panes.pane(pane).selections(), 0);
+    }
+}

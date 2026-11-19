@@ -2,8 +2,10 @@
 //! the Settings Window's last placement and Settings Section.
 //!
 //! Closing the Workspace Window remembers its view here, and the next Workspace Window takes it
-//! and presents the same view. Exiting the process drops it, so a launch opens from defaults.
-//! Nothing here reaches a server, the Settings Document or disk.
+//! and presents the same view. Exiting the process drops it. The person's next launch opens
+//! only the Workspace, Tab and Focused Pane this client last presented from this computer,
+//! which [`spaceterm_core::client_view::ClientViewStore`] retains, and waits here for that
+//! launch to land. Nothing here reaches a server, the Settings Document or disk.
 //!
 //! Each server Pane's Scrollback position, Selection and cached rows stay with that Pane's
 //! client-lifetime record in the terminal layer, which reattaches them as it does after a
@@ -295,6 +297,19 @@ impl Restoration {
         }
     }
 
+    /// The window of the person's own launch of SpaceTerm, which opens the selection a previous
+    /// launch left once this computer's Workspaces arrive, unless the person chose something
+    /// in the window first.
+    pub(crate) fn landing() -> Self {
+        Self {
+            remembered: false,
+            workspaces: BTreeMap::new(),
+            held: BTreeMap::new(),
+            selection: Selection::Landing,
+            person_chose: false,
+        }
+    }
+
     /// A window with nothing to restore.
     pub(crate) fn none() -> Self {
         Self {
@@ -324,6 +339,16 @@ impl Restoration {
         self.person_chose = true;
         self.selection = Selection::Settled;
         self.held.clear();
+    }
+
+    /// Whether the launch may open the selection a previous launch left, because the person has
+    /// chosen nothing in the window yet. Either way, nothing waits for the launch afterwards.
+    pub(crate) fn take_landing(&mut self) -> bool {
+        let lands = matches!(self.selection, Selection::Landing);
+        if lands {
+            self.selection = Selection::Settled;
+        }
+        lands
     }
 
     /// The remembered view of a Workspace the window presents for the first time, once.
@@ -411,6 +436,9 @@ impl Restoration {
 }
 
 enum Selection {
+    /// The person's launch opens the selection a previous launch left once this computer's
+    /// Workspaces arrive.
+    Landing,
     /// The remembered Active Workspace returns when its server presents it.
     Waiting(WorkspaceReference),
     /// The remembered Active Workspace is gone, so the window keeps its default selected.
