@@ -1094,6 +1094,7 @@ pub(crate) fn failure_of_code(code: &str) -> ActionFailure {
         "unsupported" => ActionFailure::Unavailable(Unavailable::CoreTooOld),
         "service_busy" | "capacity" | "activation_unresolved" => ActionFailure::Busy,
         "changed" | "candidate_changed" => ActionFailure::Changed,
+        "outcome_unconfirmed" | "cleanup_unresolved" => ActionFailure::Unconfirmed,
         "login_item_off" => ActionFailure::LoginItemOff,
         "disk_full" => ActionFailure::DiskFull,
         "feed_unreachable"

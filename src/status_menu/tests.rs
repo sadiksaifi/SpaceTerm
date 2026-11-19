@@ -213,6 +213,52 @@ fn only_this_mac_offers_stop_and_stopping_with_sessions_asks(cx: &mut TestAppCon
     );
 }
 
+/// A Stop whose outcome nothing confirms offers Check Status from the menu, which reads what
+/// happened and never stops again. One that failed offers Try Again, which asks first again.
+#[gpui::test]
+fn a_stop_without_a_confirmed_outcome_offers_check_status_and_a_failed_one_try_again(
+    cx: &mut TestAppContext,
+) {
+    for (failure, follow_up, then) in [
+        (
+            ActionFailure::Unconfirmed,
+            "Check Status",
+            MachineAction::CheckAgain,
+        ),
+        (ActionFailure::Failed, "Try Again", MachineAction::Stop),
+    ] {
+        let fixture = start(vec![machine(LOCAL, "This Mac", 2)], cx);
+        let stop = submenu_command(&fixture.host.menu(), LOCAL, copy::STOP_CORE);
+        fixture.host.answers.borrow_mut().push(true);
+        cx.update(|cx| fixture.menu.perform(stop, None, cx));
+        cx.run_until_parked();
+        fixture.machines.emit(MachineUpdatesEvent::Finished {
+            machine: LOCAL,
+            action: MachineAction::Stop,
+            outcome: Err(failure),
+        });
+        fixture.host.answers.borrow_mut().push(true);
+        cx.run_until_parked();
+        let alert = fixture.host.alerts.borrow().get(1).cloned();
+        assert_eq!(
+            alert.map(|alert| alert.buttons),
+            Some(AlertButtons::FollowUp(follow_up.to_owned())),
+            "{failure:?}"
+        );
+        if then == MachineAction::CheckAgain {
+            assert_eq!(fixture.machines.performed(), [(LOCAL, then)]);
+        } else {
+            // Try Again previews the Stop again, so the person reviews it before it runs.
+            assert_eq!(fixture.machines.asked(), [(LOCAL, then.clone()), (LOCAL, then)]);
+        }
+        assert_eq!(
+            fixture.machines.executed_actions(),
+            [(LOCAL, MachineAction::Stop)],
+            "{failure:?}: nothing stops again without the person"
+        );
+    }
+}
+
 #[gpui::test]
 fn a_restart_drawn_before_more_sessions_opened_asks_with_the_new_count(cx: &mut TestAppContext) {
     let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 1))], cx);

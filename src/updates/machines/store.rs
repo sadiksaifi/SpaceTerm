@@ -101,7 +101,7 @@ impl MachineUpdatesNotice {
     /// action the Core refused at its preview, and a failed Start or Stop, which no update step
     /// reports. A later outcome of an update action shows once in the title bar instead (design
     /// 4.6). `Changed` and `LoginItemOff` have no alert.
-    pub(crate) fn unasked_alert(&self) -> Option<(SharedString, SharedString)> {
+    pub(crate) fn unasked_alert(&self) -> Option<crate::updates::confirm::Explanation> {
         let Err(failure) = self.outcome else {
             return None;
         };
@@ -110,7 +110,12 @@ impl MachineUpdatesNotice {
         if !waiting {
             return None;
         }
-        crate::updates::copy::dialogs::action_failure(&self.name, &self.action, failure)
+        crate::updates::copy::dialogs::action_failure_alert(
+            &self.name,
+            self.machine,
+            &self.action,
+            failure,
+        )
     }
 }
 

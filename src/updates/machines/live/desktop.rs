@@ -37,6 +37,8 @@ pub(crate) struct DesktopSources {
     /// The account Core's service and its lane handle. None when the identity has no service
     /// paths.
     local: Option<(Controller, MachineConnection)>,
+    /// The desktop build's identity, whose ledger confirms a local Stop once its lane closed.
+    identity: String,
     direct: DirectConnections,
 }
 
@@ -48,7 +50,11 @@ impl DesktopSources {
             .ok()
             .zip(MachineConnection::for_identity(identity).ok())
             .map(|(service, core)| (Controller::new(service), core));
-        Self { local, direct }
+        Self {
+            local,
+            identity: identity.to_owned(),
+            direct,
+        }
     }
 }
 
@@ -59,6 +65,7 @@ impl Sources for DesktopSources {
             let installed = controller.status().is_ok_and(|status| status.installed);
             if installed && let Ok(id) = core.machine_id() {
                 let core = core.clone();
+                let identity = self.identity.clone();
                 known.push(Known {
                     id,
                     name: THIS_MACHINE.into(),
@@ -66,7 +73,7 @@ impl Sources for DesktopSources {
                     machine: Arc::new(LocalMachine {
                         service: Arc::new(controller.clone()),
                         connect: Arc::new(move || {
-                            let lane = CoreLane::new(core.clone());
+                            let lane = CoreLane::local(core.clone(), identity.clone());
                             let work = lane.work()?;
                             Ok((Arc::new(lane) as Arc<dyn MachineLane>, work))
                         }),
@@ -386,13 +393,53 @@ struct CoreLane {
     core: MachineConnection,
     /// The connection the latest read answered on, reused by the next `WaitFacts`.
     session: Mutex<Option<Session>>,
+    /// The identity of this computer's own Core, whose ledger records a Stop's outcome once the
+    /// Core closed the lane. None for a paired Machine, which never stops over its lane.
+    ledger: Option<String>,
 }
+
+/// How often a local Stop reads its ledger record while it waits for the outcome.
+const LEDGER_POLL: Duration = Duration::from_millis(250);
 
 impl CoreLane {
     fn new(core: MachineConnection) -> Self {
         Self {
             core,
             session: Mutex::new(None),
+            ledger: None,
+        }
+    }
+
+    /// This computer's own Core, of the build `identity`.
+    fn local(core: MachineConnection, identity: String) -> Self {
+        Self {
+            ledger: Some(identity),
+            ..Self::new(core)
+        }
+    }
+
+    /// The outcome of the Stop `operation`, once SpaceTerm Core closed its lane: the helper
+    /// records it in the ledger after the Core exited. A closed lane alone proves nothing about
+    /// native cleanup, so without a terminal record by `deadline` the outcome stays unconfirmed.
+    fn confirm_stop(&self, operation: &str, deadline: Instant) -> Result<(), ActionFailure> {
+        use spaceterm_core::service::operations::{Ledger, OperationId, State};
+        let (Some(identity), Some(id)) = (&self.ledger, OperationId::parse(operation)) else {
+            return Err(ActionFailure::Unconfirmed);
+        };
+        loop {
+            let state = Ledger::open(identity)
+                .and_then(|ledger| ledger.resolve_now(&id))
+                .ok()
+                .flatten()
+                .map(|record| record.state);
+            match state {
+                Some(State::Done) => return Ok(()),
+                Some(State::Failed { code }) => return Err(failure_of_code(&code)),
+                Some(State::NotPerformed(_)) => return Err(ActionFailure::Failed),
+                Some(State::Unresolved) => return Err(ActionFailure::Unconfirmed),
+                _ if Instant::now() + LEDGER_POLL < deadline => std::thread::sleep(LEDGER_POLL),
+                _ => return Err(ActionFailure::Unconfirmed),
+            }
         }
     }
 
@@ -544,8 +591,16 @@ impl MachineLane for CoreLane {
             LaneChange::Restart => LaneAction::Restart,
             LaneChange::Stop => LaneAction::Stop,
         };
-        let mut session = self.open()?;
-        admin::preview(&mut session, action).map_err(lane_failure)
+        let lane = self
+            .core
+            .service_lane()
+            .map_err(|error| core_failure(&error))?;
+        let session = lane.session().map_err(|error| core_failure(&error))?;
+        // Another operation, such as an update check, may hold SpaceTerm Core for a while. The
+        // preview waits for it quietly rather than refusing at once.
+        admin::preview_when_ready(&lane, session, action, &|| None, &mut || {})
+            .map(|(_, preview)| preview)
+            .map_err(lane_failure)
     }
 
     fn execute(&self, preview: admin::Preview) -> Result<(), ActionFailure> {
@@ -559,7 +614,11 @@ impl MachineLane for CoreLane {
             .map_err(|error| core_failure(&error))?;
         let (session, _) = admin::open(&lane, &pending).map_err(lane_failure)?;
         let wait = admin::wait(&preview.action);
-        let outcome = admin::execute(
+        // The flow finishes on its own thread whatever the desktop does meanwhile, including
+        // closing the window that asked. It waits for another operation that holds SpaceTerm
+        // Core under the same approval, which SpaceTerm Core refuses as changed when what it
+        // affects changed meanwhile.
+        let outcome = admin::execute_approved(
             &lane,
             session,
             preview.action,
@@ -568,17 +627,22 @@ impl MachineLane for CoreLane {
             &pending,
             &mut admin::Unshared,
             &mut || Ok(()),
-            // The flow finishes on its own thread whatever the desktop does meanwhile.
             &|| None,
+            &mut || {},
         )
         .map_err(lane_failure)?;
-        match admin::verdict(&outcome) {
-            admin::Verdict::Done | admin::Verdict::Shutdown => Ok(()),
-            admin::Verdict::Failed(Some(code)) => Err(failure_of_code(&code)),
-            admin::Verdict::Failed(None) | admin::Verdict::NotPerformed => {
+        match (admin::verdict(&outcome), outcome) {
+            (admin::Verdict::Done, _) => Ok(()),
+            (admin::Verdict::Shutdown, lane_client::Outcome::Shutdown { operation, .. }) => {
+                self.confirm_stop(&operation, Instant::now() + wait)
+            }
+            (admin::Verdict::Failed(Some(code)), _) => Err(failure_of_code(&code)),
+            (admin::Verdict::Failed(None) | admin::Verdict::NotPerformed, _) => {
                 Err(ActionFailure::Failed)
             }
-            admin::Verdict::Uncertain => Err(ActionFailure::Unreachable),
+            (admin::Verdict::Shutdown | admin::Verdict::Uncertain, _) => {
+                Err(ActionFailure::Unconfirmed)
+            }
         }
     }
 }

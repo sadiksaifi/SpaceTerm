@@ -362,12 +362,8 @@ impl SettingsWindow {
                 );
             } else if failure == ActionFailure::LoginItemOff {
                 crate::local_startup::open_login_items();
-            } else if let Some((title, message)) = notice.unasked_alert() {
-                settings.perform_update_command(
-                    Command::Explain(Explanation::ok(title, message)),
-                    window,
-                    cx,
-                );
+            } else if let Some(explanation) = notice.unasked_alert() {
+                settings.perform_update_command(Command::Explain(explanation), window, cx);
             }
         })
         .detach();

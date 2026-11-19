@@ -161,6 +161,10 @@ pub(crate) enum ActionFailure {
     SteppingStoneSkipped([u64; 3]),
     /// The Machine must fetch this release before it can accept the bundled Core.
     NeedsFloor(spaceterm_core::update::ordering::Floor),
+    /// The action was admitted, and nothing proves whether it finished: its answer was lost, or
+    /// SpaceTerm Core stopped before its native cleanup was confirmed. Checking again reads what
+    /// happened. Trying again could repeat the action, so nothing offers that.
+    Unconfirmed,
     Failed,
 }
 

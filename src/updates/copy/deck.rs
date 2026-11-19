@@ -551,12 +551,23 @@ fn build() -> Deck {
                 ActionFailure::ClockBehind,
                 ActionFailure::SteppingStoneSkipped([0, 12, 0]),
                 ActionFailure::NeedsFloor(floor),
+                ActionFailure::Unconfirmed,
                 ActionFailure::Failed,
             ] {
-                if let Some((title, message)) = dialogs::action_failure(name, &action, failure) {
-                    deck.field(Role::Text, &title);
-                    deck.field(Role::Text, &message);
-                    deck.dialogs.insert(format!("{title} | {message} | OK"));
+                if let Some(alert) = dialogs::action_failure_alert(name, LOCAL, &action, failure) {
+                    deck.field(Role::Text, &alert.title);
+                    deck.field(Role::Text, &alert.message);
+                    let buttons = match alert.follow_up() {
+                        Some(label) => {
+                            deck.field(Role::Label, &label);
+                            format!("{label}, Cancel")
+                        }
+                        None => "OK".to_owned(),
+                    };
+                    deck.dialogs.insert(format!(
+                        "{} | {} | {buttons}",
+                        alert.title, alert.message
+                    ));
                 }
             }
         }

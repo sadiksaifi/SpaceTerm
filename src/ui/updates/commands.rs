@@ -241,11 +241,10 @@ fn explain(explanation: Explanation, presenter: Presenter, cx: &mut App) {
 /// click. An action that already ran reports through the title bar's failure or not-confirmed
 /// step instead, whatever its outcome.
 pub(super) fn refusal(notice: &MachineUpdatesNotice) -> Option<Explanation> {
-    if notice.action != MachineAction::Restart {
+    if !matches!(notice.action, MachineAction::Restart | MachineAction::Stop) {
         return None;
     }
-    let (title, message) = notice.unasked_alert()?;
-    Some(Explanation::ok(title, message))
+    notice.unasked_alert()
 }
 
 /// Answers a Machine action a window performed that did not succeed. A confirmation that went

@@ -424,13 +424,14 @@ Couldn’t Restart SpaceTerm Core on This Mac | SpaceTerm Core 0.11.4 couldn’t
 Couldn’t Restart SpaceTerm Core on This Mac | SpaceTerm Core 0.11.4 couldn’t start because another app is using This Mac’s Network Access port, so it went back to 0.11.3. Close that app or change the port, then try again. | Try Again, Cancel (dismisses the step)
 Couldn’t Restart SpaceTerm Core on This Mac | SpaceTerm Core 0.11.4 didn’t start, so it went back to 0.11.3. The Terminal Sessions that ended don’t come back. SpaceTerm waits for the next update. | OK (dismisses the step)
 Couldn’t Restart SpaceTerm Core on This Mac | SpaceTerm Core 0.11.4 didn’t start. It stays downloaded. | Try Again, Cancel
-Couldn’t Restart SpaceTerm Core on This Mac | SpaceTerm Core on This Mac didn’t finish. Try again. | OK
-Couldn’t Restart SpaceTerm Core on This Mac | SpaceTerm Core on This Mac is busy with another operation. Try again when it finishes. | OK
+Couldn’t Restart SpaceTerm Core on This Mac | SpaceTerm Core on This Mac didn’t finish. Try again. | Try Again, Cancel
+Couldn’t Restart SpaceTerm Core on This Mac | SpaceTerm Core on This Mac is busy with another operation. Try again when it finishes. | Try Again, Cancel
 Couldn’t Restart SpaceTerm Core on This Mac | SpaceTerm Core on This Mac is too old for this SpaceTerm. | OK
 Couldn’t Restart SpaceTerm Core on This Mac | SpaceTerm can’t reach This Mac. Try again when it’s connected. | OK
+Couldn’t Restart SpaceTerm Core on This Mac | SpaceTerm can’t reach This Mac. Try again when it’s connected. | Try Again, Cancel
 Couldn’t Restart SpaceTerm Core on This Mac | SpaceTerm was replaced on disk while it was running. Relaunch SpaceTerm, then try again. | OK
 Couldn’t Restart SpaceTerm Core on This Mac | The restart into SpaceTerm Core 0.11.4 was interrupted, so it went back to 0.11.3. | Try Again, Cancel (dismisses the step)
-Couldn’t Restart SpaceTerm Core on This Mac | This Mac is out of disk space. Free some space, then try again. | OK
+Couldn’t Restart SpaceTerm Core on This Mac | This Mac is out of disk space. Free some space, then try again. | Try Again, Cancel
 Couldn’t Restart SpaceTerm Core on This Mac | This Mac needs SpaceTerm Core 0.12.0 first and couldn’t get it. | OK
 Couldn’t Restart SpaceTerm Core on This Mac | This Mac’s clock is more than five minutes behind. Set the correct date and time on This Mac, then try again. | OK
 Couldn’t Restart SpaceTerm Core on This Mac | This SpaceTerm is too old for SpaceTerm Core on This Mac. | OK
@@ -439,54 +440,59 @@ Couldn’t Restart SpaceTerm Core on penguin | SpaceTerm Core 0.11.4 couldn’t 
 Couldn’t Restart SpaceTerm Core on penguin | SpaceTerm Core 0.11.4 couldn’t start because penguin is out of disk space, so it went back to 0.11.3. Free some space, then try again. | Try Again, Cancel (dismisses the step)
 Couldn’t Restart SpaceTerm Core on penguin | SpaceTerm Core 0.11.4 didn’t start, so it went back to 0.11.3. The Terminal Sessions that ended don’t come back. SpaceTerm waits for the next update. | OK (dismisses the step)
 Couldn’t Restart SpaceTerm Core on penguin | SpaceTerm Core 0.11.4 didn’t start. It stays downloaded. | Try Again, Cancel
-Couldn’t Restart SpaceTerm Core on penguin | SpaceTerm Core on penguin didn’t finish. Try again. | OK
-Couldn’t Restart SpaceTerm Core on penguin | SpaceTerm Core on penguin is busy with another operation. Try again when it finishes. | OK
+Couldn’t Restart SpaceTerm Core on penguin | SpaceTerm Core on penguin didn’t finish. Try again. | Try Again, Cancel
+Couldn’t Restart SpaceTerm Core on penguin | SpaceTerm Core on penguin is busy with another operation. Try again when it finishes. | Try Again, Cancel
 Couldn’t Restart SpaceTerm Core on penguin | SpaceTerm Core on penguin is too old for this SpaceTerm. | OK
 Couldn’t Restart SpaceTerm Core on penguin | SpaceTerm can’t reach penguin. Try again when it’s connected. | OK
+Couldn’t Restart SpaceTerm Core on penguin | SpaceTerm can’t reach penguin. Try again when it’s connected. | Try Again, Cancel
 Couldn’t Restart SpaceTerm Core on penguin | SpaceTerm was replaced on disk while it was running. Relaunch SpaceTerm, then try again. | OK
 Couldn’t Restart SpaceTerm Core on penguin | The restart into SpaceTerm Core 0.11.4 was interrupted, so it went back to 0.11.3. | Try Again, Cancel (dismisses the step)
 Couldn’t Restart SpaceTerm Core on penguin | This SpaceTerm is too old for SpaceTerm Core on penguin. | OK
-Couldn’t Restart SpaceTerm Core on penguin | penguin is out of disk space. Free some space, then try again. | OK
+Couldn’t Restart SpaceTerm Core on penguin | penguin is out of disk space. Free some space, then try again. | Try Again, Cancel
 Couldn’t Restart SpaceTerm Core on penguin | penguin needs SpaceTerm Core 0.12.0 first and couldn’t get it. | OK
 Couldn’t Restart SpaceTerm Core on penguin | penguin’s clock is more than five minutes behind. Set the correct date and time on penguin, then try again. | OK
 Couldn’t Start SpaceTerm Core on This Mac | On This Mac, install a newer compatible SpaceTerm Core archive with spaceterm update --archive, or wait for a newer release. | OK
-Couldn’t Start SpaceTerm Core on This Mac | SpaceTerm Core on This Mac didn’t finish. Try again. | OK
-Couldn’t Start SpaceTerm Core on This Mac | SpaceTerm Core on This Mac is busy with another operation. Try again when it finishes. | OK
+Couldn’t Start SpaceTerm Core on This Mac | SpaceTerm Core on This Mac didn’t finish. Try again. | Try Again, Cancel
+Couldn’t Start SpaceTerm Core on This Mac | SpaceTerm Core on This Mac is busy with another operation. Try again when it finishes. | Try Again, Cancel
 Couldn’t Start SpaceTerm Core on This Mac | SpaceTerm Core on This Mac is too old for this SpaceTerm. | OK
 Couldn’t Start SpaceTerm Core on This Mac | SpaceTerm can’t reach This Mac. Try again when it’s connected. | OK
+Couldn’t Start SpaceTerm Core on This Mac | SpaceTerm can’t reach This Mac. Try again when it’s connected. | Try Again, Cancel
 Couldn’t Start SpaceTerm Core on This Mac | SpaceTerm was replaced on disk while it was running. Relaunch SpaceTerm, then try again. | OK
-Couldn’t Start SpaceTerm Core on This Mac | This Mac is out of disk space. Free some space, then try again. | OK
+Couldn’t Start SpaceTerm Core on This Mac | This Mac is out of disk space. Free some space, then try again. | Try Again, Cancel
 Couldn’t Start SpaceTerm Core on This Mac | This Mac needs SpaceTerm Core 0.12.0 first and couldn’t get it. | OK
 Couldn’t Start SpaceTerm Core on This Mac | This Mac’s clock is more than five minutes behind. Set the correct date and time on This Mac, then try again. | OK
 Couldn’t Start SpaceTerm Core on This Mac | This SpaceTerm is too old for SpaceTerm Core on This Mac. | OK
 Couldn’t Start SpaceTerm Core on penguin | On penguin, install a newer compatible SpaceTerm Core archive with spaceterm update --archive, or wait for a newer release. | OK
-Couldn’t Start SpaceTerm Core on penguin | SpaceTerm Core on penguin didn’t finish. Try again. | OK
-Couldn’t Start SpaceTerm Core on penguin | SpaceTerm Core on penguin is busy with another operation. Try again when it finishes. | OK
+Couldn’t Start SpaceTerm Core on penguin | SpaceTerm Core on penguin didn’t finish. Try again. | Try Again, Cancel
+Couldn’t Start SpaceTerm Core on penguin | SpaceTerm Core on penguin is busy with another operation. Try again when it finishes. | Try Again, Cancel
 Couldn’t Start SpaceTerm Core on penguin | SpaceTerm Core on penguin is too old for this SpaceTerm. | OK
 Couldn’t Start SpaceTerm Core on penguin | SpaceTerm can’t reach penguin. Try again when it’s connected. | OK
+Couldn’t Start SpaceTerm Core on penguin | SpaceTerm can’t reach penguin. Try again when it’s connected. | Try Again, Cancel
 Couldn’t Start SpaceTerm Core on penguin | SpaceTerm was replaced on disk while it was running. Relaunch SpaceTerm, then try again. | OK
 Couldn’t Start SpaceTerm Core on penguin | This SpaceTerm is too old for SpaceTerm Core on penguin. | OK
-Couldn’t Start SpaceTerm Core on penguin | penguin is out of disk space. Free some space, then try again. | OK
+Couldn’t Start SpaceTerm Core on penguin | penguin is out of disk space. Free some space, then try again. | Try Again, Cancel
 Couldn’t Start SpaceTerm Core on penguin | penguin needs SpaceTerm Core 0.12.0 first and couldn’t get it. | OK
 Couldn’t Start SpaceTerm Core on penguin | penguin’s clock is more than five minutes behind. Set the correct date and time on penguin, then try again. | OK
 Couldn’t Stop SpaceTerm Core on This Mac | On This Mac, install a newer compatible SpaceTerm Core archive with spaceterm update --archive, or wait for a newer release. | OK
-Couldn’t Stop SpaceTerm Core on This Mac | SpaceTerm Core on This Mac didn’t finish. Try again. | OK
-Couldn’t Stop SpaceTerm Core on This Mac | SpaceTerm Core on This Mac is busy with another operation. Try again when it finishes. | OK
+Couldn’t Stop SpaceTerm Core on This Mac | SpaceTerm Core on This Mac didn’t finish. Try again. | Try Again, Cancel
+Couldn’t Stop SpaceTerm Core on This Mac | SpaceTerm Core on This Mac is busy with another operation. Try again when it finishes. | Try Again, Cancel
 Couldn’t Stop SpaceTerm Core on This Mac | SpaceTerm Core on This Mac is too old for this SpaceTerm. | OK
 Couldn’t Stop SpaceTerm Core on This Mac | SpaceTerm can’t reach This Mac. Try again when it’s connected. | OK
+Couldn’t Stop SpaceTerm Core on This Mac | SpaceTerm can’t reach This Mac. Try again when it’s connected. | Try Again, Cancel
 Couldn’t Stop SpaceTerm Core on This Mac | SpaceTerm was replaced on disk while it was running. Relaunch SpaceTerm, then try again. | OK
-Couldn’t Stop SpaceTerm Core on This Mac | This Mac is out of disk space. Free some space, then try again. | OK
+Couldn’t Stop SpaceTerm Core on This Mac | This Mac is out of disk space. Free some space, then try again. | Try Again, Cancel
 Couldn’t Stop SpaceTerm Core on This Mac | This Mac needs SpaceTerm Core 0.12.0 first and couldn’t get it. | OK
 Couldn’t Stop SpaceTerm Core on This Mac | This Mac’s clock is more than five minutes behind. Set the correct date and time on This Mac, then try again. | OK
 Couldn’t Stop SpaceTerm Core on This Mac | This SpaceTerm is too old for SpaceTerm Core on This Mac. | OK
 Couldn’t Stop SpaceTerm Core on penguin | On penguin, install a newer compatible SpaceTerm Core archive with spaceterm update --archive, or wait for a newer release. | OK
-Couldn’t Stop SpaceTerm Core on penguin | SpaceTerm Core on penguin didn’t finish. Try again. | OK
-Couldn’t Stop SpaceTerm Core on penguin | SpaceTerm Core on penguin is busy with another operation. Try again when it finishes. | OK
+Couldn’t Stop SpaceTerm Core on penguin | SpaceTerm Core on penguin didn’t finish. Try again. | Try Again, Cancel
+Couldn’t Stop SpaceTerm Core on penguin | SpaceTerm Core on penguin is busy with another operation. Try again when it finishes. | Try Again, Cancel
 Couldn’t Stop SpaceTerm Core on penguin | SpaceTerm Core on penguin is too old for this SpaceTerm. | OK
 Couldn’t Stop SpaceTerm Core on penguin | SpaceTerm can’t reach penguin. Try again when it’s connected. | OK
+Couldn’t Stop SpaceTerm Core on penguin | SpaceTerm can’t reach penguin. Try again when it’s connected. | Try Again, Cancel
 Couldn’t Stop SpaceTerm Core on penguin | SpaceTerm was replaced on disk while it was running. Relaunch SpaceTerm, then try again. | OK
 Couldn’t Stop SpaceTerm Core on penguin | This SpaceTerm is too old for SpaceTerm Core on penguin. | OK
-Couldn’t Stop SpaceTerm Core on penguin | penguin is out of disk space. Free some space, then try again. | OK
+Couldn’t Stop SpaceTerm Core on penguin | penguin is out of disk space. Free some space, then try again. | Try Again, Cancel
 Couldn’t Stop SpaceTerm Core on penguin | penguin needs SpaceTerm Core 0.12.0 first and couldn’t get it. | OK
 Couldn’t Stop SpaceTerm Core on penguin | penguin’s clock is more than five minutes behind. Set the correct date and time on penguin, then try again. | OK
 Restart SpaceTerm Core on This Mac? | SpaceTerm Core 0.11.3 restarts without updating. No Terminal Session is open. Workspaces, Tabs and Panes stay. | Restart Core, Cancel
@@ -526,8 +532,14 @@ Restart SpaceTerm Core on penguin? | SpaceTerm Core restarts from 0.11.3 to 0.11
 Restart SpaceTerm Core on penguin? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 3 Terminal Sessions. Workspaces, Tabs and Panes stay. | Restart Core, Cancel
 Restart SpaceTerm Core on penguin? | SpaceTerm Core restarts from 0.11.3 to 0.11.4. This ends 3 Terminal Sessions. Workspaces, Tabs and Panes stay. | Restart Core, Remind Me Tomorrow
 SpaceTerm Can’t Confirm the Restart on This Computer | This Computer stopped responding while SpaceTerm Core restarted into 0.11.5. | Check Again, Cancel
+SpaceTerm Can’t Confirm the Restart on This Mac | SpaceTerm lost touch with SpaceTerm Core on This Mac before it confirmed that it restarted. Check Status reads what happened. | Check Status, Cancel
 SpaceTerm Can’t Confirm the Restart on This Mac | This Mac stopped responding while SpaceTerm Core restarted into 0.11.5. | Check Again, Cancel
+SpaceTerm Can’t Confirm the Restart on penguin | SpaceTerm lost touch with SpaceTerm Core on penguin before it confirmed that it restarted. Check Status reads what happened. | Check Status, Cancel
 SpaceTerm Can’t Confirm the Restart on penguin | penguin stopped responding while SpaceTerm Core restarted into 0.11.5. | Check Again, Cancel
+SpaceTerm Can’t Confirm the Start on This Mac | SpaceTerm lost touch with SpaceTerm Core on This Mac before it confirmed that it started. Check Status reads what happened. | Check Status, Cancel
+SpaceTerm Can’t Confirm the Start on penguin | SpaceTerm lost touch with SpaceTerm Core on penguin before it confirmed that it started. Check Status reads what happened. | Check Status, Cancel
+SpaceTerm Can’t Confirm the Stop on This Mac | SpaceTerm lost touch with SpaceTerm Core on This Mac before it confirmed that it stopped. Check Status reads what happened. | Check Status, Cancel
+SpaceTerm Can’t Confirm the Stop on penguin | SpaceTerm lost touch with SpaceTerm Core on penguin before it confirmed that it stopped. Check Status reads what happened. | Check Status, Cancel
 SpaceTerm Core on This Computer Can’t Update by Itself | On This Computer, install a newer compatible SpaceTerm Core archive with spaceterm update --archive, or wait for a newer release. | OK (dismisses the step)
 SpaceTerm Core on This Mac Can’t Update by Itself | On This Mac, install a newer compatible SpaceTerm Core archive with spaceterm update --archive, or wait for a newer release. | OK (dismisses the step)
 SpaceTerm Core on penguin Can’t Update by Itself | On penguin, install a newer compatible SpaceTerm Core archive with spaceterm update --archive, or wait for a newer release. | OK (dismisses the step)

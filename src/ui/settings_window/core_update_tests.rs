@@ -256,12 +256,28 @@ fn a_failed_settings_preview_explains_the_failure(cx: &mut TestAppContext) {
     click(UPDATE_SELECTOR, cx);
     adapter.answer_preview(|_, _| Err(crate::updates::machines::ActionFailure::Unreachable));
     cx.run_until_parked();
+    // Nothing ran, so the explanation offers Try Again.
     assert!(
-        cx.debug_bounds("modal-action-settings-update-explanation-ok")
+        cx.debug_bounds("modal-action-settings-update-explanation-proceed")
             .is_some(),
         "the failure is explained"
     );
     assert!(adapter.executed().is_empty());
+}
+
+/// An approved restart whose answer was lost offers Check Status, never Try Again, so nothing
+/// can run it twice.
+#[gpui::test]
+fn an_unconfirmed_settings_restart_offers_check_status(cx: &mut TestAppContext) {
+    let (_, adapter, cx) = open(cx, Some("1.6.0"));
+    adapter.hold_previews();
+    click(UPDATE_SELECTOR, cx);
+    adapter.answer_preview(|_, _| Err(crate::updates::machines::ActionFailure::Unconfirmed));
+    cx.run_until_parked();
+    A11yTree::read(cx).text("SpaceTerm Can\u{2019}t Confirm the Restart on This Mac");
+    answer("settings-update-explanation-proceed", cx);
+    assert!(adapter.executed().is_empty(), "checking runs no restart");
+    assert_eq!(adapter.performed(), [(MACHINE, MachineAction::CheckAgain)]);
 }
 
 /// An approved restart the Core refuses without running it opens D5 at once, because the

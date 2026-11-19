@@ -31,6 +31,8 @@ pub(crate) const CANCEL: &str = "Cancel";
 pub(crate) const REMIND_ME_TOMORROW: &str = "Remind Me Tomorrow";
 pub(crate) const TRY_AGAIN: &str = "Try Again";
 pub(crate) const CHECK_AGAIN: &str = "Check Again";
+/// The follow-up of an action whose outcome is unconfirmed: it reads what happened.
+pub(crate) const CHECK_STATUS: &str = "Check Status";
 
 /// D1, or D2 for a same-version restart: one Machine per confirmation.
 pub(crate) fn restart(described: &[Previewed]) -> (SharedString, SharedString, SharedString) {
@@ -411,6 +413,7 @@ pub(crate) fn action_failure(
     };
     let message = match failure {
         ActionFailure::Changed | ActionFailure::LoginItemOff => return None,
+        ActionFailure::Unconfirmed => return Some(unconfirmed(name, action)),
         ActionFailure::Unavailable(Unavailable::CoreTooOld) => {
             format!("SpaceTerm Core on {name} is too old for this SpaceTerm.")
         }
@@ -431,4 +434,56 @@ pub(crate) fn action_failure(
         ActionFailure::Failed => format!("SpaceTerm Core on {name} didn\u{2019}t finish. Try again."),
     };
     Some((title.into(), message.into()))
+}
+
+/// The title and message for an action SpaceTerm Core admitted whose outcome nothing confirms.
+fn unconfirmed(name: &str, action: &MachineAction) -> (SharedString, SharedString) {
+    let (what, did) = match action {
+        MachineAction::Stop => ("Stop", "stopped"),
+        MachineAction::Start => ("Start", "started"),
+        _ => ("Restart", "restarted"),
+    };
+    (
+        format!("SpaceTerm Can\u{2019}t Confirm the {what} on {name}").into(),
+        format!(
+            "SpaceTerm lost touch with SpaceTerm Core on {name} before it confirmed that it {did}. \
+             Check Status reads what happened."
+        )
+        .into(),
+    )
+}
+
+/// [`action_failure`] as an alert with its follow-up. An unconfirmed outcome offers Check
+/// Status, which reads what happened and never repeats the action. A Start, Stop or Restart
+/// that failed or was refused before it ran offers Try Again, which asks first again wherever
+/// something ends.
+pub(crate) fn action_failure_alert(
+    name: &str,
+    machine: MachineId,
+    action: &MachineAction,
+    failure: ActionFailure,
+) -> Option<Explanation> {
+    let (title, message) = action_failure(name, action, failure)?;
+    let (then, proceed) = match (failure, action) {
+        (ActionFailure::Unconfirmed, _) => (
+            Some(Command::Machine(machine, MachineAction::CheckAgain)),
+            Some(CHECK_STATUS),
+        ),
+        (
+            ActionFailure::Busy
+            | ActionFailure::Unreachable
+            | ActionFailure::DiskFull
+            | ActionFailure::Failed,
+            MachineAction::Start | MachineAction::Stop | MachineAction::Restart,
+        ) => (
+            Some(Command::Machine(machine, action.clone())),
+            Some(TRY_AGAIN),
+        ),
+        _ => (None, None),
+    };
+    Some(Explanation {
+        then: then.map(Box::new),
+        proceed: proceed.map(SharedString::new_static),
+        ..Explanation::ok(title, message)
+    })
 }
