@@ -139,7 +139,9 @@ fn bookkept(
     exchange: impl FnOnce(&Request) -> Result<Reply, CoreError>,
 ) -> Result<Reply, CoreError> {
     let start = match request {
-        Request::StartRestored { core, .. } => Some(Some(*core)),
+        Request::StartRestored { core, .. } | Request::PrepareRestored { core, .. } => {
+            Some(Some(*core))
+        }
         Request::RepairDirectory { target, .. } => Some(Some(target.boot)),
         Request::SelectPane { explicit: true, .. } => Some(None),
         Request::TakeOver { target, .. }
@@ -306,7 +308,10 @@ impl ClaimWorker<'_> {
                     && (created_start
                         || state.start_restored.load(Ordering::Acquire)
                         || state.selected.load(Ordering::Acquire)
-                        || (was_attached && state.foreground()));
+                        || (was_attached && state.foreground())
+                        || (!state.start_unconfirmed()
+                            && state.prepares()
+                            && state.will_prepare(boot)));
                 state.set(if unavailable {
                     CorePaneStatus::Failed(CoreError::DirectoryUnavailable)
                 } else if let Some(end) = session_ended {
@@ -390,6 +395,31 @@ impl ClaimWorker<'_> {
                             return Err(error);
                         }
                         Ok(reply) => reply,
+                    };
+                } else if !unavailable
+                    && session_ended.is_none()
+                    && !state.start_unconfirmed()
+                    && state.prepares()
+                    && state.take_prepare(boot)
+                {
+                    // Nobody asked for this Pane yet. Its shell starts in the background with no
+                    // client in control, once per Core boot, so it is ready when the person
+                    // opens it.
+                    grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
+                    let update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    grant_appearance = None;
+                    reply = match exchange(&Request::PrepareRestored {
+                        core: boot,
+                        pane,
+                        size: grant_size,
+                        style: Some(encode_style(&update)),
+                    }) {
+                        Err(CoreError::DirectoryUnavailable) => {
+                            unavailable = true;
+                            state.invalidate();
+                            reply
+                        }
+                        other => other?,
                     };
                 } else {
                     // Start, selection, repair and dismissal wake this wait, and so does

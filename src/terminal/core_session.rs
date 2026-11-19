@@ -86,6 +86,8 @@ pub(crate) struct CorePaneState {
     selected: Arc<AtomicBool>,
     /// The Pane is the Focused Pane of the Tab and Workspace the person has open.
     foreground: AtomicBool,
+    /// The Core boot whose background start this Pane last asked for, so it asks once per boot.
+    prepared: Mutex<Option<[u8; 32]>>,
     created_start: Arc<AtomicBool>,
     take_over: AtomicBool,
     start_restored: Arc<AtomicBool>,
@@ -132,6 +134,7 @@ impl CorePaneState {
             retry: AtomicBool::new(false),
             selected: Arc::default(),
             foreground: AtomicBool::new(false),
+            prepared: Mutex::default(),
             created_start: Arc::default(),
             take_over: AtomicBool::new(false),
             start_restored: Arc::default(),
@@ -248,6 +251,28 @@ impl CorePaneState {
 
     pub(crate) fn foreground(&self) -> bool {
         self.foreground.load(Ordering::Acquire)
+    }
+
+    /// Whether this Pane may still ask Core `boot` for its background start.
+    pub(crate) fn will_prepare(&self, boot: [u8; 32]) -> bool {
+        *self.prepared.lock().unwrap_or_else(|e| e.into_inner()) != Some(boot)
+    }
+
+    /// Whether this Pane may still ask Core `boot` for its background start, and from now on it
+    /// may not.
+    pub(crate) fn take_prepare(&self, boot: [u8; 32]) -> bool {
+        let mut prepared = self.prepared.lock().unwrap_or_else(|e| e.into_inner());
+        prepared.replace(boot) != Some(boot)
+    }
+
+    /// Whether this Pane's Core starts a retained shell in the background without granting
+    /// control: one whose live work connection selected work 1.4 or later.
+    pub(crate) fn prepares(&self) -> bool {
+        self.directory_core().is_some_and(|core| {
+            core.capabilities()
+                .work()
+                .is_ok_and(|work| work.minor >= spaceterm_core::pane::MINOR_PREPARE)
+        })
     }
 
     pub(crate) fn select(&self) {

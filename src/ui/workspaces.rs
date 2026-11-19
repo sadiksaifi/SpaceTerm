@@ -1402,12 +1402,19 @@ mod core_workspaces {
         /// longer starting.
         pub(crate) fn shell_starting(&self, pane_id: PaneId) -> bool {
             use crate::terminal::core_session::CorePaneStatus;
-            let starting = self.views.get(&pane_id).is_some_and(|view| {
-                matches!(
-                    view.connection().status(),
-                    CorePaneStatus::Connecting | CorePaneStatus::Connected
-                )
-            });
+            let Some(connection) = self.views.get(&pane_id).map(CorePaneView::connection) else {
+                self.shell_starts.borrow_mut().remove(&pane_id);
+                return false;
+            };
+            let status = connection.status();
+            // A background start this client asked for is starting too, until it is answered.
+            if status == CorePaneStatus::Connecting && connection.startup_pending() {
+                return true;
+            }
+            let starting = matches!(
+                status,
+                CorePaneStatus::Connecting | CorePaneStatus::Connected
+            );
             let mut starts = self.shell_starts.borrow_mut();
             if !starting {
                 starts.remove(&pane_id);

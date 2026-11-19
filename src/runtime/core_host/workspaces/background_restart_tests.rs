@@ -8,7 +8,7 @@ use crate::terminal::geometry::{
     BackingScale, CellGridSize, LogicalCellSize, LogicalSize, TerminalGeometry,
 };
 use crate::terminal::session::{TerminalAppearanceUpdate, TerminalSessionFactory as _};
-use crate::ui::core_pane::{CorePaneScreen, CorePaneView, DormantCopy};
+use crate::ui::core_pane::{CorePaneScreen, CorePaneView};
 use spaceterm_core::direct::{DirectConnection, DirectConnector, DirectError};
 
 struct Away;
@@ -96,16 +96,17 @@ fn three_panes_observe_restart_after_the_window_reopens_offline() {
     core.stop_core();
     core.restore_core(restored());
     (core.reconnect)();
+    // Each Pane's fresh shell starts once in the background, and no client controls it.
+    let starts = core.starts();
     for (_, state) in &window {
-        await_status(state, CorePaneStatus::Restored);
+        await_status(state, CorePaneStatus::Takeover);
     }
-    assert!(
-        core.sessions().is_empty(),
-        "restart started a shell without first use"
-    );
-    window[2].1.start_restored();
+    assert_eq!(core.sessions().len(), 3, "each Pane started once");
+    assert_eq!(core.starts(), starts, "no background start claimed a Pane");
+    // Selecting a prepared Pane acquires its running shell without starting another.
+    window[2].1.select();
     await_status(&window[2].1, CorePaneStatus::Connected);
-    assert_eq!(core.sessions().len(), 1);
+    assert_eq!(core.sessions().len(), 3);
 
     // Close the Workspace window, stop the server, then reopen the window while offline.
     drop(window);
@@ -134,7 +135,7 @@ fn three_panes_observe_restart_after_the_window_reopens_offline() {
         && core.connection().live_link().is_some()
         && reopened
             .iter()
-            .any(|(_, state)| state.status() != CorePaneStatus::Restored)
+            .any(|(_, state)| state.status() != CorePaneStatus::Takeover)
     {
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -149,7 +150,7 @@ fn three_panes_observe_restart_after_the_window_reopens_offline() {
     reopened[2].0.handle.focus(true);
     for (index, (_, state)) in reopened.iter().enumerate() {
         let until = Instant::now() + Duration::from_secs(10);
-        while state.status() != CorePaneStatus::Restored && Instant::now() < until {
+        while state.status() != CorePaneStatus::Takeover && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(
@@ -158,33 +159,28 @@ fn three_panes_observe_restart_after_the_window_reopens_offline() {
         );
         let mut view = CorePaneView::new(state.clone());
         view.sync();
-        let Some(CorePaneScreen::Restored {
-            starting: false,
-            unconfirmed: false,
-            offered: true,
-            ended,
-        }) = view.screen()
-        else {
-            panic!(
-                "Pane {index} on the connected route did not offer Start Session: status={:?}, screen={:?}, notice={:?}",
-                state.status(),
+        assert!(
+            matches!(
                 view.screen(),
-                view.notice()
-            );
-        };
-        let copy = DormantCopy::of(ended);
-        assert_eq!(
-            (copy.title.as_ref(), copy.label),
-            ("SpaceTerm Core Restarted", "Start Session")
+                Some(CorePaneScreen::Takeover {
+                    offered: true,
+                    ended: false,
+                    ..
+                })
+            ),
+            "Pane {index} on the connected route did not wait unclaimed: status={:?}, screen={:?}",
+            state.status(),
+            view.screen(),
         );
     }
     assert_eq!(
         core.starts(),
         starts,
-        "reconnection submitted a shell start"
+        "reconnection claimed no Pane and selected none"
     );
-    assert!(
-        core.sessions().is_empty(),
-        "reconnection started a shell without first use"
+    assert_eq!(
+        core.sessions().len(),
+        3,
+        "each Pane of the restarted server started once in the background"
     );
 }

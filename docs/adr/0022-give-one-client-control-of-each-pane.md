@@ -8,7 +8,7 @@ Whenever SpaceTerm Core offers Take Over, it names the Controlling Client by its
 
 Selecting an unclaimed Pane by clicking it or navigating to it with the keyboard requests control automatically. SpaceTerm Core grants control only while the Pane remains unclaimed; if another client acquires it first, the selecting client presents the Takeover Screen. Selecting a Pane controlled by another client requires Take Over, including when that client is disconnected.
 
-Opening a Tab also applies this acquisition rule to that client's Focused Pane in the opened Tab. It does not acquire control of other Panes or of Focused Panes remembered in inactive Tabs.
+Opening a Tab also applies this acquisition rule to that client's Focused Pane in the opened Tab. It does not acquire control of other Panes or of Focused Panes remembered in inactive Tabs. A retained Pane that a client starts in the background under [ADR 0043](0043-start-restored-shells-on-first-use.md) stays unclaimed until someone selects it.
 
 Once a client has focused a Pane and acquired control, switching Tabs preserves that control.
 
