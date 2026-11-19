@@ -79,17 +79,17 @@ Restarting Core… | Plain | Restarting SpaceTerm Core on penguin into 0.11.5.
 Restarting Core… | Plain | Restarting SpaceTerm Core on penguin.
 Update Failed | Warning | Couldn’t download SpaceTerm 0.11.5. Check your network, then try again.
 Update Failed | Warning | Couldn’t download SpaceTerm Core 0.11.5 to This Computer.
-Update Failed | Warning | Couldn’t download SpaceTerm Core 0.11.5 to This Computer. SpaceTerm Core on This Computer is busy with another update.
+Update Failed | Warning | Couldn’t download SpaceTerm Core 0.11.5 to This Computer. SpaceTerm Core on This Computer is busy with another operation.
 Update Failed | Warning | Couldn’t download SpaceTerm Core 0.11.5 to This Computer. SpaceTerm was replaced on disk while it was running.
 Update Failed | Warning | Couldn’t download SpaceTerm Core 0.11.5 to This Computer. This Computer is out of disk space.
 Update Failed | Warning | Couldn’t download SpaceTerm Core 0.11.5 to This Computer. This Computer stopped answering.
 Update Failed | Warning | Couldn’t download SpaceTerm Core 0.11.5 to This Mac.
-Update Failed | Warning | Couldn’t download SpaceTerm Core 0.11.5 to This Mac. SpaceTerm Core on This Mac is busy with another update.
+Update Failed | Warning | Couldn’t download SpaceTerm Core 0.11.5 to This Mac. SpaceTerm Core on This Mac is busy with another operation.
 Update Failed | Warning | Couldn’t download SpaceTerm Core 0.11.5 to This Mac. SpaceTerm was replaced on disk while it was running.
 Update Failed | Warning | Couldn’t download SpaceTerm Core 0.11.5 to This Mac. This Mac is out of disk space.
 Update Failed | Warning | Couldn’t download SpaceTerm Core 0.11.5 to This Mac. This Mac stopped answering.
 Update Failed | Warning | Couldn’t download SpaceTerm Core 0.11.5 to penguin.
-Update Failed | Warning | Couldn’t download SpaceTerm Core 0.11.5 to penguin. SpaceTerm Core on penguin is busy with another update.
+Update Failed | Warning | Couldn’t download SpaceTerm Core 0.11.5 to penguin. SpaceTerm Core on penguin is busy with another operation.
 Update Failed | Warning | Couldn’t download SpaceTerm Core 0.11.5 to penguin. SpaceTerm was replaced on disk while it was running.
 Update Failed | Warning | Couldn’t download SpaceTerm Core 0.11.5 to penguin. penguin is out of disk space.
 Update Failed | Warning | Couldn’t download SpaceTerm Core 0.11.5 to penguin. penguin stopped answering.
@@ -338,9 +338,9 @@ Couldn’t Check for SpaceTerm Updates | The check didn’t finish. Check your n
 Couldn’t Check for Updates on This Computer | The check didn’t finish. Check your network, then try again. | Check Again, Cancel
 Couldn’t Check for Updates on This Mac | On This Mac, install a newer compatible SpaceTerm Core archive with spaceterm update --archive, or wait for a newer release. | OK
 Couldn’t Check for Updates on This Mac | SpaceTerm Core on This Mac didn’t finish. Try again. | OK
-Couldn’t Check for Updates on This Mac | SpaceTerm Core on This Mac is busy with another update. Try again when it finishes. SpaceTerm Core 0.11.4 stays downloaded. | Check Again, Cancel
-Couldn’t Check for Updates on This Mac | SpaceTerm Core on This Mac is busy with another update. Try again when it finishes. | Check Again, Cancel
-Couldn’t Check for Updates on This Mac | SpaceTerm Core on This Mac is busy with another update. Try again when it finishes. | OK
+Couldn’t Check for Updates on This Mac | SpaceTerm Core on This Mac is busy with another operation. Try again when it finishes. SpaceTerm Core 0.11.4 stays downloaded. | Check Again, Cancel
+Couldn’t Check for Updates on This Mac | SpaceTerm Core on This Mac is busy with another operation. Try again when it finishes. | Check Again, Cancel
+Couldn’t Check for Updates on This Mac | SpaceTerm Core on This Mac is busy with another operation. Try again when it finishes. | OK
 Couldn’t Check for Updates on This Mac | SpaceTerm Core on This Mac is too old for this SpaceTerm. | OK
 Couldn’t Check for Updates on This Mac | SpaceTerm can’t reach This Mac. Try again when it’s connected. | Check Again, Cancel
 Couldn’t Check for Updates on This Mac | SpaceTerm can’t reach This Mac. Try again when it’s connected. | OK
@@ -354,9 +354,9 @@ Couldn’t Check for Updates on This Mac | This Mac’s clock is more than five 
 Couldn’t Check for Updates on This Mac | This SpaceTerm is too old for SpaceTerm Core on This Mac. | OK
 Couldn’t Check for Updates on penguin | On penguin, install a newer compatible SpaceTerm Core archive with spaceterm update --archive, or wait for a newer release. | OK
 Couldn’t Check for Updates on penguin | SpaceTerm Core on penguin didn’t finish. Try again. | OK
-Couldn’t Check for Updates on penguin | SpaceTerm Core on penguin is busy with another update. Try again when it finishes. SpaceTerm Core 0.11.4 stays downloaded. | Check Again, Cancel
-Couldn’t Check for Updates on penguin | SpaceTerm Core on penguin is busy with another update. Try again when it finishes. | Check Again, Cancel
-Couldn’t Check for Updates on penguin | SpaceTerm Core on penguin is busy with another update. Try again when it finishes. | OK
+Couldn’t Check for Updates on penguin | SpaceTerm Core on penguin is busy with another operation. Try again when it finishes. SpaceTerm Core 0.11.4 stays downloaded. | Check Again, Cancel
+Couldn’t Check for Updates on penguin | SpaceTerm Core on penguin is busy with another operation. Try again when it finishes. | Check Again, Cancel
+Couldn’t Check for Updates on penguin | SpaceTerm Core on penguin is busy with another operation. Try again when it finishes. | OK
 Couldn’t Check for Updates on penguin | SpaceTerm Core on penguin is too old for this SpaceTerm. | OK
 Couldn’t Check for Updates on penguin | SpaceTerm can’t reach penguin. Try again when it’s connected. | Check Again, Cancel
 Couldn’t Check for Updates on penguin | SpaceTerm can’t reach penguin. Try again when it’s connected. | OK
@@ -373,19 +373,19 @@ Couldn’t Connect to penguin | SpaceTerm couldn’t reach penguin to check for 
 Couldn’t Download SpaceTerm 0.11.5 | Check your network, then try again. | Try Again, Cancel (dismisses the step)
 Couldn’t Download SpaceTerm 0.11.5 | SpaceTerm tries again later. Terminal Sessions keep running. | OK
 Couldn’t Download SpaceTerm Core 0.11.5 to This Computer | Its Terminal Sessions keep running. | Try Again, Cancel (dismisses the step)
-Couldn’t Download SpaceTerm Core 0.11.5 to This Computer | SpaceTerm Core on This Computer is busy with another update. Its Terminal Sessions keep running. | Try Again, Cancel (dismisses the step)
+Couldn’t Download SpaceTerm Core 0.11.5 to This Computer | SpaceTerm Core on This Computer is busy with another operation. Its Terminal Sessions keep running. | Try Again, Cancel (dismisses the step)
 Couldn’t Download SpaceTerm Core 0.11.5 to This Computer | SpaceTerm Core tries again later. Its Terminal Sessions keep running. | OK
 Couldn’t Download SpaceTerm Core 0.11.5 to This Computer | SpaceTerm was replaced on disk while it was running. Relaunch SpaceTerm, then try again. | OK (dismisses the step)
 Couldn’t Download SpaceTerm Core 0.11.5 to This Computer | This Computer is out of disk space. Its Terminal Sessions keep running. | Try Again, Cancel (dismisses the step)
 Couldn’t Download SpaceTerm Core 0.11.5 to This Computer | This Computer stopped answering. Its Terminal Sessions keep running. | Try Again, Cancel (dismisses the step)
 Couldn’t Download SpaceTerm Core 0.11.5 to This Mac | Its Terminal Sessions keep running. | Try Again, Cancel (dismisses the step)
-Couldn’t Download SpaceTerm Core 0.11.5 to This Mac | SpaceTerm Core on This Mac is busy with another update. Its Terminal Sessions keep running. | Try Again, Cancel (dismisses the step)
+Couldn’t Download SpaceTerm Core 0.11.5 to This Mac | SpaceTerm Core on This Mac is busy with another operation. Its Terminal Sessions keep running. | Try Again, Cancel (dismisses the step)
 Couldn’t Download SpaceTerm Core 0.11.5 to This Mac | SpaceTerm Core tries again later. Its Terminal Sessions keep running. | OK
 Couldn’t Download SpaceTerm Core 0.11.5 to This Mac | SpaceTerm was replaced on disk while it was running. Relaunch SpaceTerm, then try again. | OK (dismisses the step)
 Couldn’t Download SpaceTerm Core 0.11.5 to This Mac | This Mac is out of disk space. Its Terminal Sessions keep running. | Try Again, Cancel (dismisses the step)
 Couldn’t Download SpaceTerm Core 0.11.5 to This Mac | This Mac stopped answering. Its Terminal Sessions keep running. | Try Again, Cancel (dismisses the step)
 Couldn’t Download SpaceTerm Core 0.11.5 to penguin | Its Terminal Sessions keep running. | Try Again, Cancel (dismisses the step)
-Couldn’t Download SpaceTerm Core 0.11.5 to penguin | SpaceTerm Core on penguin is busy with another update. Its Terminal Sessions keep running. | Try Again, Cancel (dismisses the step)
+Couldn’t Download SpaceTerm Core 0.11.5 to penguin | SpaceTerm Core on penguin is busy with another operation. Its Terminal Sessions keep running. | Try Again, Cancel (dismisses the step)
 Couldn’t Download SpaceTerm Core 0.11.5 to penguin | SpaceTerm Core tries again later. Its Terminal Sessions keep running. | OK
 Couldn’t Download SpaceTerm Core 0.11.5 to penguin | SpaceTerm was replaced on disk while it was running. Relaunch SpaceTerm, then try again. | OK (dismisses the step)
 Couldn’t Download SpaceTerm Core 0.11.5 to penguin | penguin is out of disk space. Its Terminal Sessions keep running. | Try Again, Cancel (dismisses the step)
@@ -395,7 +395,7 @@ Couldn’t Download SpaceTerm Core 0.12.1 to This Mac | This Mac needs SpaceTerm
 Couldn’t Download SpaceTerm Core 0.12.1 to penguin | penguin needs SpaceTerm Core 0.12.0 first and couldn’t get it. Its Terminal Sessions keep running. | Try Again, Cancel (dismisses the step)
 Couldn’t Download SpaceTerm Core to This Mac | On This Mac, install a newer compatible SpaceTerm Core archive with spaceterm update --archive, or wait for a newer release. | OK
 Couldn’t Download SpaceTerm Core to This Mac | SpaceTerm Core on This Mac didn’t finish. Try again. | OK
-Couldn’t Download SpaceTerm Core to This Mac | SpaceTerm Core on This Mac is busy with another update. Try again when it finishes. | OK
+Couldn’t Download SpaceTerm Core to This Mac | SpaceTerm Core on This Mac is busy with another operation. Try again when it finishes. | OK
 Couldn’t Download SpaceTerm Core to This Mac | SpaceTerm Core on This Mac is too old for this SpaceTerm. | OK
 Couldn’t Download SpaceTerm Core to This Mac | SpaceTerm can’t reach This Mac. Try again when it’s connected. | OK
 Couldn’t Download SpaceTerm Core to This Mac | SpaceTerm was replaced on disk while it was running. Relaunch SpaceTerm, then try again. | OK
@@ -405,7 +405,7 @@ Couldn’t Download SpaceTerm Core to This Mac | This Mac’s clock is more than
 Couldn’t Download SpaceTerm Core to This Mac | This SpaceTerm is too old for SpaceTerm Core on This Mac. | OK
 Couldn’t Download SpaceTerm Core to penguin | On penguin, install a newer compatible SpaceTerm Core archive with spaceterm update --archive, or wait for a newer release. | OK
 Couldn’t Download SpaceTerm Core to penguin | SpaceTerm Core on penguin didn’t finish. Try again. | OK
-Couldn’t Download SpaceTerm Core to penguin | SpaceTerm Core on penguin is busy with another update. Try again when it finishes. | OK
+Couldn’t Download SpaceTerm Core to penguin | SpaceTerm Core on penguin is busy with another operation. Try again when it finishes. | OK
 Couldn’t Download SpaceTerm Core to penguin | SpaceTerm Core on penguin is too old for this SpaceTerm. | OK
 Couldn’t Download SpaceTerm Core to penguin | SpaceTerm can’t reach penguin. Try again when it’s connected. | OK
 Couldn’t Download SpaceTerm Core to penguin | SpaceTerm was replaced on disk while it was running. Relaunch SpaceTerm, then try again. | OK
@@ -425,7 +425,7 @@ Couldn’t Restart SpaceTerm Core on This Mac | SpaceTerm Core 0.11.4 couldn’t
 Couldn’t Restart SpaceTerm Core on This Mac | SpaceTerm Core 0.11.4 didn’t start, so it went back to 0.11.3. The Terminal Sessions that ended don’t come back. SpaceTerm waits for the next update. | OK (dismisses the step)
 Couldn’t Restart SpaceTerm Core on This Mac | SpaceTerm Core 0.11.4 didn’t start. It stays downloaded. | Try Again, Cancel
 Couldn’t Restart SpaceTerm Core on This Mac | SpaceTerm Core on This Mac didn’t finish. Try again. | OK
-Couldn’t Restart SpaceTerm Core on This Mac | SpaceTerm Core on This Mac is busy with another update. Try again when it finishes. | OK
+Couldn’t Restart SpaceTerm Core on This Mac | SpaceTerm Core on This Mac is busy with another operation. Try again when it finishes. | OK
 Couldn’t Restart SpaceTerm Core on This Mac | SpaceTerm Core on This Mac is too old for this SpaceTerm. | OK
 Couldn’t Restart SpaceTerm Core on This Mac | SpaceTerm can’t reach This Mac. Try again when it’s connected. | OK
 Couldn’t Restart SpaceTerm Core on This Mac | SpaceTerm was replaced on disk while it was running. Relaunch SpaceTerm, then try again. | OK
@@ -440,7 +440,7 @@ Couldn’t Restart SpaceTerm Core on penguin | SpaceTerm Core 0.11.4 couldn’t 
 Couldn’t Restart SpaceTerm Core on penguin | SpaceTerm Core 0.11.4 didn’t start, so it went back to 0.11.3. The Terminal Sessions that ended don’t come back. SpaceTerm waits for the next update. | OK (dismisses the step)
 Couldn’t Restart SpaceTerm Core on penguin | SpaceTerm Core 0.11.4 didn’t start. It stays downloaded. | Try Again, Cancel
 Couldn’t Restart SpaceTerm Core on penguin | SpaceTerm Core on penguin didn’t finish. Try again. | OK
-Couldn’t Restart SpaceTerm Core on penguin | SpaceTerm Core on penguin is busy with another update. Try again when it finishes. | OK
+Couldn’t Restart SpaceTerm Core on penguin | SpaceTerm Core on penguin is busy with another operation. Try again when it finishes. | OK
 Couldn’t Restart SpaceTerm Core on penguin | SpaceTerm Core on penguin is too old for this SpaceTerm. | OK
 Couldn’t Restart SpaceTerm Core on penguin | SpaceTerm can’t reach penguin. Try again when it’s connected. | OK
 Couldn’t Restart SpaceTerm Core on penguin | SpaceTerm was replaced on disk while it was running. Relaunch SpaceTerm, then try again. | OK
@@ -451,7 +451,7 @@ Couldn’t Restart SpaceTerm Core on penguin | penguin needs SpaceTerm Core 0.12
 Couldn’t Restart SpaceTerm Core on penguin | penguin’s clock is more than five minutes behind. Set the correct date and time on penguin, then try again. | OK
 Couldn’t Start SpaceTerm Core on This Mac | On This Mac, install a newer compatible SpaceTerm Core archive with spaceterm update --archive, or wait for a newer release. | OK
 Couldn’t Start SpaceTerm Core on This Mac | SpaceTerm Core on This Mac didn’t finish. Try again. | OK
-Couldn’t Start SpaceTerm Core on This Mac | SpaceTerm Core on This Mac is busy with another update. Try again when it finishes. | OK
+Couldn’t Start SpaceTerm Core on This Mac | SpaceTerm Core on This Mac is busy with another operation. Try again when it finishes. | OK
 Couldn’t Start SpaceTerm Core on This Mac | SpaceTerm Core on This Mac is too old for this SpaceTerm. | OK
 Couldn’t Start SpaceTerm Core on This Mac | SpaceTerm can’t reach This Mac. Try again when it’s connected. | OK
 Couldn’t Start SpaceTerm Core on This Mac | SpaceTerm was replaced on disk while it was running. Relaunch SpaceTerm, then try again. | OK
@@ -461,7 +461,7 @@ Couldn’t Start SpaceTerm Core on This Mac | This Mac’s clock is more than fi
 Couldn’t Start SpaceTerm Core on This Mac | This SpaceTerm is too old for SpaceTerm Core on This Mac. | OK
 Couldn’t Start SpaceTerm Core on penguin | On penguin, install a newer compatible SpaceTerm Core archive with spaceterm update --archive, or wait for a newer release. | OK
 Couldn’t Start SpaceTerm Core on penguin | SpaceTerm Core on penguin didn’t finish. Try again. | OK
-Couldn’t Start SpaceTerm Core on penguin | SpaceTerm Core on penguin is busy with another update. Try again when it finishes. | OK
+Couldn’t Start SpaceTerm Core on penguin | SpaceTerm Core on penguin is busy with another operation. Try again when it finishes. | OK
 Couldn’t Start SpaceTerm Core on penguin | SpaceTerm Core on penguin is too old for this SpaceTerm. | OK
 Couldn’t Start SpaceTerm Core on penguin | SpaceTerm can’t reach penguin. Try again when it’s connected. | OK
 Couldn’t Start SpaceTerm Core on penguin | SpaceTerm was replaced on disk while it was running. Relaunch SpaceTerm, then try again. | OK
@@ -471,7 +471,7 @@ Couldn’t Start SpaceTerm Core on penguin | penguin needs SpaceTerm Core 0.12.0
 Couldn’t Start SpaceTerm Core on penguin | penguin’s clock is more than five minutes behind. Set the correct date and time on penguin, then try again. | OK
 Couldn’t Stop SpaceTerm Core on This Mac | On This Mac, install a newer compatible SpaceTerm Core archive with spaceterm update --archive, or wait for a newer release. | OK
 Couldn’t Stop SpaceTerm Core on This Mac | SpaceTerm Core on This Mac didn’t finish. Try again. | OK
-Couldn’t Stop SpaceTerm Core on This Mac | SpaceTerm Core on This Mac is busy with another update. Try again when it finishes. | OK
+Couldn’t Stop SpaceTerm Core on This Mac | SpaceTerm Core on This Mac is busy with another operation. Try again when it finishes. | OK
 Couldn’t Stop SpaceTerm Core on This Mac | SpaceTerm Core on This Mac is too old for this SpaceTerm. | OK
 Couldn’t Stop SpaceTerm Core on This Mac | SpaceTerm can’t reach This Mac. Try again when it’s connected. | OK
 Couldn’t Stop SpaceTerm Core on This Mac | SpaceTerm was replaced on disk while it was running. Relaunch SpaceTerm, then try again. | OK
@@ -481,7 +481,7 @@ Couldn’t Stop SpaceTerm Core on This Mac | This Mac’s clock is more than fiv
 Couldn’t Stop SpaceTerm Core on This Mac | This SpaceTerm is too old for SpaceTerm Core on This Mac. | OK
 Couldn’t Stop SpaceTerm Core on penguin | On penguin, install a newer compatible SpaceTerm Core archive with spaceterm update --archive, or wait for a newer release. | OK
 Couldn’t Stop SpaceTerm Core on penguin | SpaceTerm Core on penguin didn’t finish. Try again. | OK
-Couldn’t Stop SpaceTerm Core on penguin | SpaceTerm Core on penguin is busy with another update. Try again when it finishes. | OK
+Couldn’t Stop SpaceTerm Core on penguin | SpaceTerm Core on penguin is busy with another operation. Try again when it finishes. | OK
 Couldn’t Stop SpaceTerm Core on penguin | SpaceTerm Core on penguin is too old for this SpaceTerm. | OK
 Couldn’t Stop SpaceTerm Core on penguin | SpaceTerm can’t reach penguin. Try again when it’s connected. | OK
 Couldn’t Stop SpaceTerm Core on penguin | SpaceTerm was replaced on disk while it was running. Relaunch SpaceTerm, then try again. | OK

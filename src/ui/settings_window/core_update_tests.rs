@@ -279,7 +279,7 @@ fn a_refused_approved_settings_restart_opens_d5(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     A11yTree::read(cx).text(
-        "SpaceTerm Core on This Mac is busy with another update. Try again when it finishes.",
+        "SpaceTerm Core on This Mac is busy with another operation. Try again when it finishes.",
     );
     assert_eq!(adapter.executed().len(), 1, "no restart runs again");
 }

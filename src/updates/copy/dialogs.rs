@@ -217,7 +217,7 @@ pub(crate) fn machine_failure(row: &MachineRow) -> Option<Explanation> {
             let first = match cause {
                 DownloadCause::DiskFull => format!("{name} is out of disk space. "),
                 DownloadCause::Unreachable => format!("{name} stopped answering. "),
-                DownloadCause::Busy => format!("SpaceTerm Core on {name} is busy with another update. "),
+                DownloadCause::Busy => format!("SpaceTerm Core on {name} is busy with another operation. "),
                 DownloadCause::RelaunchRequired | DownloadCause::Failed => String::new(),
             };
             Explanation {
@@ -421,7 +421,7 @@ pub(crate) fn action_failure(
             format!("SpaceTerm can\u{2019}t reach {name}. Try again when it\u{2019}s connected.")
         }
         ActionFailure::Busy => format!(
-            "SpaceTerm Core on {name} is busy with another update. Try again when it finishes."
+            "SpaceTerm Core on {name} is busy with another operation. Try again when it finishes."
         ),
         ActionFailure::DiskFull => format!("{name} is out of disk space. Free some space, then try again."),
         ActionFailure::RelaunchRequired => "SpaceTerm was replaced on disk while it was running. Relaunch SpaceTerm, then try again.".to_owned(),

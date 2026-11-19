@@ -885,7 +885,7 @@ fn only_a_restart_refused_at_its_preview_has_an_alert() {
         commands::refusal(&notice(ActionFailure::Busy, true)).expect("a busy Core explains itself");
     assert_eq!(
         busy.message,
-        "SpaceTerm Core on penguin is busy with another update. Try again when it finishes."
+        "SpaceTerm Core on penguin is busy with another operation. Try again when it finishes."
     );
     for failure in [
         ActionFailure::Unreachable,
