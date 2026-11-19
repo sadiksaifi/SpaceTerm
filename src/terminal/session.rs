@@ -685,6 +685,9 @@ impl TerminalRuntime {
                 command,
                 Command::Focus(_) | Command::Resize | Command::ClearScreenAndScrollback
             );
+        if command.submits_line() {
+            self.event_publisher.note_submitted();
+        }
         let command = if records_input {
             let Ok(receipt) = self
                 .event_publisher
@@ -1155,6 +1158,26 @@ impl Command {
     }
 
     /// The Terminal Diagnostics kind of this command.
+    /// Whether this input submits a line to the program reading it, as Enter or a Run does.
+    fn submits_line(&self) -> bool {
+        match self {
+            Self::Received(command, _) => command.submits_line(),
+            Self::Run(..) => true,
+            Self::Key(key) => {
+                key.action != crate::terminal::key::KeyAction::Release
+                    && (matches!(
+                        key.physical_key,
+                        crate::terminal::key::PhysicalKey::Enter
+                            | crate::terminal::key::PhysicalKey::NumpadEnter
+                    ) || key
+                        .text
+                        .as_deref()
+                        .is_some_and(|text| text.contains(['\r', '\n'])))
+            }
+            _ => false,
+        }
+    }
+
     fn kind(&self) -> PaneWorkerCommand {
         match self {
             Self::Received(command, _) => command.kind(),
@@ -2039,6 +2062,7 @@ impl TerminalWorker {
             return false;
         }
         self.note_activity();
+        self.events.note_output();
 
         if let Some(read_error) = reader_stopped {
             if self.clipboard.pending() {

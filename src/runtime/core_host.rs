@@ -425,6 +425,14 @@ impl CorePaneHost {
             .filter(|pane| !pane.ended)
             .is_some_and(|pane| pane.runtime.work_going_on(now))
     }
+    /// Whether current facts verify work in this Pane's running Terminal Session that a direct
+    /// close would end. A Pane without one has none.
+    pub(crate) fn running_work(&self) -> bool {
+        self.pane
+            .as_ref()
+            .filter(|pane| !pane.ended)
+            .is_some_and(|pane| pane.runtime.running_work())
+    }
     /// This Pane's running Terminal Session, if one has not ended.
     pub(crate) fn live_session(&self) -> Option<[u8; 32]> {
         self.pane

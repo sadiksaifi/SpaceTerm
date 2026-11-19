@@ -10,6 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 #[cfg(test)]
+#[path = "workspaces/close_activity_tests.rs"]
+mod close_activity_tests;
+#[cfg(test)]
 #[path = "workspaces/close_control_tests.rs"]
 mod close_control_tests;
 #[cfg(test)]
@@ -659,6 +662,24 @@ impl WorkspaceHost {
         }
         let mut next = self.state.clone();
         next.inventory = self.inventory();
+        // A close that asks nobody first reads each exact Session's activity now, after every
+        // input this host accepted before it.
+        if let Mutation::Close { confirmation, .. } = &mutation
+            && confirmation.own_controls.is_some()
+        {
+            let working = confirmation
+                .panes
+                .iter()
+                .filter_map(|pane| {
+                    let session = pane.session?;
+                    let host = self.panes.get(&pane.id)?;
+                    (host.live_session() == Some(session) && host.running_work()).then_some(session)
+                })
+                .collect();
+            next.set_working(working);
+        } else {
+            next.set_working(Default::default());
+        }
         let mut directory = Ok(self.prototype.directory.clone());
         if let Mutation::SplitPane {
             workspace,

@@ -16,6 +16,10 @@ pub(super) struct ActivityState {
     /// The owning shell waited at its own empty prompt after `last`.
     empty_prompt: bool,
     probe: Option<Arc<dyn SessionProbe>>,
+    /// A line was submitted, such as by Enter, that neither a prompt nor any output answered
+    /// yet. It is recorded where input is accepted, before the worker writes it, so a close the
+    /// host admits after that input sees it.
+    submitted: bool,
 }
 
 impl Default for ActivityState {
@@ -25,6 +29,7 @@ impl Default for ActivityState {
             last: None,
             empty_prompt: false,
             probe: None,
+            submitted: false,
         }
     }
 }
@@ -39,6 +44,9 @@ impl ActivityState {
     pub(super) fn note(&mut self, now: Instant, empty_prompt: bool) {
         self.last = Some(now);
         self.empty_prompt = empty_prompt;
+        if empty_prompt {
+            self.submitted = false;
+        }
     }
 }
 
@@ -69,6 +77,12 @@ impl TerminalRuntime {
         state.activity.probe.as_ref()?.activity()?;
         drop(state);
         Some(Arc::new(self.event_publisher.clone()))
+    }
+
+    /// Whether current facts verify work that a direct close of this Terminal Session would end.
+    /// See [`TerminalEventPublisher::running_work`].
+    pub(crate) fn running_work(&self) -> bool {
+        self.event_publisher.running_work()
     }
 
     /// Whether this Terminal Session has work going on at `now`, by [`work_going_on`]. A
@@ -130,6 +144,52 @@ impl TerminalEventPublisher {
     pub(super) fn note_activity(&self, now: Instant, empty_prompt: bool) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         state.activity.note(now, empty_prompt);
+    }
+
+    /// Records that accepted input submits a line, before the worker writes it.
+    pub(super) fn note_submitted(&self) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        state.activity.submitted = true;
+    }
+
+    /// Output answered the last submitted line while the shell owns the foreground again.
+    pub(super) fn note_output(&self) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if !state.activity.submitted {
+            return;
+        }
+        let shell = state
+            .activity
+            .probe
+            .as_ref()
+            .is_some_and(|probe| matches!(probe.shell_foreground(), Ok(true)));
+        if shell {
+            state.activity.submitted = false;
+        }
+    }
+
+    /// Whether current facts verify work in this Terminal Session that a direct close would end:
+    /// a fresh read finds a program other than the shell owning the foreground or other processes
+    /// in its terminal session, or a submitted line that nothing answered yet. Facts it cannot
+    /// read verify nothing, so a shell that is starting or waits at its prompt closes directly.
+    pub(super) fn running_work(&self) -> bool {
+        let (probe, submitted, stopped) = {
+            let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                state.activity.probe.clone(),
+                state.activity.submitted,
+                state.stopped,
+            )
+        };
+        if stopped {
+            return false;
+        }
+        if submitted {
+            return true;
+        }
+        probe.is_some_and(|probe| {
+            matches!(probe.shell_foreground(), Ok(false)) || matches!(probe.others(), Ok(true))
+        })
     }
 }
 

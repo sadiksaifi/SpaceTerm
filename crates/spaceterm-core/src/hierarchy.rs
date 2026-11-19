@@ -636,6 +636,10 @@ pub struct State {
     creator_boot: Option<Id>,
     /// Durable cleanup intent names original Sessions, never future replacements.
     session_ends: Option<CloseInventory>,
+    /// The Terminal Sessions in which the host verified running work as it admits the next
+    /// edit. It is never retained: each admission reads it afresh.
+    #[serde(skip)]
+    working: std::collections::BTreeSet<Id>,
 }
 impl State {
     pub fn empty() -> Self {
@@ -653,6 +657,7 @@ impl State {
             sequence_floor: 0,
             creator_boot: None,
             session_ends: None,
+            working: Default::default(),
         }
     }
     pub fn begin_boot(&mut self, boot: Id) {
@@ -742,6 +747,7 @@ impl State {
             sequence_floor: 0,
             creator_boot: None,
             session_ends: None,
+            working: Default::default(),
         };
         state.validate()?;
         Ok(state)
@@ -878,6 +884,11 @@ impl State {
         self.inventory.revision = self.inventory.revision.saturating_add(1);
         Ok(id)
     }
+    /// The Terminal Sessions in which the host verified running work for the next edit.
+    pub fn set_working(&mut self, working: std::collections::BTreeSet<Id>) {
+        self.working = working;
+    }
+
     pub fn apply(
         &mut self,
         device: Id,
@@ -1011,6 +1022,15 @@ impl State {
                     return Ok(Outcome::StaleConfirmation);
                 }
                 if let Some(reviewed) = &confirmation.own_controls {
+                    // A close that asks nobody first never ends work the host verified running
+                    // in an exact Session it names, such as a command started by input this
+                    // close follows. The person reviews it afresh.
+                    if confirmation.panes.iter().any(|pane| {
+                        pane.session
+                            .is_some_and(|session| self.working.contains(&session))
+                    }) {
+                        return Ok(Outcome::StaleConfirmation);
+                    }
                     let current = self.inventory.close.as_ref().map(|live| &live.controls);
                     if reviewed.len() != confirmation.panes.len()
                         || confirmation.panes.iter().any(|pane| {
