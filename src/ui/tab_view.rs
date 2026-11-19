@@ -2929,18 +2929,24 @@ impl TabView {
         ) {
             return Some(false);
         }
+        // A shell still starting runs nothing yet. Only a running command the facts about this
+        // exact Terminal Session verify asks first; an interrupted connection says nothing
+        // current about it, so it asks too.
         Some(if live_session {
-            status == CorePaneStatus::Connected
-                && !self
-                    .tab
-                    .pane(pane)?
-                    .read(cx)
-                    .close_facts()
-                    .requires_confirmation()
+            matches!(
+                status,
+                CorePaneStatus::Connected | CorePaneStatus::Connecting
+            ) && !self
+                .tab
+                .pane(pane)?
+                .read(cx)
+                .close_facts()
+                .running_command()
         } else {
             matches!(
                 status,
                 CorePaneStatus::Connected
+                    | CorePaneStatus::Connecting
                     | CorePaneStatus::Restored
                     | CorePaneStatus::SessionEnded(_)
                     | CorePaneStatus::Ended

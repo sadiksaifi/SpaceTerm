@@ -101,6 +101,9 @@ pub(crate) struct CorePaneState {
     interaction: Mutex<Interaction>,
     effect_authority: Arc<ClipboardAuthority>,
     hidden_input: AtomicBool,
+    /// The Line Mode SpaceTerm Core last pushed, with the connection epoch it arrived on. It
+    /// describes only that epoch's Terminal Session.
+    line: Mutex<Option<(u64, pane::LineMode)>>,
     /// Whether the input the worker sends now was typed at a hidden prompt. Shared with the
     /// link, which records it per Input serial.
     sending_hidden: Arc<AtomicBool>,
@@ -141,6 +144,7 @@ impl CorePaneState {
             paste_unconfirmed: AtomicBool::new(false),
             interaction: Mutex::new(Interaction::default()),
             hidden_input: AtomicBool::new(false),
+            line: Mutex::default(),
             sending_hidden: Arc::default(),
             reading: Mutex::default(),
             accessibility: Mutex::default(),
@@ -429,6 +433,7 @@ impl CorePaneState {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         self.hidden_input.store(false, Ordering::Release);
+        *self.line.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         if *status == CorePaneStatus::Connected {
             *status = CorePaneStatus::Reconnecting;
@@ -607,6 +612,7 @@ impl CorePaneState {
                 .disconnect();
             self.effect_authority.client_focus(None);
             self.hidden_input.store(false, Ordering::Release);
+            *self.line.lock().unwrap_or_else(|e| e.into_inner()) = None;
             self.paste_unconfirmed.store(false, Ordering::Release);
         }
         *current = status;
@@ -1112,6 +1118,14 @@ impl TerminalSessionHandle for PresentationHandle {
     }
     fn hidden_input(&self) -> Option<bool> {
         Some(self.state.hidden_input.load(Ordering::Acquire))
+    }
+    fn foreground_job(&self) -> Option<bool> {
+        let line = *self.state.line.lock().unwrap_or_else(|e| e.into_inner());
+        let (epoch, mode) = line?;
+        // A Line Mode from an earlier connection describes another Terminal Session, and an
+        // unreadable PTY says nothing about what runs.
+        (epoch == self.state.epoch.load(Ordering::Acquire) && mode != pane::LineMode::UNKNOWN)
+            .then_some(!mode.shell_foreground)
     }
     fn focus(&self, focused: bool) {
         self.interactive_focus(focused, focused);

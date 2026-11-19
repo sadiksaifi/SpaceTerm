@@ -500,6 +500,12 @@ pub trait TerminalSessionHandle {
         None
     }
 
+    /// Whether a program other than the shell owns this Terminal Session's foreground, from the
+    /// Line Mode its host last read for this exact Session. `None` when no reading describes it.
+    fn foreground_job(&self) -> Option<bool> {
+        None
+    }
+
     fn key(&self, input: KeyInput);
 
     /// Accepts the entire commit as one ordered unit, or refuses before consuming its text.

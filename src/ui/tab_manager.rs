@@ -6961,7 +6961,9 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         use crate::terminal::metadata::TitleProvenance;
-        let (manager, _records, cx) = tab_manager(cx);
+        let (manager, records, cx) = tab_manager(cx);
+        // A command runs in each Pane, so closing one asks first.
+        records.set_foreground_job(Some(true));
         let tab_title = |cx: &mut VisualTestContext| {
             manager.read_with(cx, |manager, cx| {
                 manager.tabs.active_tab().read(cx).tab_title()

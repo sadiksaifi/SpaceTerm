@@ -1659,6 +1659,11 @@ impl TerminalPane {
             state: &self.pane_state,
             disconnected: self.terminal_session.connection_interrupted,
             metadata: self.metadata(),
+            foreground_job: self
+                .terminal_session
+                .session
+                .as_ref()
+                .and_then(|session| session.foreground_job()),
         }
     }
 
