@@ -448,14 +448,74 @@ fn foreground_harness(
     launch: ScriptedLaunch,
     cx: &mut TestAppContext,
 ) -> (LaunchHarness, &mut VisualTestContext) {
+    foreground_harness_with(launch, ScriptedEdits::new(Some(inventory())), cx)
+}
+
+/// [`foreground_harness`] presenting `edits`.
+fn foreground_harness_with(
+    launch: ScriptedLaunch,
+    edits: ScriptedEdits,
+    cx: &mut TestAppContext,
+) -> (LaunchHarness, &mut VisualTestContext) {
     scripted_harness(
         launch,
-        ScriptedEdits::new(Some(inventory())),
+        edits,
         [],
         None,
         launch::LaunchIntent::Foreground,
         cx,
     )
+}
+
+fn no_workspaces() -> Inventory {
+    Inventory {
+        workspaces: Vec::new(),
+        ..inventory()
+    }
+}
+
+#[gpui::test]
+fn the_persons_launch_creates_one_workspace_when_none_is_attached(cx: &mut TestAppContext) {
+    use spaceterm_core::hierarchy::Mutation;
+    let launch = ScriptedLaunch::default();
+    launch.answer(ready());
+    let (harness, cx) =
+        foreground_harness_with(launch, ScriptedEdits::new(Some(no_workspaces())), cx);
+    sync(&harness, cx);
+    sync(&harness, cx);
+    assert_eq!(
+        harness.edits.submitted(),
+        vec![Mutation::CreateWorkspace {
+            name: String::new(),
+            directory: None,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
+        }],
+        "one launch creates one Workspace"
+    );
+}
+
+#[gpui::test]
+fn a_reopened_window_with_nothing_attached_creates_nothing(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness_with(
+        vec![ready()],
+        ScriptedEdits::new(Some(no_workspaces())),
+        [],
+        cx,
+    );
+    sync(&harness, cx);
+    sync(&harness, cx);
+    assert!(harness.edits.submitted().is_empty());
+}
+
+#[gpui::test]
+fn the_persons_launch_opens_the_focused_pane_once(cx: &mut TestAppContext) {
+    let launch = ScriptedLaunch::default();
+    launch.answer(ready());
+    let (harness, cx) = foreground_harness(launch, cx);
+    sync(&harness, cx);
+    sync(&harness, cx);
+    assert_eq!(harness.panes.pane(PANE).selections(), 1);
+    assert!(harness.edits.submitted().is_empty(), "nothing is created");
 }
 
 #[gpui::test]

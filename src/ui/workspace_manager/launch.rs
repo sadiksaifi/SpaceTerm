@@ -591,6 +591,10 @@ pub(super) struct LocalLaunchState {
     /// service operation, and every launch after it is passive, so a Stop the person chooses
     /// later stays in force.
     intent: LaunchIntent,
+    /// The person's launch of SpaceTerm still owes them a shell: once this computer's first
+    /// inventory is presented, the window opens the Active Workspace's Focused Pane, or creates
+    /// one Workspace when nothing is attached.
+    landing: bool,
     /// The server was started elsewhere while this launch was answering. A launch that then
     /// finishes waiting runs once more, because its answer may predate that start.
     resume: bool,
@@ -622,6 +626,7 @@ impl LocalLaunchState {
     pub(super) fn new(adapters: LocalCoreAdapters, place: &'static str) -> Self {
         Self {
             intent: adapters.intent,
+            landing: adapters.intent == LaunchIntent::Foreground,
             adapters,
             state: LaunchState::Launching,
             place,
@@ -642,6 +647,11 @@ impl LocalLaunchState {
             create_when_presented: false,
             reconnect_from: std::cell::Cell::new(None),
         }
+    }
+
+    /// Whether the person's launch still owes them a shell, and from now on it does not.
+    pub(super) fn take_landing(&mut self) -> bool {
+        std::mem::take(&mut self.landing)
     }
 
     /// The account-local connection that retains this desktop's Workspace order, if any.

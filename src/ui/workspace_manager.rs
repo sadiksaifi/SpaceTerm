@@ -1553,6 +1553,26 @@ impl WorkspaceManager {
         }
     }
 
+    /// Opens the Active Workspace's Active Tab and Focused Pane for the person who launched
+    /// SpaceTerm, starting that Pane's shell. With no Workspace to present, it creates one Local
+    /// Workspace, whose Root Pane opens once SpaceTerm Core publishes it. Workspaces the person
+    /// detached stay detached.
+    fn land(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(workspace_id) = self.workspaces.active_workspace_id() {
+            if self.activate_workspace(workspace_id, window, cx) {
+                self.focus(window, cx);
+            }
+            return;
+        }
+        if self.workspaces.iter().next().is_none() {
+            self.run_workspace_creation(
+                crate::ui::workspace_creation::WorkspaceCreation::Local,
+                window,
+                cx,
+            );
+        }
+    }
+
     fn activate_workspace(
         &mut self,
         workspace_id: WorkspaceId,
@@ -2817,6 +2837,7 @@ impl WorkspaceManager {
         } else {
             super::workspaces::WorkspaceRemoval::Published
         };
+        let inventory_applied = poll.inventory.is_some();
         if let Some(inventory) = poll.inventory {
             self.apply_inventory(key, &inventory, removal, window, cx);
             self.settle_remembered_view(key, window, cx);
@@ -2824,13 +2845,22 @@ impl WorkspaceManager {
         // A new client's first view is the person opening SpaceTerm to work, so it opens the
         // Active Tab and its Focused Pane's shell. Later launches restore views passively, and
         // so does a window reopened with the view the last one left, which nobody chose here.
-        if let Some(workspace_id) = poll
+        let initial = poll
             .initial
             .filter(|_| !self.restores_remembered_view())
-            .and_then(|core| self.binding.get(key)?.local(core))
-            && self.activate_workspace(workspace_id, window, cx)
-        {
+            .and_then(|core| self.binding.get(key)?.local(core));
+        let landed = initial.is_some_and(|workspace_id| self.activate_workspace(workspace_id, window, cx));
+        if landed {
             self.focus(window, cx);
+        }
+        // The person's own launch of SpaceTerm lands in a shell once this computer's Workspaces
+        // and this client's attachments are known.
+        if key == MachineKey::LOCAL
+            && inventory_applied
+            && self.launch.take_landing()
+            && !landed
+        {
+            self.land(window, cx);
         }
         // The client that asked for a creation opens it, once, after the server published it.
         if let Some(accepted) = poll.accepted {
