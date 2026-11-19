@@ -83,7 +83,9 @@ impl ScriptedMachines {
         let reported = match &event {
             MachineUpdatesEvent::Machines(machines) => machines.iter().collect(),
             MachineUpdatesEvent::Changed(update) => vec![update.as_ref()],
-            MachineUpdatesEvent::Finished { .. } => Vec::new(),
+            MachineUpdatesEvent::Finished { .. } | MachineUpdatesEvent::Waiting { .. } => {
+                Vec::new()
+            }
         };
         for update in reported {
             let facts = update.facts.as_ref();

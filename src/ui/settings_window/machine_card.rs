@@ -297,6 +297,9 @@ impl MenuItem {
     }
 }
 
+/// The Server row's progress while an approved Stop or Restart waits for another operation.
+const WAITING_FOR_OPERATION: &str = "Waiting for another SpaceTerm Core operation\u{2026}";
+
 impl SettingsWindow {
     /// How `choice` reads now, from what SpaceTerm already knows about it.
     pub(in crate::ui::settings_window) fn core_state(&self, choice: &MachineChoice) -> CoreState {
@@ -1062,6 +1065,14 @@ impl SettingsWindow {
     /// The operation underway on `choice` that changes it, as the Server row names it under its
     /// label. A read isn't one: the state says Checking instead.
     fn core_progress(&self, choice: &MachineChoice, cx: &App) -> Option<SharedString> {
+        // An approved Stop or Restart that waits for another SpaceTerm Core operation says so
+        // until it runs.
+        if let Some(update) = self.machine_update(choice, cx)
+            && crate::updates::machines::store::MachineUpdates::global(cx)
+                .is_some_and(|store| store.read(cx).waiting(update.machine).is_some())
+        {
+            return Some(SharedString::new_static(WAITING_FOR_OPERATION));
+        }
         if let Some(update) = self.machine_update(choice, cx)
             && matches!(
                 update

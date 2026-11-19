@@ -198,6 +198,12 @@ pub(crate) enum MachineUpdatesEvent {
         action: MachineAction,
         outcome: Result<(), ActionFailure>,
     },
+    /// The approved `action` waits for another SpaceTerm Core operation on `machine` to settle
+    /// before it runs, until it finishes.
+    Waiting {
+        machine: MachineId,
+        action: MachineAction,
+    },
 }
 
 /// The adapter cannot report Machine updates in this build or session.

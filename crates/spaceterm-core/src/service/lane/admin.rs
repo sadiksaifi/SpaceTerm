@@ -427,17 +427,18 @@ pub fn busy(error: &LaneError) -> bool {
         || *error == LaneError::Core(CoreError::ServiceBusy)
 }
 
-/// Asks the server to preview `action`, waiting up to [`BUSY_WAIT`] while another operation
-/// holds it. `waiting` runs once, when the wait begins, so the client can say so.
+/// Asks the server to preview `action`, waiting until `deadline` while another operation holds
+/// it. `waiting` runs once, when the wait begins, so the client can say so.
 pub fn preview_when_ready(
     lane: &Lane,
     session: Session,
     action: LaneAction,
+    deadline: Instant,
     interrupted: &dyn Fn() -> Option<Instant>,
     waiting: &mut dyn FnMut(),
 ) -> Result<(Session, Preview), LaneError> {
     let mut session = session;
-    let mut wait = BusyWait::new(waiting);
+    let mut wait = BusyWait::new(deadline, waiting);
     loop {
         match preview(&mut session, action.clone()) {
             Ok(preview) => return Ok((session, preview)),
@@ -449,27 +450,30 @@ pub fn preview_when_ready(
     }
 }
 
-/// Executes the person's approved `token` for `action` and follows it as [`execute`] does. A
-/// refusal because another operation holds SpaceTerm Core admits nothing and keeps the token, so
-/// the same approval executes again once that operation settles, for up to [`BUSY_WAIT`]. When
-/// what the action affects changed meanwhile, SpaceTerm Core refuses the token as `changed`,
-/// and the person reviews a fresh preview. `waiting` runs once, when the wait begins.
+/// Executes the person's approved `token` for `action` and follows it as [`execute`] does, for at
+/// most `follow` and never past `deadline`. A refusal because another operation holds SpaceTerm
+/// Core admits nothing and keeps the token, so the same approval executes again once that
+/// operation settles, until `deadline`. When what the action affects changed meanwhile,
+/// SpaceTerm Core refuses the token as `changed`, and the person reviews a fresh preview. After
+/// an interrupt nothing is executed again. `waiting` runs once, when the wait begins.
 #[allow(clippy::too_many_arguments, reason = "one approval's parts, used once")]
 pub fn execute_approved(
     lane: &Lane,
     session: Session,
     action: LaneAction,
     token: String,
-    wait: Duration,
+    deadline: Instant,
+    follow: Duration,
     pending: &PendingOperations,
     share: &mut dyn Share,
     dispatch: &mut dyn FnMut() -> Result<(), LaneError>,
     interrupted: &dyn Fn() -> Option<Instant>,
     waiting: &mut dyn FnMut(),
 ) -> Result<Outcome, LaneError> {
-    let mut busy_wait = BusyWait::new(waiting);
+    let mut busy_wait = BusyWait::new(deadline, waiting);
     let mut session = session;
     loop {
+        let wait = follow.min(deadline.saturating_duration_since(Instant::now()));
         match execute(
             lane,
             session,
@@ -489,7 +493,7 @@ pub fn execute_approved(
     }
 }
 
-/// One approval's wait for another operation: until [`BUSY_WAIT`] after it began.
+/// One approval's wait for another operation, until its absolute deadline.
 struct BusyWait<'a> {
     deadline: Instant,
     /// Runs once, when the wait begins.
@@ -497,9 +501,9 @@ struct BusyWait<'a> {
 }
 
 impl<'a> BusyWait<'a> {
-    fn new(waiting: &'a mut dyn FnMut()) -> Self {
+    fn new(deadline: Instant, waiting: &'a mut dyn FnMut()) -> Self {
         Self {
-            deadline: Instant::now() + BUSY_WAIT,
+            deadline: deadline.min(Instant::now() + BUSY_WAIT),
             waiting: Some(waiting),
         }
     }
@@ -507,7 +511,8 @@ impl<'a> BusyWait<'a> {
     /// Waits [`BUSY_POLL`] for the operation that refused with `refused`, then opens a new lane
     /// connection. A server that restarts meanwhile answers again later, so a connection that
     /// fails keeps waiting. Once the deadline passes or the caller is interrupted, it returns
-    /// `refused`.
+    /// `refused`. The dial runs on its own thread, so an interrupt ends the wait at once while
+    /// a stalled connection still holds it.
     fn for_lane(
         &mut self,
         lane: &Lane,
@@ -517,19 +522,29 @@ impl<'a> BusyWait<'a> {
         if let Some(waiting) = self.waiting.take() {
             waiting();
         }
+        let deadline = self.deadline;
         loop {
-            if interrupted().is_some() || Instant::now() + BUSY_POLL >= self.deadline {
+            if interrupted().is_some() || Instant::now() + BUSY_POLL >= deadline {
                 return Err(refused);
             }
             std::thread::sleep(BUSY_POLL);
             if interrupted().is_some() {
                 return Err(refused);
             }
-            match lane.session() {
-                Ok(session) => return Ok(session),
+            let dialing = lane.clone();
+            let dialed = super::client::within(
+                "spaceterm-lane-io",
+                &|| Some(interrupted().map_or(deadline, |by| by.min(Instant::now()))),
+                move || dialing.session(),
+            );
+            match dialed {
+                Some(Ok(session)) => return Ok(session),
                 // A stopped SpaceTerm Core answers no lane until the person starts it.
-                Err(CoreError::Stopped) => return Err(LaneError::Core(CoreError::Stopped)),
-                Err(_) => {}
+                Some(Err(CoreError::Stopped)) => {
+                    return Err(LaneError::Core(CoreError::Stopped));
+                }
+                Some(Err(_)) => {}
+                None => return Err(refused),
             }
         }
     }

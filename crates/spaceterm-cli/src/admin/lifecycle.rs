@@ -162,6 +162,7 @@ fn preview(
         &opened.lane,
         opened.session,
         kind.action(),
+        crate::interrupt::limit(Instant::now() + context.timeout(admin::BUSY_WAIT)),
         &crate::interrupt::settle_by,
         &mut say_waiting(context),
     );
@@ -378,19 +379,22 @@ fn execute(
     // An approved Stop or Restart waits for another operation that holds SpaceTerm Core, then
     // runs under the same approval. SpaceTerm Core refuses it as changed when what it affects
     // changed meanwhile.
+    // One absolute deadline covers the wait for another operation, the action's settlement
+    // and, for a local Stop, reading its outcome afterwards. `--timeout` sets the whole of it.
+    let deadline = Instant::now() + context.timeout(admin::BUSY_WAIT + kind.wait());
     let outcome = admin::execute_approved(
         &lane,
         session,
         kind.action(),
         token,
-        context.timeout(kind.wait()),
+        deadline,
+        kind.wait(),
         pending.operations(),
         &mut *context.state.borrow_mut(),
         &mut super::dispatch,
         &crate::interrupt::settle_by,
         &mut say_waiting(context),
     );
-    let deadline = Instant::now() + context.timeout(kind.wait());
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(error) => {

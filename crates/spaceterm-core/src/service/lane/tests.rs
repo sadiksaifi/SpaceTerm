@@ -1812,6 +1812,7 @@ mod flow {
                 session,
                 LaneAction::Stop,
                 approved.token,
+                Instant::now() + admin::BUSY_WAIT,
                 Duration::from_secs(2),
                 &pending(&lane),
                 &mut admin::Unshared,
@@ -1853,6 +1854,7 @@ mod flow {
                 session,
                 LaneAction::Stop,
                 approved.token,
+                Instant::now() + admin::BUSY_WAIT,
                 Duration::from_secs(2),
                 &pending(&lane),
                 &mut admin::Unshared,
@@ -1870,6 +1872,37 @@ mod flow {
         });
     }
 
+    /// The caller's deadline bounds the whole wait, as `--timeout` does for the CLI, and a
+    /// refusal that outlasts it admits nothing.
+    #[test]
+    fn an_approval_waits_no_longer_than_its_deadline() {
+        with_lane(|lane| {
+            let (client, session, approved) = approved_stop(&lane);
+            let _settle = another_clients_restart(&lane);
+            let began = Instant::now();
+            let outcome = admin::execute_approved(
+                &client,
+                session,
+                LaneAction::Stop,
+                approved.token,
+                began + Duration::from_millis(2500),
+                Duration::from_secs(90),
+                &pending(&lane),
+                &mut admin::Unshared,
+                &mut || Ok(()),
+                &|| None,
+                &mut || {},
+            );
+            assert_eq!(outcome, Err(LaneError::Code("service_busy".into())));
+            assert!(
+                began.elapsed() < Duration::from_secs(4),
+                "{:?}",
+                began.elapsed()
+            );
+            assert_eq!(lane.launches.load(Ordering::SeqCst), 1);
+        });
+    }
+
     #[test]
     fn an_interrupted_approval_stops_waiting_and_reports_busy() {
         with_lane(|lane| {
@@ -1882,6 +1915,7 @@ mod flow {
                 session,
                 LaneAction::Stop,
                 approved.token,
+                Instant::now() + admin::BUSY_WAIT,
                 Duration::from_secs(2),
                 &pending(&lane),
                 &mut admin::Unshared,

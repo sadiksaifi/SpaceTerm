@@ -605,7 +605,11 @@ impl MachineLane for CoreLane {
         }
     }
 
-    fn preview(&self, change: LaneChange) -> Result<admin::Preview, ActionFailure> {
+    fn preview(
+        &self,
+        change: LaneChange,
+        waiting: &(dyn Fn() + Sync),
+    ) -> Result<admin::Preview, ActionFailure> {
         let action = match change {
             LaneChange::Restart => LaneAction::Restart,
             LaneChange::Stop => LaneAction::Stop,
@@ -617,9 +621,16 @@ impl MachineLane for CoreLane {
         let session = lane.session().map_err(|error| core_failure(&error))?;
         // Another operation, such as an update check, may hold SpaceTerm Core for a while. The
         // preview waits for it quietly rather than refusing at once.
-        admin::preview_when_ready(&lane, session, action, &|| None, &mut || {})
-            .map(|(_, preview)| preview)
-            .map_err(lane_failure)
+        admin::preview_when_ready(
+            &lane,
+            session,
+            action,
+            Instant::now() + admin::BUSY_WAIT,
+            &|| None,
+            &mut || waiting(),
+        )
+        .map(|(_, preview)| preview)
+        .map_err(lane_failure)
     }
 
     fn resolve(&self, operation: &str) -> Result<(), ActionFailure> {
@@ -655,6 +666,7 @@ impl MachineLane for CoreLane {
         &self,
         preview: admin::Preview,
         operation: &mut Option<String>,
+        waiting: &(dyn Fn() + Sync),
     ) -> Result<(), ActionFailure> {
         let lane = self
             .core
@@ -675,12 +687,13 @@ impl MachineLane for CoreLane {
             session,
             preview.action,
             preview.token,
+            Instant::now() + admin::BUSY_WAIT + wait,
             wait,
             &pending,
             &mut admin::Unshared,
             &mut || Ok(()),
             &|| None,
-            &mut || {},
+            &mut || waiting(),
         )
         .map_err(lane_failure)?;
         *operation = Some(match &outcome {
@@ -775,10 +788,19 @@ mod tests {
         ) -> Result<spaceterm_core::update::facts::UpdateFacts, ActionFailure> {
             Err(ActionFailure::Unreachable)
         }
-        fn preview(&self, _: LaneChange) -> Result<admin::Preview, ActionFailure> {
+        fn preview(
+            &self,
+            _: LaneChange,
+            _: &(dyn Fn() + Sync),
+        ) -> Result<admin::Preview, ActionFailure> {
             Err(ActionFailure::Unreachable)
         }
-        fn execute(&self, _: admin::Preview, _: &mut Option<String>) -> Result<(), ActionFailure> {
+        fn execute(
+            &self,
+            _: admin::Preview,
+            _: &mut Option<String>,
+            _: &(dyn Fn() + Sync),
+        ) -> Result<(), ActionFailure> {
             Ok(())
         }
     }

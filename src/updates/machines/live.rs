@@ -93,8 +93,13 @@ pub(crate) trait MachineLane: Send + Sync {
     /// Pushes `build` when supplied, otherwise fetches from the Core's feed. Answers with the
     /// Core's facts after it. A feed that names nothing newer downloads nothing.
     fn install(&self, build: Option<&EmbeddedCore>) -> Result<UpdateFacts, ActionFailure>;
-    /// `Preview` of `change`: the Core's token and what it affects.
-    fn preview(&self, change: LaneChange) -> Result<admin::Preview, ActionFailure>;
+    /// `Preview` of `change`: the Core's token and what it affects. `waiting` runs once when
+    /// the preview waits for another SpaceTerm Core operation to settle.
+    fn preview(
+        &self,
+        change: LaneChange,
+        waiting: &(dyn Fn() + Sync),
+    ) -> Result<admin::Preview, ActionFailure>;
     /// `Execute` of exactly `preview`, followed until it settles. `operation` receives the
     /// operation ID once the request may have reached the Core, so its outcome can be read
     /// later when nothing confirms it now.
@@ -102,6 +107,7 @@ pub(crate) trait MachineLane: Send + Sync {
         &self,
         preview: admin::Preview,
         operation: &mut Option<String>,
+        waiting: &(dyn Fn() + Sync),
     ) -> Result<(), ActionFailure>;
     /// What the receipt of `operation`, which this desktop executed, says now. `Unconfirmed`
     /// while it has not settled or the Core cannot answer.
@@ -407,7 +413,13 @@ fn preview(
     let Reach::Lane { lane, .. } = target.known.machine.reach() else {
         return Err(ActionFailure::Unreachable);
     };
-    let lane_preview = lane.preview(change)?;
+    let waiting = || {
+        shared.emit(MachineUpdatesEvent::Waiting {
+            machine,
+            action: action.clone(),
+        });
+    };
+    let lane_preview = lane.preview(change, &waiting)?;
     let previewed = MachinePreview {
         machine,
         action: action.clone(),
@@ -436,7 +448,13 @@ fn run_previewed(
         shared.expect_restart(machine, preview.target.clone());
     }
     let mut operation = None;
-    let outcome = lane.execute(lane_preview, &mut operation);
+    let waiting = || {
+        shared.emit(MachineUpdatesEvent::Waiting {
+            machine,
+            action: preview.action.clone(),
+        });
+    };
+    let outcome = lane.execute(lane_preview, &mut operation, &waiting);
     let checked = if restart {
         Checked::Restart
     } else {

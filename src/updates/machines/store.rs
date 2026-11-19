@@ -228,6 +228,8 @@ pub(crate) struct MachineUpdates {
     dismissed: Dismissed,
     /// Actions performed that have not finished, oldest first.
     performed: Vec<(MachineId, MachineAction, Surface)>,
+    /// The approved Stops and Restarts waiting for another operation on their Machine.
+    waiting: Vec<(MachineId, MachineAction)>,
     /// Each check or install a person started that has not ended, oldest first.
     asked: Vec<AskedWork>,
     /// How many checks, installs and restarts people started, which names the next one.
@@ -283,6 +285,7 @@ impl MachineUpdates {
                 machines: Vec::new(),
                 dismissed: Dismissed::new(),
                 performed: Vec::new(),
+                waiting: Vec::new(),
                 asked: Vec::new(),
                 serial: 0,
                 deferred: HashMap::new(),
@@ -319,6 +322,15 @@ impl MachineUpdates {
 
     pub(crate) fn machines(&self) -> &[MachineUpdate] {
         &self.machines
+    }
+
+    /// The approved Stop or Restart on `machine` that waits for another SpaceTerm Core operation
+    /// to settle before it runs.
+    pub(crate) fn waiting(&self, machine: MachineId) -> Option<&MachineAction> {
+        self.waiting
+            .iter()
+            .find(|(id, _)| *id == machine)
+            .map(|(_, action)| action)
     }
 
     pub(crate) fn dismissed(&self) -> &Dismissed {
@@ -874,11 +886,18 @@ impl MachineUpdates {
                     None => self.machines.push(update),
                 }
             }
+            MachineUpdatesEvent::Waiting { machine, action } => {
+                if self.waiting(machine).is_none() {
+                    self.waiting.push((machine, action));
+                }
+            }
             MachineUpdatesEvent::Finished {
                 machine,
                 action,
                 outcome,
             } => {
+                self.waiting
+                    .retain(|(id, waiting)| *id != machine || *waiting != action);
                 let automatic = (action == MachineAction::Install)
                     .then(|| self.installing.iter().position(|(id, _)| *id == machine))
                     .flatten()

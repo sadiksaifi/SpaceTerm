@@ -71,6 +71,8 @@ struct ScriptedLane {
     install_result: Mutex<Result<UpdateFacts, ActionFailure>>,
     /// What each Execute answers.
     execute_result: Mutex<Result<(), ActionFailure>>,
+    /// Each Execute first waits for another operation.
+    execute_waits: Mutex<bool>,
     /// What each Resolve of an executed operation answers.
     resolve_result: Mutex<Result<(), ActionFailure>>,
     requests: Mutex<Vec<String>>,
@@ -86,6 +88,7 @@ impl ScriptedLane {
             previewed: Mutex::new(0),
             install_result: Mutex::new(Ok(self::facts(2, 0, Some("0.9.0")).facts)),
             execute_result: Mutex::new(Ok(())),
+            execute_waits: Mutex::new(false),
             resolve_result: Mutex::new(Err(ActionFailure::Unconfirmed)),
             requests: Mutex::new(Vec::new()),
         })
@@ -164,7 +167,11 @@ impl MachineLane for ScriptedLane {
         self.install_result.lock().unwrap().clone()
     }
 
-    fn preview(&self, change: LaneChange) -> Result<admin::Preview, ActionFailure> {
+    fn preview(
+        &self,
+        change: LaneChange,
+        _: &(dyn Fn() + Sync),
+    ) -> Result<admin::Preview, ActionFailure> {
         self.record(format!("preview {change:?}"));
         let ends = *self.previewed.lock().unwrap();
         Ok(admin::Preview {
@@ -189,8 +196,12 @@ impl MachineLane for ScriptedLane {
         &self,
         preview: admin::Preview,
         operation: &mut Option<String>,
+        waiting: &(dyn Fn() + Sync),
     ) -> Result<(), ActionFailure> {
         self.record(format!("execute {}", preview.token));
+        if *self.execute_waits.lock().unwrap() {
+            waiting();
+        }
         *operation = Some(format!("operation-{}", preview.token));
         *self.execute_result.lock().unwrap()
     }

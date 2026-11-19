@@ -265,6 +265,21 @@ fn a_settings_stop_runs_on_the_cores_session_bound_preview(cx: &mut TestAppConte
     assert!(adapter.executed().is_empty(), "Stop waits for confirmation");
     answer(UPDATE_CONFIRM_SELECTOR, cx);
     assert_eq!(adapter.executed_actions(), [(MACHINE, MachineAction::Stop)]);
+    // Another operation holds SpaceTerm Core, so the approved Stop waits and Settings says so.
+    adapter.emit(MachineUpdatesEvent::Waiting {
+        machine: MACHINE,
+        action: MachineAction::Stop,
+    });
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    assert_eq!(
+        settings
+            .read_with(cx, |settings, cx| settings.core_subtitle(cx))
+            .as_ref(),
+        "Waiting for another SpaceTerm Core operation\u{2026}"
+    );
     adapter.emit(MachineUpdatesEvent::Finished {
         machine: MACHINE,
         action: MachineAction::Stop,

@@ -512,6 +512,7 @@ impl Connector for Paired {
 }
 
 /// A route to one server's service lane. Opening it never starts a server.
+#[derive(Clone)]
 pub struct Lane {
     connector: Arc<dyn Connector>,
 }
