@@ -502,6 +502,27 @@ pub(super) enum DragFace {
     },
 }
 
+impl DragFace {
+    /// What the face shows, whatever its size and place. A picture changes from one face to
+    /// another only when this changes; a face that only resizes, as a Tab whose landing place
+    /// opens, follows its bounds.
+    fn kind(self) -> DragFaceKind {
+        match self {
+            Self::Pane => DragFaceKind::Pane,
+            Self::Joining { .. } => DragFaceKind::Joining,
+            Self::Tab { .. } => DragFaceKind::Tab,
+        }
+    }
+}
+
+/// What a [`DragFace`] shows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DragFaceKind {
+    Pane,
+    Joining,
+    Tab,
+}
+
 /// Paints a lifted Tab face of a given size. The Tab strip owns that face.
 pub(super) type TabFace = dyn Fn(gpui::Size<Pixels>, &mut Window, &mut App) -> AnyElement;
 
@@ -513,8 +534,8 @@ pub(super) struct DragPicture {
     stand_in: DragStandIn,
     /// Where the pointer holds the picture: a share of its width, and a distance below its top.
     grab: (f32, Pixels),
-    morph: RefCell<FaceMorph<DragFace>>,
-    drawn: Cell<Option<Morph<DragFace>>>,
+    morph: RefCell<FaceMorph<DragFaceKind>>,
+    drawn: Cell<Option<Morph<DragFaceKind>>>,
 }
 
 impl DragPicture {
@@ -590,7 +611,7 @@ impl DragPicture {
                 size,
             ),
         };
-        let mut morph = self.morph.borrow_mut().frame(face, target, cx);
+        let mut morph = self.morph.borrow_mut().frame(face.kind(), target, cx);
         // A shape between two faces stays inside the window too.
         morph.bounds.origin = inside(morph.bounds.origin, morph.bounds.size);
         self.drawn.set(Some(morph));
@@ -607,33 +628,44 @@ impl DragPicture {
             window.request_animation_frame();
         }
         let size = morph.bounds.size;
-        let layer = |face: DragFace, opacity: f32, window: &mut Window, cx: &mut App| {
-            let tab_face = self.tab_face.borrow().clone();
-            let content = match (face, tab_face) {
-                (DragFace::Tab { .. }, Some(tab_face)) => tab_face(size, window, cx),
-                _ => render_stand_in_card(&self.stand_in, size, cx),
+        // Each layer is its own element, so a face shown in both as it changes never repeats
+        // an element of the other.
+        let layer =
+            |face: DragFaceKind, layer: usize, opacity: f32, window: &mut Window, cx: &mut App| {
+                let tab_face = self.tab_face.borrow().clone();
+                let content = match (face, tab_face) {
+                    (DragFaceKind::Tab, Some(tab_face)) => tab_face(size, window, cx),
+                    _ => render_stand_in_card(&self.stand_in, size, cx),
+                };
+                div()
+                    .id(("drag-picture-layer", layer))
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w(size.width)
+                    .h(size.height)
+                    .opacity(opacity)
+                    .child(content)
+                    .into_any_element()
             };
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .w(size.width)
-                .h(size.height)
-                .opacity(opacity)
-                .child(content)
-                .into_any_element()
-        };
-        let current = self.face.get();
+        let current = self.face.get().kind();
         let (previous, progress) = match morph.from {
             Some((from, progress)) => (Some(from), progress),
             None => (None, 1.0),
         };
-        let mut picture = div().relative().w(size.width).h(size.height);
+        // The picture stands for what the pointer carries, which assistive technology reads
+        // from the dragged Pane or Tab itself.
+        let mut picture = div()
+            .id("drag-picture")
+            .aria_hidden(true)
+            .relative()
+            .w(size.width)
+            .h(size.height);
         if let Some(previous) = previous {
-            picture = picture.child(layer(previous, 1.0 - progress, window, cx));
+            picture = picture.child(layer(previous, 0, 1.0 - progress, window, cx));
         }
         picture
-            .child(layer(current, progress, window, cx))
+            .child(layer(current, 1, progress, window, cx))
             .into_any_element()
     }
 }
@@ -2870,6 +2902,14 @@ impl TabView {
         self.binding.holds(core)
     }
 
+    /// Whether the Pane `core`, which this Tab presents, is still starting the Terminal Session
+    /// this client created it with, so what closing it would end is about to change. `None` for
+    /// a Pane elsewhere.
+    pub(crate) fn pane_shell_starting(&self, core: spaceterm_core::hierarchy::Id) -> Option<bool> {
+        let pane = self.binding.local_pane(core)?;
+        Some(self.binding.shell_starting(pane))
+    }
+
     pub(crate) fn pane_closes_directly(
         &self,
         core: spaceterm_core::hierarchy::Id,
@@ -3932,6 +3972,12 @@ pub(crate) struct TabIdentity {
 }
 
 impl TabIdentity {
+    /// Whether the Terminal Session has named the Tab yet. Until then the Tab says only
+    /// "Terminal".
+    pub(crate) fn is_named(&self) -> bool {
+        !self.place.is_empty() || !(self.activity.is_empty() || self.activity == "Terminal")
+    }
+
     fn resolve(caption: PaneCaptionText, title: gpui::SharedString, attention: bool) -> Self {
         let (activity, directory) = if caption.label.is_empty() {
             (caption.name.as_ref(), "")

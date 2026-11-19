@@ -4,7 +4,7 @@ use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 
 use super::*;
 use crate::repository_status::presentation::{PullRequestHover, PullRequestState, SidebarBadge};
-use crate::ui::drag_and_drop::{AnimatePresence, PRESENCE_DURATION, finish_slides};
+use crate::ui::drag_and_drop::{AnimatePresence, LEAVING_FADE, PRESENCE_DURATION, finish_slides};
 
 const WORKSPACE: WorkspaceId = WorkspaceId::new(1);
 const PULL_REQUEST_URL: &str = "https://github.com/owner/app/pull/7";
@@ -215,7 +215,8 @@ fn a_row_returning_into_a_closing_gap_should_keep_the_rows_after_it_hidden(
     cx.update(|_, cx| cx.set_global(AnimatePresence));
 
     present(&sidebar, rows(&[1, 4]), cx);
-    cx.executor().advance_clock(PRESENCE_DURATION / 4);
+    cx.executor()
+        .advance_clock(LEAVING_FADE + PRESENCE_DURATION / 4);
     cx.update(|window, cx| window.simulate_next_frame(cx));
     cx.run_until_parked();
     let gap = row(4, cx).top() - row(1, cx).bottom();
@@ -230,5 +231,312 @@ fn a_row_returning_into_a_closing_gap_should_keep_the_rows_after_it_hidden(
     assert!(
         hidden.is_none_or(|third| third.top() >= fourth.top()),
         "the row that left second must stay clipped away, got {hidden:?} above {fourth:?}"
+    );
+}
+
+/// An expanded Workspace that leaves while one of its Worktree rows carries the selection keeps
+/// drawing its Worktree rows, takes no input, and fades the selection where the list drew it,
+/// on that Worktree row rather than on the Workspace row.
+#[gpui::test]
+fn an_expanded_workspace_leaving_with_a_selected_worktree_should_fade_as_it_drew(
+    cx: &mut TestAppContext,
+) {
+    use crate::ui::drag_and_drop::painted_quad;
+
+    let (sidebar, cx) = sidebar(cx);
+    let other = WorkspaceRowViewModel {
+        workspace_id: WorkspaceId::new(2),
+        name: "Docs".into(),
+        worktrees: None,
+        active: false,
+        ..workspace(Vec::new())
+    };
+    let leaving = WorkspaceRowViewModel {
+        repository: Some(pull_request()),
+        ..workspace(vec![worktree(1, None), worktree(2, None)])
+    };
+    let rows = |rows: Vec<WorkspaceRowViewModel>, cx: &mut VisualTestContext| {
+        cx.update(|_, cx| sidebar.update(cx, |sidebar, cx| sidebar.set_rows(rows, Vec::new(), cx)));
+        cx.run_until_parked();
+    };
+    rows(vec![leaving, other.clone()], cx);
+    finish_slides(cx);
+    let selected = cx
+        .debug_bounds(format!("worktree-row-{}-1-selection", WORKSPACE.get()).leak())
+        .expect("the active Worktree row carries the selection");
+    let links = |cx: &mut VisualTestContext| {
+        spaceterm_ui::a11y_testing::A11yTree::read(cx)
+            .with_role("Link")
+            .iter()
+            .filter(|link| link["aria"]["label"] == PULL_REQUEST_LABEL)
+            .count()
+    };
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    rows(
+        vec![WorkspaceRowViewModel {
+            active: true,
+            ..other
+        }],
+        cx,
+    );
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    let departing = painted_quad("workspace-departing-selection", cx);
+    let header =
+        cx.debug_bounds(format!("workspace-row-leaving-{}-active", WORKSPACE.get()).leak());
+    let worktree_rows = [1, 2].map(|worktree| closing(worktree, cx));
+
+    assert!(
+        header.is_some() && worktree_rows.iter().all(Option::is_some),
+        "the leaving Workspace must keep drawing its Workspace row and its Worktree rows, got \
+         {header:?} and {worktree_rows:?}"
+    );
+    assert_eq!(
+        departing.map(|(bounds, _, _)| bounds.origin),
+        Some(selected.origin),
+        "the selection must fade on the Worktree row the list drew it on"
+    );
+    assert!(
+        painted_quad(
+            format!("workspace-row-leaving-selection-{}", WORKSPACE.get()).leak(),
+            cx
+        )
+        .is_none_or(|(_, _, opacity)| opacity == 0.0),
+        "the leaving Workspace row must not paint a selection of its own"
+    );
+    assert_eq!(
+        links(cx),
+        0,
+        "a leaving Workspace must not offer its Pull Request"
+    );
+}
+
+/// A Workspace expanded and activated at once moves the selection to its active Worktree row
+/// while that row discloses. The selection paints whole on its way, and stays within as much of
+/// the group as has opened.
+#[gpui::test]
+fn activating_a_workspace_as_it_discloses_should_move_the_selection_whole_into_its_rows(
+    cx: &mut TestAppContext,
+) {
+    use crate::ui::drag_and_drop::{painted_quad, within};
+
+    let (sidebar, cx) = sidebar(cx);
+    // The last of six Worktree rows is active, well below where the group first opens.
+    let worktrees = || {
+        (1..=6)
+            .map(|id| WorktreeRowViewModel {
+                active: id == 6,
+                ..worktree(id, None)
+            })
+            .collect::<Vec<_>>()
+    };
+    let other = WorkspaceRowViewModel {
+        workspace_id: WorkspaceId::new(2),
+        name: "Docs".into(),
+        worktrees: None,
+        active: true,
+        ..workspace(Vec::new())
+    };
+    let collapsed = WorkspaceRowViewModel {
+        active: false,
+        worktrees: Some(WorktreeSection {
+            expanded: false,
+            repository: None,
+            worktrees: worktrees(),
+        }),
+        ..workspace(Vec::new())
+    };
+    let rows = |rows: Vec<WorkspaceRowViewModel>, cx: &mut VisualTestContext| {
+        cx.update(|_, cx| sidebar.update(cx, |sidebar, cx| sidebar.set_rows(rows, Vec::new(), cx)));
+        cx.run_until_parked();
+    };
+    rows(vec![other.clone(), collapsed], cx);
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    rows(
+        vec![
+            WorkspaceRowViewModel {
+                active: false,
+                ..other
+            },
+            workspace(worktrees()),
+        ],
+        cx,
+    );
+    let chip = format!("worktree-row-{}-6-selection", WORKSPACE.get()).leak();
+    let group = format!("workspace-group-{}", WORKSPACE.get()).leak();
+    let mut cut = Vec::new();
+    let mut outside = Vec::new();
+    for _ in 0..12 {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(16));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let (bounds, mask, _) = painted_quad(chip, cx).expect("the selection must paint");
+        let shown = cx.debug_bounds(group).unwrap();
+        if !within(bounds, mask) {
+            cut.push((bounds, mask));
+        }
+        if bounds.top() >= shown.top() && bounds.bottom() > shown.bottom() + px(0.5) {
+            outside.push((bounds, shown));
+        }
+    }
+    finish_slides(cx);
+
+    assert!(
+        cut.is_empty(),
+        "the selection must paint whole on its way, got {cut:?}"
+    );
+    assert!(
+        outside.is_empty(),
+        "inside the group the selection must stay within what has opened, got {outside:?}"
+    );
+    let inset =
+        cx.update(|_, cx| crate::ui::appearance::chrome(cx).spacing(SIDEBAR_ROW_SELECTION_INSET_Y));
+    assert_eq!(
+        cx.debug_bounds(chip).map(|chip| chip.top()),
+        Some(row(6, cx).top() + inset),
+        "the selection must land on the Worktree row"
+    );
+}
+
+/// A Workspace group that leaves while one of its Worktree rows still grows in keeps drawing
+/// that row as far as it had grown, rather than at its full height.
+#[gpui::test]
+fn a_workspace_group_leaving_mid_motion_should_keep_its_rows_as_drawn(cx: &mut TestAppContext) {
+    let (sidebar, cx) = sidebar(cx);
+    let other = WorkspaceRowViewModel {
+        workspace_id: WorkspaceId::new(2),
+        name: "Docs".into(),
+        worktrees: None,
+        active: false,
+        ..workspace(Vec::new())
+    };
+    let rows = |rows: Vec<WorkspaceRowViewModel>, cx: &mut VisualTestContext| {
+        cx.update(|_, cx| sidebar.update(cx, |sidebar, cx| sidebar.set_rows(rows, Vec::new(), cx)));
+        cx.run_until_parked();
+    };
+    rows(
+        vec![
+            workspace(vec![worktree(1, None), worktree(2, None)]),
+            other.clone(),
+        ],
+        cx,
+    );
+    finish_slides(cx);
+    let resting = row(2, cx).size.height;
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    // The third row starts growing in.
+    rows(
+        vec![
+            workspace(vec![
+                worktree(1, None),
+                worktree(2, None),
+                worktree(3, None),
+            ]),
+            other.clone(),
+        ],
+        cx,
+    );
+    cx.executor()
+        .advance_clock(LEAVING_FADE + PRESENCE_DURATION / 8);
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    let group = cx
+        .debug_bounds(format!("workspace-group-{}", WORKSPACE.get()).leak())
+        .unwrap();
+    rows(
+        vec![WorkspaceRowViewModel {
+            active: true,
+            ..other
+        }],
+        cx,
+    );
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    let leaving = cx
+        .debug_bounds(format!("workspace-group-leaving-{}", WORKSPACE.get()).leak())
+        .expect("the leaving group must keep drawing");
+    let growing = cx
+        .debug_bounds(format!("worktree-slot-leaving-{}-3", WORKSPACE.get()).leak())
+        .expect("the growing row must keep drawing");
+
+    assert!(
+        growing.size.height < resting - px(1.0),
+        "the row that was growing must keep the height it had grown to, got {growing:?}"
+    );
+    assert!(
+        (leaving.size.height - group.size.height).abs() <= px(1.0),
+        "the leaving group must keep the height it was drawn at, got {leaving:?} for {group:?}"
+    );
+}
+
+/// A Workspace group that leaves while a removed Worktree row's place is closing keeps that
+/// place as tall as it was drawn, so the row after it stays where it drew, inside its slot.
+#[gpui::test]
+fn a_workspace_group_leaving_as_a_worktree_place_closes_should_keep_the_place_as_drawn(
+    cx: &mut TestAppContext,
+) {
+    let (sidebar, cx) = sidebar(cx);
+    let other = WorkspaceRowViewModel {
+        workspace_id: WorkspaceId::new(2),
+        name: "Docs".into(),
+        worktrees: None,
+        active: false,
+        ..workspace(Vec::new())
+    };
+    let rows = |rows: Vec<WorkspaceRowViewModel>, cx: &mut VisualTestContext| {
+        cx.update(|_, cx| sidebar.update(cx, |sidebar, cx| sidebar.set_rows(rows, Vec::new(), cx)));
+        cx.run_until_parked();
+    };
+    rows(
+        vec![
+            workspace(vec![
+                worktree(1, None),
+                worktree(2, None),
+                worktree(3, None),
+            ]),
+            other.clone(),
+        ],
+        cx,
+    );
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    // The second row leaves, and its place has closed part way.
+    rows(
+        vec![
+            workspace(vec![worktree(1, None), worktree(3, None)]),
+            other.clone(),
+        ],
+        cx,
+    );
+    cx.executor()
+        .advance_clock(LEAVING_FADE + PRESENCE_DURATION / 8);
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    let survivor = row(3, cx);
+    rows(
+        vec![WorkspaceRowViewModel {
+            active: true,
+            ..other
+        }],
+        cx,
+    );
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    let slot = cx
+        .debug_bounds(format!("worktree-slot-leaving-{}-3", WORKSPACE.get()).leak())
+        .expect("the surviving row must keep drawing as its group leaves");
+    let leaving = closing(3, cx).expect("the surviving row must keep drawing");
+
+    assert!(
+        (leaving.top() - survivor.top()).abs() <= px(1.0)
+            && leaving.bottom() <= slot.bottom() + px(0.5),
+        "the surviving row must stay where it drew, inside its slot, got {leaving:?} in \
+         {slot:?} from {survivor:?}"
     );
 }

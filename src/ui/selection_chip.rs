@@ -131,9 +131,6 @@ pub(crate) struct SelectionChip {
     paint: ChipPaint,
     outline: Option<Color>,
     landing: Option<Color>,
-    offset: gpui::Point<Pixels>,
-    /// How much taller the chip draws than its item, from its bottom edge.
-    lengthening: Pixels,
 }
 
 /// The width of the outline that marks the item a context menu acts on.
@@ -153,22 +150,7 @@ impl SelectionChip {
             paint,
             outline: None,
             landing: None,
-            offset: gpui::Point::default(),
-            lengthening: px(0.0),
         }
-    }
-
-    /// Draws the chip `offset` from its place in the item, as a selection moving to the item.
-    pub(crate) const fn displaced(mut self, offset: gpui::Point<Pixels>) -> Self {
-        self.offset = offset;
-        self
-    }
-
-    /// Draws the chip `by` taller than its item, from its bottom edge, as a selection that left a
-    /// taller item and is still moving.
-    pub(crate) const fn lengthened(mut self, by: Pixels) -> Self {
-        self.lengthening = by;
-        self
     }
 
     /// Edges the chip with a dashed line in `color`, marking the place a dragged item would land.
@@ -184,13 +166,13 @@ impl SelectionChip {
         self
     }
 
-    fn body(shape: ChipShape, offset: gpui::Point<Pixels>, lengthening: Pixels) -> gpui::Div {
+    fn body(shape: ChipShape) -> gpui::Div {
         div()
             .absolute()
-            .top(shape.inset_y + offset.y)
-            .bottom(shape.inset_y - offset.y - lengthening)
-            .left(shape.inset_leading + offset.x)
-            .right(shape.inset_trailing - offset.x)
+            .top(shape.inset_y)
+            .bottom(shape.inset_y)
+            .left(shape.inset_leading)
+            .right(shape.inset_trailing)
             .rounded(shape.radius)
     }
 
@@ -221,7 +203,7 @@ impl SelectionChip {
         let hover_rim = paint.hover_rim.filter(|rim| rim.a != 0).or(rest_rim);
         let rim = hovered_paint(rest_rim, hover_rim, hover);
         let landing = self.landing.is_some();
-        Self::body(self.shape, self.offset, self.lengthening)
+        Self::body(self.shape)
             .debug_selector(move || {
                 if landing {
                     format!("{selector}-landing")

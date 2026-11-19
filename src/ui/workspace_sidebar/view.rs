@@ -3,10 +3,17 @@ use crate::ui::appearance::gpui_color;
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
-use crate::ui::drag_and_drop::{ItemMotion, LIFTED_OPACITY, drag_release_observer, lift_shadow};
+use crate::ui::drag_and_drop::{
+    ItemMotion, LIFTED_OPACITY, SelectionOverlay, SelectionPart, drag_release_observer,
+    lift_shadow, prepaint_selection_last,
+};
 use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 use gpui::accesskit;
 use spaceterm_ui::{ContextMenuTarget, HoverFade};
+
+/// How far a new row grows in before it shows, fading in after. Its words sit clear of its
+/// growing edge by then, so its slot never cuts through them.
+pub(super) const ROW_REVEAL: f32 = 0.85;
 
 /// Where the pointer stands over one row.
 pub(super) struct RowHover {
@@ -299,11 +306,16 @@ pub(super) fn row_background(
     })
 }
 
-/// Whether a row face is the row in the Workspace list or its lifted copy following the pointer.
+/// Whether a row face is the row in the Workspace list, its lifted copy following the pointer, or
+/// the row of a Workspace that left, fading where it stood.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RowRole {
     InList,
     Lifted,
+    /// The row of a Workspace that left, which keeps whether it carried the selection.
+    Leaving {
+        selected: bool,
+    },
 }
 
 impl WorkspaceSidebar {
@@ -342,10 +354,12 @@ impl WorkspaceSidebar {
         let row_background = row_background(appearance);
         let emphasized = appearance.active && self.has_visible_focus(window);
         let lifted = role == RowRole::Lifted;
-        let selected = if lifted {
-            active
-        } else {
-            self.selected_key() == Some(SidebarRowKey::Workspace(workspace_id))
+        // A row outside the list takes no input and keeps the selection it showed.
+        let detached = role != RowRole::InList;
+        let selected = match role {
+            RowRole::InList => self.selected_key() == Some(SidebarRowKey::Workspace(workspace_id)),
+            RowRole::Lifted => active,
+            RowRole::Leaving { selected } => selected,
         };
         let RowHover {
             level: hover,
@@ -354,7 +368,7 @@ impl WorkspaceSidebar {
         let hover = if appearance.active { hover } else { 0.0 };
         let level = f64::from(hover);
         let (chip, row_colors) = row_paint(selected, emphasized, hover, appearance, cx);
-        let chip = if lifted {
+        let chip = if detached {
             chip
         } else if self.workspace_reorder.motion(workspace_id, cx).lifted {
             chip.landing(row_colors.row_foreground)
@@ -516,15 +530,15 @@ impl WorkspaceSidebar {
         let owner = sidebar.entity_id();
         // The lifted copy shows its whole lift; the row in the list shows what remains of its
         // lift as it settles.
-        let lift = if lifted {
-            1.0
-        } else {
-            self.workspace_reorder.motion(workspace_id, cx).lift
+        let lift = match role {
+            RowRole::InList => self.workspace_reorder.motion(workspace_id, cx).lift,
+            RowRole::Lifted => 1.0,
+            RowRole::Leaving { .. } => 0.0,
         };
-        let element_name = if lifted {
-            "workspace-row-preview"
-        } else {
-            "workspace-row"
+        let element_name = match role {
+            RowRole::InList => "workspace-row",
+            RowRole::Lifted => "workspace-row-preview",
+            RowRole::Leaving { .. } => "workspace-row-leaving",
         };
         // The chevron, and the "+" of an expanded row, trail the name on line 1, so line 2 runs
         // to the row's end like a row without Worktrees. A collapsed row offers New Worktree from
@@ -538,7 +552,7 @@ impl WorkspaceSidebar {
                     .flex()
                     .items_center()
                     .when(
-                        shown_expanded && creates_worktrees && !lifted && !renaming,
+                        shown_expanded && creates_worktrees && !detached && !renaming,
                         |trailing| {
                             trailing.child(new_worktree_button(
                                 workspace_id,
@@ -555,20 +569,18 @@ impl WorkspaceSidebar {
                         workspace_id,
                         expanded,
                         disclosure,
-                        !lifted,
+                        !detached,
                         row_colors.row_icon,
                         sidebar.clone(),
                         appearance,
                     ))
             });
+        // The list draws the selection of a row in it beneath every row, so nothing a row clips
+        // cuts it off. The row draws its own chip only as the place a release would land it.
+        // The selection a Workspace that left held fades where the list drew it.
+        let drawn_chip =
+            !selected || lifted || self.workspace_reorder.motion(workspace_id, cx).lifted;
         let row_content = div()
-            .when(selected && !lifted, |row| {
-                row.on_children_prepainted(self.measure_selection(
-                    SidebarRowKey::Workspace(workspace_id),
-                    sidebar.clone(),
-                    appearance,
-                ))
-            })
             .id((element_name, workspace_id.get()))
             .debug_selector(move || {
                 format!(
@@ -587,23 +599,20 @@ impl WorkspaceSidebar {
             .flex_row()
             .items_center()
             .gap(appearance.spacing(ROW_CONTENT_GAP))
-            .when(!lifted, |row| row.block_mouse_except_scroll())
+            .when(!detached, |row| row.block_mouse_except_scroll())
             .when_some(row_background, |row, background| {
                 row.bg(gpui_color(background))
             })
             .when(lifted, |row| row.opacity(LIFTED_OPACITY))
-            .child({
+            .when(drawn_chip, |row| {
                 let selector = format!("{element_name}-selection-{}", workspace_id.get());
-                if lift > 0.0 {
+                row.child(if lift > 0.0 {
                     chip.render_lifted(selector, hover.max(lift), lift_shadow(appearance, lift))
-                } else if lifted {
-                    chip.render(selector, hover)
                 } else {
-                    self.moving_selection(chip, SidebarRowKey::Workspace(workspace_id), cx)
-                        .render(selector, hover)
-                }
+                    chip.render(selector, hover)
+                })
             })
-            .when(!lifted, |row| {
+            .when(!detached, |row| {
                 row.on_click(move |_, _, cx| {
                     let _ = click_sidebar.update(cx, |sidebar, cx| {
                         sidebar.cursor = None;
@@ -615,7 +624,7 @@ impl WorkspaceSidebar {
                     cx.stop_propagation();
                 })
             })
-            .when(!renaming && !lifted, |row| {
+            .when(!renaming && !detached, |row| {
                 row.on_drag(
                     DraggedWorkspace {
                         workspace_id,
@@ -701,7 +710,8 @@ impl WorkspaceSidebar {
                             repository.map(|badge| text::RowRepository {
                                 badge,
                                 pull_request_paint,
-                                interactive: true,
+                                // A row outside the list opens no Pull Request.
+                                interactive: !detached,
                             }),
                             pinned && !disclosing && detail_color.is_none(),
                             detail_paint,
@@ -719,7 +729,7 @@ impl WorkspaceSidebar {
             // Rows rest on the continuous base surface without separators. The hover and selection
             // chips alone give each Workspace its shape; collection focus never adds a row ring.
             .when_some(tracker, |row, tracker| row.child(tracker.tracker()));
-        if lifted {
+        if detached {
             return row_content.into_any_element();
         }
         let row = Tooltip::new(("workspace-row-tooltip", workspace_id.get()), tooltip_label)
@@ -818,82 +828,244 @@ impl WorkspaceSidebar {
             .collect()
     }
 
-    /// How tall the chip of the row `key` is at rest this frame.
-    pub(super) fn chip_height(
+    /// The groups of Workspaces that left the list from a closing gap, each as it drew as it
+    /// left and as much of it as shows, fading before the gap closes. Their rows take no input
+    /// and present no accessible element.
+    fn render_departed_rows(
         &self,
-        key: SidebarRowKey,
-        appearance: &crate::ui::appearance::ChromeAppearance,
-    ) -> Pixels {
-        let row = match key {
-            SidebarRowKey::Workspace(workspace_id) => workspace_row_height(
-                appearance,
-                self.groups
-                    .get(&workspace_id)
-                    .map_or(0.0, |group| group.frame.disclosed.reveal),
-            ),
-            SidebarRowKey::Worktree(..) => row_height(appearance),
-        };
-        row - appearance.spacing(SIDEBAR_ROW_SELECTION_INSET_Y) * 2.0
-    }
-
-    /// Draws the selection on the row `key` that carries it: displaced while it moves there, and
-    /// lengthened while it keeps some of the size it left with.
-    fn moving_selection(&self, chip: SelectionChip, key: SidebarRowKey, cx: &App) -> SelectionChip {
-        let (workspace_id, row) = match key {
-            SidebarRowKey::Workspace(workspace_id) => (workspace_id, None),
-            SidebarRowKey::Worktree(workspace_id, worktree_id) => (workspace_id, Some(worktree_id)),
-        };
-        let lengthening = self
-            .selection_lengthening
-            .filter(|(target, _)| *target == key)
-            .map_or(px(0.0), |(_, by)| {
-                by * self
-                    .workspace_reorder
-                    .row_selection_remaining(workspace_id, row, cx)
-            });
-        chip.displaced(
-            self.workspace_reorder
-                .row_selection_offset(workspace_id, row, cx),
-        )
-        .lengthened(lengthening)
-    }
-
-    /// Records where the selected row `key` painted its chip, its first child, along the list,
-    /// so the next move of the selection starts from there.
-    fn measure_selection(
-        &self,
-        key: SidebarRowKey,
+        leaving: &[crate::ui::drag_and_drop::Leaving<WorkspaceId>],
+        presentation: &crate::desktop_profile::DesktopPresentation,
         sidebar: WeakEntity<Self>,
-        appearance: &crate::ui::appearance::ChromeAppearance,
-    ) -> impl Fn(Vec<gpui::Bounds<Pixels>>, &mut Window, &mut App) + 'static {
-        let inset = appearance.spacing(SIDEBAR_ROW_SELECTION_INSET_Y);
-        move |bounds, _, cx| {
-            let Some(chip) = bounds.first().copied() else {
-                return;
-            };
-            let _ = sidebar.update(cx, |sidebar, _| {
-                // The list's items stand where they would unscrolled.
-                let start = chip.top() - inset - sidebar.scroll_handle.offset().y;
-                sidebar.painted_selection = Some((key, start, chip.size.height));
-            });
-        }
-    }
-
-    /// How far the row `key` stands from the start of its Workspace group this frame, where the
-    /// group draws it.
-    pub(super) fn row_inset(
-        &self,
-        key: SidebarRowKey,
+        window: &Window,
         appearance: &crate::ui::appearance::ChromeAppearance,
         cx: &App,
-    ) -> Pixels {
-        let SidebarRowKey::Worktree(workspace_id, worktree_id) = key else {
-            return px(0.0);
+    ) -> Option<AnyElement> {
+        (!leaving.is_empty()).then(|| {
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .children(leaving.iter().map(|leaving| {
+                    let departed = leaving
+                        .id
+                        .and_then(|workspace_id| self.departed_groups.get(&workspace_id));
+                    div()
+                        .w_full()
+                        .h(leaving.extent)
+                        .flex_shrink_0()
+                        .overflow_hidden()
+                        .opacity(leaving.opacity(cx) * leaving.motion().reveal(ROW_REVEAL))
+                        .children(departed.map(|group| {
+                            self.render_departed_group(
+                                group,
+                                presentation,
+                                sidebar.clone(),
+                                window,
+                                appearance,
+                                cx,
+                            )
+                        }))
+                }))
+                .into_any_element()
+        })
+    }
+
+    /// The rows of a Workspace group that left, as it drew them as it left: its Workspace row,
+    /// and below it its Worktree rows as far as they had disclosed, with the selection's row
+    /// still painted as selected. None of them takes input.
+    fn render_departed_group(
+        &self,
+        group: &DepartedGroup,
+        presentation: &crate::desktop_profile::DesktopPresentation,
+        sidebar: WeakEntity<Self>,
+        window: &Window,
+        appearance: &crate::ui::appearance::ChromeAppearance,
+        cx: &App,
+    ) -> AnyElement {
+        let workspace_id = group.row.workspace_id;
+        let header = self.render_workspace_row(
+            group.row.clone(),
+            RowRole::Leaving {
+                selected: group.selected == Some(SidebarRowKey::Workspace(workspace_id)),
+            },
+            RowHover {
+                level: 0.0,
+                tracker: None,
+            },
+            group.disclosure,
+            sidebar.clone(),
+            presentation,
+            window,
+            appearance,
+            cx,
+        );
+        // Each Worktree row keeps the slot it was drawn in, how far it had grown, and the rows
+        // fading beside it, so nothing it showed comes back and nothing it hid shows.
+        // A closing gap shows as much of the rows in it as its drawn height holds.
+        let gap = |extent: Pixels, rows: &[(Option<WorktreeRowViewModel>, Pixels, f32)]| {
+            div()
+                .w_full()
+                .h(extent)
+                .flex_shrink_0()
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .children(rows.iter().map(|(departed, extent, opacity)| {
+                    div()
+                        .w_full()
+                        .h(*extent)
+                        .flex_shrink_0()
+                        .overflow_hidden()
+                        .opacity(*opacity)
+                        .children(departed.as_ref().map(|departed| {
+                            self.render_worktree_row(
+                                workspace_id,
+                                departed,
+                                (1, 1),
+                                None,
+                                Some(false),
+                                sidebar.clone(),
+                                window,
+                                appearance,
+                                cx,
+                            )
+                        }))
+                }))
         };
-        self.group_layout(workspace_id, appearance, cx)
-            .into_iter()
-            .find(|(row, _, _)| *row == GroupRow::Worktree(worktree_id))
-            .map_or(px(0.0), |(_, face, _)| face)
+        let worktrees = group.slots.iter().map(|slot| {
+            let key = SidebarRowKey::Worktree(workspace_id, slot.worktree.worktree_id);
+            let row = div().w_full().flex_shrink_0().opacity(slot.reveal).child(
+                self.render_worktree_row(
+                    workspace_id,
+                    &slot.worktree,
+                    slot.position,
+                    None,
+                    Some(group.selected == Some(key)),
+                    sidebar.clone(),
+                    window,
+                    appearance,
+                    cx,
+                ),
+            );
+            let worktree_id = slot.worktree.worktree_id;
+            div()
+                .debug_selector(move || {
+                    format!("worktree-slot-leaving-{}-{worktree_id}", workspace_id.get())
+                })
+                .w_full()
+                .h(slot.height)
+                .flex_shrink_0()
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .when(slot.grows_from_end, |slot| slot.justify_end())
+                // Worktree rows fade as they disclose, and keep how far they had.
+                .opacity(group.disclosure.disclosed)
+                .child(gap(slot.leading_gap, &slot.before))
+                .child(row)
+                .child(gap(slot.trailing_gap, &slot.after))
+        });
+        div()
+            .debug_selector(move || format!("workspace-group-leaving-{}", workspace_id.get()))
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(header)
+            .children(worktrees)
+            .into_any_element()
+    }
+
+    /// The selection on the row `key`, which the list draws beneath its rows where the frame lays
+    /// that row out, gliding there from where it was drawn when it moves. `hover` is how far that
+    /// row has eased toward its hovered paint.
+    fn render_selection(
+        &self,
+        key: SidebarRowKey,
+        hover: f32,
+        window: &Window,
+        appearance: &crate::ui::appearance::ChromeAppearance,
+        cx: &App,
+    ) -> SelectionOverlay {
+        let workspace_id = key.workspace_id();
+        let emphasized = appearance.active && self.has_visible_focus(window);
+        let hover = if appearance.active { hover } else { 0.0 };
+        let (chip, _) = row_paint(true, emphasized, hover, appearance, cx);
+        let chip = self.outline_menu_target(chip, key, appearance);
+        let motion = self.workspace_reorder.motion(workspace_id, cx);
+        // A lifted Workspace shows where a release would land it instead. One that settles from
+        // a drop carries the selection with what remains of its lift.
+        let lifted = motion.lifted;
+        let lift = match key {
+            SidebarRowKey::Workspace(_) => motion.lift,
+            SidebarRowKey::Worktree(..) => 0.0,
+        };
+        let shadow = lift_shadow(appearance, lift);
+        let selector = match key {
+            SidebarRowKey::Workspace(workspace_id) => {
+                format!("workspace-row-selection-{}", workspace_id.get())
+            }
+            SidebarRowKey::Worktree(workspace_id, worktree_id) => {
+                format!(
+                    "worktree-row-{}-{worktree_id}-selection",
+                    workspace_id.get()
+                )
+            }
+        };
+        let group = self.groups.get(&workspace_id);
+        let place = group.map(|group| {
+            group
+                .rows
+                .place_face(key.group_row(), &group.row_ids(), &group.items, cx)
+        });
+        // Worktree rows that disclose or close show only as far as their group has opened, so a
+        // selection on one stands within that, whole, and follows the group as it opens.
+        let disclosing = group
+            .filter(|group| group.frame.disclosed.moving)
+            .and(self.row_position(workspace_id))
+            .map(|position| (self.scroll_handle.clone(), position));
+        let place = move |cx: &App| {
+            if lifted {
+                return None;
+            }
+            let face = place?(cx)?;
+            let Some((list, position)) = &disclosing else {
+                return Some(face);
+            };
+            let Some(group) = list.bounds_for_item(*position) else {
+                return Some(face);
+            };
+            let top = list.offset().y + group.top();
+            let bottom = list.offset().y + group.bottom();
+            let along = face.top().min(bottom - face.size.height).max(top);
+            Some(gpui::Bounds::new(point(face.origin.x, along), face.size))
+        };
+        SelectionOverlay::new(
+            gpui::Axis::Vertical,
+            &self.scroll_handle,
+            self.workspace_reorder
+                .selection_motion(workspace_id, key.worktree_id(), cx),
+            place,
+            move |size, opacity, part| {
+                let face = div()
+                    .relative()
+                    .w(size.width)
+                    .h(size.height)
+                    .opacity(opacity);
+                match part {
+                    // The selection a Workspace that left held fades where it was drawn.
+                    SelectionPart::Departing => {
+                        face.child(chip.render("workspace-departing-selection".to_owned(), 0.0))
+                    }
+                    SelectionPart::Selected if lift > 0.0 => face.child(chip.render_lifted(
+                        selector.clone(),
+                        hover.max(lift),
+                        shadow.clone(),
+                    )),
+                    SelectionPart::Selected => face.child(chip.render(selector.clone(), hover)),
+                }
+                .into_any_element()
+            },
+        )
     }
 
     /// Outlines the row whose menu is open. A secondary click leaves the selection where it was,
@@ -1062,8 +1234,15 @@ impl WorkspaceSidebar {
         });
         // Each Workspace and its Worktrees are one scroll child, so reordering, revealing, and
         // drag previews stay indexed by Workspace.
+        let selected_key = self.selected_key();
+        // How far the selected row has eased toward its hovered paint, which the selection drawn
+        // beneath it follows.
+        let mut selected_hover = 0.0;
         for (row, fade) in self.rows.iter().zip(hovers) {
             let workspace_id = row.workspace_id;
+            if selected_key == Some(SidebarRowKey::Workspace(workspace_id)) {
+                selected_hover = fade.level;
+            }
             let group = self.groups.get(&workspace_id);
             let frame = group.map_or_else(
                 || GroupFrame::at_rest(row.worktrees.as_ref()),
@@ -1118,11 +1297,18 @@ impl WorkspaceSidebar {
                     },
                     None => None,
                 };
+                if let Some(fade) = fade.as_ref()
+                    && selected_key
+                        == Some(SidebarRowKey::Worktree(workspace_id, worktree.worktree_id))
+                {
+                    selected_hover = fade.level;
+                }
                 let element = self.render_worktree_row(
                     workspace_id,
                     worktree,
                     position,
                     fade,
+                    None,
                     sidebar.clone(),
                     window,
                     appearance,
@@ -1131,25 +1317,27 @@ impl WorkspaceSidebar {
                 elements.push((row, element));
             }
             // Every row holds a slot that grows it in, and draws the rows that left beside it,
-            // each clipped to what showed of it, while their places close. Their faces take no
+            // each fading in what showed of it before its place closes. Their faces take no
             // input and present no accessible element.
-            let departed = |rows: Vec<(Option<&WorktreeRowViewModel>, Pixels)>| {
+            let departed = |rows: Vec<DepartedRow<'_>>| {
                 (!rows.is_empty()).then(|| {
                     div()
                         .w_full()
                         .flex()
                         .flex_col()
-                        .children(rows.into_iter().map(|(departed, extent)| {
+                        .children(rows.into_iter().map(|departed| {
                             div()
                                 .w_full()
-                                .h(extent)
+                                .h(departed.extent)
                                 .flex_shrink_0()
                                 .overflow_hidden()
-                                .children(departed.map(|departed| {
+                                .opacity(departed.opacity * departed.motion.reveal(ROW_REVEAL))
+                                .children(departed.row.map(|departed| {
                                     self.render_worktree_row(
                                         workspace_id,
                                         departed,
                                         (1, 1),
+                                        None,
                                         None,
                                         sidebar.clone(),
                                         window,
@@ -1166,7 +1354,13 @@ impl WorkspaceSidebar {
                 let motion =
                     group.map_or_else(ItemMotion::default, |group| group.rows.motion(row, cx));
                 let (before, after) =
-                    group.map_or_else(Default::default, |group| group.departed_beside(row));
+                    group.map_or_else(Default::default, |group| group.departed_beside(row, cx));
+                // A row growing in shows once it nearly fits, so its slot never cuts its words.
+                let element = div()
+                    .w_full()
+                    .opacity(motion.reveal(ROW_REVEAL))
+                    .child(element)
+                    .into_any_element();
                 motion
                     .frame_item(
                         gpui::Axis::Vertical,
@@ -1201,18 +1395,6 @@ impl WorkspaceSidebar {
             let measure_sidebar = sidebar.clone();
             let grow_sidebar = sidebar.clone();
             let motion = self.workspace_reorder.motion(workspace_id, cx);
-            // The slot keeps the group's laid-out place, so a drag measures every group at rest
-            // while the group itself slides. It also grows a new group in and closes the gap a
-            // removed one leaves.
-            let slot = motion.frame_slot(
-                gpui::Axis::Vertical,
-                div().w_full().flex_shrink_0(),
-                move |size, cx| {
-                    let _ = grow_sidebar.update(cx, |sidebar, _| {
-                        sidebar.workspace_reorder.measure(workspace_id, size);
-                    });
-                },
-            );
             // The group's scroll handle tracks its rows, which leaves the prepaint listener none,
             // so the listener reads them from the handle.
             let group_element = div()
@@ -1226,7 +1408,7 @@ impl WorkspaceSidebar {
                 .relative()
                 .left(motion.offset.x)
                 .top(motion.offset.y)
-                .opacity(motion.opacity())
+                .opacity(motion.opacity() * motion.reveal(ROW_REVEAL))
                 .w_full()
                 .flex()
                 .flex_col()
@@ -1235,8 +1417,52 @@ impl WorkspaceSidebar {
                 })
                 .when_some(group, |element, group| element.track_scroll(&group.items))
                 .children(children);
-            list = list.child(slot.child(group_element));
+            // The slot keeps the group's laid-out place, so a drag measures every group at rest
+            // while the group itself slides. It also grows a new group in, and draws the rows of
+            // Workspaces that left beside it, fading, while their places close.
+            let (before, after) = self.workspace_reorder.leaving_beside(workspace_id);
+            list = list.child(motion.frame_item(
+                gpui::Axis::Vertical,
+                div().w_full().flex_shrink_0(),
+                group_element.into_any_element(),
+                self.render_departed_rows(
+                    before,
+                    presentation,
+                    sidebar.clone(),
+                    window,
+                    appearance,
+                    cx,
+                ),
+                self.render_departed_rows(
+                    after,
+                    presentation,
+                    sidebar.clone(),
+                    window,
+                    appearance,
+                    cx,
+                ),
+                move |size, cx| {
+                    let _ = grow_sidebar.update(cx, |sidebar, _| {
+                        sidebar.workspace_reorder.measure(workspace_id, size);
+                    });
+                },
+            ));
         }
+        // The selection paints beneath the rows, and prepaints after them, from the layout and
+        // scroll the frame settles.
+        let selection = selected_key
+            .map(|key| self.render_selection(key, selected_hover, window, appearance, cx));
+        let children = 1 + usize::from(selection.is_some());
+        let list = div()
+            .relative()
+            .w_full()
+            .min_h_0()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .children(selection)
+            .child(list)
+            .with_dynamic_prepaint_order(move |_, _| prepaint_selection_last(children));
 
         let scrollbar = self.scrollbar.clone();
         let menu_sidebar = sidebar.clone();
@@ -1533,6 +1759,7 @@ impl WorkspaceSidebar {
         worktree: &WorktreeRowViewModel,
         (position, size): (usize, usize),
         fade: Option<RowFade>,
+        departed_selection: Option<bool>,
         sidebar: WeakEntity<Self>,
         window: &Window,
         appearance: &crate::ui::appearance::ChromeAppearance,
@@ -1540,14 +1767,15 @@ impl WorkspaceSidebar {
     ) -> AnyElement {
         let worktree_id = worktree.worktree_id;
         let key = SidebarRowKey::Worktree(workspace_id, worktree_id);
-        let selected = self.selected_key() == Some(key);
+        // A row of a Workspace that left keeps whether it carried the selection.
+        let selected = departed_selection.unwrap_or_else(|| self.selected_key() == Some(key));
         let emphasized = appearance.active && self.has_visible_focus(window);
         let hover = match &fade {
             Some(fade) if appearance.active => fade.level,
             _ => 0.0,
         };
         let (chip, row_colors) = row_paint(selected, emphasized, hover, appearance, cx);
-        let chip = self.moving_selection(self.outline_menu_target(chip, key, appearance), key, cx);
+        let chip = self.outline_menu_target(chip, key, appearance);
         // A closing row draws its face alone, which takes no input.
         let closing = fade.is_none();
         let openable = worktree.openable() && !closing;
@@ -1647,13 +1875,9 @@ impl WorkspaceSidebar {
         };
         let click_sidebar = sidebar.clone();
         let press_sidebar = sidebar.clone();
-        let measure_sidebar = sidebar.clone();
         let menu_sidebar = sidebar;
         let icon_size = appearance.icons.metrics(IconRole::Row).glyph_size;
         let row = div()
-            .when(selected && !closing, |row| {
-                row.on_children_prepainted(self.measure_selection(key, measure_sidebar, appearance))
-            })
             .id(id)
             .debug_selector({
                 let selector = selector.clone();
@@ -1672,7 +1896,11 @@ impl WorkspaceSidebar {
             .when_some(row_background(appearance), |row, background| {
                 row.bg(gpui_color(background))
             })
-            .child(chip.render(format!("{selector}-selection"), hover))
+            // The list draws the selection beneath every row, and fades the selection of a
+            // Workspace that left where it drew it.
+            .when(!selected, |row| {
+                row.child(chip.render(format!("{selector}-selection"), hover))
+            })
             .when(openable, |row| {
                 row.on_click(move |_, _, cx| {
                     let _ = click_sidebar.update(cx, |sidebar, cx| {

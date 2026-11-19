@@ -307,6 +307,22 @@ impl SidebarRowKey {
             Self::Workspace(workspace_id) | Self::Worktree(workspace_id, _) => workspace_id,
         }
     }
+
+    /// The Worktree whose row this is, or `None` for a Workspace row.
+    const fn worktree_id(self) -> Option<WorktreeId> {
+        match self {
+            Self::Workspace(_) => None,
+            Self::Worktree(_, worktree_id) => Some(worktree_id),
+        }
+    }
+
+    /// The row as its Workspace group knows it.
+    const fn group_row(self) -> GroupRow {
+        match self {
+            Self::Workspace(_) => GroupRow::Workspace,
+            Self::Worktree(_, worktree_id) => GroupRow::Worktree(worktree_id),
+        }
+    }
 }
 
 /// One row of a Workspace group, by what it shows.
@@ -440,31 +456,111 @@ impl GroupMotion {
         ids
     }
 
+    /// Each Worktree row of `section` as the group drew it in its last frame, for the group to
+    /// keep drawing as it leaves.
+    fn drawn_slots(&self, section: Option<&WorktreeSection>, cx: &App) -> Vec<DepartedSlot> {
+        let Some(section) = section else {
+            return Vec::new();
+        };
+        let ids = self.row_ids();
+        worktree_group_rows(section)
+            .into_iter()
+            .filter_map(|(row, (worktree, position))| {
+                let index = ids.iter().position(|id| *id == row)?;
+                // Everything comes from the frame the slot was last painted in.
+                let height = self.items.bounds_for_item(index)?.size.height;
+                let painted_at = self.rows.painted_at(cx);
+                let motion = self.rows.painted_motion(row, cx);
+                let reveal = motion.reveal(view::ROW_REVEAL);
+                let (before, after) = self.rows.leaving_beside(row);
+                let shown = |rows: &[super::drag_and_drop::Leaving<GroupRow>]| {
+                    rows.iter()
+                        .map(|leaving| {
+                            (
+                                leaving.id.and_then(|id| self.departed.get(&id)).cloned(),
+                                leaving.extent,
+                                leaving.opacity_at(painted_at)
+                                    * leaving.motion().reveal(view::ROW_REVEAL),
+                            )
+                        })
+                        .collect()
+                };
+                Some(DepartedSlot {
+                    worktree: worktree.clone(),
+                    position,
+                    height,
+                    reveal,
+                    grows_from_end: motion.grows_from_end,
+                    leading_gap: motion.leading_gap,
+                    trailing_gap: motion.trailing_gap,
+                    before: shown(before),
+                    after: shown(after),
+                })
+            })
+            .collect()
+    }
+
     /// The rows that left from beside `row` and still draw in its closing gaps, before it and
     /// after it, each with how much of it shows from its top. A place with no row to draw, as a
     /// row that returned leaves, stays empty.
-    #[expect(
-        clippy::type_complexity,
-        reason = "the rows on either side are the same list of departed rows and their extents"
-    )]
     fn departed_beside(
         &self,
         row: GroupRow,
-    ) -> (
-        Vec<(Option<&WorktreeRowViewModel>, Pixels)>,
-        Vec<(Option<&WorktreeRowViewModel>, Pixels)>,
-    ) {
+        cx: &App,
+    ) -> (Vec<DepartedRow<'_>>, Vec<DepartedRow<'_>>) {
         let (before, after) = self.rows.leaving_beside(row);
         let departed = |rows: &[super::drag_and_drop::Leaving<GroupRow>]| {
             rows.iter()
-                .map(|leaving| {
-                    let departed = leaving.id.and_then(|id| self.departed.get(&id));
-                    (departed, leaving.extent)
+                .map(|leaving| DepartedRow {
+                    row: leaving.id.and_then(|id| self.departed.get(&id)),
+                    extent: leaving.extent,
+                    opacity: leaving.opacity(cx),
+                    motion: leaving.motion(),
                 })
                 .collect::<Vec<_>>()
         };
         (departed(before), departed(after))
     }
+}
+
+/// A Workspace group that left the list, as it drew as it left, which fades in its closing gap.
+struct DepartedGroup {
+    row: WorkspaceRowViewModel,
+    /// The Worktree rows the group drew below the Workspace row, as it drew them.
+    slots: Vec<DepartedSlot>,
+    /// How far the Worktree rows had disclosed.
+    disclosure: view::RowDisclosure,
+    /// The row of the group that carried the selection.
+    selected: Option<SidebarRowKey>,
+}
+
+/// A Worktree row of a Workspace group that left, as the group drew it in its last frame.
+struct DepartedSlot {
+    worktree: WorktreeRowViewModel,
+    /// The row's place in its group, from 1, and how many Worktree rows the group drew.
+    position: (usize, usize),
+    /// How tall the row's slot was drawn, the gaps it held included.
+    height: Pixels,
+    /// How opaque the row was as it grew in, and whether it grew from its slot's far end.
+    reveal: f32,
+    grows_from_end: bool,
+    /// How tall the closing gaps before it and after it were drawn.
+    leading_gap: Pixels,
+    trailing_gap: Pixels,
+    /// The rows that had left from beside it and still drew in its gaps, as much of each as
+    /// showed and how opaque each was.
+    before: Vec<(Option<WorktreeRowViewModel>, Pixels, f32)>,
+    after: Vec<(Option<WorktreeRowViewModel>, Pixels, f32)>,
+}
+
+/// A row that left a Workspace group and still draws in a closing gap, as much of it as shows
+/// from its top, fading before the gap closes.
+struct DepartedRow<'a> {
+    row: Option<&'a WorktreeRowViewModel>,
+    extent: Pixels,
+    opacity: f32,
+    /// How far the row had grown in as it left.
+    motion: super::drag_and_drop::ItemMotion,
 }
 
 /// Each row a Worktree section draws below its Workspace row, in order, with what it shows.
@@ -498,6 +594,9 @@ struct DraggedWorkspace {
 /// Owns sidebar layout, scrolling, menus, inline rename, reordering, and focus transitions.
 pub(super) struct WorkspaceSidebar {
     rows: Vec<WorkspaceRowViewModel>,
+    /// The groups of Workspaces that left the list, which fade where they stood before their
+    /// places close.
+    departed_groups: std::collections::HashMap<WorkspaceId, DepartedGroup>,
     /// The saved paired servers the creation menu offers.
     remote_machines: Vec<RemoteCreationMachine>,
     layout: SidebarLayout,
@@ -526,14 +625,6 @@ pub(super) struct WorkspaceSidebar {
     workspace_reorder: ReorderableStrip<WorkspaceId, Option<WorktreeId>>,
     /// How each Workspace group moves as its Worktree rows disclose, come, and go.
     groups: std::collections::HashMap<WorkspaceId, GroupMotion>,
-    /// The row that carried the selection in the last frame, where its chip was painted along the
-    /// list, and how tall the chip was.
-    painted_selection: Option<(SidebarRowKey, Pixels, Pixels)>,
-    /// The row that carried the selection at the last render.
-    selected: Option<SidebarRowKey>,
-    /// The row the selection is moving to, and how much taller than that row's chip the chip it
-    /// left was, so the moving chip starts at the size it was drawn.
-    selection_lengthening: Option<(SidebarRowKey, Pixels)>,
     /// How the sidebar moves as it shows and hides.
     motion: SidebarMotion,
     /// How the current frame presents the sidebar.
@@ -587,6 +678,7 @@ impl WorkspaceSidebar {
         .detach();
         Self {
             rows: Vec::new(),
+            departed_groups: std::collections::HashMap::new(),
             remote_machines: Vec::new(),
             layout: SidebarLayout {
                 visible,
@@ -606,9 +698,6 @@ impl WorkspaceSidebar {
             suppress_pointer_until_release: false,
             workspace_reorder: ReorderableStrip::new(gpui::Axis::Vertical),
             groups: std::collections::HashMap::new(),
-            painted_selection: None,
-            selected: None,
-            selection_lengthening: None,
             motion: SidebarMotion::new(visible),
             frame: SidebarFrame {
                 reveal: if visible { 1.0 } else { 0.0 },
@@ -1007,6 +1096,40 @@ impl WorkspaceSidebar {
         if self.rows == rows && self.remote_machines == remote_machines {
             return false;
         }
+        let selected = self.selected_key();
+        for departed in std::mem::take(&mut self.rows) {
+            let workspace_id = departed.workspace_id;
+            if rows.iter().any(|row| row.workspace_id == workspace_id) {
+                continue;
+            }
+            // A group that leaves keeps what it drew as it left: its rows, how far they had
+            // disclosed, and which of them carried the selection.
+            let group = self.groups.get(&workspace_id);
+            let frame = group.map_or_else(
+                || GroupFrame::at_rest(departed.worktrees.as_ref()),
+                |group| group.frame,
+            );
+            let section = departed
+                .worktrees
+                .as_ref()
+                .or_else(|| group.and_then(|group| group.section.as_ref()))
+                .filter(|_| frame.draws_worktrees());
+            let slots = group
+                .map(|group| group.drawn_slots(section, cx))
+                .unwrap_or_default();
+            self.departed_groups.insert(
+                workspace_id,
+                DepartedGroup {
+                    row: departed,
+                    slots,
+                    disclosure: view::RowDisclosure {
+                        disclosed: frame.disclosed.reveal,
+                        chevron: frame.disclosing.reveal,
+                    },
+                    selected: selected.filter(|key| key.workspace_id() == workspace_id),
+                },
+            );
+        }
         self.rows = rows;
         self.remote_machines = remote_machines;
         if self
@@ -1202,6 +1325,9 @@ impl Render for WorkspaceSidebar {
         let ids = self.row_ids();
         self.workspace_reorder
             .refresh(&self.scroll_handle, &ids, window, cx);
+        let leaving = self.workspace_reorder.leaving().collect::<Vec<_>>();
+        self.departed_groups
+            .retain(|workspace_id, _| leaving.contains(workspace_id));
         if let Some(active) = self.rows.iter().find(|row| row.active) {
             self.workspace_reorder.reveal_while_entering(
                 active.workspace_id,
@@ -1210,29 +1336,11 @@ impl Render for WorkspaceSidebar {
             );
         }
         self.present_groups(window, cx);
-        let appearance = super::appearance::chrome(cx);
-        // A selection that moves starts from the rect its chip was painted at, whatever moved
-        // under it since.
-        let selected_key = self.selected_key();
-        if selected_key != self.selected {
-            self.selection_lengthening = None;
-            if let (Some(previous), Some(next)) = (self.selected, selected_key)
-                && let Some((painted, start, height)) = self.painted_selection
-                && painted == previous
-            {
-                self.workspace_reorder.drew_selection_at(start);
-                self.selection_lengthening =
-                    Some((next, height - self.chip_height(next, appearance)));
-            }
-            self.selected = selected_key;
-        }
-        let selected = selected_key.map(|key| {
-            let row = match key {
-                SidebarRowKey::Workspace(_) => None,
-                SidebarRowKey::Worktree(_, worktree_id) => Some(worktree_id),
-            };
-            (key.workspace_id(), row, self.row_inset(key, appearance, cx))
-        });
+        // A selection that moves starts from the rect its chip was drawn at, whatever moved
+        // under it since, and changes size on its way.
+        let selected = self
+            .selected_key()
+            .map(|key| (key.workspace_id(), key.worktree_id()));
         self.workspace_reorder
             .follow_row_selection(selected, window, cx);
         // A selected Worktree row growing in or disclosing stays in view, as a new active

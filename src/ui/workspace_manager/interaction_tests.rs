@@ -717,6 +717,107 @@ fn closing_a_pending_tab_waits_for_its_creation_then_reviews_authoritative_sessi
     ));
 }
 
+/// A Tab this client just created reports no Terminal Session until its shell starts. A close
+/// asked for meanwhile waits for the shell, then reviews the Session it started, so the review
+/// never goes stale on the shell's own start and reports the Tab as changed elsewhere.
+#[gpui::test]
+fn closing_a_new_tab_while_its_shell_starts_should_review_the_started_session(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_core::hierarchy::{CloseTarget, Outcome};
+    let (harness, cx) = close_harness(cx);
+    let starting = |session| {
+        let mut inventory = pending_close_inventory();
+        if let Some(close) = inventory.close.as_mut()
+            && let Some(pane) = close
+                .sessions
+                .iter_mut()
+                .find(|pane| pane.id == PENDING_CLOSE_PANE)
+        {
+            pane.session = session;
+        }
+        inventory
+    };
+    click("create-tab-button", cx);
+    harness.edits.answer(Outcome::Accepted {
+        target: PENDING_CLOSE_TAB,
+    });
+    harness.publish(starting(None), cx);
+
+    cx.dispatch_action(crate::ui::CloseTab);
+    redraw(cx);
+    let waited = cx.debug_bounds("modal-action-close-confirm").is_none();
+    // The shell starts: the Pane connects before the server reports its Session.
+    harness.panes.pane(PENDING_CLOSE_PANE).reconnect();
+    cx.executor()
+        .advance_clock(crate::ui::workspace_manager::CLOSE_START_POLL * 2);
+    redraw(cx);
+    let waited_for_report = cx.debug_bounds("modal-action-close-confirm").is_none();
+    let mut started = starting(Some([82; 32]));
+    started.revision += 1;
+    harness.publish(started, cx);
+    cx.executor()
+        .advance_clock(crate::ui::workspace_manager::CLOSE_START_POLL * 2);
+    redraw(cx);
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+    let changed = tree.find("Tab Changed on Another Client").is_some();
+    let reviewed = cx.debug_bounds("modal-action-close-confirm").is_some();
+    if reviewed {
+        click("modal-action-close-confirm", cx);
+    }
+
+    assert_eq!(
+        (waited, waited_for_report, changed, reviewed),
+        (true, true, false, true),
+        "the close must wait for the starting shell and its reported Session, then review it \
+         without a stale notice"
+    );
+    assert_eq!(
+        harness.closes(),
+        [close_mutation(
+            CloseTarget::Tab {
+                workspace: CLOSE_WORKSPACE,
+                tab: PENDING_CLOSE_TAB
+            },
+            &[(PENDING_CLOSE_PANE, Some([82; 32]))],
+            WorkspaceCloseRemoves::Tab,
+        )],
+        "the close must end exactly the Session the shell started"
+    );
+}
+
+/// A new Tab whose shell ended before it reported a Terminal Session has nothing about to
+/// change, so a close reviews what it ends at once.
+#[gpui::test]
+fn closing_a_new_tab_whose_shell_ended_should_review_at_once(cx: &mut TestAppContext) {
+    use spaceterm_core::hierarchy::Outcome;
+    let (harness, cx) = close_harness(cx);
+    click("create-tab-button", cx);
+    harness.edits.answer(Outcome::Accepted {
+        target: PENDING_CLOSE_TAB,
+    });
+    let mut inventory = pending_close_inventory();
+    if let Some(close) = inventory.close.as_mut() {
+        for pane in &mut close.sessions {
+            pane.session = None;
+        }
+    }
+    harness.publish(inventory, cx);
+    harness
+        .panes
+        .pane(PENDING_CLOSE_PANE)
+        .set(crate::terminal::core_session::CorePaneStatus::Ended);
+    redraw(cx);
+
+    cx.dispatch_action(crate::ui::CloseTab);
+    redraw(cx);
+
+    assert!(
+        cx.debug_bounds("modal-action-close-confirm").is_some(),
+        "a close must review a new Tab whose shell ended without waiting"
+    );
+}
+
 #[gpui::test]
 fn a_pending_tab_close_preserves_later_tab_selection_and_terminal_find(cx: &mut TestAppContext) {
     use spaceterm_core::hierarchy::{CloseTarget, Outcome};
@@ -1005,11 +1106,13 @@ fn a_close_in_a_creation_burst_follows_only_the_last_requested_tab(cx: &mut Test
         harness.edits.answer(Outcome::Accepted { target: id });
         harness.publish(authority.clone(), cx);
         assert!(harness.closes().is_empty());
-        assert_eq!(
-            cx.debug_bounds("modal-action-close-confirm").is_some(),
-            index == 2
-        );
+        // The last Tab's shell is still starting, so its review waits for the shell.
+        assert!(cx.debug_bounds("modal-action-close-confirm").is_none());
     }
+    // A shell that does not start in time leaves the review to name what the Tab ends now.
+    cx.executor()
+        .advance_clock(crate::ui::workspace_manager::CLOSE_START_LIMIT * 2);
+    redraw(cx);
     click("modal-action-close-confirm", cx);
     assert_eq!(
         harness.closes(),
