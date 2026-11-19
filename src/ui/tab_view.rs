@@ -741,6 +741,8 @@ pub(crate) struct TabView {
     parked_panes: BTreeMap<PaneId, crate::domain::tab::ParkedPane<Entity<TerminalPane>>>,
     directory_recovery: Option<Entity<super::core_pane::DirectoryRecovery>>,
     /// Reads every Pane's connection status while the Tab lives.
+    /// Classifies the connection losses no announcement explained, once their wait ends.
+    _classify: Option<gpui::Task<()>>,
     _workspace_status: gpui::Task<()>,
     /// Repaints a blocked Pane's notice as the Core's download and SpaceTerm's own update move.
     _blocked_updates: Vec<gpui::Subscription>,
@@ -841,6 +843,7 @@ impl TabView {
             parked_panes: BTreeMap::new(),
             directory_recovery: None,
             _blocked_updates: blocked_updates,
+            _classify: None,
             _workspace_status: cx.spawn_in(window, async move |view, cx| {
                 while changes.recv().await.is_ok() {
                     if view
@@ -1024,21 +1027,33 @@ impl TabView {
     /// What this Tab presents about the Terminal Session its Focused Pane runs, read from that
     /// Pane's caption facts.
     pub(crate) fn tab_identity(&self) -> TabIdentity {
-        let caption = self
-            .pane_captions
-            .get(&self.tab.focused_pane_id())
-            .cloned()
-            .unwrap_or_default();
-        let title = self
-            .pane_titles
-            .get(&self.tab.focused_pane_id())
-            .map(|title| gpui::SharedString::from(reported_title(title).words.to_owned()))
-            .unwrap_or_else(|| "Terminal".into());
+        let focused = self.tab.focused_pane_id();
         TabIdentity::resolve(
-            caption,
-            title,
+            self.caption_text(focused),
+            self.pane_title(focused),
             self.pane_attention.values().copied().sum::<u32>() > 0,
         )
+    }
+
+    /// The title Pane `pane_id` reported, or Terminal.
+    fn pane_title(&self, pane_id: PaneId) -> gpui::SharedString {
+        self.pane_titles
+            .get(&pane_id)
+            .map(|title| gpui::SharedString::from(reported_title(title).words.to_owned()))
+            .unwrap_or_else(|| "Terminal".into())
+    }
+
+    /// What Pane `pane_id`'s caption says, and whether its shell is starting without a name yet.
+    /// A starting shell's caption and Tab wait for its first confirmed name rather than saying
+    /// Terminal, so its first words are its real name.
+    fn caption_text(&self, pane_id: PaneId) -> PaneCaptionText {
+        let mut text = self.pane_captions.get(&pane_id).cloned().unwrap_or_default();
+        let starting = self.binding.view(pane_id).is_some_and(|view| {
+            view.connection().status() == crate::terminal::core_session::CorePaneStatus::Connecting
+        });
+        text.pending = starting
+            && !TabIdentity::resolve(text.clone(), self.pane_title(pane_id), false).is_named();
+        text
     }
 
     /// Records unread attention for one Pane as its Terminal Session would report it.
@@ -1863,6 +1878,9 @@ impl TabView {
                 focused_pane: Some(terminal.entity_id()) == focused_terminal_id,
                 blocker,
             };
+            if let Some(view) = self.binding.view(pane_id) {
+                view.set_foreground(product_focus.active_tab && product_focus.focused_pane);
+            }
             let product_focus_changed = terminal.update(cx, |terminal, cx| {
                 let product_focus_changed = terminal.set_product_focus(product_focus, cx);
                 terminal.synchronize_native_service_hierarchy_generation(hierarchy_generation);
@@ -2099,11 +2117,7 @@ impl TabView {
                     pane_id,
                     background: terminal.read(cx).surface_background(),
                     terminal,
-                    text: self
-                        .pane_captions
-                        .get(&pane_id)
-                        .cloned()
-                        .unwrap_or_default(),
+                    text: self.caption_text(pane_id),
                     focused,
                     zoomed,
                     attention: self.pane_attention.get(&pane_id).copied().unwrap_or(0) > 0,
@@ -3119,8 +3133,57 @@ impl TabView {
             self.apply_sync(pane_id, sync, window, cx);
         }
         if changed {
+            // A Pane whose shell starts or stops starting changes what its Tab says.
+            cx.emit(TabViewEvent::PresentationChanged {
+                tab_id: self.tab.id(),
+            });
             cx.notify();
         }
+        self.schedule_classification(window, cx);
+    }
+
+    /// Calls each Pane whose connection loss nothing explained within
+    /// [`crate::ui::core_pane::CLASSIFY_LIMIT`] an interruption, so only then does it say it
+    /// reconnects. Input paused when the loss began.
+    fn schedule_classification(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self._classify.is_some() {
+            return;
+        }
+        let waiting: Vec<PaneId> = self
+            .binding
+            .pane_ids()
+            .into_iter()
+            .filter(|pane_id| {
+                self.binding
+                    .view(*pane_id)
+                    .is_some_and(crate::ui::core_pane::CorePaneView::classifying)
+            })
+            .collect();
+        if waiting.is_empty() {
+            return;
+        }
+        self._classify = Some(cx.spawn_in(window, async move |view, cx| {
+            cx.background_executor()
+                .timer(crate::ui::core_pane::CLASSIFY_LIMIT)
+                .await;
+            let _ = view.update_in(cx, |view, window, cx| {
+                view._classify = None;
+                for pane_id in waiting {
+                    let Some(sync) = view
+                        .binding
+                        .view_mut(pane_id)
+                        .map(crate::ui::core_pane::CorePaneView::classify)
+                    else {
+                        continue;
+                    };
+                    if sync.changed {
+                        view.apply_sync(pane_id, sync, window, cx);
+                        cx.notify();
+                    }
+                }
+                view.schedule_classification(window, cx);
+            });
+        }));
     }
 
     fn apply_sync(
@@ -3172,7 +3235,7 @@ impl TabView {
     /// Close, keyboard Pane navigation, or opening its Tab. Close, focus a Pane regains on its
     /// own, window restoration, and membership publication never do, so none of them starts a
     /// retained shell. An unreachable server is asked for nothing at all.
-    fn select_pane(&self, pane_id: PaneId) {
+    fn select_pane(&mut self, pane_id: PaneId) {
         if self.binding.reachable() {
             self.binding.select(pane_id);
         }
@@ -3975,6 +4038,9 @@ pub(crate) struct TabIdentity {
     pub(crate) glyph: Option<gpui::SharedString>,
     /// Whether any Pane in the Tab is asking for attention.
     pub(crate) attention: bool,
+    /// The Focused Pane's shell is starting and has not named itself yet, so the Tab waits for
+    /// its first name the same way the Pane Caption does.
+    pub(crate) pending: bool,
 }
 
 impl TabIdentity {
@@ -4007,6 +4073,7 @@ impl TabIdentity {
             place,
             glyph: caption.glyph,
             attention,
+            pending: caption.pending,
         }
     }
 
@@ -4047,6 +4114,9 @@ struct PaneCaptionText {
     running: bool,
     progress: TerminalProgress,
     repository: Option<RepositoryCaption>,
+    /// The Pane's shell is starting and has not named itself yet. The caption and its Tab show
+    /// one waiting presentation until its first confirmed name, which then shows whole.
+    pending: bool,
 }
 
 impl PaneCaptionText {
@@ -4066,6 +4136,7 @@ impl PaneCaptionText {
                 running: facts.running,
                 progress: facts.progress,
                 repository: facts.repository,
+                pending: false,
             };
         }
         let (leading, name) = split_directory_leaf(&facts.directory);
@@ -4079,6 +4150,7 @@ impl PaneCaptionText {
             running: facts.running,
             progress: facts.progress,
             repository: facts.repository,
+            pending: false,
         }
     }
 }
@@ -4712,24 +4784,31 @@ fn render_caption_identity(
             color,
             appearance,
         ));
+    // A shell that is starting shows no words until its first confirmed name, as its Tab does,
+    // so neither says Terminal first and then something else.
+    let pending = text.pending;
+    let waiting = move |segment: gpui::Div| segment.when(pending, |segment| segment.opacity(0.0));
+    caption_content = caption_content.when(pending, |row| {
+        row.child(div().debug_selector(move || format!("pane-caption-name-pending-{}", pane_id.get())))
+    });
     if text.has_directory {
         caption_content = caption_content
             .when(layout.show_directory && !text.directory.is_empty(), |row| {
-                row.child(
+                row.child(waiting(
                     div()
                         .debug_selector(move || format!("pane-caption-directory-{}", pane_id.get()))
                         .flex_shrink_0()
                         .text_color(gpui_color(color))
                         .child(text.directory),
-                )
+                ))
             })
-            .child(
+            .child(waiting(
                 div()
                     .debug_selector(move || format!("pane-caption-name-{}", pane_id.get()))
                     .min_w_0()
                     .truncate()
                     .child(text.name),
-            )
+            ))
             .when(layout.show_status_separator, |row| {
                 row.child(
                     div()
@@ -4755,14 +4834,14 @@ fn render_caption_identity(
                     )),
             )
             .when(layout.show_label && !text.label.is_empty(), |row| {
-                row.child(
+                row.child(waiting(
                     div()
                         .debug_selector(move || format!("pane-caption-label-{}", pane_id.get()))
                         .min_w_0()
                         .truncate()
                         .text_color(gpui_color(color))
                         .child(text.label),
-                )
+                ))
             });
     } else {
         caption_content = caption_content
@@ -4772,13 +4851,13 @@ fn render_caption_identity(
                 paint,
                 appearance,
             ))
-            .child(
+            .child(waiting(
                 div()
                     .debug_selector(move || format!("pane-caption-name-{}", pane_id.get()))
                     .min_w_0()
                     .truncate()
                     .child(text.name),
-            );
+            ));
     }
     caption_content
 }

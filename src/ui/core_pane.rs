@@ -895,7 +895,9 @@ pub(crate) fn with_tab_traversal(surface: Stateful<gpui::Div>) -> Stateful<gpui:
     })
 }
 
-pub(crate) use connection::{CorePaneScreen, CorePaneSync, CorePaneView, MachinePaneConnection};
+pub(crate) use connection::{
+    CLASSIFY_LIMIT, CorePaneScreen, CorePaneSync, CorePaneView, MachinePaneConnection,
+};
 
 mod connection {
     use std::sync::Arc;
@@ -985,6 +987,11 @@ mod connection {
         /// Asks the server for this Pane, which starts or acquires only this Pane.
         fn select(&self);
 
+        /// Whether this Pane is the Focused Pane of the Tab and Workspace the person has open.
+        /// After SpaceTerm Core restarts, the Pane the person was using starts its fresh shell
+        /// at once; every other Pane waits.
+        fn set_foreground(&self, _foreground: bool) {}
+
         /// Leaves this client's view of the Pane for the next window that presents it.
         fn retain_view(&self) {}
 
@@ -1064,6 +1071,10 @@ mod connection {
 
         fn select(&self) {
             Self::select(self);
+        }
+
+        fn set_foreground(&self, foreground: bool) {
+            Self::set_foreground(self, foreground);
         }
 
         fn retain_view(&self) {
@@ -1166,8 +1177,11 @@ mod connection {
         restart: Option<CoreRestart>,
         /// The Core announced a confirmed Stop, so its lost connection reads as that Stop.
         stopping: bool,
-        /// When this Pane last lost its connection, while the loss is unexplained.
-        lost_since: Option<std::time::Instant>,
+        /// The Pane lost its connection, and nothing has explained the loss yet.
+        lost: bool,
+        /// The person selected this restored Pane, so its ordinary shell start is on the way and
+        /// the Pane stays blank instead of showing the restored screen.
+        selecting: bool,
         /// The loss outlasted [`CLASSIFY_LIMIT`] without an explanation, so it is an
         /// interruption the Pane says it reconnects from.
         interrupted: bool,
@@ -1210,19 +1224,12 @@ mod connection {
 
     /// Hints `hint` once an announced restart's deadline passes. Without the thread, the deadline
     /// still passes at the next reading.
-    fn wake_at_deadline(hint: async_channel::Sender<()>, since: std::time::Instant) {
-        wake_at(
-            hint,
-            since + crate::terminal::core_session::restart::RECONNECT_LIMIT,
-        );
-    }
-
     /// How long a lost connection stays unclassified, with input paused and no notice, while
     /// SpaceTerm reads whether SpaceTerm Core stopped on purpose.
     pub(crate) const CLASSIFY_LIMIT: std::time::Duration = std::time::Duration::from_secs(1);
 
-    /// Hints `hint` once `deadline` passes, so the Pane reads its connection again then.
-    fn wake_at(hint: async_channel::Sender<()>, deadline: std::time::Instant) {
+    fn wake_at_deadline(hint: async_channel::Sender<()>, since: std::time::Instant) {
+        let deadline = since + crate::terminal::core_session::restart::RECONNECT_LIMIT;
         let _ = std::thread::Builder::new()
             .name("spaceterm-pane-restart-deadline".into())
             .spawn(move || {
@@ -1240,7 +1247,8 @@ mod connection {
                 start_failure: connection.start_failure(),
                 restart: None,
                 stopping: false,
-                lost_since: None,
+                lost: false,
+                selecting: false,
                 interrupted: false,
                 restart_since: None,
                 announced: None,
@@ -1311,37 +1319,51 @@ mod connection {
             changed
         }
 
-        /// Times how long a lost connection has gone unexplained and reports whether the Pane
-        /// now calls it an interruption. Input pauses at once; the notice waits for
-        /// [`CLASSIFY_LIMIT`], so a Stop or Restart SpaceTerm Core announces meanwhile never
-        /// reads as one.
+        /// Follows whether the Pane's connection is lost. Input pauses at once; the notice
+        /// waits for [`Self::classify`], which its Tab calls [`CLASSIFY_LIMIT`] after the loss,
+        /// so a Stop or Restart SpaceTerm Core announces meanwhile never reads as one.
         fn read_interruption(&mut self, status: CorePaneStatus) -> bool {
             let lost = matches!(
                 status,
                 CorePaneStatus::Reconnecting | CorePaneStatus::TakeoverReconnecting
             );
-            let interrupted = if lost {
-                let now = self.connection.now();
-                let since = *self.lost_since.get_or_insert_with(|| {
-                    if let Some(hint) = self.deadline_hint.clone() {
-                        wake_at(hint, now + CLASSIFY_LIMIT);
-                    }
-                    now
-                });
-                now.saturating_duration_since(since) >= CLASSIFY_LIMIT
-            } else {
-                self.lost_since = None;
-                false
-            };
-            let changed = interrupted != self.interrupted;
-            self.interrupted = interrupted;
-            changed
+            if lost == self.lost {
+                return false;
+            }
+            self.lost = lost;
+            std::mem::take(&mut self.interrupted)
+        }
+
+        /// Whether the Pane lost its connection and waits for [`Self::classify`].
+        pub(crate) fn classifying(&self) -> bool {
+            self.lost && !self.interrupted
+        }
+
+        /// Calls a loss that nothing explained within [`CLASSIFY_LIMIT`] an interruption.
+        pub(crate) fn classify(&mut self) -> CorePaneSync {
+            if !self.classifying() {
+                return CorePaneSync::default();
+            }
+            self.interrupted = true;
+            CorePaneSync {
+                changed: true,
+                ..CorePaneSync::default()
+            }
         }
 
         /// Asks the server for this Pane, which starts or acquires only this Pane. Only an
         /// explicit Pane selection or Tab opening calls it; rendering and reconciliation never do.
-        pub(crate) fn select(&self) {
+        pub(crate) fn select(&mut self) {
+            self.selecting = self.status == CorePaneStatus::Restored
+                && self.session_end.is_none()
+                && !self.start_unconfirmed;
             self.connection.select();
+        }
+
+        /// Says whether this Pane is the Focused Pane of the Tab and Workspace the person has
+        /// open. It asks the server for nothing by itself.
+        pub(crate) fn set_foreground(&self, foreground: bool) {
+            self.connection.set_foreground(foreground);
         }
 
         /// Leaves this client's view of the Pane for the next window that presents it.
@@ -1371,6 +1393,10 @@ mod connection {
             let controller = self.connection.controller();
             let session_end = self.connection.session_end();
             let start_unknown = self.connection.start_unconfirmed();
+            // A selection waits only while the Pane stays restored on the same connection.
+            if status != CorePaneStatus::Restored || generation_changed {
+                self.selecting = false;
+            }
             if status == self.status
                 && !version_changed
                 && !restart_changed
@@ -1616,6 +1642,17 @@ mod connection {
                             || self.start_in_flight(),
                         offered: self.can_start_shell(),
                     },
+                    // An ordinary shell start keeps the Pane blank and steady until its prompt
+                    // arrives. Only an ended Session or an unconfirmed start explains itself.
+                    Dormant::Restored
+                        if !(self.start_unconfirmed && self.restart.is_none())
+                            && (self.selecting
+                                || self.starting_shell()
+                                || self.start_in_flight()
+                                || self.connection.start_waiting()) =>
+                    {
+                        return None;
+                    }
                     Dormant::Restored | Dormant::Ended(_) => CorePaneScreen::Restored {
                         starting: self.starting_shell()
                             || self.start_in_flight()

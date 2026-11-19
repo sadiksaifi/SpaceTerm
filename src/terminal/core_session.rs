@@ -84,6 +84,8 @@ pub(crate) struct CorePaneState {
     session_end: Mutex<Option<pane::SessionEnd>>,
     retry: AtomicBool,
     selected: Arc<AtomicBool>,
+    /// The Pane is the Focused Pane of the Tab and Workspace the person has open.
+    foreground: AtomicBool,
     created_start: Arc<AtomicBool>,
     take_over: AtomicBool,
     start_restored: Arc<AtomicBool>,
@@ -129,6 +131,7 @@ impl CorePaneState {
             session_end: Mutex::default(),
             retry: AtomicBool::new(false),
             selected: Arc::default(),
+            foreground: AtomicBool::new(false),
             created_start: Arc::default(),
             take_over: AtomicBool::new(false),
             start_restored: Arc::default(),
@@ -236,6 +239,17 @@ impl CorePaneState {
 
     /// Selecting a Pane starts or acquires it, except a Pane whose Session ended in this server
     /// run: that one waits on Session Ended for Start Session, whoever holds its grant.
+    /// Records whether the person has this Pane open as the Focused Pane of their open Tab and
+    /// Workspace. Only a Core restart reads it: the Pane the person was using starts its fresh
+    /// shell at once.
+    pub(crate) fn set_foreground(&self, foreground: bool) {
+        self.foreground.store(foreground, Ordering::Release);
+    }
+
+    pub(crate) fn foreground(&self) -> bool {
+        self.foreground.load(Ordering::Acquire)
+    }
+
     pub(crate) fn select(&self) {
         let status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         if !self.start_unconfirmed()

@@ -156,8 +156,7 @@ fn lost_start() -> (Arc<Connection>, CorePaneView) {
     connection.set(CorePaneStatus::Reconnecting);
     view.sync();
     // Nothing explained the loss in time, so it is an interruption.
-    connection.advance(super::connection::CLASSIFY_LIMIT);
-    view.sync();
+    view.classify();
     (connection, view)
 }
 
@@ -370,21 +369,33 @@ fn a_first_selection_whose_answer_was_lost_shows_the_unconfirmed_start() {
     assert!(view.can_retry());
 }
 
+/// An ordinary shell start keeps the surface blank and steady until the prompt arrives.
 #[test]
-fn a_restored_pane_whose_start_is_in_flight_shows_it_starting() {
+fn a_restored_pane_whose_start_is_in_flight_stays_blank() {
     let connection = Connection::new(CorePaneStatus::Restored);
     connection.set_start_unconfirmed(true);
     let view = CorePaneView::new(connection);
 
-    assert_eq!(
-        view.screen(),
-        Some(CorePaneScreen::Restored {
-            starting: true,
-            unconfirmed: false,
-            offered: false,
-            ended: None,
-        })
-    );
+    assert_eq!(view.screen(), None);
+}
+
+#[test]
+fn selecting_or_starting_a_restored_pane_blanks_it_at_once() {
+    let connection = Connection::new(CorePaneStatus::Restored);
+    let mut view = CorePaneView::new(connection.clone());
+    assert!(matches!(view.screen(), Some(CorePaneScreen::Restored { .. })));
+    view.select();
+    assert_eq!(view.screen(), None, "the selected Pane waits for its prompt");
+
+    // Another client took the Pane meanwhile, so the selection ends.
+    connection.set(CorePaneStatus::Takeover);
+    view.sync();
+    connection.set(CorePaneStatus::Restored);
+    view.sync();
+    assert!(matches!(view.screen(), Some(CorePaneScreen::Restored { .. })));
+
+    view.start_shell();
+    assert_eq!(view.screen(), None, "Start Session waits for the prompt too");
 }
 
 #[test]
@@ -717,6 +728,8 @@ fn an_announced_restart_keeps_one_deadline_through_failed_statuses() {
         connection.advance(std::time::Duration::from_secs(60));
         connection.answer(CorePaneStatus::Reconnecting);
         view.sync();
+        // The Tab classifies the loss while the restart's deadline still hides it.
+        view.classify();
         assert_eq!(notice(&view), None);
         connection.advance(RECONNECT_LIMIT - std::time::Duration::from_secs(120));
         view.sync();
@@ -754,8 +767,8 @@ fn an_unexplained_loss_says_reconnecting_once_nothing_explains_it() {
     connection.set(CorePaneStatus::Reconnecting);
     view.sync();
     assert_eq!(notice(&view), None, "SpaceTerm reads why first");
-    connection.advance(super::connection::CLASSIFY_LIMIT);
-    assert!(view.sync().changed, "the classification repaints the Pane");
+    assert!(view.classifying());
+    assert!(view.classify().changed, "the classification repaints the Pane");
     assert_eq!(
         notice(&view).map(|(title, _)| title),
         Some("Reconnecting…".to_owned())

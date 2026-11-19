@@ -1433,7 +1433,7 @@ mod core_workspaces {
 
         /// A provisional creation already owns its startup intent. Only a confirmed Pane
         /// receives selection or control acquisition.
-        pub(crate) fn select(&self, pane_id: PaneId) {
+        pub(crate) fn select(&mut self, pane_id: PaneId) {
             if self
                 .panes
                 .get(&pane_id)
@@ -1441,7 +1441,7 @@ mod core_workspaces {
             {
                 return;
             }
-            if let Some(view) = self.views.get(&pane_id) {
+            if let Some(view) = self.views.get_mut(&pane_id) {
                 view.select();
             }
         }

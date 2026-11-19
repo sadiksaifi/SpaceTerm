@@ -716,6 +716,10 @@ fn another_clients_ended_pane_should_show_session_ended_without_starting_one(
 
     pane.set(CorePaneStatus::TakeoverReconnecting);
     settle(&harness, cx);
+    // Nothing explains the loss within its wait, so the Pane says it reconnects.
+    cx.executor()
+        .advance_clock(crate::ui::core_pane::CLASSIFY_LIMIT);
+    settle(&harness, cx);
     assert_eq!(
         A11yTree::read(cx).node("Reconnecting…")["aria"]["description"],
         "Start Session waits for SpaceTerm Core to reconnect."
@@ -806,6 +810,13 @@ fn an_interrupted_pane_should_offer_retry_until_its_screen_returns(cx: &mut Test
         .panes
         .pane(ROOT_PANE)
         .set(CorePaneStatus::Reconnecting);
+    settle(&harness, cx);
+    assert!(
+        cx.debug_bounds("pane-notice-1").is_none(),
+        "SpaceTerm first reads whether the loss was a Stop or a restart"
+    );
+    cx.executor()
+        .advance_clock(crate::ui::core_pane::CLASSIFY_LIMIT);
     settle(&harness, cx);
 
     assert!(

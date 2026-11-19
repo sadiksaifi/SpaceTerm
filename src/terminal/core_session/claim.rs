@@ -214,6 +214,10 @@ impl ClaimWorker<'_> {
         if state.restart_expired() {
             return Err(CoreError::Protocol);
         }
+        // This client presented the Pane's live Session before the connection was lost. If the
+        // Core comes back restarted and the person still has this Pane open, its fresh shell
+        // starts at once, as though they had selected it again.
+        let mut was_attached = *attached_session;
         let mut grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
         let grant_update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let mut grant_appearance = Some(grant_update.generation);
@@ -296,11 +300,18 @@ impl ClaimWorker<'_> {
                 unavailable |= directory_unavailable;
                 state.set_session_end(session_ended);
                 state.admission(Admission::Waiting);
+                // A shell about to start for a first use stays an ordinary start: the Pane keeps
+                // its blank surface rather than flashing the restored screen.
+                let starting = session_ended.is_none()
+                    && (created_start
+                        || state.start_restored.load(Ordering::Acquire)
+                        || state.selected.load(Ordering::Acquire)
+                        || (was_attached && state.foreground()));
                 state.set(if unavailable {
                     CorePaneStatus::Failed(CoreError::DirectoryUnavailable)
                 } else if let Some(end) = session_ended {
                     CorePaneStatus::SessionEnded(end)
-                } else if fresh {
+                } else if fresh || starting {
                     CorePaneStatus::Connecting
                 } else {
                     CorePaneStatus::Restored
@@ -323,8 +334,9 @@ impl ClaimWorker<'_> {
                 }
                 let start_restored = state.start_restored.swap(false, Ordering::AcqRel);
                 // Selection never starts a Session that ended in this server run.
-                let selected =
-                    state.selected.swap(false, Ordering::AcqRel) && session_ended.is_none();
+                let resumed = std::mem::take(&mut was_attached) && state.foreground();
+                let selected = (state.selected.swap(false, Ordering::AcqRel) || resumed)
+                    && session_ended.is_none();
                 if created || repair.is_some() || start_restored || selected {
                     grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
                     let update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -1306,6 +1318,65 @@ mod tests {
                 assert_eq!(granted.lease.connection, [1; 32]);
                 host.shutdown().unwrap();
             }
+        }
+    }
+
+    /// A worker whose previous run presented this client's live Session, as after SpaceTerm
+    /// Core restarted.
+    fn run_claim_after_attachment(
+        state: &CorePaneState,
+        mut core: impl FnMut(&Request) -> Result<Reply, CoreError>,
+    ) -> Result<Option<Granted>, CoreError> {
+        ClaimWorker {
+            state,
+            pane_id: [2; 32],
+            alive: &AtomicBool::new(true),
+            attachment: &None,
+            size: &Mutex::new(PaneSize {
+                columns: 80,
+                rows: 24,
+                cell_width: 8,
+                cell_height: 16,
+            }),
+            appearance: &Mutex::new(TerminalAppearanceUpdate::builtin().unwrap()),
+            attached_session: &mut true,
+            takeover: &mut false,
+            paste_unconfirmed: &mut false,
+        }
+        .run(
+            |request| exchange(state, [2; 32], request, &mut core),
+            || {},
+        )
+    }
+
+    #[test]
+    fn a_restarted_core_starts_only_the_open_pane_the_person_was_using() {
+        for foreground in [true, false] {
+            let state = CorePaneState::new();
+            state.set_foreground(foreground);
+            // The wait for another intent ends at once, so the worker asks again.
+            state.wake.notify();
+            let mut starts = 0;
+            let mut observations = 0;
+            let _ = run_claim_after_attachment(&state, |request| match request {
+                Request::SelectPane {
+                    explicit: false, ..
+                } => {
+                    observations += 1;
+                    if observations == 1 {
+                        Ok(restored(9))
+                    } else {
+                        Err(CoreError::Stopped)
+                    }
+                }
+                Request::StartRestored { core, .. } => {
+                    assert_eq!(*core, [9; 32], "the start names the restarted boot");
+                    starts += 1;
+                    Err(CoreError::Protocol)
+                }
+                other => panic!("a restart starts nothing else: {other:?}"),
+            });
+            assert_eq!(starts, usize::from(foreground), "foreground {foreground}");
         }
     }
 

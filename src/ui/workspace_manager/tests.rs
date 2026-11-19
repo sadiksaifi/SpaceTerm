@@ -9678,6 +9678,49 @@ fn close_pane_should_ask_when_core_verifies_a_running_command(cx: &mut TestAppCo
     assert!(harness.closes().is_empty());
 }
 
+/// A shell that is starting shows one waiting presentation in its Tab and its Pane Caption, for
+/// as long as it starts. Neither says Terminal first and then its real name.
+#[gpui::test]
+fn a_starting_shell_waits_for_its_name_in_its_tab_and_caption(cx: &mut TestAppContext) {
+    use crate::terminal::core_session::CorePaneStatus;
+    let (harness, cx) = close_harness(cx);
+    let (tab, pane) = harness.manager.read_with(cx, |manager, cx| {
+        manager
+            .active_tab_manager()
+            .expect("an active Workspace")
+            .read(cx)
+            .active_terminal_identity(cx)
+    });
+    let tab_pending: &'static str = format!("tab-name-pending-{}", tab.get()).leak();
+    let caption_pending: &'static str =
+        format!("pane-caption-name-pending-{}", pane.get()).leak();
+    harness.panes.pane(CLOSE_ROOT_PANE).set(CorePaneStatus::Connecting);
+    settle_panes(cx);
+    assert!(cx.debug_bounds(caption_pending).is_some());
+    assert!(cx.debug_bounds(tab_pending).is_some());
+
+    // A slow start never falls back to Terminal while it is still starting.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    settle_panes(cx);
+    assert!(cx.debug_bounds(caption_pending).is_some());
+    assert!(cx.debug_bounds(tab_pending).is_some());
+
+    harness.panes.pane(CLOSE_ROOT_PANE).reconnect();
+    settle_panes(cx);
+    assert!(
+        cx.debug_bounds(caption_pending).is_none(),
+        "a started shell's caption shows what it has"
+    );
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    settle_panes(cx);
+    assert!(
+        cx.debug_bounds(tab_pending).is_none(),
+        "a started shell that never names itself says Terminal once its wait ends"
+    );
+}
+
 /// An approved Tab close hides its exact membership and focuses the surviving Tab immediately.
 /// The final Tab's close hides the Workspace while the server decides the operation.
 #[gpui::test]

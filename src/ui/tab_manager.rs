@@ -1457,6 +1457,13 @@ impl TabManager {
     fn wait_for_tab_names(&mut self, cx: &mut Context<Self>) {
         let now = super::drag_and_drop::now(cx);
         self.presented = true;
+        // A Tab whose shell is still starting keeps waiting for its first name, and its wait for
+        // a name starts over once the shell has started, so it never says Terminal meanwhile.
+        for (tab_id, view) in self.tabs.iter() {
+            if view.read(cx).tab_identity().pending {
+                self.unnamed_since.insert(tab_id, now);
+            }
+        }
         let tabs = &self.tabs;
         self.unnamed_since.retain(|tab_id, since| {
             now.saturating_duration_since(*since) < TAB_NAME_WAIT
@@ -2007,7 +2014,8 @@ impl TabManager {
         // A Tab that arrived says nothing until its Terminal Session names it, however fast it
         // grows in, so its first words are its real name. One that never gets a name says
         // Terminal once its wait ends.
-        let named = identity.is_named() || !self.unnamed_since.contains_key(&tab_id);
+        let named = identity.is_named()
+            || (!identity.pending && !self.unnamed_since.contains_key(&tab_id));
         // A Tab growing in offers its close control once the control shows whole, so no part of
         // it cut off by the Tab's slot takes a press or reaches assistive technology.
         let close_control = if role != TabItemRole::InBar || reveal.close <= 0.0 {
