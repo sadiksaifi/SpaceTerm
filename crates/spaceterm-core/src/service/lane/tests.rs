@@ -1810,7 +1810,8 @@ mod flow {
             let outcome = admin::execute_approved(
                 &client,
                 session,
-                &approved,
+                LaneAction::Stop,
+                approved.token,
                 Duration::from_secs(2),
                 &pending(&lane),
                 &mut admin::Unshared,
@@ -1820,8 +1821,9 @@ mod flow {
             )
             .unwrap();
             settled.join().unwrap();
+            // No helper runs here, so the admitted Stop is followed until the wait ends.
             assert!(
-                matches!(outcome, admin::Approved::Performed(_)),
+                matches!(outcome, Outcome::Unconfirmed { .. }),
                 "{outcome:?}"
             );
             assert_eq!(waits, 1, "the wait is said once");
@@ -1834,7 +1836,7 @@ mod flow {
     }
 
     #[test]
-    fn an_approved_stop_asks_again_when_its_sessions_change_while_it_waits() {
+    fn an_approved_stop_is_refused_as_changed_when_its_sessions_change_while_it_waits() {
         with_lane(|lane| {
             lane.host.sessions.lock().unwrap().push([3; 32]);
             let (client, session, approved) = approved_stop(&lane);
@@ -1849,20 +1851,17 @@ mod flow {
             let outcome = admin::execute_approved(
                 &client,
                 session,
-                &approved,
+                LaneAction::Stop,
+                approved.token,
                 Duration::from_secs(2),
                 &pending(&lane),
                 &mut admin::Unshared,
                 &mut || Ok(()),
                 &|| None,
                 &mut || {},
-            )
-            .unwrap();
+            );
             settled.join().unwrap();
-            let admin::Approved::Changed(fresh) = outcome else {
-                panic!("expected a fresh preview, got {outcome:?}");
-            };
-            assert_eq!(fresh.effects.ends_sessions, 2);
+            assert_eq!(outcome, Err(LaneError::Code("changed".into())));
             assert_eq!(
                 lane.launches.load(Ordering::SeqCst),
                 1,
@@ -1881,7 +1880,8 @@ mod flow {
             let outcome = admin::execute_approved(
                 &client,
                 session,
-                &approved,
+                LaneAction::Stop,
+                approved.token,
                 Duration::from_secs(2),
                 &pending(&lane),
                 &mut admin::Unshared,

@@ -387,6 +387,7 @@ pub fn execute(
     dispatch: &mut dyn FnMut() -> Result<(), LaneError>,
     interrupted: &dyn Fn() -> Option<Instant>,
 ) -> Result<Outcome, LaneError> {
+    let mut recorded = None;
     let outcome = lane.perform(
         session,
         action,
@@ -397,27 +398,26 @@ pub fn execute(
             pending
                 .add(operation)
                 .map_err(|_| LaneError::Core(CoreError::StorageUnavailable))?;
+            recorded = Some(*operation);
             share.release();
             Ok(())
         },
         interrupted,
     );
     let shared = share.resume();
+    // A busy Core refuses Execute before it admits anything, so no later connection has an
+    // operation to settle.
+    if let (Err(error), Some(operation)) = (&outcome, recorded)
+        && shared
+        && busy(error)
+    {
+        let _ = pending.remove(&operation.to_string());
+    }
     let outcome = outcome?;
     if shared && let Outcome::Settled { receipt, .. } = &outcome {
         let _ = pending.remove(&receipt.operation);
     }
     Ok(outcome)
-}
-
-/// What an approved action came to.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Approved {
-    /// The approval covered the action, which was dispatched and followed.
-    Performed(Outcome),
-    /// What the action affects changed while it waited for another operation, so nothing was
-    /// dispatched. Its fresh preview asks the person again.
-    Changed(Preview),
 }
 
 /// Whether `error` is a refusal because another service operation holds SpaceTerm Core, which
@@ -449,54 +449,42 @@ pub fn preview_when_ready(
     }
 }
 
-/// Executes the person's approved `approved` and follows it as [`execute`] does. A refusal
-/// because another operation holds SpaceTerm Core admitted nothing and spent the token, so the
-/// approval waits up to [`BUSY_WAIT`] for that operation, previews again and executes the fresh
-/// token only while the fresh preview's effects equal the approved ones. Otherwise it returns
-/// [`Approved::Changed`] without dispatching anything. `waiting` runs once, when the wait begins.
+/// Executes the person's approved `token` for `action` and follows it as [`execute`] does. A
+/// refusal because another operation holds SpaceTerm Core admits nothing and keeps the token, so
+/// the same approval executes again once that operation settles, for up to [`BUSY_WAIT`]. When
+/// what the action affects changed meanwhile, SpaceTerm Core refuses the token as `changed`,
+/// and the person reviews a fresh preview. `waiting` runs once, when the wait begins.
 #[allow(clippy::too_many_arguments, reason = "one approval's parts, used once")]
 pub fn execute_approved(
     lane: &Lane,
     session: Session,
-    approved: &Preview,
+    action: LaneAction,
+    token: String,
     wait: Duration,
     pending: &PendingOperations,
     share: &mut dyn Share,
     dispatch: &mut dyn FnMut() -> Result<(), LaneError>,
     interrupted: &dyn Fn() -> Option<Instant>,
     waiting: &mut dyn FnMut(),
-) -> Result<Approved, LaneError> {
+) -> Result<Outcome, LaneError> {
     let mut busy_wait = BusyWait::new(waiting);
     let mut session = session;
-    let mut token = approved.token.clone();
     loop {
-        let error = match execute(
+        match execute(
             lane,
             session,
-            approved.action.clone(),
-            token,
+            action.clone(),
+            token.clone(),
             wait,
             pending,
             share,
             dispatch,
             interrupted,
         ) {
-            Err(error) if busy(&error) => error,
-            outcome => return outcome.map(Approved::Performed),
-        };
-        let mut refused = error;
-        loop {
-            let mut fresh = busy_wait.for_lane(lane, interrupted, refused)?;
-            match preview(&mut fresh, approved.action.clone()) {
-                Ok(preview) if preview.effects == approved.effects => {
-                    session = fresh;
-                    token = preview.token;
-                    break;
-                }
-                Ok(preview) => return Ok(Approved::Changed(preview)),
-                Err(error) if busy(&error) => refused = error,
-                Err(error) => return Err(error),
+            Err(error) if busy(&error) => {
+                session = busy_wait.for_lane(lane, interrupted, error)?;
             }
+            outcome => return outcome,
         }
     }
 }
