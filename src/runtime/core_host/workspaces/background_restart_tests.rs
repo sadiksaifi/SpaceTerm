@@ -326,3 +326,51 @@ fn a_lost_prepare_reply_keeps_its_place_until_its_shell_settles() {
     assert_eq!(core.starts(), starts, "nothing took control");
 }
 
+/// A Pane worker that stopped reconnecting is asked to connect again once per Core run, and
+/// only while the route reaches that run. A worker that still reconnects by itself is left
+/// alone.
+#[test]
+fn a_stopped_worker_is_asked_to_connect_again_once_per_core_run() {
+    let mut original = crate::runtime::directory_testing::terminal_host();
+    original.prepare_initial_organization().unwrap();
+    let organization: Organization =
+        serde_json::from_slice(&serde_json::to_vec(&original.state.envelope()).unwrap()).unwrap();
+    let restored = || {
+        let mut host = crate::runtime::directory_testing::terminal_host();
+        host.restore_organization(Some(&organization));
+        host
+    };
+    let core = ConnectedPane::with_host(paired_connection(Arc::new(Away)), original);
+    let state = Arc::clone(&core.state);
+    let reaches = |cx: &ConnectedPane| {
+        let until = Instant::now() + Duration::from_secs(10);
+        while cx
+            .connection()
+            .live_link()
+            .and_then(|link| link.inventory())
+            .is_none_or(|(_, revision)| revision.inventory.close.is_none())
+        {
+            assert!(Instant::now() < until, "the route never reached the Core");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    reaches(&core);
+    state.set_status_for_test(CorePaneStatus::Reconnecting);
+    assert!(!state.rearm_background(), "a worker that reconnects is left alone");
+    state.set_status_for_test(CorePaneStatus::Failed(CoreError::Protocol));
+    assert!(state.rearm_background());
+    state.set_status_for_test(CorePaneStatus::Failed(CoreError::Protocol));
+    assert!(!state.rearm_background(), "once per Core run");
+
+    core.stop_core();
+    core.restore_core(restored());
+    (core.reconnect)();
+    reaches(&core);
+    state.set_status_for_test(CorePaneStatus::Failed(CoreError::Protocol));
+    let until = Instant::now() + Duration::from_secs(10);
+    while !state.rearm_background() {
+        assert!(Instant::now() < until, "the new Core run never asked again");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+

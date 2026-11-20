@@ -109,6 +109,9 @@ pub(crate) struct CorePaneState {
     foreground: AtomicBool,
     /// The Core boot whose background start this Pane last asked for, so it asks once per boot.
     prepared: Mutex<Option<[u8; 32]>>,
+    /// The Core run in which the window's start queue last asked this Pane's stopped worker to
+    /// connect again.
+    rearmed: Mutex<Option<[u8; 32]>>,
     /// This Pane's worker is starting its shell, or presents one that has not attached yet.
     shell_starting: AtomicBool,
     /// The shell this client started is attached and has not reached its first prompt, named
@@ -164,6 +167,7 @@ impl CorePaneState {
             selected: Arc::default(),
             foreground: AtomicBool::new(false),
             prepared: Mutex::default(),
+            rearmed: Mutex::default(),
             shell_starting: AtomicBool::new(false),
             startup_quiet: AtomicBool::new(false),
             background: Mutex::new(Reservation::Idle),
@@ -527,14 +531,63 @@ impl CorePaneState {
     }
 
     /// Whether this Pane's Core offered work 1.4 at its latest admission, so it starts a
-    /// retained shell in the background once its live work connection selects that version.
+    /// retained shell in the background once its live work connection selects that version, or
+    /// whether no admission of the route said what it offers yet, as while a replaced Core
+    /// returns.
     pub(crate) fn offers_prepare(&self) -> bool {
         self.directory_core().is_some_and(|core| {
-            core.core_versions().is_some_and(|offered| {
+            core.core_versions().is_none_or(|offered| {
                 offered.work.major == spaceterm_core::protocol::version::WORK.major
                     && offered.work.minor >= spaceterm_core::pane::MINOR_PREPARE
             })
         })
+    }
+
+    /// The run of the Core whose inventory the route's live link holds, when it holds one.
+    fn live_boot(&self) -> Option<[u8; 32]> {
+        let (_, revision) = self.directory_core()?.live_link()?.inventory()?;
+        revision.inventory.close.as_ref().map(|close| close.boot)
+    }
+
+    /// Whether the route's live inventory lists Pane `pane`.
+    pub(crate) fn listed(&self, pane: [u8; 32]) -> bool {
+        self.directory_core()
+            .and_then(|core| core.live_link())
+            .and_then(|link| link.inventory())
+            .is_some_and(|(_, revision)| {
+                revision
+                    .inventory
+                    .workspaces
+                    .iter()
+                    .flat_map(|workspace| &workspace.tabs)
+                    .flat_map(|tab| &tab.panes)
+                    .any(|candidate| candidate.id == pane)
+            })
+    }
+
+    /// Asks this Pane's worker, which stopped reconnecting after a failure that needs the
+    /// person, to connect once more, at most once per Core run, while the route reaches that
+    /// run. A retained Pane whose worker gave up while its Core was replaced then still waits
+    /// for its background turn instead of staying unstarted. Returns whether it asked.
+    pub(crate) fn rearm_background(&self) -> bool {
+        let parked = matches!(
+            self.status(),
+            CorePaneStatus::Failed(error) if error != CoreError::DirectoryUnavailable
+        );
+        if !parked {
+            return false;
+        }
+        let Some(boot) = self.live_boot() else {
+            return false;
+        };
+        let mut rearmed = self.rearmed.lock().unwrap_or_else(|e| e.into_inner());
+        if *rearmed == Some(boot) {
+            return false;
+        }
+        *rearmed = Some(boot);
+        drop(rearmed);
+        self.retry();
+        true
     }
 
     pub(crate) fn select(&self) {
@@ -903,6 +956,11 @@ impl CorePaneState {
             self.retry.store(true, Ordering::Release);
             self.wake.notify();
         }
+    }
+    /// Sets the worker's status, as a test of the window's start queue needs.
+    #[cfg(test)]
+    pub(crate) fn set_status_for_test(&self, status: CorePaneStatus) {
+        self.set(status);
     }
     fn set(&self, status: CorePaneStatus) {
         let mut current = self.status.lock().unwrap_or_else(|e| e.into_inner());

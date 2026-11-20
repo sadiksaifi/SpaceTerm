@@ -1021,6 +1021,12 @@ mod connection {
         /// Gives this Pane its turn to start its shell in the background.
         fn grant_turn(&self) {}
 
+        /// Asks this Pane's worker, which stopped reconnecting, to connect once more in the
+        /// current Core run. Returns whether it asked.
+        fn rearm_background(&self) -> bool {
+            false
+        }
+
         /// Leaves this client's view of the Pane for the next window that presents it.
         fn retain_view(&self) {}
 
@@ -1128,6 +1134,10 @@ mod connection {
 
         fn grant_turn(&self) {
             Self::grant_turn(self);
+        }
+
+        fn rearm_background(&self) -> bool {
+            Self::rearm_background(self)
         }
 
         fn retain_view(&self) {

@@ -294,6 +294,9 @@ impl Readiness {
                 entry.dirty = true;
                 requested = true;
             }
+            // A worker that stopped reconnecting, as one can while its Core is replaced, would
+            // never wait for a turn again, so each such Pane connects once more per Core run.
+            requested |= tab.read(cx).rearm_background(entry.pane_id);
             background += usize::from(in_flight);
             if awaiting {
                 waiting.push((tab, entry.pane_id));

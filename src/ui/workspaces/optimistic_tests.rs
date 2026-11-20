@@ -1322,6 +1322,59 @@ fn background_starts_after_a_restart_take_bounded_turns_visible_first(cx: &mut T
     assert_eq!(turns(cx), 3, "finished turns pass to the waiting Panes");
 }
 
+/// Retained Panes whose workers stopped reconnecting while SpaceTerm Core was replaced, as
+/// Panes another client created just before the replacement can, still get their background
+/// turns: the window asks each such worker to connect again and gives it a turn within the same
+/// bound of three.
+#[gpui::test]
+fn retained_panes_whose_workers_stopped_still_take_bounded_background_turns(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = window_harness(cx);
+    for _ in 0..4 {
+        cx.dispatch_action(crate::ui::NewTab);
+    }
+    for _ in 0..4 {
+        harness.core.finish(true, true);
+        project_window(&harness, cx);
+    }
+    cx.dispatch_action(crate::ui::ActivateTab1);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(16));
+    cx.run_until_parked();
+    let panes = harness.panes.opened();
+    assert_eq!(panes.len(), 5);
+    for pane in &panes {
+        pane.admitted();
+    }
+    let (parked, waiting) = panes.split_at(2);
+    for pane in parked {
+        pane.park();
+    }
+    for pane in waiting {
+        pane.await_turn();
+    }
+    let turns = |cx: &mut VisualTestContext| {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(16));
+        cx.run_until_parked();
+        panes.iter().filter(|pane| pane.holds_turn()).count()
+    };
+    assert_eq!(turns(cx), 3, "the bound holds");
+    for pane in parked {
+        assert_eq!(pane.rearms(), 1, "each stopped worker connects again once");
+    }
+    let mut started = 0;
+    for _ in 0..3 {
+        for pane in panes.iter().filter(|pane| pane.holds_turn()) {
+            pane.finish_turn();
+            started += 1;
+        }
+        assert!(turns(cx) <= 3);
+    }
+    assert_eq!(started, panes.len(), "every retained Pane got its turn");
+}
+
 #[gpui::test]
 fn readiness_reserves_foreground_start_capacity_during_a_hidden_creation_burst(
     cx: &mut TestAppContext,

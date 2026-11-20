@@ -3750,6 +3750,10 @@ mod core_workspaces {
             awaiting_turn: std::sync::atomic::AtomicBool,
             /// This Pane holds a turn or uses one.
             in_background: std::sync::atomic::AtomicBool,
+            /// The worker stopped reconnecting, so it waits for no turn until it connects again.
+            parked: std::sync::atomic::AtomicBool,
+            /// How often the window's start queue asked the stopped worker to connect again.
+            rearms: std::sync::atomic::AtomicUsize,
             status: Mutex<crate::terminal::core_session::CorePaneStatus>,
             startup_pending: std::sync::atomic::AtomicBool,
             controller: Mutex<Option<spaceterm_core::pane::control::Controller>>,
@@ -3777,6 +3781,8 @@ mod core_workspaces {
                     background: std::sync::atomic::AtomicBool::new(false),
                     awaiting_turn: std::sync::atomic::AtomicBool::new(false),
                     in_background: std::sync::atomic::AtomicBool::new(false),
+                    parked: std::sync::atomic::AtomicBool::new(false),
+                    rearms: std::sync::atomic::AtomicUsize::new(0),
                     controller: Mutex::default(),
                     session_end: Mutex::default(),
                     generation: std::sync::atomic::AtomicU64::new(0),
@@ -3815,6 +3821,20 @@ mod core_workspaces {
                 self.background.store(true, SeqCst);
                 self.awaiting_turn.store(true, SeqCst);
                 self.changes.publish();
+            }
+
+            /// The restarted Core starts shells in the background, but this Pane's worker stopped
+            /// reconnecting while the Core was replaced, so it waits for no turn.
+            pub(crate) fn park(&self) {
+                use std::sync::atomic::Ordering::SeqCst;
+                self.background.store(true, SeqCst);
+                self.parked.store(true, SeqCst);
+                self.changes.publish();
+            }
+
+            /// How often the window's start queue asked this stopped worker to connect again.
+            pub(crate) fn rearms(&self) -> usize {
+                self.rearms.load(std::sync::atomic::Ordering::SeqCst)
             }
 
             /// Whether the window's start queue gave this Pane a turn it still uses.
@@ -3963,6 +3983,18 @@ mod core_workspaces {
                 if self.awaiting_turn.swap(false, SeqCst) {
                     self.in_background.store(true, SeqCst);
                 }
+            }
+
+            /// The stopped worker connects again and waits for its turn.
+            fn rearm_background(&self) -> bool {
+                use std::sync::atomic::Ordering::SeqCst;
+                if !self.parked.swap(false, SeqCst) {
+                    return false;
+                }
+                self.rearms.fetch_add(1, SeqCst);
+                self.awaiting_turn.store(true, SeqCst);
+                self.changes.publish();
+                true
             }
 
             fn running_version(&self) -> Option<spaceterm_core::update::facts::Version> {

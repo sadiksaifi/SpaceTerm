@@ -2066,6 +2066,11 @@ pub(super) fn present(
                     && std::mem::take(&mut attached_session)
                 {
                     CoreError::StaleControl
+                } else if error == CoreError::SessionUnavailable && state.listed(pane_id) {
+                    // A Pane the route's live inventory still lists was not removed. A Core
+                    // that is being replaced can answer this way, so the worker reconnects
+                    // within its bounded recovery.
+                    CoreError::Protocol
                 } else {
                     error
                 };

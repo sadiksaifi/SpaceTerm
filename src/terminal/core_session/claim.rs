@@ -331,10 +331,10 @@ impl ClaimWorker<'_> {
                     && state.will_prepare(boot);
                 let prepares = state.prepares();
                 let background = eligible && prepares;
-                // While the route's live work connection returns, a Core that offered work 1.4
-                // does not show that version yet, so the wait below looks again shortly. A Core
-                // that offered an older version never starts Panes in the background, and
-                // nothing polls it.
+                // While the route's live work connection returns, a Core that offered work 1.4,
+                // or one whose offer no admission read yet, does not show that version, so the
+                // wait below looks again shortly. A Core that offered an older version never
+                // starts Panes in the background, and nothing polls it.
                 let recheck = eligible && !prepares && state.offers_prepare();
                 let starting = session_ended.is_none()
                     && (created_start

@@ -1934,6 +1934,13 @@ impl TabView {
             .unwrap_or_default()
     }
 
+    /// Asks Pane `pane_id`'s stopped worker to connect once more in the current Core run.
+    pub(crate) fn rearm_background(&self, pane_id: PaneId) -> bool {
+        self.binding
+            .view(pane_id)
+            .is_some_and(|view| view.connection().rearm_background())
+    }
+
     /// Gives Pane `pane_id` its turn to start its shell in the background.
     pub(crate) fn grant_background_turn(&self, pane_id: PaneId) {
         if let Some(view) = self.binding.view(pane_id) {
