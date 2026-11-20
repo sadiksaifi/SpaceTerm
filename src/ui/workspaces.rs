@@ -20,7 +20,7 @@
 //! Requests from its own GitHub CLI, and never reads git for a Workspace itself.
 //!
 pub(crate) use core_workspaces::ArrangementUnavailable;
-pub(crate) use core_workspaces::CloseConsent;
+pub(crate) use core_workspaces::{CloseConsent, CloseKeyboard};
 pub(crate) use core_workspaces::{
     DirectMachine, DrawnAnswer, OutcomeNotice, OutcomeOwner, OutcomeTicket, WorkspaceAcceptance,
     WorkspaceAttachmentFailure, WorkspaceCloseApproval, WorkspaceCloseIntent, WorkspaceCloseReview,
@@ -2587,6 +2587,22 @@ mod core_workspaces {
             self.edits.pending.borrow_mut().take_close_intent()
         }
 
+        /// Takes the queued close of exactly `core` and `local` once it may resume, as
+        /// [`Self::take_close_intent`] would hand it over, so a repeat request resumes it.
+        pub(crate) fn take_close_intent_for(
+            &self,
+            core: MachineCloseTarget,
+            local: CloseTarget,
+        ) -> Option<WorkspaceCloseIntent> {
+            if self.edits.follow_restart().is_some() || !self.edits.transport().availability().0 {
+                return None;
+            }
+            self.edits
+                .pending
+                .borrow_mut()
+                .take_close_intent_for(core, local)
+        }
+
         /// Captures what closing `target` ends, as the server reported it last. The capture is
         /// what a person reviews and what a confirmed close submits; nothing rebuilds it later.
         pub(crate) fn close_approval(
@@ -3230,7 +3246,7 @@ mod core_workspaces {
                                         .queue_close(WorkspaceCloseIntent {
                                             core: *target,
                                             local: submitted.local,
-                                            keyboard: None,
+                                            keyboard: CloseKeyboard::Unknown,
                                             review: submitted.consent == CloseConsent::Confirmed,
                                         })
                                         .is_ok()
@@ -3778,9 +3794,23 @@ mod core_workspaces {
         pub(crate) core: MachineCloseTarget,
         pub(crate) local: CloseTarget,
         /// The initiating keyboard owner, before any confirmation or later navigation.
-        pub(crate) keyboard: Option<gpui::FocusHandle>,
+        pub(crate) keyboard: CloseKeyboard,
         /// Whether the close follows a Review, so it asks for confirmation when it resumes.
         pub(crate) review: bool,
+    }
+
+    /// What a deferred close knows about the keyboard when the person asked for it.
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) enum CloseKeyboard {
+        /// Nothing recorded it, as for a close a Core restart fenced after this client already
+        /// moved the keyboard to what remains. The close reads who holds the keyboard when it
+        /// resumes.
+        #[default]
+        Unknown,
+        /// The closing Workspace did not hold the keyboard.
+        Elsewhere,
+        /// This focus handle held the keyboard, inside the closing Workspace.
+        Held(gpui::FocusHandle),
     }
 
     /// One shared close confirmation on screen: its Close Confirmation generation, the local
@@ -4815,7 +4845,7 @@ mod restart_tests {
                     tab_id: crate::domain::TabId::new(2),
                     pane_id: crate::domain::PaneId::new(3),
                 },
-                keyboard: None,
+                keyboard: CloseKeyboard::Unknown,
                 review: false,
             };
             assert!(binding.defer_close(intent()).unwrap());

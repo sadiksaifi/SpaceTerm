@@ -3024,9 +3024,21 @@ impl WorkspaceManager {
             // The local presentation must still name the exact creation this intent followed.
             && self.close_target(intent.local, cx) == Some(intent.core)
         {
-            let held_keyboard = intent.keyboard.is_some()
-                && intent.keyboard == keyboard_before_reconciliation
-                && self.close_target_is_active(intent.local, cx);
+            // Navigation since the person asked wins over the keyboard intent the close kept.
+            // A close that recorded no keyboard owner, as a retry after a Core restart, takes
+            // the keyboard only when its target is the active Pane and its Workspace holds the
+            // keyboard now.
+            let held_keyboard = self.close_target_is_active(intent.local, cx)
+                && match &intent.keyboard {
+                    super::workspaces::CloseKeyboard::Unknown => self
+                        .workspaces
+                        .workspace(close_target_workspace(intent.local))
+                        .is_some_and(|entry| entry.payload().read(cx).holds_keyboard(window, cx)),
+                    super::workspaces::CloseKeyboard::Elsewhere => false,
+                    super::workspaces::CloseKeyboard::Held(handle) => {
+                        keyboard_before_reconciliation.as_ref() == Some(handle)
+                    }
+                };
             self.request_core_close_as(
                 intent.local,
                 CloseRequest {
@@ -3645,6 +3657,16 @@ impl WorkspaceManager {
             // A target this window can no longer name closes nothing.
             return true;
         };
+        // A close of this target that still waits is the person's same request. It answers
+        // before anything reads whether a shell started or whether the close could be direct.
+        match self.join_waiting_close(target, machine_target, request, window, cx) {
+            WaitingClose::None => {}
+            WaitingClose::Waits => return true,
+            WaitingClose::Resumes(joined) => {
+                self.resume_close(target, joined, window, cx);
+                return true;
+            }
+        }
         if self.request_worktree_close_fallback(target, machine_target, request, window, cx) {
             return true;
         }
@@ -3661,7 +3683,12 @@ impl WorkspaceManager {
         match binding.defer_close(WorkspaceCloseIntent {
             core: machine_target,
             local: target,
-            keyboard: held_keyboard.then(|| window.focused(cx)).flatten(),
+            keyboard: held_keyboard
+                .then(|| window.focused(cx))
+                .flatten()
+                .map_or(super::workspaces::CloseKeyboard::Elsewhere, |handle| {
+                    super::workspaces::CloseKeyboard::Held(handle)
+                }),
             review: request.review,
         }) {
             Ok(true) => return true,
@@ -3962,7 +3989,9 @@ impl WorkspaceManager {
     ) {
         use super::workspaces::{WorkspaceCloseState, WorkspaceSubmission};
 
-        let held_keyboard = self.close_keyboard.take(generation);
+        // Navigation since the confirmation opened wins over the keyboard intent it kept.
+        let held_keyboard =
+            self.close_keyboard.take(generation) && self.close_target_is_active(target, cx);
 
         // The review lives with the server that owns what it would close.
         let review = self.binding.keys().into_iter().find_map(|key| {
@@ -5568,6 +5597,22 @@ impl WaitingReviews {
     fn next(&mut self) -> Option<(CloseTarget, Option<bool>)> {
         self.0.pop_front()
     }
+
+    /// Takes the Review of `target` that waits, with its keyboard answer.
+    fn take(&mut self, target: CloseTarget) -> Option<Option<bool>> {
+        let index = self.0.iter().position(|(waiting, _)| *waiting == target)?;
+        self.0.remove(index).map(|(_, keyboard)| keyboard)
+    }
+}
+
+/// What a request for a close finds waiting for the same target.
+enum WaitingClose {
+    /// Nothing waits.
+    None,
+    /// A close still waits for its starting shell and now stands for the request too.
+    Waits,
+    /// The request and the close that waited resume together as this one request.
+    Resumes(CloseRequest),
 }
 
 impl CloseStartWait {
@@ -5650,6 +5695,66 @@ impl WorkspaceManager {
             self.focus(window, cx);
         }
         self.request_core_close_as(target, CloseRequest { keyboard, ..request }, window, cx);
+    }
+
+    /// Joins `request` to the close of `target` that still waits: a Review held for an open
+    /// confirmation, a close waiting for a starting shell, or an unapproved close its server
+    /// queued. That close owns the person's intent, so a repeat request never asks or closes
+    /// apart from it. A close whose shell still starts keeps waiting with the joined request;
+    /// any other resumes once, now, and leaves nothing waiting to resume again.
+    fn join_waiting_close(
+        &mut self,
+        target: CloseTarget,
+        machine_target: spaceterm_core::hierarchy::CloseTarget,
+        request: CloseRequest,
+        window: &Window,
+        cx: &App,
+    ) -> WaitingClose {
+        use super::workspaces::CloseKeyboard;
+
+        // The earliest request's keyboard answer wins as each joins.
+        let mut waiting = self.close_reviews.take(target).map(|keyboard| CloseRequest {
+            review: true,
+            keyboard,
+        });
+        if self
+            .close_start
+            .waiting
+            .as_ref()
+            .is_some_and(|starting| starting.target == target)
+        {
+            let shell_starting = self.close_shell_starting(target, cx);
+            if let Some(starting) = self.close_start.waiting.as_mut()
+                && shell_starting
+            {
+                if let Some(held) = waiting {
+                    starting.request = starting.request.join(held);
+                }
+                starting.request = starting.request.join(request);
+                return WaitingClose::Waits;
+            }
+            if let Some(starting) = self.close_start.waiting.take() {
+                waiting = Some(waiting.map_or(starting.request, |held| held.join(starting.request)));
+            }
+        }
+        if let Some(intent) = self
+            .binding
+            .owning(close_target_workspace(target))
+            .and_then(|binding| binding.take_close_intent_for(machine_target, target))
+        {
+            let queued = CloseRequest {
+                review: intent.review,
+                keyboard: match intent.keyboard {
+                    CloseKeyboard::Unknown => None,
+                    CloseKeyboard::Elsewhere => Some(false),
+                    CloseKeyboard::Held(handle) => Some(window.focused(cx) == Some(handle)),
+                },
+            };
+            waiting = Some(waiting.map_or(queued, |held| held.join(queued)));
+        }
+        waiting.map_or(WaitingClose::None, |waiting| {
+            WaitingClose::Resumes(waiting.join(request))
+        })
     }
 
     /// Whether a Pane the close of `target` would end is still starting its shell.
