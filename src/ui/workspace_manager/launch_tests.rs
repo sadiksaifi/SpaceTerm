@@ -3247,15 +3247,15 @@ fn a_command_line_start_opens_a_window_that_opened_while_stopped(cx: &mut TestAp
     read(MachineLink::Connected, cx);
     assert_eq!(
         harness.launch.steps(),
-        ["run", "run"],
-        "no Start of its own"
+        ["run", "connect"],
+        "it only connects, with no Start of its own"
     );
     assert_eq!(harness.launch_title(cx), None);
     assert_eq!(harness.rows(cx), 1);
     assert!(harness.panes.was_opened(PANE), "its retained Pane opens");
 
     read(MachineLink::Connected, cx);
-    assert_eq!(harness.launch.steps(), ["run", "run"]);
+    assert_eq!(harness.launch.steps(), ["run", "connect"]);
 }
 
 /// This computer's Machine as Machine updates read it, with `link` and the facts of Core run
@@ -3298,7 +3298,7 @@ fn following_local_run(
 /// itself, even when Machine updates never read the Core stopped because a Start from the
 /// command line came first. The window waits past the Core run it saw answering, so another
 /// answer of that run resumes nothing, and the new run's first answer opens its retained Pane
-/// with one launch and no Start of its own.
+/// with one connection and no Start of its own.
 #[gpui::test]
 fn a_window_that_read_the_stop_itself_opens_when_a_new_core_run_answers(cx: &mut TestAppContext) {
     use crate::updates::machines::MachineLink;
@@ -3319,10 +3319,10 @@ fn a_window_that_read_the_stop_itself_opens_when_a_new_core_run_answers(cx: &mut
     read(local_run(MachineLink::Connected, "after-start"), cx);
     assert_eq!(
         harness.launch.steps(),
-        ["run", "run"],
-        "no Start of its own"
+        ["run", "connect"],
+        "it only connects, with no Start of its own"
     );
-    assert_eq!(harness.launch.intents(), [launch::LaunchIntent::Passive; 2]);
+    assert_eq!(harness.launch.intents(), [launch::LaunchIntent::Passive]);
     assert_eq!(harness.launch_title(cx), None);
     assert_eq!(harness.rows(cx), 1);
     assert!(harness.panes.was_opened(PANE), "its retained Pane opens");
@@ -3333,7 +3333,11 @@ fn a_window_that_read_the_stop_itself_opens_when_a_new_core_run_answers(cx: &mut
         cx,
     );
     read(local_run(MachineLink::Connected, "after-start"), cx);
-    assert_eq!(harness.launch.steps(), ["run", "run"], "once per Core run");
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "connect"],
+        "once per Core run"
+    );
 }
 
 /// A new Core run that Machine updates read while the window's launch was still reading the
@@ -3366,14 +3370,138 @@ fn a_core_run_read_while_the_launch_read_the_stop_resumes_at_once(cx: &mut TestA
     cx.run_until_parked();
     assert_eq!(
         harness.launch.steps(),
-        ["run", "run"],
-        "no Start of its own"
+        ["run", "connect"],
+        "it only connects, with no Start of its own"
     );
     assert_eq!(harness.launch_title(cx), None);
     assert!(harness.panes.was_opened(PANE), "its retained Pane opens");
 
     read(local_run(MachineLink::Connected, "after-start"), cx);
-    assert_eq!(harness.launch.steps(), ["run", "run"], "once per Core run");
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "connect"],
+        "once per Core run"
+    );
+}
+
+/// A Core run that answers and then exits before the waiting window connects is never started
+/// or installed by that window: its connection only reads, and the window keeps saying the Core
+/// is stopped. Another answer of the gone run connects nothing again, so nothing spins. A later
+/// run that a Stop from the command line ends first leaves the window as it was too, and the
+/// next run that still runs opens its retained Pane, one connection per run.
+#[gpui::test]
+fn a_core_run_gone_before_the_window_connects_is_never_started(cx: &mut TestAppContext) {
+    use crate::updates::machines::MachineLink;
+    use spaceterm_core::protocol::version::Incompatible;
+    let (_machines, read) = following_local_run("before-stop", cx);
+    let (harness, cx) = launch_harness(
+        vec![
+            Ok(LaunchOutcome::Stopped),
+            Err(CoreError::NotRunning),
+            Ok(LaunchOutcome::Stopped),
+            ready(),
+        ],
+        cx,
+    );
+    cx.run_until_parked();
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+
+    read(local_run(MachineLink::Connected, "gone"), cx);
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "connect"],
+        "the gone run is never started"
+    );
+    assert_eq!(harness.launch.intents(), [launch::LaunchIntent::Passive]);
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+    assert!(!harness.panes.was_opened(PANE));
+
+    read(local_run(MachineLink::Connected, "gone"), cx);
+    read(
+        local_run(
+            MachineLink::Incompatible(Incompatible::ListenerTooOld),
+            "gone",
+        ),
+        cx,
+    );
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "connect"],
+        "the gone run connects once"
+    );
+
+    read(local_run(MachineLink::Connected, "stopped-again"), cx);
+    assert_eq!(harness.launch.steps(), ["run", "connect", "connect"]);
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+
+    read(local_run(MachineLink::Connected, "after-start"), cx);
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "connect", "connect", "connect"],
+        "only connections, with no Start of its own"
+    );
+    assert_eq!(harness.launch_title(cx), None);
+    assert!(harness.panes.was_opened(PANE), "its retained Pane opens");
+}
+
+/// A window whose connection finds the running Core refuses it says so, as launch does, and
+/// starts nothing.
+#[gpui::test]
+fn a_core_run_that_refuses_the_connection_says_it_is_incompatible(cx: &mut TestAppContext) {
+    use crate::updates::machines::MachineLink;
+    use spaceterm_core::protocol::version::Incompatible;
+    let (_machines, read) = following_local_run("before-stop", cx);
+    let (harness, cx) = launch_harness(
+        vec![
+            Ok(LaunchOutcome::Stopped),
+            Err(CoreError::IncompatibleProtocol(
+                Incompatible::ListenerTooOld,
+            )),
+        ],
+        cx,
+    );
+    cx.run_until_parked();
+
+    read(local_run(MachineLink::Connected, "after-start"), cx);
+    assert_eq!(harness.launch.steps(), ["run", "connect"]);
+    assert!(harness.manager.read_with(cx, |manager, _| matches!(
+        manager.launch.state,
+        launch::LaunchState::Incompatible(Incompatible::ListenerTooOld)
+    )));
+}
+
+/// A window that Machine updates resume after reading the Core stopped and answering again only
+/// connects, and a Core gone by then leaves it stopped, with nothing started. The next Start
+/// from the command line connects it.
+#[gpui::test]
+fn a_command_line_start_gone_before_an_open_window_connects_starts_nothing(
+    cx: &mut TestAppContext,
+) {
+    use crate::updates::machines::MachineLink;
+    let read = following_local_core(cx);
+    let (harness, cx) = launch_harness(
+        vec![
+            Ok(LaunchOutcome::Stopped),
+            Err(CoreError::NotRunning),
+            ready(),
+        ],
+        cx,
+    );
+    cx.run_until_parked();
+
+    read(MachineLink::Stopped, cx);
+    read(MachineLink::Connected, cx);
+    assert_eq!(harness.launch.steps(), ["run", "connect"]);
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+
+    read(MachineLink::Connected, cx);
+    assert_eq!(harness.launch.steps(), ["run", "connect"]);
+
+    read(MachineLink::Stopped, cx);
+    read(MachineLink::Connected, cx);
+    assert_eq!(harness.launch.steps(), ["run", "connect", "connect"]);
+    assert_eq!(harness.launch_title(cx), None);
+    assert!(harness.panes.was_opened(PANE), "its retained Pane opens");
 }
 
 /// A reading that names no Core run, as Machine updates list before the Core's first answer,

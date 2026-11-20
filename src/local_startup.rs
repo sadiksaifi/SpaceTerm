@@ -36,6 +36,25 @@ pub fn run(
     )
 }
 
+/// Connects to this account's SpaceTerm Core only when it already runs, as after a Start from the
+/// command line. It never installs, enables or starts the server, and never changes Stop. A
+/// stopped server answers [`StartupOutcome::Stopped`], and a server that does not run fails with
+/// [`CoreError::NotRunning`].
+pub fn connect(cancelled: impl Fn() -> bool) -> Result<StartupOutcome, CoreError> {
+    if cancelled() {
+        return Ok(StartupOutcome::Cancelled);
+    }
+    let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
+    let core = spaceterm_core::MachineConnection::for_identity(identity)?;
+    match core.refresh_cancellable(&cancelled) {
+        Ok(status) => Ok(StartupOutcome::Ready { core, status }),
+        Err(CoreError::ServiceBusy) if cancelled() => Ok(StartupOutcome::Cancelled),
+        Err(CoreError::ServiceBusy) => Ok(StartupOutcome::ServiceBusy),
+        Err(CoreError::Stopped) => Ok(StartupOutcome::Stopped),
+        Err(error) => Err(error),
+    }
+}
+
 /// Whether macOS keeps this account's SpaceTerm Core from running because its background item is
 /// off in Login Items. Reading it changes nothing. The service itself refuses every start
 /// meanwhile, with [`CoreError::LoginItemOff`].
