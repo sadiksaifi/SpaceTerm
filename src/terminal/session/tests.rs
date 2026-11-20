@@ -5434,9 +5434,147 @@ impl crate::platform::native_pty::SessionProbe for MovingForeground {
     fn shell_foreground(&self) -> io::Result<bool> {
         Ok(self.0.load(Ordering::Acquire))
     }
+    fn line_editor(&self) -> io::Result<bool> {
+        // Every test that moves the foreground back to the shell restores its line editor.
+        self.shell_foreground()
+    }
     fn others(&self) -> io::Result<bool> {
         Ok(false)
     }
+}
+
+/// A probe that reads the foreground and line mode of the test's scripted PTY, as the native
+/// probe reads them from the PTY itself.
+struct ScriptedProbe(ScriptedPtyRecords);
+impl crate::platform::native_pty::SessionProbe for ScriptedProbe {
+    fn shell_foreground(&self) -> io::Result<bool> {
+        Ok(self.0.snapshot().line_mode.shell_foreground)
+    }
+    fn line_editor(&self) -> io::Result<bool> {
+        let mode = self.0.snapshot().line_mode;
+        Ok(mode.shell_foreground && !mode.canonical)
+    }
+    fn others(&self) -> io::Result<bool> {
+        Ok(false)
+    }
+}
+
+/// The owning shell without shell integration at its line editor, with no other process.
+fn unintegrated_worker(records: &ScriptedPtyRecords) -> TerminalWorker {
+    let mut worker = idle_worker_on(records.clone(), SHELL_FOREGROUND, Some(false));
+    worker
+        .events
+        .set_probe(Some(Arc::new(ScriptedProbe(records.clone()))));
+    reads(&mut worker, b"% ");
+    worker
+}
+
+/// The owning shell, as its foreground and line mode say, with `bytes` its output after.
+fn moves(worker: &mut TerminalWorker, records: &ScriptedPtyRecords, mode: LineMode, bytes: &[u8]) {
+    records.update(|state| state.line_mode = mode);
+    reads(worker, bytes);
+}
+
+/// The owning shell without shell integration in a canonical PTY, as `read answer` runs.
+const SHELL_BUILTIN: LineMode = LineMode {
+    canonical: true,
+    echo: true,
+    signals: true,
+    shell_foreground: true,
+};
+
+/// Without shell integration the owning shell draws no prompt of its own. A line typed at its
+/// line editor that ran `/bin/sh -c 'sleep 1; echo done; sleep 1'` in the foreground is answered
+/// once the shell's line editor waits again with no other process, so the idle Pane closes
+/// directly. The program's return alone answers nothing.
+#[test]
+fn without_owned_prompts_a_completed_foreground_line_is_answered_at_the_line_editor() {
+    let records = ScriptedPtyRecords::default();
+    let mut worker = unintegrated_worker(&records);
+    assert!(!worker.events.running_work(), "an idle prompt");
+
+    worker.events.note_submitted();
+    assert!(worker.process_command(Command::Key(enter_key())));
+    reads(&mut worker, b"\r\n");
+    assert!(worker.events.running_work(), "written, not yet run");
+    moves(&mut worker, &records, LINE_PROGRAM, b"done\r\n");
+    assert!(worker.events.running_work(), "the program runs");
+    // The program ended, but the shell has not drawn its line editor yet.
+    moves(&mut worker, &records, SHELL_BUILTIN, b"");
+    assert!(
+        worker.events.running_work(),
+        "the shell may go on with the line"
+    );
+    moves(&mut worker, &records, SHELL_FOREGROUND, b"% ");
+    assert!(
+        !worker.events.running_work(),
+        "the line editor waits again after the line ran"
+    );
+    worker.finish();
+}
+
+/// Without shell integration a line typed at the line editor that never takes the foreground away
+/// from the shell, such as a builtin, is never answered, since nothing ties the line editor's
+/// return to it. `sleep 3; read answer` stays work while `read` runs after `sleep` returned.
+#[test]
+fn without_owned_prompts_a_builtin_after_the_program_stays_work() {
+    let records = ScriptedPtyRecords::default();
+    let mut worker = unintegrated_worker(&records);
+    worker.events.note_submitted();
+    assert!(worker.process_command(Command::Key(enter_key())));
+    reads(&mut worker, b"\r\n");
+    moves(&mut worker, &records, LINE_PROGRAM, b"");
+    assert!(worker.events.running_work(), "`sleep` runs");
+    moves(&mut worker, &records, SHELL_BUILTIN, b"");
+    assert!(worker.events.running_work(), "`read` runs in the shell");
+    moves(&mut worker, &records, SHELL_FOREGROUND, b"\r\n% ");
+    assert!(!worker.events.running_work(), "the whole line ran");
+
+    // A builtin line alone never takes the foreground, so nothing answers it.
+    worker.events.note_submitted();
+    assert!(worker.process_command(Command::Key(enter_key())));
+    moves(&mut worker, &records, SHELL_FOREGROUND, b"\r\n% ");
+    assert!(
+        worker.events.running_work(),
+        "no evidence ties the prompt to it"
+    );
+    worker.finish();
+}
+
+/// Without shell integration `/bin/sleep 1` and `read answer` both reach the PTY at the line
+/// editor before `sleep` takes the foreground. `sleep` ending answers only the first line: the
+/// line editor that then waits reads the second line, whose builtin runs in the shell, and a
+/// close admitted then or after still finds work.
+#[test]
+fn without_owned_prompts_a_completed_program_never_answers_a_line_queued_behind_it() {
+    let records = ScriptedPtyRecords::default();
+    let mut worker = unintegrated_worker(&records);
+    for _ in 0..2 {
+        worker.events.note_submitted();
+        assert!(worker.process_command(Command::Key(enter_key())));
+    }
+    reads(&mut worker, b"\r\n");
+    moves(&mut worker, &records, LINE_PROGRAM, b"");
+    assert!(worker.events.running_work(), "`sleep` runs");
+    // The line editor waits and reads the second line from the kernel's line buffer.
+    moves(
+        &mut worker,
+        &records,
+        SHELL_FOREGROUND,
+        b"% read answer\r\n",
+    );
+    assert!(
+        worker.events.running_work(),
+        "the second line is read at this line editor"
+    );
+    moves(&mut worker, &records, SHELL_BUILTIN, b"");
+    assert!(worker.events.running_work(), "`read` runs in the shell");
+    moves(&mut worker, &records, SHELL_FOREGROUND, b"% ");
+    assert!(
+        worker.events.running_work(),
+        "nothing ties this line editor to the second line"
+    );
+    worker.finish();
 }
 
 fn enter_key() -> KeyInput {

@@ -1687,6 +1687,7 @@ impl TerminalWorker {
         // line counts as written once the PTY accepted all of its bytes.
         if !matches!(command, Command::Received(..)) && command.submits_line() {
             let enqueued = self.input.enqueued();
+            let before = self.line_editor();
             let result = self.process_command_once(command);
             // A submission that put no bytes in the PTY's queue, such as a Run the shell's
             // prompt refused, submitted nothing, so no close waits for it.
@@ -1694,15 +1695,25 @@ impl TerminalWorker {
                 self.events.retract_submitted();
             } else {
                 self.input.note_line();
-                self.note_lines_written();
+                self.note_lines_written(before);
             }
             return result;
         }
         self.process_command_once(command)
     }
 
-    /// Records each submitted line whose bytes the PTY has now accepted whole.
-    fn note_lines_written(&mut self) {
+    /// Whether the owning shell holds the PTY foreground with ICANON off, as its line editor
+    /// does while it waits for a command line. A mode that can't be read says no.
+    fn line_editor(&self) -> bool {
+        self.native_pty
+            .line_mode()
+            .is_ok_and(|mode| mode.shell_foreground && !mode.canonical)
+    }
+
+    /// Records each submitted line whose bytes the PTY has now accepted whole. `line_editor` is
+    /// [`Self::line_editor`] just before the worker wrote them: a line editor reads a line's Enter
+    /// as soon as it arrives and may restore ICANON before a later read.
+    fn note_lines_written(&mut self, line_editor: bool) {
         let lines = self.input.take_written_lines();
         if lines == 0 {
             return;
@@ -1711,7 +1722,7 @@ impl TerminalWorker {
         let canonical = self.native_pty.line_mode().ok().map(|mode| mode.canonical);
         for _ in 0..lines {
             self.events
-                .note_written(self.emulator.prompt_progress(), canonical);
+                .note_written(self.emulator.prompt_progress(), canonical, line_editor);
         }
     }
 
@@ -2517,8 +2528,9 @@ impl TerminalWorker {
     }
 
     fn flush_input(&mut self) -> bool {
+        let line_editor = self.input.line_pending() && self.line_editor();
         let drained = self.input.drain(&mut self.native_pty);
-        self.note_lines_written();
+        self.note_lines_written(line_editor);
         if let Err(error) = drained {
             let _ = self.send_runtime_failure(
                 TerminalFailure::pty("write-shell-input")

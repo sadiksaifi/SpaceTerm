@@ -51,6 +51,11 @@ impl PtyInput {
         self.lines.push_back(self.enqueued);
     }
 
+    /// Whether a submitted line has bytes the PTY has not accepted yet.
+    pub(super) fn line_pending(&self) -> bool {
+        !self.lines.is_empty()
+    }
+
     /// How many submitted lines the PTY accepted whole since the last call, oldest first.
     pub(super) fn take_written_lines(&mut self) -> usize {
         let mut count = 0;
