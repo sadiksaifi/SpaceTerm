@@ -2942,6 +2942,7 @@ mod startup_tests {
                 },
                 &fixture.pin,
                 "spaceterm-development",
+                Instant::now() + Duration::from_secs(5),
             )
             .is_ok()
             {

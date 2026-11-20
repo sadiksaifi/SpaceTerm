@@ -755,7 +755,28 @@ impl Service {
             return Ok(None);
         };
         let _operation = data.lock("service.lock", false)?;
-        let state = Self::state(&data)?.ok_or(CoreError::NotInstalled)?;
+        self.stopped_locked(&data)
+    }
+    /// [`Self::stop_if_stopped`] that waits for the service lock only until `deadline`. A lock
+    /// another operation holds past it is [`CoreError::ServiceBusy`].
+    pub fn stop_if_stopped_by(
+        &self,
+        deadline: Instant,
+    ) -> Result<Option<ServiceStatus>, CoreError> {
+        let Some((data, _)) = self.read()? else {
+            return Ok(None);
+        };
+        let limit = deadline.saturating_duration_since(Instant::now());
+        let crate::storage::LockWait::Locked(_operation) =
+            data.wait_lock("service.lock", limit, None)?
+        else {
+            return Err(CoreError::ServiceBusy);
+        };
+        self.stopped_locked(&data)
+    }
+    /// What [`Self::stop_if_stopped`] confirms, under the service lock.
+    fn stopped_locked(&self, data: &Directory) -> Result<Option<ServiceStatus>, CoreError> {
+        let state = Self::state(data)?.ok_or(CoreError::NotInstalled)?;
         if !state.stopped || !state.installed {
             return Ok(None);
         }

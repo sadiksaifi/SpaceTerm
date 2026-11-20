@@ -329,13 +329,31 @@ impl DirectConnection {
     /// Admits this client to the service lane on the authenticated connection, which needs a
     /// shared service major whatever the work majors, and returns the stream the lane's JSON
     /// frames travel on.
+    #[cfg(test)]
+    pub(crate) fn admit_service_lane(
+        self,
+        caller: crate::protocol::Caller<'_>,
+    ) -> Result<
+        (
+            Box<crate::connection::quic::QuicStream>,
+            crate::protocol::Negotiated,
+        ),
+        crate::protocol::Refused,
+    > {
+        self.admit_service_lane_by(
+            caller,
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        )
+    }
+    /// [`Self::admit_service_lane`] that sends no admission frame once `deadline` has passed.
     #[cfg_attr(
         not(any(feature = "client", test)),
         allow(dead_code, reason = "the CLI administers paired servers over the lane")
     )]
-    pub(crate) fn admit_service_lane(
+    pub(crate) fn admit_service_lane_by(
         self,
         caller: crate::protocol::Caller<'_>,
+        deadline: std::time::Instant,
     ) -> Result<
         (
             Box<crate::connection::quic::QuicStream>,
@@ -349,6 +367,7 @@ impl DirectConnection {
             caller,
             &self.paired.pin.core,
             &self.paired.pin.build,
+            deadline,
         )?;
         Ok((stream, negotiated))
     }

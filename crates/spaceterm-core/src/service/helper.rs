@@ -182,6 +182,7 @@ pub(super) fn grant_stop_over(
         },
         &record.core,
         identity,
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
     )?;
     let encode = |bytes: &[u8]| {
         bytes

@@ -38,7 +38,7 @@ use spaceterm_core::service::lane::client::{Lane, LaneError, Session};
 use spaceterm_core::service::lane::{LaneOperationState, LaneReceipt};
 use spaceterm_core::{CliRoute, CoreError, MachineConnection};
 use std::io::Write;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// One finished machine verb: its envelope and its operational text.
 pub struct Reply {
@@ -64,6 +64,18 @@ impl Reply {
     pub fn failure(command: &str, core: Option<MachineRef>, failure: Failure) -> Self {
         Self::new(
             &Envelope::error(command, core, failure, contract::Empty {}),
+            String::new(),
+        )
+    }
+
+    /// The failure of a lane connection that did not open, with the earlier operations it
+    /// settled before failing.
+    pub fn unopened(command: &str, core: Option<MachineRef>, unopened: Unopened) -> Self {
+        Self::new(
+            &with_recovered(
+                Envelope::error(command, core, unopened.failure, contract::Empty {}),
+                unopened.recovered,
+            ),
             String::new(),
         )
     }
@@ -438,6 +450,20 @@ impl UpdateLane for Session {
     }
 }
 
+/// A session whose update reads stop at a deadline.
+struct By<'a>(&'a mut Session, Instant);
+
+impl UpdateLane for By<'_> {
+    fn detailed_facts(
+        &mut self,
+    ) -> Result<Option<spaceterm_core::update::facts::DetailedUpdateFacts>, LaneError> {
+        admin::detailed_facts_by(self.0, self.1)
+    }
+    fn facts(&mut self) -> Result<spaceterm_core::update::facts::UpdateFacts, LaneError> {
+        admin::facts_by(self.0, self.1).map(|(_, facts)| facts)
+    }
+}
+
 /// The update facts of the Core on `lane` with the continuation its engine reports: the
 /// detailed facts of a Core of service 1.2, otherwise its facts. None when it answers neither.
 pub(crate) fn reported(lane: &mut dyn UpdateLane) -> Option<crate::notice::Reported> {
@@ -455,6 +481,23 @@ pub fn lane_failure(error: LaneError) -> Failure {
         LaneError::BelowFloor(floor) => contract::below_floor(floor),
         LaneError::Core(error) => contract::from_core_error(error),
         LaneError::Interrupted => Failure::new(Code::Interrupted),
+        LaneError::Deadline => Failure::new(Code::Timeout),
+    }
+}
+
+/// A service-lane connection [`open_lane`] did not open, and the earlier operations it settled
+/// and acknowledged before it failed, whose outcomes the command still reports.
+pub struct Unopened {
+    pub failure: Failure,
+    pub recovered: Vec<RecoveredOperation>,
+}
+
+impl From<Failure> for Unopened {
+    fn from(failure: Failure) -> Self {
+        Self {
+            failure,
+            recovered: Vec::new(),
+        }
     }
 }
 
@@ -497,29 +540,41 @@ pub fn dispatch() -> Result<(), LaneError> {
     crate::interrupt::dispatch().map_err(|_| LaneError::Interrupted)
 }
 
-/// Opens the lane of `connection` and settles what earlier commands of this identity left on
-/// it. A pending operation that has not settled stays recorded for a later command.
+/// Opens the lane of `connection` by `deadline` and settles what earlier commands of this
+/// identity left on it. A pending operation that has not settled stays recorded for a later
+/// command. A connection that fails after settling some still reports their outcomes.
 pub fn open_lane(
     context: &Context<'_>,
     connection: &Result<MachineConnection, Failure>,
     route: &RouteKey,
     pending: &Pending,
-) -> Result<Opened, Failure> {
+    deadline: Instant,
+) -> Result<Opened, Unopened> {
     let identity = &context.identity_kind();
     let connection = connection.as_ref().map_err(Clone::clone)?;
     let lane = connection
         .service_lane()
         .map_err(contract::from_core_error)?;
-    let (mut session, settled) = admin::open(&lane, &pending.operations).map_err(lane_failure)?;
+    let (mut session, settled) =
+        admin::open(&lane, &pending.operations, deadline).map_err(|unopened| Unopened {
+            failure: lane_failure(unopened.error),
+            recovered: unopened
+                .settled
+                .iter()
+                .map(|receipt| recovered_operation(receipt, identity))
+                .collect(),
+        })?;
     // Only a notice that can print costs the round trip.
     if crate::notice::shown(context.global.into(), terminal(libc::STDERR_FILENO)) {
-        context.facts.replace(reported(&mut session));
+        context
+            .facts
+            .replace(reported(&mut By(&mut session, deadline)));
     }
     let mut recovered: Vec<_> = settled
         .iter()
         .map(|receipt| recovered_operation(receipt, identity))
         .collect();
-    recovered.extend(settle_journals(context, connection, route));
+    recovered.extend(settle_journals(context, connection, route, deadline));
     remember_connected(context, route);
     Ok(Opened {
         lane,
@@ -575,6 +630,7 @@ fn settle_journals(
     context: &Context<'_>,
     connection: &MachineConnection,
     route: &RouteKey,
+    deadline: Instant,
 ) -> Vec<RecoveredOperation> {
     let Ok(state) = CliState::open(context.identity) else {
         return Vec::new();
@@ -603,7 +659,7 @@ fn settle_journals(
             }
             RouteKey::Paired(_) => Err(CoreError::Unsupported),
         },
-        std::time::Instant::now() + Duration::from_secs(30),
+        deadline.min(Instant::now() + Duration::from_secs(30)),
     )
     .unwrap_or_default()
 }

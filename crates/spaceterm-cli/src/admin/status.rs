@@ -11,6 +11,7 @@ use crate::contract::{
     UpdateFailureStage, UpdateFailureStatus, UpdateOperation, UpdateOperationKind, Version,
 };
 use crate::state::{CliState, RouteKey};
+use spaceterm_core::service::lane::admin;
 use spaceterm_core::service::lane::{
     LaneActivation, LaneReply, LaneRequest, LaneStatus, LaneVersion, Offline,
 };
@@ -102,18 +103,32 @@ fn over_lane(
     route: RouteKey,
 ) -> Reply {
     let opened = Pending::open(context, &route)
-        .and_then(|pending| super::open_lane(context, connection, &route, &pending));
+        .map_err(super::Unopened::from)
+        .and_then(|pending| {
+            super::open_lane(
+                context,
+                connection,
+                &route,
+                &pending,
+                Instant::now() + admin::REQUEST_LIMIT,
+            )
+        });
     let Opened {
         mut session,
         recovered,
         ..
     } = match opened {
         Ok(opened) => opened,
-        Err(failure) if failure.code == Code::Unreachable || failure.code == Code::NotRunning => {
+        Err(super::Unopened { failure, recovered })
+            if failure.code == Code::Unreachable || failure.code == Code::NotRunning =>
+        {
             let last = super::last_connected(context, &route);
-            return Reply::new(&unreachable_envelope(core, failure, last), String::new());
+            return Reply::new(
+                &super::with_recovered(unreachable_envelope(core, failure, last), recovered),
+                String::new(),
+            );
         }
-        Err(failure) => return Reply::failure(COMMAND, Some(core), failure),
+        Err(unopened) => return Reply::unopened(COMMAND, Some(core), unopened),
     };
     let reply = session.request(
         &LaneRequest::Status,

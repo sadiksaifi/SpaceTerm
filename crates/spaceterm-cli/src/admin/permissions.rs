@@ -52,17 +52,20 @@ pub fn run(context: &Context<'_>, command: Option<&PermissionsCommand>) -> Reply
             };
         }
     };
-    let opened = Pending::open(context, &RouteKey::Local).and_then(|pending| {
-        super::open_lane(
-            context,
-            &context.local_connection(),
-            &RouteKey::Local,
-            &pending,
-        )
-    });
+    let opened = Pending::open(context, &RouteKey::Local)
+        .map_err(super::Unopened::from)
+        .and_then(|pending| {
+            super::open_lane(
+                context,
+                &context.local_connection(),
+                &RouteKey::Local,
+                &pending,
+                Instant::now() + spaceterm_core::service::lane::admin::REQUEST_LIMIT,
+            )
+        });
     let mut opened = match opened {
         Ok(opened) => opened,
-        Err(failure) => return Reply::failure(path, Some(core), failure),
+        Err(unopened) => return Reply::unopened(path, Some(core), unopened),
     };
     let reply = opened
         .session

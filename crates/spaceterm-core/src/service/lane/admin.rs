@@ -5,7 +5,7 @@
 //!
 //! The CLI and the desktop present each result their own way. Both take the same steps here, so
 //! a confirmation, a dispatched operation and its settlement mean the same on either.
-use super::client::{Lane, LaneError, Leftover, Outcome, Session, settle_leftover};
+use super::client::{Lane, LaneError, Leftover, Outcome, Session};
 use super::network::{LaneNetworkEffects, NetworkAccess};
 use super::{
     LaneAction, LaneEffects, LaneOperationState, LaneReceipt, LaneReply, LaneRequest, LaneStatus,
@@ -13,7 +13,7 @@ use super::{
 };
 use crate::CoreError;
 use crate::service::operations::OperationId;
-use crate::storage::Directory;
+use crate::storage::{Directory, Lock, LockWait};
 use crate::update::facts::UpdateFacts;
 use crate::update::ordering::Candidate;
 use base64::Engine;
@@ -57,6 +57,10 @@ pub fn wait(action: &LaneAction) -> Duration {
 /// The record of one route and identity's admitted operations, kept in `directory`.
 const PENDING: &str = "service-operations.json";
 const PENDING_FILE: &std::ffi::CStr = c"service-operations.json";
+/// Held shared by each flow that follows an operation it recorded, and exclusively while a lane
+/// connection settles the identity's leftovers, so that settlement never acknowledges a receipt
+/// a running flow still waits to read.
+const FOLLOWING: &str = "service-operations-following.lock";
 /// At most this many pending operations are kept. The server holds no more than 16.
 const MAX_PENDING: usize = 16;
 
@@ -114,32 +118,91 @@ impl PendingOperations {
         })
         .map(drop)
     }
+
+    /// The claim of a flow that follows an operation it is about to record, held until the flow
+    /// returns. It waits until `deadline` for a settlement that runs now.
+    fn follow(&self, deadline: Instant) -> Result<Lock, LaneError> {
+        let limit = deadline.saturating_duration_since(Instant::now());
+        match self.directory.wait_lock_shared(FOLLOWING, limit) {
+            Ok(LockWait::Locked(lock)) => Ok(lock),
+            Ok(LockWait::Held | LockWait::Cancelled) => Err(LaneError::Deadline),
+            Err(_) => Err(LaneError::Core(CoreError::StorageUnavailable)),
+        }
+    }
+
+    /// The claim that lets a connection settle this identity's leftovers, or None while a flow
+    /// follows one of them.
+    fn settle(&self) -> Result<Option<Lock>, CoreError> {
+        self.directory.try_lock(FOLLOWING)
+    }
 }
 
-/// Opens one lane connection and settles what earlier commands of this identity left on it.
-/// Returns the receipts it settled and acknowledged. An operation that has not settled stays
-/// recorded for a later connection.
+/// A lane connection that [`open`] did not return. `settled` holds every receipt it
+/// acknowledged before `error`, whose outcomes the caller still reports.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Unopened {
+    pub error: LaneError,
+    pub settled: Vec<LaneReceipt>,
+}
+
+impl From<LaneError> for Unopened {
+    fn from(error: LaneError) -> Self {
+        Self {
+            error,
+            settled: Vec::new(),
+        }
+    }
+}
+
+impl From<CoreError> for Unopened {
+    fn from(error: CoreError) -> Self {
+        LaneError::Core(error).into()
+    }
+}
+
+/// Opens one lane connection by `deadline` and settles what earlier commands of this identity
+/// left on it. Returns the receipts it settled and acknowledged. An operation that has not
+/// settled stays recorded for a later connection, and so does every leftover while a flow of
+/// this identity follows an operation, because that flow reads its own receipt.
+///
+/// Every leftover is resolved before any is acknowledged, so a failed read loses no outcome.
+/// A failed acknowledgement returns the receipts acknowledged before it in [`Unopened`].
 pub fn open(
     lane: &Lane,
     pending: &PendingOperations,
-) -> Result<(Session, Vec<LaneReceipt>), LaneError> {
-    let mut session = lane.session()?;
+    deadline: Instant,
+) -> Result<(Session, Vec<LaneReceipt>), Unopened> {
+    let mut session = lane.session_by(deadline)?;
+    let Some(_settling) = pending.settle()? else {
+        return Ok((session, Vec::new()));
+    };
     let mut settled = Vec::new();
     for operation in pending.list()? {
         let Some(id) = OperationId::parse(&operation) else {
             pending.remove(&operation)?;
             continue;
         };
-        match settle_leftover(&mut session, &id)? {
-            Leftover::Settled(receipt) => {
-                settled.push(receipt);
-                pending.remove(&operation)?;
-            }
+        let by = deadline.min(Instant::now() + REQUEST_LIMIT);
+        match super::client::leftover(&mut session, &id, by)? {
+            Leftover::Settled(receipt) => settled.push((id, receipt)),
             Leftover::Gone => pending.remove(&operation)?,
             Leftover::Pending => {}
         }
     }
-    Ok((session, settled))
+    let mut acknowledged = Vec::new();
+    for (id, receipt) in settled {
+        let by = deadline.min(Instant::now() + REQUEST_LIMIT);
+        if let Err(error) = super::client::acknowledge(&mut session, &id, by) {
+            return Err(Unopened {
+                error,
+                settled: acknowledged,
+            });
+        }
+        // An acknowledged record the server no longer holds settles as gone next time.
+        let _ = pending.remove(&receipt.operation);
+        acknowledged.push(receipt);
+    }
+    Ok((session, acknowledged))
 }
 
 /// The server's own service facts.
@@ -271,13 +334,28 @@ pub fn detailed_facts(
 pub fn detailed_facts_of_run(
     session: &mut Session,
 ) -> Result<Option<(String, crate::update::facts::DetailedUpdateFacts)>, LaneError> {
+    detailed_facts_of_run_by(session, Instant::now() + REQUEST_LIMIT)
+}
+
+/// [`detailed_facts`] that stops waiting at `deadline`, which ends the session.
+pub fn detailed_facts_by(
+    session: &mut Session,
+    deadline: Instant,
+) -> Result<Option<crate::update::facts::DetailedUpdateFacts>, LaneError> {
+    Ok(detailed_facts_of_run_by(session, deadline)?.map(|(_, detailed)| detailed))
+}
+
+fn detailed_facts_of_run_by(
+    session: &mut Session,
+    deadline: Instant,
+) -> Result<Option<(String, crate::update::facts::DetailedUpdateFacts)>, LaneError> {
     if session.selected().minor < crate::update::facts::MINOR_DETAILED_FACTS {
         return Ok(None);
     }
-    match session.call(
-        &LaneRequest::DetailedFacts {},
-        Instant::now() + REQUEST_LIMIT,
-    )? {
+    let sent = Instant::now();
+    match session.call_within(&LaneRequest::DetailedFacts {}, &|| {
+        deadline.min(sent + REQUEST_LIMIT)
+    })? {
         LaneReply::DetailedFacts { boot, detailed } => Ok(Some((boot, *detailed))),
         _ => Err(LaneError::Core(CoreError::Protocol)),
     }
@@ -414,20 +492,28 @@ pub fn execute(
     interrupted: &dyn Fn() -> Option<Instant>,
 ) -> Result<Outcome, LaneError> {
     let id = OperationId::random()?;
-    let mut journaled = false;
+    let mut journal = Journal::default();
     let (outcome, shared) = execute_as(
         lane,
         session,
         (action, token, id),
         wait,
         pending,
-        &mut journaled,
+        &mut journal,
         share,
         dispatch,
         interrupted,
     );
-    forget_refused(&outcome, id, journaled && shared, pending);
+    forget_refused(&outcome, id, journal.journaled && shared, pending);
     outcome
+}
+
+/// One approval's record in the pending operations: whether it was written, and the claim that
+/// keeps another lane connection of this identity from acknowledging its receipt meanwhile.
+#[derive(Default)]
+struct Journal {
+    journaled: bool,
+    _following: Option<Lock>,
 }
 
 /// One `Execute` attempt of operation `id` under [`Lane::perform_as`]. The operation is recorded
@@ -444,11 +530,12 @@ fn execute_as(
     (action, token, id): (LaneAction, String, OperationId),
     wait: Duration,
     pending: &PendingOperations,
-    journaled: &mut bool,
+    journal: &mut Journal,
     share: &mut dyn Share,
     dispatch: &mut dyn FnMut() -> Result<(), LaneError>,
     interrupted: &dyn Fn() -> Option<Instant>,
 ) -> (Result<Outcome, LaneError>, bool) {
+    let until = Instant::now() + wait;
     let outcome = lane.perform_as(
         session,
         action,
@@ -457,11 +544,13 @@ fn execute_as(
         wait,
         &mut |operation| {
             dispatch()?;
-            if !*journaled {
+            if !journal.journaled {
+                let following = pending.follow(until)?;
                 pending
                     .add(operation)
                     .map_err(|_| LaneError::Core(CoreError::StorageUnavailable))?;
-                *journaled = true;
+                journal._following = Some(following);
+                journal.journaled = true;
             }
             share.release();
             Ok(())
@@ -476,9 +565,10 @@ fn execute_as(
 }
 
 /// Removes the record of operation `id` once its last `Execute` was refused because another
-/// operation holds the Core. Every attempt under `id` either got that definite refusal or was
-/// followed until it answered, so nothing admits `id` later. `journaled` is false when the
-/// record was never written or its state left this build's generation.
+/// operation holds the Core, or was never sent because the deadline passed first. Every attempt
+/// under `id` either got that definite refusal, was never sent, or was followed until it
+/// answered, so nothing admits `id` later. `journaled` is false when the record was never
+/// written or its state left this build's generation.
 fn forget_refused(
     outcome: &Result<Outcome, LaneError>,
     id: OperationId,
@@ -487,7 +577,7 @@ fn forget_refused(
 ) {
     if let Err(error) = outcome
         && journaled
-        && busy(error)
+        && (busy(error) || *error == LaneError::Deadline)
     {
         let _ = pending.remove(&id.to_string());
     }
@@ -555,29 +645,53 @@ pub fn execute_approved(
     // One operation ID for the whole approval, journaled once. An attempt whose reply was lost
     // is followed under that ID until it answers, so a later attempt never admits another.
     let id = OperationId::random()?;
-    let mut journaled = false;
+    let mut journal = Journal::default();
+    // The definite refusal of the last attempt, which a deadline that passes before the next
+    // attempt reports.
+    let mut refused = None;
+    // Whether the state the record lives in was shared again after the last attempt.
+    let mut shared = true;
     loop {
         let wait = follow.min(deadline.saturating_duration_since(Instant::now()));
-        let (outcome, shared) = execute_as(
+        if wait.is_zero() {
+            // No attempt is sent once the deadline passed.
+            let outcome = Err(refused.unwrap_or(LaneError::Deadline));
+            forget_refused(&outcome, id, journal.journaled && shared, pending);
+            return outcome;
+        }
+        let (outcome, resumed) = execute_as(
             lane,
             session,
             (action.clone(), token.clone(), id),
             wait,
             pending,
-            &mut journaled,
+            &mut journal,
             share,
             dispatch,
             interrupted,
         );
+        shared = resumed;
         match outcome {
-            Err(error) if busy(&error) => match busy_wait.for_lane(lane, interrupted, error) {
-                Ok(next) => session = next,
-                Err(error) => {
-                    let refused = Err(error);
-                    forget_refused(&refused, id, journaled && shared, pending);
-                    return refused;
+            Err(error) if busy(&error) => {
+                match busy_wait.for_lane(lane, interrupted, error.clone()) {
+                    Ok(next) => {
+                        session = next;
+                        refused = Some(error);
+                    }
+                    Err(error) => {
+                        let outcome = Err(error);
+                        forget_refused(&outcome, id, journal.journaled && shared, pending);
+                        return outcome;
+                    }
                 }
-            },
+            }
+            Err(LaneError::Deadline) => {
+                // A deadline that passed before this attempt was sent reports the refusal of
+                // the attempt before it.
+                let outcome = Err(refused.unwrap_or(LaneError::Deadline));
+                forget_refused(&outcome, id, journal.journaled && shared, pending);
+                return outcome;
+            }
             outcome => return outcome,
         }
     }

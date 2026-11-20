@@ -671,12 +671,18 @@ impl MachineLane for CoreLane {
             .core
             .service_operations()
             .map_err(|error| core_failure(&error))?;
-        let (session, settled) = admin::open(&lane, &pending).map_err(lane_failure)?;
-        // Opening acknowledged these receipts, so their outcomes go to the surfaces that ask.
+        // Opening acknowledged these receipts, so their outcomes go to the surfaces that ask, even
+        // when the connection failed after acknowledging them.
+        let opened = admin::open(&lane, &pending, deadline);
+        let settled = match &opened {
+            Ok((_, settled)) => settled.as_slice(),
+            Err(unopened) => unopened.settled.as_slice(),
+        };
         report.settled = settled
             .iter()
             .map(|receipt| (receipt.operation.clone(), receipt_outcome(receipt)))
             .collect();
+        let (session, _) = opened.map_err(|unopened| lane_failure(unopened.error))?;
         // The flow finishes on its own thread whatever the desktop does meanwhile, including
         // closing the window that asked. It waits for another operation that holds SpaceTerm
         // Core under the same approval, which SpaceTerm Core refuses as changed when what it
@@ -750,7 +756,9 @@ fn lane_failure(error: LaneError) -> ActionFailure {
         // The Machine's facts changed since the push was offered.
         LaneError::BelowFloor(_) => ActionFailure::Changed,
         LaneError::Core(error) => core_failure(&error),
-        LaneError::Interrupted => ActionFailure::Failed,
+        // Neither was sent: the desktop sets no interrupt, and a deadline that passed first
+        // dispatched nothing.
+        LaneError::Interrupted | LaneError::Deadline => ActionFailure::Failed,
     }
 }
 

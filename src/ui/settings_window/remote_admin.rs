@@ -137,7 +137,7 @@ impl RemoteFailure {
             // neither.
             LaneError::BelowFloor(_) => Self::Protocol,
             LaneError::Core(error) => Self::of_core(error),
-            LaneError::Interrupted => Self::Failed,
+            LaneError::Interrupted | LaneError::Deadline => Self::Failed,
         }
     }
 
@@ -215,7 +215,14 @@ impl LaneControl {
             .core
             .service_operations()
             .map_err(RemoteFailure::of_core)?;
-        let (session, settled) = admin::open(&lane, &pending).map_err(RemoteFailure::of_lane)?;
+        // A connection that fails after settling some leftovers reports only its failure here;
+        // the card names one earlier operation at most.
+        let (session, settled) = admin::open(
+            &lane,
+            &pending,
+            std::time::Instant::now() + admin::REQUEST_LIMIT,
+        )
+        .map_err(|unopened| RemoteFailure::of_lane(unopened.error))?;
         Ok((lane, pending, session, settled))
     }
 }

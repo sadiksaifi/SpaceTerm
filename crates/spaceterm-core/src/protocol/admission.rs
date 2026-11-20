@@ -336,9 +336,14 @@ pub(crate) struct Wire<'a> {
 }
 impl<'a> Wire<'a> {
     pub(crate) fn new(stream: &'a mut dyn Preamble) -> Self {
+        Self::until(stream, Instant::now() + CONNECTION_LIMIT)
+    }
+    /// Admission frames that end at `deadline` or after [`CONNECTION_LIMIT`], whichever comes
+    /// first. A frame is never sent once `deadline` has passed.
+    pub(crate) fn until(stream: &'a mut dyn Preamble, deadline: Instant) -> Self {
         Self {
             stream,
-            deadline: Instant::now() + CONNECTION_LIMIT,
+            deadline: deadline.min(Instant::now() + CONNECTION_LIMIT),
         }
     }
     pub(crate) fn read<T: DeserializeOwned>(&mut self) -> Result<T, CoreError> {
@@ -347,7 +352,7 @@ impl<'a> Wire<'a> {
     }
     pub(crate) fn write(&mut self, value: &impl Serialize) -> Result<(), CoreError> {
         let bytes = serde_json::to_vec(value).map_err(|_| CoreError::Protocol)?;
-        if bytes.len() > MAX_FRAME {
+        if bytes.len() > MAX_FRAME || Instant::now() >= self.deadline {
             return Err(CoreError::Protocol);
         }
         self.stream.send(&bytes, self.deadline)
@@ -526,8 +531,8 @@ impl Caller<'_> {
     }
 }
 
-/// Admits a service-lane connection as `caller`. The lane needs a shared service major, just as
-/// work admission needs a shared work major.
+/// Admits a service-lane connection as `caller` by `deadline`. The lane needs a shared service
+/// major, just as work admission needs a shared work major.
 #[cfg_attr(
     not(feature = "client"),
     allow(dead_code, reason = "the CLI's server commands open the service lane")
@@ -537,14 +542,15 @@ pub(crate) fn admit_service_lane(
     caller: Caller<'_>,
     core: &[u8; 32],
     build: &str,
+    deadline: Instant,
 ) -> Result<Negotiated, Refused> {
     admit_lane(
         stream,
         caller,
         core,
         build,
-        Lane::Service,
-        &Lane::Service.offered(),
+        (Lane::Service, &Lane::Service.offered()),
+        deadline,
     )
 }
 
@@ -592,22 +598,22 @@ pub(crate) fn admit_transport<'a>(
         caller.into(),
         core,
         build,
-        Lane::Work,
-        &Lane::Work.offered(),
+        (Lane::Work, &Lane::Work.offered()),
+        Instant::now() + CONNECTION_LIMIT,
     )
 }
 
-/// The caller's half of admission on `lane`, offering `offered`. The Offer must select one of
-/// the offered majors at no more than its offered minor, or none.
+/// The caller's half of admission on `lane`, offering `offered`, by `deadline`. The Offer must
+/// select one of the offered majors at no more than its offered minor, or none.
 fn admit_lane(
     stream: &mut dyn Preamble,
     caller: Caller<'_>,
     core: &[u8; 32],
     build: &str,
-    lane: Lane,
-    offered: &[ProtocolVersion],
+    (lane, offered): (Lane, &[ProtocolVersion]),
+    deadline: Instant,
 ) -> Result<Negotiated, Refused> {
-    let mut wire = Wire::new(stream);
+    let mut wire = Wire::until(stream, deadline);
     wire.write(&Hello {
         lane,
         versions: offered.to_vec(),
@@ -678,8 +684,8 @@ mod tests {
             (&[9; 32], &"Build Mac".into()).into(),
             &[7; 32],
             "spaceterm-development",
-            lane,
-            offered,
+            (lane, offered),
+            Instant::now() + CONNECTION_LIMIT,
         );
         (result, thread.join().unwrap())
     }
@@ -819,8 +825,8 @@ mod tests {
                 (&[9; 32], &"Build Mac".into()).into(),
                 &[7; 32],
                 "spaceterm-development",
-                Lane::Work,
-                &[v(1, 0)],
+                (Lane::Work, &[v(1, 0)]),
+                Instant::now() + CONNECTION_LIMIT,
             );
             assert_eq!(result, Err(Refused::Failed(CoreError::Protocol)));
             thread.join().unwrap();

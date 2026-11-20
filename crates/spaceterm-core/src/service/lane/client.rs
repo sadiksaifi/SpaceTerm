@@ -48,6 +48,9 @@ pub enum LaneError {
     Core(CoreError),
     /// The caller was interrupted before `Execute` was sent, so nothing was dispatched.
     Interrupted,
+    /// The caller's deadline passed before the request completed. When it was an `Execute`,
+    /// it passed before `Execute` was sent, so nothing was dispatched.
+    Deadline,
 }
 
 impl From<CoreError> for LaneError {
@@ -163,19 +166,51 @@ impl Session {
         request: &LaneRequest,
         deadline: &dyn Fn() -> Instant,
     ) -> Result<LaneReply, CoreError> {
-        let bytes = self.frame(request)?;
-        let mut stream = self.stream.take().ok_or(CoreError::Protocol)?;
-        self.used = Instant::now();
+        self.send_within(request, deadline).0
+    }
+
+    /// [`Self::request_within`] that also says whether any byte of `request` may have reached
+    /// the transport. Nothing is written once the deadline fixed when it starts has passed,
+    /// even by I/O the caller stopped waiting for.
+    fn send_within(
+        &mut self,
+        request: &LaneRequest,
+        deadline: &dyn Fn() -> Instant,
+    ) -> (Result<LaneReply, CoreError>, bool) {
+        let bytes = match self.frame(request) {
+            Ok(bytes) => bytes,
+            Err(error) => return (Err(error), false),
+        };
         let fixed = deadline();
-        let (stream, reply) = within(LANE_IO, &|| Some(deadline()), move || {
+        if Instant::now() >= fixed {
+            return (Err(CoreError::Protocol), false);
+        }
+        let Some(mut stream) = self.stream.take() else {
+            return (Err(CoreError::Protocol), false);
+        };
+        self.used = Instant::now();
+        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let starting = Arc::clone(&started);
+        let finished = within(LANE_IO, &|| Some(deadline()), move || {
+            // Marked before the clock is read, so a caller that saw the deadline pass and then
+            // found this unmarked knows the check below refuses to write.
+            starting.store(true, std::sync::atomic::Ordering::SeqCst);
+            if Instant::now() >= fixed {
+                return (stream, Err(CoreError::Protocol), false);
+            }
             let reply = stream
                 .send(&bytes, fixed)
                 .and_then(|()| stream.receive(MAX_FRAME, fixed));
-            (stream, reply)
-        })
-        .ok_or(CoreError::Protocol)?;
+            (stream, reply, true)
+        });
+        let Some((stream, reply, wrote)) = finished else {
+            // The caller stopped waiting while the I/O may still run.
+            let past = Instant::now() >= fixed;
+            let unstarted = !started.load(std::sync::atomic::Ordering::SeqCst);
+            return (Err(CoreError::Protocol), !(past && unstarted));
+        };
         self.stream = Some(stream);
-        self.decode(&reply?)
+        (reply.and_then(|reply| self.decode(&reply)), wrote)
     }
 
     /// Sends one request and turns a lane `Error` into [`LaneError::Code`], and a `BelowFloor`
@@ -190,6 +225,15 @@ impl Session {
             LaneReply::BelowFloor { floor } => Err(LaneError::BelowFloor(floor)),
             reply => Ok(reply),
         }
+    }
+}
+
+/// `error`, or [`LaneError::Deadline`] when it ended a wait that `deadline` bounded.
+pub(crate) fn past(error: CoreError, deadline: Instant) -> LaneError {
+    if Instant::now() >= deadline {
+        LaneError::Deadline
+    } else {
+        LaneError::Core(error)
     }
 }
 
@@ -274,11 +318,20 @@ pub(crate) fn perform(
     admitted: &mut dyn FnMut(&OperationId) -> Result<(), LaneError>,
     interrupted: &dyn Fn() -> Option<Instant>,
 ) -> Result<Outcome, LaneError> {
+    let started = Instant::now();
+    let deadline = || interrupted().into_iter().fold(started + wait, Instant::min);
+    // Fixed per request from when it is sent, and moved closer by an interrupt.
+    let request_deadline = |sent: Instant| move || deadline().min(sent + REQUEST_LIMIT);
+    // A caller whose deadline passed before `Execute` dispatches nothing.
     let mut session = if session.used.elapsed() >= STALE {
-        Session::open(connector.as_ref(), Instant::now() + REQUEST_LIMIT)?
+        Session::open_within(connector, &request_deadline(Instant::now()))
+            .map_err(|error| past(error, deadline()))?
     } else {
         session
     };
+    if Instant::now() >= deadline() {
+        return Err(LaneError::Deadline);
+    }
     admitted(&id)?;
     let operation = id.to_string();
     // Stop and Uninstall end the Core that answers the lane, so the flow does not reconnect once
@@ -290,17 +343,15 @@ pub(crate) fn perform(
         token,
         operation: operation.clone(),
     };
-    let started = Instant::now();
-    let deadline = || interrupted().into_iter().fold(started + wait, Instant::min);
-    // Fixed per request from when it is sent, and moved closer by an interrupt.
-    let request_deadline = |sent: Instant| move || deadline().min(sent + REQUEST_LIMIT);
     let (mut boot, mut current) =
-        match session.request_within(&execute, &request_deadline(Instant::now())) {
-            Ok(LaneReply::Accepted { boot, .. }) => (Some(boot), Some(session)),
+        match session.send_within(&execute, &request_deadline(Instant::now())) {
+            (Ok(LaneReply::Accepted { boot, .. }), _) => (Some(boot), Some(session)),
             // A refused Execute admitted nothing.
-            Ok(LaneReply::Error { code }) => return Err(LaneError::Code(code)),
+            (Ok(LaneReply::Error { code }), _) => return Err(LaneError::Code(code)),
+            // No byte of Execute was written, so nothing was dispatched.
+            (Err(error), false) => return Err(past(error, deadline())),
             // Execute was sent, so the operation may be durable: follow the same operation ID.
-            Ok(_) | Err(_) => (None, None),
+            (Ok(_) | Err(_), _) => (None, None),
         };
     let mut last = None;
     loop {
@@ -439,27 +490,55 @@ pub fn settle_leftover(
     operation: &OperationId,
 ) -> Result<Leftover, LaneError> {
     let deadline = Instant::now() + REQUEST_LIMIT;
-    let reply = session.request(
-        &LaneRequest::Resolve {
-            operation: operation.to_string(),
-        },
-        deadline,
-    )?;
+    let leftover = leftover(session, operation, deadline)?;
+    if let Leftover::Settled(_) = &leftover {
+        acknowledge(session, operation, deadline)?;
+    }
+    Ok(leftover)
+}
+
+/// What became of an operation an earlier command admitted, read by `deadline` without
+/// acknowledging it.
+pub(crate) fn leftover(
+    session: &mut Session,
+    operation: &OperationId,
+    deadline: Instant,
+) -> Result<Leftover, LaneError> {
+    let reply = session
+        .request_within(
+            &LaneRequest::Resolve {
+                operation: operation.to_string(),
+            },
+            &|| deadline,
+        )
+        .map_err(|error| past(error, deadline))?;
     match reply {
-        LaneReply::Receipt(receipt) if settled(&receipt) => {
-            session.call(
-                &LaneRequest::Acknowledge {
-                    operation: operation.to_string(),
-                },
-                deadline,
-            )?;
-            Ok(Leftover::Settled(receipt))
-        }
+        LaneReply::Receipt(receipt) if settled(&receipt) => Ok(Leftover::Settled(receipt)),
         LaneReply::Receipt(_) => Ok(Leftover::Pending),
         LaneReply::Error { code } if code == "not_found" => Ok(Leftover::Gone),
         LaneReply::Error { code } => Err(LaneError::Code(code)),
         _ => Err(LaneError::Core(CoreError::Protocol)),
     }
+}
+
+/// Acknowledges a settled operation by `deadline`, which lets the server forget it.
+pub(crate) fn acknowledge(
+    session: &mut Session,
+    operation: &OperationId,
+    deadline: Instant,
+) -> Result<(), LaneError> {
+    session
+        .call_within(
+            &LaneRequest::Acknowledge {
+                operation: operation.to_string(),
+            },
+            &|| deadline,
+        )
+        .map(drop)
+        .map_err(|error| match error {
+            LaneError::Core(error) => past(error, deadline),
+            error => error,
+        })
 }
 
 /// The service lane of this account's own server, over account IPC.
@@ -487,6 +566,7 @@ impl Connector for Local {
             },
             &self.core,
             &self.paths.identity,
+            deadline,
         );
         record(&self.admissions, &admitted);
         let admitted = admitted?;
@@ -523,11 +603,14 @@ impl Connector for Paired {
         if connection.paired() != &self.paired {
             return Err(CoreError::AuthenticationRefused);
         }
-        let admitted = connection.admit_service_lane(crate::protocol::Caller {
-            client: &self.paired.client,
-            name: &self.name,
-            agent: self.agent.as_ref(),
-        });
+        let admitted = connection.admit_service_lane_by(
+            crate::protocol::Caller {
+                client: &self.paired.client,
+                name: &self.name,
+                agent: self.agent.as_ref(),
+            },
+            deadline,
+        );
         record(
             &self.admissions,
             &admitted
@@ -597,6 +680,14 @@ impl Lane {
     /// Opens and admits one connection.
     pub fn session(&self) -> Result<Session, CoreError> {
         Session::open(self.connector.as_ref(), Instant::now() + REQUEST_LIMIT)
+    }
+
+    /// Opens and admits one connection by `deadline`, and stops waiting for a stalled server
+    /// once it passes. A deadline that passed first is [`LaneError::Deadline`].
+    pub fn session_by(&self, deadline: Instant) -> Result<Session, LaneError> {
+        let opened = Instant::now();
+        let by = || deadline.min(opened + REQUEST_LIMIT);
+        Session::open_within(&self.connector, &by).map_err(|error| past(error, deadline))
     }
 
     /// Executes a previewed action as a new operation and follows it. See [`perform`].
