@@ -1234,6 +1234,10 @@ mod connection {
         lost: bool,
         /// Counts the Pane's connection losses, so a classification names the exact one.
         losses: u64,
+        /// The connection generation the current loss began on. A connection that reached the
+        /// Terminal Session again changes it, so a recovery and a new loss that one reading
+        /// coalesces still count as a new loss.
+        loss_generation: Option<u64>,
         /// The person selected this restored Pane, so its ordinary shell start is on the way and
         /// the Pane stays blank instead of showing the restored screen.
         selecting: bool,
@@ -1304,6 +1308,7 @@ mod connection {
                 stopping: false,
                 lost: false,
                 losses: 0,
+                loss_generation: None,
                 selecting: false,
                 interrupted: false,
                 restart_since: None,
@@ -1383,12 +1388,17 @@ mod connection {
                 status,
                 CorePaneStatus::Reconnecting | CorePaneStatus::TakeoverReconnecting
             );
-            if lost == self.lost {
+            // The connection's own generation says whether it recovered in between, which a
+            // reading that missed the recovery can't see in the status alone.
+            let generation = self.connection.connection_generation();
+            let new_loss = lost && (!self.lost || self.loss_generation != Some(generation));
+            if !new_loss && lost == self.lost {
                 return false;
             }
             self.lost = lost;
-            if lost {
+            if new_loss {
                 self.losses = self.losses.wrapping_add(1);
+                self.loss_generation = Some(generation);
             }
             std::mem::take(&mut self.interrupted)
         }
@@ -1405,8 +1415,10 @@ mod connection {
                 return CorePaneSync::default();
             }
             self.interrupted = true;
+            // Only the notice changes. Input stays paused while the connection is lost.
             CorePaneSync {
                 changed: true,
+                interrupted: self.status != CorePaneStatus::Connected,
                 ..CorePaneSync::default()
             }
         }

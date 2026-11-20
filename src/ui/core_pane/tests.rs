@@ -785,6 +785,40 @@ fn a_classification_names_the_exact_loss_it_waited_for() {
     );
 }
 
+/// A recovery and a second loss that one reading coalesces are still a new loss, which waits
+/// its own time: the first loss's timer finds nothing to classify.
+#[test]
+fn a_recovery_the_reading_missed_still_starts_a_new_loss() {
+    let connection = Connection::new(CorePaneStatus::Connected);
+    let mut view = CorePaneView::new(connection.clone());
+    view.sync();
+    connection.set(CorePaneStatus::Reconnecting);
+    view.sync();
+    let first = view.classifying().expect("the first loss waits");
+    // A new connection reached the Session and was lost again before the Pane read it.
+    connection.answer(CorePaneStatus::Reconnecting);
+    view.sync();
+    let second = view.classifying().expect("the second loss waits");
+    assert_ne!(first, second);
+    assert!(!view.classify(first).changed);
+    assert_eq!(notice(&view), None);
+}
+
+/// Classifying a loss changes only its notice: input stays paused while the connection is still
+/// lost, so the Pane takes no keyboard back.
+#[test]
+fn a_classified_loss_keeps_input_paused() {
+    let connection = Connection::new(CorePaneStatus::Connected);
+    let mut view = CorePaneView::new(connection.clone());
+    view.sync();
+    connection.set(CorePaneStatus::Reconnecting);
+    assert!(view.sync().interrupted);
+    let loss = view.classifying().expect("the loss waits");
+    let sync = view.classify(loss);
+    assert!(sync.changed);
+    assert!(sync.interrupted, "the frozen Pane accepts no input");
+}
+
 #[test]
 fn a_confirmed_stop_never_says_reconnecting_and_ends_in_its_stopped_state() {
     let connection = Connection::new(CorePaneStatus::Connected);
