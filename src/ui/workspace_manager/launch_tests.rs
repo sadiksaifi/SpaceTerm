@@ -494,6 +494,70 @@ fn the_persons_launch_creates_one_workspace_when_none_is_attached(cx: &mut TestA
     );
 }
 
+/// A cold launch presents this computer's inventory before its server can take a creation.
+/// The landing waits without an alert, then creates exactly one Workspace once it can.
+#[gpui::test]
+fn a_cold_launch_creates_its_workspace_once_the_core_can_take_it(cx: &mut TestAppContext) {
+    use spaceterm_core::hierarchy::Mutation;
+    let launch = ScriptedLaunch::default();
+    launch.answer(ready());
+    let edits = ScriptedEdits::new(Some(no_workspaces()));
+    edits.set_connected(false);
+    let (harness, cx) = foreground_harness_with(launch, edits, cx);
+    sync(&harness, cx);
+    sync(&harness, cx);
+    assert!(
+        harness.edits.submitted().is_empty(),
+        "nothing is asked of a server that cannot take it"
+    );
+    assert!(
+        !cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)),
+        "the wait is not a failure"
+    );
+
+    harness.edits.set_connected(true);
+    sync(&harness, cx);
+    sync(&harness, cx);
+    assert_eq!(
+        harness.edits.submitted(),
+        vec![Mutation::CreateWorkspace {
+            name: String::new(),
+            directory: None,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
+        }],
+        "the launch creates one Workspace once"
+    );
+}
+
+/// The person's own creation while the landing waits replaces the creation the launch owed.
+#[gpui::test]
+fn a_creation_the_person_chose_replaces_the_one_a_cold_launch_owed(cx: &mut TestAppContext) {
+    let launch = ScriptedLaunch::default();
+    launch.answer(ready());
+    let edits = ScriptedEdits::new(Some(no_workspaces()));
+    edits.set_connected(false);
+    let (harness, cx) = foreground_harness_with(launch, edits, cx);
+    sync(&harness, cx);
+    harness.edits.set_connected(true);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.run_workspace_creation(
+                crate::ui::workspace_creation::WorkspaceCreation::Local,
+                window,
+                cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+    sync(&harness, cx);
+    sync(&harness, cx);
+    assert_eq!(
+        harness.edits.submitted().len(),
+        1,
+        "only the person's own creation is asked for"
+    );
+}
+
 #[gpui::test]
 fn a_reopened_window_with_nothing_attached_creates_nothing(cx: &mut TestAppContext) {
     let (harness, cx) = launch_harness_with(
@@ -2972,6 +3036,36 @@ fn a_passive_launch_leaves_the_saved_selection_unopened(cx: &mut TestAppContext)
     assert_ne!(
         presented_selection(&harness, cx).map(|selection| selection.workspace),
         Some(WORK)
+    );
+    // The default it presents is nobody's choice, so the next launch still opens the split.
+    sync(&harness, cx);
+    assert_eq!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.binding.local()?.saved_selection()),
+        Some(work_split())
+    );
+}
+
+/// Input before the Workspaces arrive that leaves the keyboard in the sidebar keeps it there:
+/// the late landing neither opens the saved selection nor takes the keyboard.
+#[gpui::test]
+fn a_late_landing_leaves_the_keyboard_where_early_input_put_it(cx: &mut TestAppContext) {
+    let (harness, cx) = relaunch(
+        Some(work_split()),
+        &[WORKSPACE, WORK],
+        |manager, window, cx| {
+            manager.sidebar.update(cx, |sidebar, cx| {
+                sidebar.take_keyboard(true, window, cx);
+            });
+            manager.person_input(cx);
+        },
+        cx,
+    );
+    assert_eq!(harness.panes.pane(WORK_SPLIT).selections(), 0);
+    assert!(
+        cx.update(|window, cx| harness.manager.read(cx).sidebar.read(cx).is_focused(window)),
+        "the sidebar keeps the keyboard"
     );
 }
 

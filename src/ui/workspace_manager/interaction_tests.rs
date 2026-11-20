@@ -1070,8 +1070,49 @@ fn a_changed_control_grant_refuses_the_original_direct_close_without_renewing_it
     assert_eq!(harness.closes(), original);
     assert!(cx.debug_bounds("modal-action-close-review").is_some());
     assert!(cx.debug_bounds("modal-action-close-confirm").is_none());
+    assert!(
+        spaceterm_ui::a11y_testing::A11yTree::read(cx)
+            .find("Tab Changed on Another Client")
+            .is_some()
+    );
     harness.sync(cx);
     assert_eq!(harness.closes(), original);
+}
+
+/// The server refuses this client's own direct close because a command started in its
+/// unchanged Pane, as after Enter and Close in quick succession. The notice says so instead of
+/// blaming another client, and Review stays the one way forward.
+#[gpui::test]
+fn an_own_close_refused_for_running_work_names_the_command_not_another_client(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_core::hierarchy::{ConfirmedControl, Mutation, Outcome};
+    let (harness, cx) = close_harness(cx);
+    let mut idle = close_inventory(
+        2,
+        &[
+            (CLOSE_ROOT_TAB, &[(CLOSE_ROOT_PANE, None)]),
+            (CLOSE_SECOND_TAB, &[(CLOSE_SECOND_PANE, None)]),
+        ],
+    );
+    idle.close.as_mut().unwrap().controls = vec![ConfirmedControl {
+        pane: CLOSE_ROOT_PANE,
+        session: None,
+        owner: [1; 32],
+        epoch: 1,
+    }];
+    harness.publish(idle.clone(), cx);
+    cx.dispatch_action(crate::ui::CloseTab);
+    redraw(cx);
+    let original = harness.closes();
+    assert!(matches!(&original[..], [Mutation::Close { .. }]));
+    harness.edits.answer(Outcome::StaleConfirmation);
+    harness.publish(idle, cx);
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+    assert!(tree.find("Command Running in Tab").is_some());
+    assert!(tree.find("Tab Changed on Another Client").is_none());
+    assert!(cx.debug_bounds("modal-action-close-review").is_some());
+    assert_eq!(harness.closes(), original, "nothing is closed without Review");
 }
 
 #[gpui::test]

@@ -26,8 +26,9 @@ pub(crate) use core_workspaces::{
     WorkspaceCloseState, WorkspaceCloseUnavailable, WorkspaceConflict, WorkspaceEditSource,
     WorkspaceEdits, WorkspaceFacts, WorkspaceHost, WorkspacePaneOpener, WorkspacePaneSessions,
     WorkspacePaneSubscription, WorkspacePanes, WorkspacePlan, WorkspaceRefusal,
-    WorkspaceRefusalReason, WorkspaceRemoval, WorkspaceRowStatus, WorkspaceSubmission,
-    WorkspaceTabs, Workspaces, close_changed_title, presenting_window,
+    WorkspaceEditability, WorkspaceRefusalReason, WorkspaceRemoval, WorkspaceRowStatus,
+    WorkspaceSubmission,
+    WorkspaceTabs, Workspaces, close_changed_title, close_working_title, presenting_window,
 };
 #[cfg(test)]
 pub(crate) use core_workspaces::{WorkspaceOwner, testing};
@@ -1165,6 +1166,9 @@ mod core_workspaces {
         restart_causes: crate::terminal::core_session::restart::PaneRestartCauses,
         /// This computer's name in the platform's wording, for a server with no remote name.
         this_computer: SharedString,
+        /// Whether a Pane these sessions present was explicitly selected, by the person or by
+        /// the landing of their own launch. Until then the window presents a view nobody chose.
+        selected: Rc<std::cell::Cell<bool>>,
     }
 
     impl WorkspacePaneSessions {
@@ -1216,6 +1220,7 @@ mod core_workspaces {
                 edits: None,
                 restart_causes: Arc::default(),
                 this_computer: SharedString::default(),
+                selected: Rc::default(),
             }
         }
 
@@ -1465,6 +1470,7 @@ mod core_workspaces {
             }
             if let Some(view) = self.views.get_mut(&pane_id) {
                 view.select();
+                self.sessions.selected.set(true);
             }
         }
 
@@ -1878,6 +1884,9 @@ mod core_workspaces {
         /// Closes the server refused because what they would end changed after the
         /// confirmation, each with its outcome's sequence.
         stale_closes: VecDeque<(MachineCloseTarget, u64)>,
+        /// The stale closes, by outcome sequence, that this client's own close found running
+        /// work in, while every Pane, Terminal Session and control grant it named is unchanged.
+        working_closes: BTreeSet<u64>,
         attachments: spaceterm_core::attachments::Attachments,
         retained_views: Option<crate::ui::client_view_state::RetainedClientViews>,
         saved_views: Option<spaceterm_core::client_view::ClientView>,
@@ -1977,6 +1986,7 @@ mod core_workspaces {
                 review: None,
                 submitted_close: None,
                 stale_closes: VecDeque::new(),
+                working_closes: BTreeSet::new(),
                 attachments: spaceterm_core::attachments::Attachments::memory(),
                 retained_views: None,
                 saved_views: None,
@@ -2376,6 +2386,12 @@ mod core_workspaces {
             self.last_saved_view = Some(view);
         }
 
+        /// Whether a Pane of this Machine was explicitly selected in this window. Only such a
+        /// selection is the person's, so only it replaces the one a previous launch left.
+        pub(crate) fn selected_explicitly(&self) -> bool {
+            self.sessions.selected.get()
+        }
+
         /// The Workspace, Tab and Focused Pane this client last presented from this Machine.
         pub(crate) const fn saved_selection(
             &self,
@@ -2646,20 +2662,29 @@ mod core_workspaces {
         /// The oldest close the server refused as stale, with the local target this process
         /// asked to close when it is the one that asked, and its alert's presentation. A
         /// recovered answer names no local target. It stays until [`Self::take_stale_close`].
+        /// The next stale close to present, the local target it closes, its notice, and whether
+        /// running work in this client's own unchanged Panes refused it rather than another
+        /// client's change.
         pub(crate) fn next_stale_close(
             &self,
-        ) -> Option<(MachineCloseTarget, Option<CloseTarget>, OutcomeNotice)> {
+        ) -> Option<(MachineCloseTarget, Option<CloseTarget>, OutcomeNotice, bool)> {
             let (target, sequence) = *self.stale_closes.front()?;
             let local = self
                 .submitted_close
                 .filter(|(submitted, _)| *submitted == target)
                 .map(|(_, local)| local);
-            Some((target, local, self.notice([sequence])))
+            Some((
+                target,
+                local,
+                self.notice([sequence]),
+                self.working_closes.contains(&sequence),
+            ))
         }
         pub(crate) fn take_stale_close(
             &mut self,
         ) -> Option<(MachineCloseTarget, Option<CloseTarget>)> {
             let (target, sequence) = self.stale_closes.pop_front()?;
+            self.working_closes.remove(&sequence);
             self.hand(sequence);
             let local = self
                 .submitted_close
@@ -3124,9 +3149,26 @@ mod core_workspaces {
                                         })
                                         .is_ok()
                                 });
+                        // An own close the host refused while everything it named is
+                        // unchanged found running work, such as a command its own input started.
+                        let working = confirmation.own_controls.as_ref().is_some_and(|reviewed| {
+                            inventory.is_some_and(|inventory| {
+                                inventory
+                                    .close_confirmation(*target)
+                                    .is_some_and(|current| current.same_targets(confirmation))
+                                    && inventory.close.as_ref().is_some_and(|live| {
+                                        reviewed
+                                            .iter()
+                                            .all(|control| live.controls.contains(control))
+                                    })
+                            })
+                        });
                         if queued {
                             self.edits.presented(sequence);
                         } else {
+                            if working {
+                                self.working_closes.insert(sequence);
+                            }
                             self.stale_closes.push_back((*target, sequence));
                         }
                     }
@@ -3315,6 +3357,9 @@ mod core_workspaces {
                     .drain(..)
                     .flat_map(|(_, refused)| refused)
                     .chain(self.stale_closes.drain(..).map(|(_, sequence)| sequence))
+                    .inspect(|sequence| {
+                        self.working_closes.remove(sequence);
+                    })
                     .collect();
                 for sequence in sequences {
                     self.edits.release(sequence);
@@ -3580,6 +3625,17 @@ mod core_workspaces {
             MachineCloseTarget::Tab { .. } => "Tab Changed on Another Client",
             MachineCloseTarget::Worktree { .. } => "Tabs Changed on Another Client",
             MachineCloseTarget::KillWorkspace { .. } => "Workspace Changed on Another Client",
+        }
+    }
+
+    /// The title of the notice that says this client's own close ended nothing because a
+    /// command is running in what it would close.
+    pub(crate) const fn close_working_title(target: MachineCloseTarget) -> &'static str {
+        match target {
+            MachineCloseTarget::Pane { .. } => "Command Running in Pane",
+            MachineCloseTarget::Tab { .. } => "Command Running in Tab",
+            MachineCloseTarget::Worktree { .. } => "Commands Running in Tabs",
+            MachineCloseTarget::KillWorkspace { .. } => "Command Running in Workspace",
         }
     }
 

@@ -597,6 +597,8 @@ pub(super) struct LocalLaunchState {
     /// inventory is presented, the window opens the Active Workspace's Focused Pane, or creates
     /// one Workspace when nothing is attached.
     landing: bool,
+    /// The owed landing saw this computer's inventory and waits for the server to take it.
+    landing_seen: bool,
     /// The server was started elsewhere while this launch was answering. A launch that then
     /// finishes waiting runs once more, because its answer may predate that start.
     resume: bool,
@@ -629,6 +631,7 @@ impl LocalLaunchState {
         Self {
             intent: adapters.intent,
             landing: adapters.intent == LaunchIntent::Foreground,
+            landing_seen: false,
             adapters,
             state: LaunchState::Launching,
             place,
@@ -651,9 +654,26 @@ impl LocalLaunchState {
         }
     }
 
-    /// Whether the person's launch still owes them a shell, and from now on it does not.
-    pub(super) fn take_landing(&mut self) -> bool {
-        std::mem::take(&mut self.landing)
+    /// Whether the person's launch still owes them a shell.
+    pub(super) const fn landing_owed(&self) -> bool {
+        self.landing
+    }
+
+    /// Whether an owed landing already saw this computer's inventory, so each later reading
+    /// tries it again even when the inventory is unchanged.
+    pub(super) const fn landing_presented(&self) -> bool {
+        self.landing && self.landing_seen
+    }
+
+    /// Records that the owed landing saw this computer's inventory and must wait.
+    pub(super) fn landing_waits(&mut self) {
+        self.landing_seen = self.landing;
+    }
+
+    /// The landing happened, or the person's own choice replaced it.
+    pub(super) fn finish_landing(&mut self) {
+        self.landing = false;
+        self.landing_seen = false;
     }
 
     /// The account-local connection that retains this desktop's Workspace order, if any.

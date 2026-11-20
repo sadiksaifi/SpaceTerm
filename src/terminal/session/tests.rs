@@ -5419,3 +5419,73 @@ fn runtime_receipts_in_an_earlier_or_later_session_refuse_a_paused_scan() {
         }
     }
 }
+
+/// A probe whose shell foreground the test moves, as a program starting and ending would.
+struct MovingForeground(AtomicBool);
+impl crate::platform::native_pty::SessionProbe for MovingForeground {
+    fn shell_foreground(&self) -> io::Result<bool> {
+        Ok(self.0.load(Ordering::Acquire))
+    }
+    fn others(&self) -> io::Result<bool> {
+        Ok(false)
+    }
+}
+
+fn enter_key() -> KeyInput {
+    KeyInput {
+        physical_key: PhysicalKey::Enter,
+        native_key_code: Some(36),
+        logical_key: "enter".to_owned(),
+        text: Some("\r".to_owned()),
+        unshifted_codepoint: Some('\r'),
+        ..text_key(KeyAction::Press)
+    }
+}
+
+/// The worker read `output` from its PTY, as each reader batch reports it.
+fn reads(worker: &mut TerminalWorker, output: &[u8]) {
+    shows(worker, output);
+    worker.events.note_output();
+}
+
+/// Enter is accepted while the worker still processes output from before it: an earlier prompt,
+/// the shell's own echo of the line, and the shell ending the line all leave the input fenced.
+/// Only a program that took the foreground and gave it back, or a fresh prompt drawn after the
+/// worker wrote the line, answers it.
+#[test]
+fn only_evidence_after_the_written_line_answers_a_submitted_line() {
+    let probe = Arc::new(MovingForeground(AtomicBool::new(true)));
+    let mut worker = idle_worker(SHELL_FOREGROUND, Some(false));
+    worker.events.set_probe(Some(probe.clone()));
+    reads(&mut worker, OWNED_PROMPT);
+    assert!(!worker.events.running_work(), "an idle prompt");
+
+    // The host accepts Enter. Before the worker writes it, it reads the earlier prompt again.
+    worker.events.note_submitted();
+    reads(&mut worker, OWNED_PROMPT);
+    assert!(worker.events.running_work(), "the earlier prompt answers nothing");
+
+    assert!(worker.process_command(Command::Key(enter_key())));
+    reads(&mut worker, b"\r\n");
+    assert!(worker.events.running_work(), "the shell's echo answers nothing");
+
+    // The program takes the foreground and gives it back.
+    probe.0.store(false, Ordering::Release);
+    reads(&mut worker, b"output");
+    assert!(worker.events.running_work());
+    probe.0.store(true, Ordering::Release);
+    reads(&mut worker, b"\r\n");
+    assert!(!worker.events.running_work(), "the program ran and ended");
+
+    // A builtin never leaves the shell's foreground, so its fresh prompt answers it.
+    worker.events.note_submitted();
+    assert!(worker.process_command(Command::Key(enter_key())));
+    reads(&mut worker, b"\r\n");
+    assert!(worker.events.running_work());
+    reads(
+        &mut worker,
+        b"\x1b]7;file://mac.local/initial\x07\x1b]133;A;spaceterm=0f1e\x07% \x1b]133;B;spaceterm=0f1e\x07",
+    );
+    assert!(!worker.events.running_work(), "a fresh prompt after the line");
+    worker.finish();
+}

@@ -279,7 +279,7 @@ impl WorkspaceManager {
 
     /// Whether the keyboard rests on the empty view or the Active Workspace's content, where a
     /// restored selection takes it along.
-    fn content_holds_keyboard(&self, window: &Window, cx: &Context<Self>) -> bool {
+    pub(super) fn content_holds_keyboard(&self, window: &Window, cx: &Context<Self>) -> bool {
         window.focused(cx).is_none()
             || self.empty_focus.is_focused(window)
             || self

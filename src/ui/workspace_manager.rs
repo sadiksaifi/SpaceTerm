@@ -1567,25 +1567,64 @@ impl WorkspaceManager {
     /// person has chosen nothing in it since it opened. With no Workspace to present, it creates
     /// one Local Workspace, whose Root Pane opens once SpaceTerm Core publishes it. Workspaces
     /// the person detached stay detached.
-    fn land(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let saved = if self.restoration.take_landing() {
-            self.restore_saved_selection(window, cx)
-        } else {
+    /// Lands the person's own launch in a shell, and returns whether it is done. It waits, and
+    /// returns `false`, while this computer's server cannot take what landing asks of it: a
+    /// retained copy stands in for the server, or the server cannot accept a creation yet.
+    fn land(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        use super::workspaces::{WorkspaceEditability, WorkspaceRefusalReason, WorkspaceSubmission};
+
+        let Some(binding) = self.binding.local() else {
+            return false;
+        };
+        // A Pane of a retained copy starts no shell, and its selection may name a Tab or Pane
+        // the server no longer has.
+        let editability = binding.editability();
+        if binding.presents_retained_copy() || editability == WorkspaceEditability::Offline {
+            return false;
+        }
+        let creates = self.workspaces.iter().next().is_none();
+        if creates && editability != WorkspaceEditability::Available {
+            return false;
+        }
+        // Input before the Workspaces arrived chose what the window shows, so the saved
+        // selection stays away and the keyboard stays where the person put it.
+        let person_chose = !self.restoration.take_landing();
+        let saved = if person_chose {
             None
+        } else {
+            self.restore_saved_selection(window, cx)
         };
         self.follow_person_input(window, cx);
         if let Some(workspace_id) = saved.or_else(|| self.workspaces.active_workspace_id()) {
+            if person_chose && !self.content_holds_keyboard(window, cx) {
+                return true;
+            }
             if self.activate_workspace(workspace_id, window, cx) {
                 self.focus(window, cx);
             }
-            return;
+            return true;
         }
-        if self.workspaces.iter().next().is_none() {
-            self.run_workspace_creation(
-                crate::ui::workspace_creation::WorkspaceCreation::Local,
-                window,
-                cx,
-            );
+        if !creates {
+            return true;
+        }
+        let Some(binding) = self.binding.local_mut() else {
+            return false;
+        };
+        match binding.create_workspace(String::new(), None) {
+            WorkspaceSubmission::Submitted => {
+                self.launch.finish_landing();
+                self.sync_workspaces(MachineKey::LOCAL, window, cx);
+                cx.notify();
+                true
+            }
+            // The server's state changed since this reading, so the next reading asks again.
+            WorkspaceSubmission::Refused(
+                WorkspaceRefusalReason::Offline | WorkspaceRefusalReason::Pending,
+            ) => false,
+            WorkspaceSubmission::Refused(reason) => {
+                Self::show_refusal("create a Workspace", reason, window, cx);
+                true
+            }
         }
     }
 
@@ -2047,6 +2086,8 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The person's own creation replaces whatever their launch still owed them.
+        self.launch.finish_landing();
         match creation {
             // The account server owns local work, so a new local Workspace is the server's.
             WorkspaceCreation::Local => {
@@ -2891,14 +2932,21 @@ impl WorkspaceManager {
         if landed {
             self.focus(window, cx);
         }
-        // The person's own launch of SpaceTerm lands in a shell once this computer's Workspaces
-        // and this client's attachments are known.
-        if key == MachineKey::LOCAL && inventory_applied && self.launch.take_landing() {
+        // The person's own launch of SpaceTerm lands in a shell once this computer's server
+        // presents its own Workspaces and this client's attachments are known. A landing that
+        // waits for the server to accept its creation runs again at each later reading.
+        if key == MachineKey::LOCAL
+            && (inventory_applied || self.launch.landing_presented())
+            && self.launch.landing_owed()
+        {
             if landed {
+                self.launch.finish_landing();
                 self.restoration.take_landing();
                 self.follow_person_input(window, cx);
+            } else if self.land(window, cx) {
+                self.launch.finish_landing();
             } else {
-                self.land(window, cx);
+                self.launch.landing_waits();
             }
         }
         // The client that asked for a creation opens it, once, after the server published it.
@@ -2936,11 +2984,11 @@ impl WorkspaceManager {
         {
             let _ = binding.take_forgotten();
         }
-        while let Some((machine_target, local, notice)) = self
+        while let Some((machine_target, local, notice, working)) = self
             .binding
             .get(key)
             .and_then(super::workspaces::Workspaces::next_stale_close)
-            && self.present_stale_close(machine_target, local, Some(&notice), window, cx)
+            && self.present_stale_close(machine_target, local, Some(&notice), working, window, cx)
             && let Some(binding) = self.binding.get_mut(key)
         {
             let _ = binding.take_stale_close();
@@ -3074,9 +3122,15 @@ impl WorkspaceManager {
             }
         }
         // Only the person's launch reads a selection, and it opens this computer's. Another
-        // Machine's Active Workspace leaves this computer's last selection as it was.
+        // Machine's Active Workspace leaves this computer's last selection as it was, and so
+        // does a view nobody chose: a passive launch's default, or a landing still owed.
         if let Some(active) = self.workspaces.active_workspace_id()
             && self.binding.owner(active) == Some(MachineKey::LOCAL)
+            && !self.launch.landing_owed()
+            && self
+                .binding
+                .local()
+                .is_some_and(super::workspaces::Workspaces::selected_explicitly)
             && let Some(selection) = self
                 .workspaces
                 .workspace(active)
@@ -3852,6 +3906,7 @@ impl WorkspaceManager {
             WorkspaceCloseState::Changed => {
                 self.present_close_changed(
                     review.approval.changed_title(),
+                    false,
                     Some(target),
                     held_keyboard,
                     None,
@@ -3897,6 +3952,7 @@ impl WorkspaceManager {
             _ => {
                 self.present_close_changed(
                     review.approval.changed_title(),
+                    false,
                     Some(review.target),
                     held_keyboard,
                     None,
@@ -3916,13 +3972,16 @@ impl WorkspaceManager {
     fn present_close_changed(
         &mut self,
         title: &'static str,
+        working: bool,
         target: Option<CloseTarget>,
         held_keyboard: bool,
         notice: Option<&super::workspaces::OutcomeNotice>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let message = if target.is_some() {
+        let message = if working && target.is_some() {
+            "Nothing was closed. Review the running command before closing."
+        } else if target.is_some() {
             "Nothing was closed. Review the updated Terminal Sessions before closing."
         } else {
             "Nothing was closed. Check the Workspace before closing it again."
@@ -4041,6 +4100,7 @@ impl WorkspaceManager {
         machine_target: spaceterm_core::hierarchy::CloseTarget,
         local: Option<CloseTarget>,
         notice: Option<&super::workspaces::OutcomeNotice>,
+        working: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -4049,8 +4109,15 @@ impl WorkspaceManager {
         let held_keyboard = local
             .and_then(|local| self.workspaces.workspace(close_target_workspace(local)))
             .is_some_and(|entry| entry.payload().read(cx).holds_keyboard(window, cx));
+        // Running work in this client's own unchanged Panes is not another client's change.
+        let title = if working {
+            super::workspaces::close_working_title(machine_target)
+        } else {
+            super::workspaces::close_changed_title(machine_target)
+        };
         self.present_close_changed(
-            super::workspaces::close_changed_title(machine_target),
+            title,
+            working,
             local,
             held_keyboard,
             notice,

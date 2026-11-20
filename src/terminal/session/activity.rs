@@ -16,10 +16,30 @@ pub(super) struct ActivityState {
     /// The owning shell waited at its own empty prompt after `last`.
     empty_prompt: bool,
     probe: Option<Arc<dyn SessionProbe>>,
-    /// A line was submitted, such as by Enter, that neither a prompt nor any output answered
-    /// yet. It is recorded where input is accepted, before the worker writes it, so a close the
-    /// host admits after that input sees it.
-    submitted: bool,
+    /// Lines submitted, such as by Enter, counted where input is accepted and before the worker
+    /// writes them, so a close the host admits after that input sees it.
+    submitted: Submissions,
+}
+
+/// The ordered evidence that answers each submitted line. Input reaches the worker in the order
+/// it was accepted, so the `n`th line the worker writes is the `n`th one accepted. Only evidence
+/// the worker observes after writing a line answers it: a fresh prompt of the owning shell, or
+/// for a shell without prompt markers, a program that took the foreground and gave it back.
+/// Output alone answers nothing, since the shell itself echoes and ends the line before the
+/// program it runs takes the foreground.
+#[derive(Default)]
+struct Submissions {
+    accepted: u64,
+    written: u64,
+    answered: u64,
+    /// A program other than the shell owned the foreground after the last written line.
+    started: bool,
+}
+
+impl Submissions {
+    const fn pending(&self) -> bool {
+        self.accepted > self.answered
+    }
 }
 
 impl Default for ActivityState {
@@ -29,7 +49,7 @@ impl Default for ActivityState {
             last: None,
             empty_prompt: false,
             probe: None,
-            submitted: false,
+            submitted: Submissions::default(),
         }
     }
 }
@@ -44,8 +64,10 @@ impl ActivityState {
     pub(super) fn note(&mut self, now: Instant, empty_prompt: bool) {
         self.last = Some(now);
         self.empty_prompt = empty_prompt;
+        // The worker reads its prompt only after writing every line it counted, and a written
+        // line leaves the prompt with input until the shell draws a fresh one.
         if empty_prompt {
-            self.submitted = false;
+            self.submitted.answered = self.submitted.written;
         }
     }
 }
@@ -149,22 +171,35 @@ impl TerminalEventPublisher {
     /// Records that accepted input submits a line, before the worker writes it.
     pub(super) fn note_submitted(&self) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        state.activity.submitted = true;
+        state.activity.submitted.accepted += 1;
     }
 
-    /// Output answered the last submitted line while the shell owns the foreground again.
+    /// The worker processed the next submitted line, in the order it was accepted.
+    pub(super) fn note_written(&self) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let submitted = &mut state.activity.submitted;
+        submitted.written = (submitted.written + 1).min(submitted.accepted);
+        submitted.started = false;
+    }
+
+    /// The worker read output after its writes. A program that took the foreground after the
+    /// last written line and gave it back to the shell answers every written line.
     pub(super) fn note_output(&self) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if !state.activity.submitted {
+        let activity = &mut state.activity;
+        if activity.submitted.written == activity.submitted.answered {
             return;
         }
-        let shell = state
-            .activity
+        match activity
             .probe
             .as_ref()
-            .is_some_and(|probe| matches!(probe.shell_foreground(), Ok(true)));
-        if shell {
-            state.activity.submitted = false;
+            .map(|probe| probe.shell_foreground())
+        {
+            Some(Ok(false)) => activity.submitted.started = true,
+            Some(Ok(true)) if activity.submitted.started => {
+                activity.submitted.answered = activity.submitted.written;
+            }
+            _ => {}
         }
     }
 
@@ -177,7 +212,7 @@ impl TerminalEventPublisher {
             let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
             (
                 state.activity.probe.clone(),
-                state.activity.submitted,
+                state.activity.submitted.pending(),
                 state.stopped,
             )
         };

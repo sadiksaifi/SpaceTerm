@@ -80,7 +80,8 @@ pub struct CloseConfirmation {
 }
 
 impl CloseConfirmation {
-    fn same_targets(&self, other: &Self) -> bool {
+    /// Whether both name the same boot, Panes, Terminal Sessions and removals.
+    pub fn same_targets(&self, other: &Self) -> bool {
         self.boot == other.boot
             && self.panes == other.panes
             && self.removes_tab == other.removes_tab

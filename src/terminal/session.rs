@@ -1682,6 +1682,16 @@ impl TerminalWorker {
     }
 
     fn process_command(&mut self, command: Command) -> bool {
+        // The worker processes each submitted line once, in the order input accepted it.
+        if !matches!(command, Command::Received(..)) && command.submits_line() {
+            let result = self.process_command_once(command);
+            self.events.note_written();
+            return result;
+        }
+        self.process_command_once(command)
+    }
+
+    fn process_command_once(&mut self, command: Command) -> bool {
         match command {
             Command::Received(command, _receipt) => {
                 let result = self.process_command(*command);
