@@ -1707,7 +1707,8 @@ impl TerminalWorker {
         if lines == 0 {
             return;
         }
-        // Whether the program holding the PTY reads keys itself decides who reads each line.
+        // Whether the program holding the PTY after the write, as before it, reads keys itself
+        // decides who reads each line.
         let canonical = self.native_pty.line_mode().ok().map(|mode| mode.canonical);
         for _ in 0..lines {
             self.events
@@ -2517,6 +2518,13 @@ impl TerminalWorker {
     }
 
     fn flush_input(&mut self) -> bool {
+        // Who holds the PTY as a write that may complete a submitted line begins decides, with
+        // who holds it after, who reads that line. A program the line itself starts can take
+        // the foreground before the worker reads it after the write.
+        if self.events.awaits_written_line() {
+            let canonical = self.native_pty.line_mode().ok().map(|mode| mode.canonical);
+            self.events.note_write_start(canonical);
+        }
         let drained = self.input.drain(&mut self.native_pty);
         self.note_lines_written();
         if let Err(error) = drained {

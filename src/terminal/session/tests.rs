@@ -5790,6 +5790,87 @@ fn lines_a_key_reading_program_took_are_answered_by_its_return() {
     worker.finish();
 }
 
+/// A probe whose foreground a program takes the moment the PTY accepts Enter, as `vim` started
+/// by the written line does before the worker reads the foreground after its write. The test
+/// gives the foreground back with `returned`.
+struct StartedByTheWrite {
+    records: ScriptedPtyRecords,
+    returned: AtomicBool,
+}
+impl crate::platform::native_pty::SessionProbe for StartedByTheWrite {
+    fn shell_foreground(&self) -> io::Result<bool> {
+        Ok(self.returned.load(Ordering::Acquire)
+            || !self.records.snapshot().written.contains(&b'\r'))
+    }
+    fn others(&self) -> io::Result<bool> {
+        Ok(false)
+    }
+}
+
+/// Without shell integration, `vim; print waiting; read -k answer` is written at the shell's line
+/// editor with ICANON off. `vim` takes the foreground with ICANON off before the worker reads it
+/// after the write. The line is still the shell's: `vim` returning answers nothing, and the shell
+/// then runs the raw builtin `read -k` in its own foreground, so a close still finds work.
+#[test]
+fn a_program_the_written_line_starts_reads_none_of_that_line() {
+    let records = ScriptedPtyRecords::default();
+    let probe = Arc::new(StartedByTheWrite {
+        records: records.clone(),
+        returned: AtomicBool::new(false),
+    });
+    let mut worker = idle_worker_on(records.clone(), SHELL_FOREGROUND, Some(false));
+    worker.events.set_probe(Some(probe.clone()));
+    reads(&mut worker, b"% ");
+    assert!(
+        !worker.events.running_work(),
+        "an idle shell before any line"
+    );
+
+    worker.events.note_submitted();
+    records.update(|state| state.line_mode = SHELL_FOREGROUND);
+    assert!(worker.process_command(Command::Key(enter_key())));
+    assert!(
+        !crate::platform::native_pty::SessionProbe::shell_foreground(&*probe).unwrap(),
+        "`vim` held the foreground once the PTY accepted Enter"
+    );
+    records.update(|state| state.line_mode = KEY_PROGRAM);
+    reads(&mut worker, b"\r\nVIM");
+    assert!(worker.events.running_work(), "`vim` runs");
+
+    // `vim` gives the foreground back; the shell prints and runs `read -k` with ICANON off.
+    probe.returned.store(true, Ordering::Release);
+    records.update(|state| state.line_mode = SHELL_FOREGROUND);
+    reads(&mut worker, b"waiting\r\n");
+    assert!(
+        worker.events.running_work(),
+        "the return of a program the line started answers none of the line"
+    );
+    worker.finish();
+}
+
+/// A line written while an editor already held the foreground with ICANON off, before and after
+/// the write, is the editor's, so its return answers it.
+#[test]
+fn a_line_written_into_a_running_editor_is_answered_by_its_return() {
+    let records = ScriptedPtyRecords::default();
+    let probe = Arc::new(MovingForeground(AtomicBool::new(false)));
+    let mut worker = idle_worker_on(records.clone(), KEY_PROGRAM, Some(false));
+    worker.events.set_probe(Some(probe.clone()));
+    reads(&mut worker, b"VIM");
+    worker.events.note_submitted();
+    assert!(worker.process_command(Command::Key(enter_key())));
+    reads(&mut worker, b"edit");
+    assert!(worker.events.running_work(), "the editor runs");
+    probe.0.store(true, Ordering::Release);
+    records.update(|state| state.line_mode = SHELL_FOREGROUND);
+    reads(&mut worker, b"% ");
+    assert!(
+        !worker.events.running_work(),
+        "the editor read the line and ended"
+    );
+    worker.finish();
+}
+
 /// Ctrl-C interrupts `sleep` while a typed-ahead line waits in the kernel's line buffer, and the
 /// shell draws its prompt again. That prompt answers the line that started `sleep`, but nothing
 /// says whether the shell will still read the typed-ahead line, so a close still asks.

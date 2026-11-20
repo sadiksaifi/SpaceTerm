@@ -39,6 +39,17 @@ struct Submissions {
     awaiting: std::collections::VecDeque<Line>,
     /// A program other than the shell owned the foreground after the last written line.
     started: bool,
+    /// Who held the PTY just before the worker's latest write while a submitted line waited to
+    /// be written. None before any such write, and where nothing could be read.
+    before_write: Option<Holder>,
+}
+
+/// Who held the PTY at one moment: whether a program other than the owning shell owned its
+/// foreground, and its ICANON mode when it could be read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Holder {
+    pub(crate) program: bool,
+    pub(crate) canonical: Option<bool>,
 }
 
 /// Who reads a written line, by who held the PTY when the PTY accepted it.
@@ -53,6 +64,28 @@ pub(crate) enum Reader {
     /// the line, and then the shell reads and runs it after the program ends, so the program's
     /// return answers nothing.
     LineProgram,
+}
+
+impl Reader {
+    /// Who reads a line, from who held the PTY just before the write that completed it and just
+    /// after. A program reads keys itself only when it held the foreground with ICANON off on
+    /// both sides of that write. A program that took the foreground during the write, as one the
+    /// line itself starts can before the worker reads it, read none of the line, and a program
+    /// that gave the foreground back during it left the line to the shell. A program that held
+    /// the foreground across the write in any other mode is one the kernel collects lines for.
+    /// A side nothing could read leaves the line to the shell, whose own prompt must answer it.
+    pub(crate) fn at_write(before: Option<Holder>, after: Holder) -> Self {
+        match before {
+            Some(before) if before.program && after.program => {
+                if before.canonical == Some(false) && after.canonical == Some(false) {
+                    Self::Program
+                } else {
+                    Self::LineProgram
+                }
+            }
+            _ => Self::Shell,
+        }
+    }
 }
 
 struct Line {
@@ -289,22 +322,42 @@ impl TerminalEventPublisher {
         submitted.accepted = submitted.accepted.saturating_sub(1).max(submitted.written);
     }
 
+    /// Whether an accepted submitted line waits for the PTY to accept it, so the next write may
+    /// complete it.
+    pub(super) fn awaits_written_line(&self) -> bool {
+        let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let submitted = &state.activity.submitted;
+        submitted.accepted > submitted.written
+    }
+
+    /// The worker is about to write while a submitted line waits, and the PTY's ICANON mode is
+    /// `canonical`. Who holds the PTY now is who held it as the write began.
+    pub(super) fn note_write_start(&self, canonical: Option<bool>) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let activity = &mut state.activity;
+        activity.submitted.before_write = Some(Holder {
+            program: Self::program_holds(activity.probe.as_deref()),
+            canonical,
+        });
+    }
+
+    /// Whether a fresh read finds a program other than the owning shell holding the foreground.
+    fn program_holds(probe: Option<&dyn SessionProbe>) -> bool {
+        probe.is_some_and(|probe| matches!(probe.shell_foreground(), Ok(false)))
+    }
+
     /// The PTY accepted the next submitted line whole, in the order it was accepted, while the
-    /// owning shell was as `progress` says. `canonical` is the PTY's ICANON mode then, which says
-    /// whether a program holding the foreground reads keys itself. A mode that can't be read
-    /// leaves who reads the line open.
+    /// owning shell was as `progress` says. `canonical` is the PTY's ICANON mode now. Who reads
+    /// the line is who held the PTY on both sides of the write that completed it, by
+    /// [`Reader::at_write`].
     pub(super) fn note_written(&self, progress: PromptProgress, canonical: Option<bool>) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let activity = &mut state.activity;
-        let program = activity
-            .probe
-            .as_ref()
-            .is_some_and(|probe| matches!(probe.shell_foreground(), Ok(false)));
-        let reader = match (program, canonical) {
-            (false, _) => Reader::Shell,
-            (true, Some(false)) => Reader::Program,
-            (true, _) => Reader::LineProgram,
+        let after = Holder {
+            program: Self::program_holds(activity.probe.as_deref()),
+            canonical,
         };
+        let reader = Reader::at_write(activity.submitted.before_write, after);
         activity.submitted.written(progress, reader);
     }
 
@@ -444,6 +497,36 @@ mod tests {
         assert!(work_going_on(HOUR, true, true, || Err(io::Error::other(
             "unreadable"
         ))));
+    }
+
+    #[test]
+    fn only_a_raw_reader_on_both_sides_of_the_write_reads_the_line_itself() {
+        let shell = Holder {
+            program: false,
+            canonical: Some(false),
+        };
+        let raw = Holder {
+            program: true,
+            canonical: Some(false),
+        };
+        let lines = Holder {
+            program: true,
+            canonical: Some(true),
+        };
+        let unread = Holder {
+            program: true,
+            canonical: None,
+        };
+        assert_eq!(Reader::at_write(Some(raw), raw), Reader::Program);
+        // A program the line itself started, which took the foreground during the write.
+        assert_eq!(Reader::at_write(Some(shell), raw), Reader::Shell);
+        // A program that gave the foreground back during the write.
+        assert_eq!(Reader::at_write(Some(raw), shell), Reader::Shell);
+        assert_eq!(Reader::at_write(None, raw), Reader::Shell);
+        assert_eq!(Reader::at_write(Some(lines), lines), Reader::LineProgram);
+        assert_eq!(Reader::at_write(Some(raw), lines), Reader::LineProgram);
+        assert_eq!(Reader::at_write(Some(raw), unread), Reader::LineProgram);
+        assert_eq!(Reader::at_write(Some(unread), raw), Reader::LineProgram);
     }
 
     #[test]
