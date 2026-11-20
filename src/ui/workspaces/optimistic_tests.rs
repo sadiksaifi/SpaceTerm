@@ -328,7 +328,10 @@ fn a_queued_direct_close_keeps_its_original_control_fence_and_requires_review_af
             .unwrap()
             .direct_close(|_, _| true)
             .unwrap();
-        assert_eq!(model.close(approval, local), WorkspaceSubmission::Submitted);
+        assert_eq!(
+            model.close(approval, local, CloseConsent::Direct),
+            WorkspaceSubmission::Submitted
+        );
         assert_eq!(
             core.dispatched().len(),
             2,
@@ -370,7 +373,10 @@ fn a_queued_direct_close_keeps_its_original_control_fence_and_requires_review_af
             "stale consent never submits a replacement"
         );
         let explicit = model.close_approval(target).unwrap();
-        assert_eq!(model.close(explicit, local), WorkspaceSubmission::Submitted);
+        assert_eq!(
+            model.close(explicit, local, CloseConsent::Confirmed),
+            WorkspaceSubmission::Submitted
+        );
         assert!(
             matches!(core.dispatched().last(), Some(Mutation::Close { confirmation, .. })
             if confirmation.own_controls.is_none())
@@ -425,7 +431,8 @@ fn combined_pending_tab_closes_retain_the_workspace_until_the_final_close_is_rev
                 crate::close_confirmation::CloseTarget::Tab {
                     workspace_id: first_workspace_id(),
                     tab_id: TabId::new(index as u64 + 1),
-                }
+                },
+                CloseConsent::Direct,
             ),
             WorkspaceSubmission::Submitted
         );
@@ -1120,7 +1127,8 @@ fn close_own_tab(harness: &WindowHarness, tab_id: TabId, cx: &mut VisualTestCont
             crate::close_confirmation::CloseTarget::Tab {
                 workspace_id: first_workspace_id(),
                 tab_id,
-            }
+            },
+            CloseConsent::Confirmed,
         ),
         WorkspaceSubmission::Submitted
     );
@@ -1628,7 +1636,8 @@ fn optimistic_close_hides_before_a_doomed_pane_status_and_restores_the_same_view
                 workspace_id: first_workspace_id(),
                 tab_id: closed_view.0,
                 pane_id: closed_view.1,
-            }
+            },
+            CloseConsent::Confirmed,
         ),
         WorkspaceSubmission::Submitted
     );
@@ -1847,7 +1856,8 @@ fn optimistic_workspace_close_keeps_its_host_through_a_lost_ack() {
     assert_eq!(
         model.close(
             approval,
-            crate::close_confirmation::CloseTarget::KillWorkspace(first_workspace_id())
+            crate::close_confirmation::CloseTarget::KillWorkspace(first_workspace_id()),
+            CloseConsent::Confirmed,
         ),
         WorkspaceSubmission::Submitted
     );
@@ -1880,6 +1890,7 @@ fn a_committed_original_keeps_resolving_without_a_workspace_window(cx: &mut Test
     model.close(
         approval,
         crate::close_confirmation::CloseTarget::KillWorkspace(first_workspace_id()),
+        CloseConsent::Confirmed,
     );
     core.finish(false, true);
     model.poll();
@@ -1931,6 +1942,7 @@ fn successive_refused_tab_closes_restore_the_original_order(cx: &mut TestAppCont
                     workspace_id: first_workspace_id(),
                     tab_id: original[index],
                 },
+                CloseConsent::Confirmed,
             ),
             WorkspaceSubmission::Submitted
         );
@@ -1978,7 +1990,8 @@ fn optimistic_tab_close_ack_keeps_later_find_focus(cx: &mut TestAppContext) {
             crate::close_confirmation::CloseTarget::Tab {
                 workspace_id: first_workspace_id(),
                 tab_id: closed.0,
-            }
+            },
+            CloseConsent::Confirmed,
         ),
         WorkspaceSubmission::Submitted
     );

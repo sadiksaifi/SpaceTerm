@@ -17,7 +17,8 @@ mod removal;
 #[derive(Default)]
 pub(super) struct SidebarWorktrees {
     form: Option<Entity<WorktreeForm>>,
-    close_fallbacks: std::collections::HashMap<WorkspaceId, spaceterm_core::hierarchy::Mutation>,
+    /// Each Workspace's fallback Tab creation, and the close request it resumes.
+    close_fallbacks: std::collections::HashMap<WorkspaceId, fallback::PendingFallback>,
     created: Option<(WorkspaceId, PathBuf, u64)>,
     /// The removal being checked, confirmed, or run. One runs at a time.
     removal: Option<u64>,

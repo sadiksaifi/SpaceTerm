@@ -16,6 +16,7 @@ use spaceterm_core::hierarchy::{
 };
 
 use super::core_workspaces::testing::{ScriptedEdits, ScriptedPanes};
+use super::core_workspaces::CloseConsent;
 use super::core_workspaces::{
     WorkspaceDraft, WorkspaceEditSource, WorkspaceEditability, WorkspaceEdits, WorkspaceFacts,
     WorkspaceField, WorkspacePaneOpener, WorkspacePaneSessions, WorkspacePlan, WorkspaceRefusal,
@@ -2320,7 +2321,7 @@ mod close {
             .expect("the published Tab can be reviewed");
         assert_eq!(binding.close_state(&approval), WorkspaceCloseState::Current);
         assert_eq!(
-            binding.close(approval, local_tab()),
+            binding.close(approval, local_tab(), CloseConsent::Confirmed),
             WorkspaceSubmission::Submitted
         );
 
@@ -2389,7 +2390,7 @@ mod close {
         };
         let (mut initial, initial_edits) = self::binding(split_beside_second_tab());
         assert_eq!(
-            initial.close(approval.clone(), local_pane),
+            initial.close(approval.clone(), local_pane, CloseConsent::Confirmed),
             WorkspaceSubmission::Submitted
         );
         assert!(matches!(
@@ -2428,7 +2429,7 @@ mod close {
         assert_eq!(fresh.detail(), None, "the Workspace keeps its second Tab");
         assert!(edits.submitted().is_empty());
         assert_eq!(
-            binding.close(fresh, local_pane),
+            binding.close(fresh, local_pane, CloseConsent::Confirmed),
             WorkspaceSubmission::Submitted
         );
         assert!(matches!(
@@ -2499,7 +2500,7 @@ mod close {
         let approval = asked
             .close_approval(ROOT_TAB_TARGET)
             .expect("the published Tab can be reviewed");
-        asked.close(approval, local_tab());
+        asked.close(approval, local_tab(), CloseConsent::Confirmed);
         edits.answer(Outcome::StaleConfirmation);
         asked.poll();
 

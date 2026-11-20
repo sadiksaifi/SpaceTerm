@@ -20,6 +20,7 @@
 //! Requests from its own GitHub CLI, and never reads git for a Workspace itself.
 //!
 pub(crate) use core_workspaces::ArrangementUnavailable;
+pub(crate) use core_workspaces::CloseConsent;
 pub(crate) use core_workspaces::{
     DirectMachine, DrawnAnswer, OutcomeNotice, OutcomeOwner, OutcomeTicket, WorkspaceAcceptance,
     WorkspaceAttachmentFailure, WorkspaceCloseApproval, WorkspaceCloseIntent, WorkspaceCloseReview,
@@ -306,6 +307,9 @@ mod core_workspaces {
         forgotten: Option<u64>,
         /// The reading's outcomes handed to alerts the person has not answered yet.
         handed: Rc<std::cell::RefCell<BTreeSet<u64>>>,
+        /// Set once another alert presents these outcomes in this one's place, so this alert's
+        /// close no longer records or releases them.
+        handed_over: Rc<std::cell::Cell<bool>>,
     }
 
     impl OutcomeNotice {
@@ -315,7 +319,29 @@ mod core_workspaces {
         ) -> impl Fn(&spaceterm_ui::ModalLifecycleEvent, &mut App) + 'static + use<> {
             let answered = self.clone();
             let unanswered = self.clone();
-            when_answered(move || answered.acknowledge(), move || unanswered.release())
+            when_answered(
+                move || {
+                    if !answered.handed_over.get() {
+                        answered.acknowledge();
+                    }
+                },
+                move || {
+                    if !unanswered.handed_over.get() {
+                        unanswered.release();
+                    }
+                },
+            )
+        }
+
+        /// The same outcomes for the alert that replaces this one's. The person's answer to that
+        /// alert records them as seen, and this alert's close, however it closes, does nothing.
+        /// Call it before this alert closes.
+        pub(crate) fn hand_over(&self) -> Self {
+            self.handed_over.set(true);
+            Self {
+                handed_over: Rc::default(),
+                ..self.clone()
+            }
         }
 
         /// Records the outcomes as seen. Call it only for the person's answer.
@@ -1890,8 +1916,9 @@ mod core_workspaces {
         repositories: super::CoreRepositories,
         /// The close confirmation a person is reviewing now.
         review: Option<WorkspaceCloseReview>,
-        /// The close this process submitted, and the local target a fresh review would reopen.
-        submitted_close: Option<(MachineCloseTarget, CloseTarget)>,
+        /// The close this process submitted, the local target a fresh review would reopen, and
+        /// how the person approved it.
+        submitted_close: Option<SubmittedClose>,
         /// Closes the server refused because what they would end changed after the
         /// confirmation, each with its outcome's sequence.
         stale_closes: VecDeque<(MachineCloseTarget, u64)>,
@@ -2625,12 +2652,45 @@ mod core_workspaces {
             }
         }
 
+        /// The title of the notice that replaces a confirmation of `approval` because what it
+        /// ends changed. A Terminal Session that ended in a Pane it names, as a shell's own exit
+        /// ends one, is no other client's change, so that notice names no other client. Any other
+        /// change, such as a Pane that joined or a new Terminal Session, keeps the title that
+        /// names another client.
+        pub(crate) fn changed_close_title(
+            &self,
+            approval: &WorkspaceCloseApproval,
+        ) -> &'static str {
+            let approved = &approval.confirmation;
+            let ended_only = self
+                .latest
+                .as_ref()
+                .and_then(|inventory| inventory.close_confirmation(approval.target))
+                .is_some_and(|current| {
+                    current.boot == approved.boot
+                        && current.removes_tab == approved.removes_tab
+                        && current.removes_workspace == approved.removes_workspace
+                        && current.panes.len() == approved.panes.len()
+                        && current.panes.iter().zip(&approved.panes).all(|(now, then)| {
+                            now.id == then.id
+                                && (now.session.is_none() || now.session == then.session)
+                        })
+                });
+            if ended_only {
+                approval.scope_changed_title()
+            } else {
+                approval.changed_title()
+            }
+        }
+
         /// Asks the server to end exactly what a person approved. `local` is the target a fresh
-        /// review reopens if the server finds the approval stale.
+        /// review reopens if the server finds the approval stale, and `consent` how the person
+        /// approved it.
         pub(crate) fn close(
             &mut self,
             approval: WorkspaceCloseApproval,
             local: CloseTarget,
+            consent: CloseConsent,
         ) -> WorkspaceSubmission {
             let target = approval.target;
             let submission = self.ask(Mutation::Close {
@@ -2638,7 +2698,11 @@ mod core_workspaces {
                 confirmation: approval.confirmation,
             });
             if submission == WorkspaceSubmission::Submitted {
-                self.submitted_close = Some((target, local));
+                self.submitted_close = Some(SubmittedClose {
+                    core: target,
+                    local,
+                    consent,
+                });
             }
             submission
         }
@@ -2670,6 +2734,7 @@ mod core_workspaces {
                 sequences: sequences.into(),
                 forgotten: None,
                 handed: Rc::clone(&self.handed),
+                handed_over: Rc::default(),
             }
         }
 
@@ -2689,8 +2754,8 @@ mod core_workspaces {
             let (target, sequence) = *self.stale_closes.front()?;
             let local = self
                 .submitted_close
-                .filter(|(submitted, _)| *submitted == target)
-                .map(|(_, local)| local);
+                .filter(|submitted| submitted.core == target)
+                .map(|submitted| submitted.local);
             Some((
                 target,
                 local,
@@ -2707,8 +2772,8 @@ mod core_workspaces {
             let local = self
                 .submitted_close
                 .take()
-                .filter(|(submitted, _)| *submitted == target)
-                .map(|(_, local)| local);
+                .filter(|submitted| submitted.core == target)
+                .map(|submitted| submitted.local);
             Some((target, local))
         }
 
@@ -3135,6 +3200,9 @@ mod core_workspaces {
                         // A restart can fence the close before its announcement reaches us.
                         // Retry only after a new boot, with exactly the same Panes and no new
                         // Terminal Session. The normal close path captures fresh confirmation.
+                        // The person's confirmation named Sessions of the old boot, so a close
+                        // they confirmed asks them again; a direct close of idle own work stays
+                        // direct while it still is.
                         let unchanged = inventory
                             .and_then(|inventory| inventory.close_confirmation(*target))
                             .is_some_and(|current| {
@@ -3154,17 +3222,16 @@ mod core_workspaces {
                         let queued = unchanged
                             && self
                                 .submitted_close
-                                .as_ref()
-                                .filter(|(submitted, _)| submitted == target)
-                                .is_some_and(|(_, local)| {
+                                .filter(|submitted| submitted.core == *target)
+                                .is_some_and(|submitted| {
                                     self.edits
                                         .pending
                                         .borrow_mut()
                                         .queue_close(WorkspaceCloseIntent {
                                             core: *target,
-                                            local: *local,
+                                            local: submitted.local,
                                             keyboard: None,
-                                            review: false,
+                                            review: submitted.consent == CloseConsent::Confirmed,
                                         })
                                         .is_ok()
                                 });
@@ -3688,6 +3755,24 @@ mod core_workspaces {
         Missing,
     }
 
+    /// How the person approved a close this client submitted.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum CloseConsent {
+        /// This client closed its own idle work without asking.
+        Direct,
+        /// The person confirmed exactly what the close ends.
+        Confirmed,
+    }
+
+    /// A close this process submitted: the server's target, the local target a fresh review
+    /// reopens, and how the person approved it.
+    #[derive(Clone, Copy, Debug)]
+    struct SubmittedClose {
+        core: MachineCloseTarget,
+        local: CloseTarget,
+        consent: CloseConsent,
+    }
+
     /// An unapproved close waiting for the exact provisional creation it names.
     pub(crate) struct WorkspaceCloseIntent {
         pub(crate) core: MachineCloseTarget,
@@ -3705,6 +3790,9 @@ mod core_workspaces {
         pub(crate) target: CloseTarget,
         pub(crate) approval: WorkspaceCloseApproval,
         pub(crate) presentation: Option<spaceterm_ui::ModalPresentationHandle>,
+        /// The refused close's outcome this confirmation presents, which the person's answer
+        /// records as seen.
+        pub(crate) notice: Option<OutcomeNotice>,
     }
 
     /// Why this window removes what the server no longer has. Only this client's own accepted
@@ -4803,7 +4891,12 @@ mod restart_tests {
     #[test]
     fn a_close_fenced_before_the_restart_announcement_waits_for_fresh_confirmation() {
         use super::tests::{inventory, pane, tab};
-        for new_session in [false, true] {
+        for (new_session, consent) in [
+            (false, CloseConsent::Direct),
+            (false, CloseConsent::Confirmed),
+            (true, CloseConsent::Direct),
+            (true, CloseConsent::Confirmed),
+        ] {
             let core = MachineConnection::for_identity("spaceterm-development").unwrap();
             let sessions = WorkspacePaneSessions::with_opener(
                 Rc::new(Panes(core)),
@@ -4829,7 +4922,7 @@ mod restart_tests {
             };
             let approval = binding.close_approval(target).unwrap();
             assert_eq!(
-                binding.close(approval, local),
+                binding.close(approval, local, consent),
                 WorkspaceSubmission::Submitted
             );
             let mut reconnected = initial;
@@ -4840,7 +4933,16 @@ mod restart_tests {
             edits.set_inventory(reconnected);
             edits.answer(spaceterm_core::hierarchy::Outcome::StaleConfirmation);
             binding.poll();
-            assert_eq!(binding.take_close_intent().is_some(), !new_session);
+            let retry = binding.take_close_intent();
+            assert_eq!(retry.is_some(), !new_session);
+            if let Some(retry) = retry {
+                assert_eq!((retry.core, retry.local), (target, local));
+                assert_eq!(
+                    retry.review,
+                    consent == CloseConsent::Confirmed,
+                    "the new boot invalidates the person's confirmation, and only that"
+                );
+            }
             assert_eq!(
                 binding.next_stale_close().is_some(),
                 new_session,

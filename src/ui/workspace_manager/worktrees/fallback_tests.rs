@@ -308,3 +308,131 @@ fn worktree_fallback_never_closes_a_reassigned_original_anchor(cx: &mut TestAppC
             .is_none()
     );
 }
+
+/// `inventory` with every Pane's Terminal Session under this client's control, so closing them
+/// needs no confirmation while they are idle.
+fn controlled(mut inventory: Inventory) -> Inventory {
+    let close = inventory.close.as_mut().expect("live close facts");
+    close.controls = close
+        .sessions
+        .iter()
+        .map(|pane| spaceterm_core::hierarchy::ConfirmedControl {
+            pane: pane.id,
+            session: pane.session,
+            owner: [1; 32],
+            epoch: 1,
+        })
+        .collect();
+    inventory
+}
+
+/// Asks to close the feature Worktree's Tabs as the Review of a changed close does.
+fn request_review(harness: &Harness, cx: &mut VisualTestContext) {
+    let (_, feature) = worktree_ids(harness, cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.request_core_close_as(
+                CloseTarget::Worktree {
+                    workspace_id: harness.binding,
+                    worktree_id: feature,
+                },
+                crate::ui::workspace_manager::CloseRequest::review(false),
+                window,
+                cx,
+            );
+        });
+    });
+    redraw(cx);
+}
+
+/// How the Worktree close reaches the fallback Tab creation.
+#[derive(Clone, Copy, Debug)]
+enum FallbackRequests {
+    /// An ordinary close of idle Tabs this client controls.
+    Plain,
+    /// A Review starts the creation.
+    Review,
+    /// An ordinary close starts the creation, and a Review joins it.
+    PlainThenReview,
+}
+
+/// The feature Worktree's idle Tabs, which this client controls, are its Workspace's only Tabs,
+/// so closing them first creates a Tab outside the Worktree. A plain close then ends them
+/// directly. A Review, whether it starts that creation or joins one already in flight, still
+/// opens a fresh confirmation of what the close ends once the Tab exists, and nothing closes
+/// before its Confirm.
+fn close_through_the_fallback_tab(requests: FallbackRequests, cx: &mut TestAppContext) {
+    let initial = controlled(only_feature());
+    let (harness, _, _, cx) = paired_harness(cx, initial.clone());
+    match requests {
+        FallbackRequests::Plain => request(&harness, cx),
+        FallbackRequests::Review => request_review(&harness, cx),
+        FallbackRequests::PlainThenReview => {
+            request(&harness, cx);
+            request_review(&harness, cx);
+        }
+    }
+    assert_eq!(
+        harness.edits.submitted(),
+        [expected_open(MAIN_ROOT)],
+        "one fallback creation"
+    );
+    let accepted = controlled(accepted_inventory(initial));
+    harness.edits.answer(Outcome::Accepted { target: [80; 32] });
+    sync(&harness, accepted.clone(), cx);
+    let target = MachineCloseTarget::Worktree {
+        workspace: WORKSPACE,
+        tab: FEATURE_TAB,
+    };
+    let confirmation = accepted.close_confirmation(target).unwrap();
+    if matches!(requests, FallbackRequests::Plain) {
+        let submitted = harness.edits.submitted();
+        assert!(
+            matches!(&submitted[..], [_, Mutation::Close { target: closed, confirmation: direct }]
+                if *closed == target && direct.own_controls.is_some()
+                    && direct.same_targets(&confirmation)),
+            "an ordinary close of idle controlled Tabs needs no confirmation: {submitted:?}"
+        );
+        return;
+    }
+    assert!(
+        cx.debug_bounds("modal-action-close-confirm").is_some(),
+        "the Review opens a fresh confirmation once the Tab exists"
+    );
+    assert_eq!(
+        harness.edits.submitted(),
+        [expected_open(MAIN_ROOT)],
+        "nothing closes before the Confirm"
+    );
+    click("modal-action-close-confirm", cx);
+    assert_eq!(
+        harness.edits.submitted(),
+        [
+            expected_open(MAIN_ROOT),
+            Mutation::Close {
+                target,
+                confirmation,
+            }
+        ],
+        "the Confirm ends exactly what the fresh confirmation showed"
+    );
+}
+
+#[gpui::test]
+fn a_plain_close_through_the_fallback_tab_ends_idle_controlled_tabs_directly(
+    cx: &mut TestAppContext,
+) {
+    close_through_the_fallback_tab(FallbackRequests::Plain, cx);
+}
+
+#[gpui::test]
+fn a_review_that_creates_the_fallback_tab_waits_for_fresh_confirmation(cx: &mut TestAppContext) {
+    close_through_the_fallback_tab(FallbackRequests::Review, cx);
+}
+
+#[gpui::test]
+fn a_review_that_joins_the_fallback_creation_waits_for_fresh_confirmation(
+    cx: &mut TestAppContext,
+) {
+    close_through_the_fallback_tab(FallbackRequests::PlainThenReview, cx);
+}
