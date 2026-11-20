@@ -13,8 +13,8 @@ use spaceterm_core::service::lane::{LaneAction, LaneReply, LaneRequest, WAIT_FAC
 use spaceterm_core::service::{Service, ServiceStatus};
 
 use super::{
-    Changed, Known, LaneChange, Machine, MachineLane, Observed, Reach, Sources, Watching,
-    failure_of_code,
+    Changed, ExecuteReport, Known, LaneChange, Machine, MachineLane, Observed, Reach, Sources,
+    Watching, failure_of_code,
 };
 use crate::direct_connections::{
     DirectConnections, DirectRouteId, DirectRouteStatus, RefusalReason,
@@ -647,16 +647,7 @@ impl MachineLane for CoreLane {
                 if let Ok(pending) = self.core.service_operations() {
                     let _ = pending.remove(operation);
                 }
-                match admin::receipt_verdict(&receipt) {
-                    admin::Verdict::Done => Ok(()),
-                    admin::Verdict::Failed(Some(code)) => Err(failure_of_code(&code)),
-                    admin::Verdict::Failed(None) | admin::Verdict::NotPerformed => {
-                        Err(ActionFailure::Failed)
-                    }
-                    admin::Verdict::Uncertain | admin::Verdict::Shutdown => {
-                        Err(ActionFailure::Unconfirmed)
-                    }
-                }
+                receipt_outcome(&receipt)
             }
             _ => Err(ActionFailure::Unconfirmed),
         }
@@ -665,9 +656,13 @@ impl MachineLane for CoreLane {
     fn execute(
         &self,
         preview: admin::Preview,
-        operation: &mut Option<String>,
+        report: &mut ExecuteReport,
         waiting: &(dyn Fn() + Sync),
     ) -> Result<(), ActionFailure> {
+        let wait = admin::wait(&preview.action);
+        // One absolute deadline covers the wait for another operation, the action's settlement
+        // and, for a Stop, confirming its native cleanup afterwards.
+        let deadline = Instant::now() + admin::BUSY_WAIT + wait;
         let lane = self
             .core
             .service_lane()
@@ -676,8 +671,12 @@ impl MachineLane for CoreLane {
             .core
             .service_operations()
             .map_err(|error| core_failure(&error))?;
-        let (session, _) = admin::open(&lane, &pending).map_err(lane_failure)?;
-        let wait = admin::wait(&preview.action);
+        let (session, settled) = admin::open(&lane, &pending).map_err(lane_failure)?;
+        // Opening acknowledged these receipts, so their outcomes go to the surfaces that ask.
+        report.settled = settled
+            .iter()
+            .map(|receipt| (receipt.operation.clone(), receipt_outcome(receipt)))
+            .collect();
         // The flow finishes on its own thread whatever the desktop does meanwhile, including
         // closing the window that asked. It waits for another operation that holds SpaceTerm
         // Core under the same approval, which SpaceTerm Core refuses as changed when what it
@@ -687,7 +686,7 @@ impl MachineLane for CoreLane {
             session,
             preview.action,
             preview.token,
-            Instant::now() + admin::BUSY_WAIT + wait,
+            deadline,
             wait,
             &pending,
             &mut admin::Unshared,
@@ -696,7 +695,7 @@ impl MachineLane for CoreLane {
             &mut || waiting(),
         )
         .map_err(lane_failure)?;
-        *operation = Some(match &outcome {
+        report.operation = Some(match &outcome {
             lane_client::Outcome::Shutdown { operation, .. }
             | lane_client::Outcome::Unconfirmed { operation, .. } => operation.clone(),
             lane_client::Outcome::Settled { receipt, .. } => receipt.operation.clone(),
@@ -704,7 +703,7 @@ impl MachineLane for CoreLane {
         match (admin::verdict(&outcome), outcome) {
             (admin::Verdict::Done, _) => Ok(()),
             (admin::Verdict::Shutdown, lane_client::Outcome::Shutdown { operation, .. }) => {
-                self.confirm_stop(&operation, Instant::now() + wait)
+                self.confirm_stop(&operation, deadline)
             }
             (admin::Verdict::Failed(Some(code)), _) => Err(failure_of_code(&code)),
             (admin::Verdict::Failed(None) | admin::Verdict::NotPerformed, _) => {
@@ -714,6 +713,16 @@ impl MachineLane for CoreLane {
                 Err(ActionFailure::Unconfirmed)
             }
         }
+    }
+}
+
+/// What a settled receipt says about its operation.
+fn receipt_outcome(receipt: &spaceterm_core::service::lane::LaneReceipt) -> Result<(), ActionFailure> {
+    match admin::receipt_verdict(receipt) {
+        admin::Verdict::Done => Ok(()),
+        admin::Verdict::Failed(Some(code)) => Err(failure_of_code(&code)),
+        admin::Verdict::Failed(None) | admin::Verdict::NotPerformed => Err(ActionFailure::Failed),
+        admin::Verdict::Uncertain | admin::Verdict::Shutdown => Err(ActionFailure::Unconfirmed),
     }
 }
 
@@ -798,7 +807,7 @@ mod tests {
         fn execute(
             &self,
             _: admin::Preview,
-            _: &mut Option<String>,
+            _: &mut ExecuteReport,
             _: &(dyn Fn() + Sync),
         ) -> Result<(), ActionFailure> {
             Ok(())

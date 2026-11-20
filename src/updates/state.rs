@@ -319,6 +319,8 @@ pub(crate) enum MachineStage {
     NotConfirmed {
         version: Version,
         here: bool,
+        /// The restart's own operation, which Check Status reads.
+        operation: Option<crate::updates::machines::ServiceOperation>,
     },
     CantCheck,
     /// The Core runs below the Update Floor of this desktop's embedded build, so it must first
@@ -980,11 +982,16 @@ fn machine_stage(
     match &update.link {
         MachineLink::Offline { .. } => return (MachineStage::Offline, None),
         MachineLink::Stopped => return (MachineStage::Stopped, None),
-        MachineLink::Unconfirmed { expected, .. } => {
+        MachineLink::Unconfirmed {
+            expected,
+            operation,
+            ..
+        } => {
             return (
                 MachineStage::NotConfirmed {
                     version: expected.clone(),
                     here: here(Asked::Restart),
+                    operation: operation.clone(),
                 },
                 None,
             );

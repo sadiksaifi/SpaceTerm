@@ -242,6 +242,7 @@ impl PreviewMachines {
                     machine,
                     action,
                     outcome,
+                    operation: None,
                 });
             }
         };
@@ -265,6 +266,7 @@ impl PreviewMachines {
                 machine,
                 action,
                 outcome,
+                operation: None,
             });
         }
     }
@@ -415,7 +417,7 @@ fn plan(
         MachineAction::CheckAgain | MachineAction::ConnectAndCheck => check_again(),
         MachineAction::Stop if !update.local => return Err(ActionFailure::Failed),
         MachineAction::Stop => stop(),
-        MachineAction::Start | MachineAction::DismissFailure(_) | MachineAction::CheckStatus(_) => {
+        MachineAction::Start | MachineAction::DismissFailure(_) | MachineAction::CheckStatus(..) => {
             Vec::new()
         }
     })
@@ -631,6 +633,7 @@ fn machines(scenario: Scenario, now: u64) -> Vec<MachineUpdate> {
         update.link = MachineLink::Unconfirmed {
             expected: version(NEWEST),
             since: now - 120,
+            operation: Some(super::ServiceOperation::new("preview-restart")),
         };
         update.capabilities = disconnected();
     };

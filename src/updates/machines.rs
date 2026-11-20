@@ -120,7 +120,13 @@ pub(crate) enum MachineLink {
     Offline { since: u64 },
     /// A restart began, and the Core did not come back on `expected` before the deadline
     /// ("Can't confirm").
-    Unconfirmed { expected: Version, since: u64 },
+    Unconfirmed {
+        expected: Version,
+        since: u64,
+        /// The restart's own operation, which Check Status reads, once it may have reached the
+        /// Core.
+        operation: Option<ServiceOperation>,
+    },
     /// The Core's service lane admits this desktop but answers `Facts` with `unsupported`: it
     /// predates update facts, so SpaceTerm can't check its updates ("Can't check").
     Unreported,
@@ -141,8 +147,23 @@ pub(crate) enum MachineAction {
     Start,
     Stop,
     /// Reads what became of the Stop or Restart this desktop sent whose outcome nothing
-    /// confirmed, from that operation's own receipt. It never runs the action again.
-    CheckStatus(Checked),
+    /// confirmed, from that exact operation's own receipt. It never runs the action again.
+    CheckStatus(Checked, ServiceOperation),
+}
+
+/// One Stop or Restart a Core may have admitted for this desktop, by its operation ID.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ServiceOperation(std::sync::Arc<str>);
+
+impl ServiceOperation {
+    pub(crate) fn new(id: &str) -> Self {
+        Self(id.into())
+    }
+
+    /// The operation ID the Core's ledger names it by.
+    pub(crate) fn id(&self) -> &str {
+        &self.0
+    }
 }
 
 /// The action a [`MachineAction::CheckStatus`] reads the outcome of.
@@ -197,6 +218,9 @@ pub(crate) enum MachineUpdatesEvent {
         machine: MachineId,
         action: MachineAction,
         outcome: Result<(), ActionFailure>,
+        /// The Stop or Restart whose outcome nothing confirmed yet, which Check Status reads.
+        /// Set only with `Unconfirmed`, once the operation may have reached the Core.
+        operation: Option<ServiceOperation>,
     },
     /// The approved `action` waits for another SpaceTerm Core operation on `machine` to settle
     /// before it runs, until it finishes.

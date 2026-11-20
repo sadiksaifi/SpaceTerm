@@ -863,6 +863,7 @@ fn notice(failure: ActionFailure, refused_at_once: bool) -> MachineUpdatesNotice
         action: MachineAction::Restart,
         surface: Surface::Window,
         outcome: Err(failure),
+        operation: None,
         refused_at_once,
     }
 }
@@ -944,6 +945,7 @@ fn a_restart_that_ran_opens_no_alert_and_a_refused_preview_does(cx: &mut gpui::T
         machine: PENGUIN,
         action: MachineAction::Restart,
         outcome: Err(ActionFailure::Failed),
+        operation: None,
     });
     visual.run_until_parked();
     assert!(
@@ -1436,6 +1438,7 @@ fn a_failed_check_row_beside_a_waiting_update_opens_its_details(cx: &mut gpui::T
         machine: PENGUIN,
         action: MachineAction::CheckAgain,
         outcome: Err(ActionFailure::Busy),
+        operation: None,
     });
     visual.run_until_parked();
     click("update-pill-menu", visual);

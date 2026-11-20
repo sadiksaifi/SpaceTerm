@@ -225,7 +225,7 @@ impl StatusMenu {
     /// waiting on it, as the same change made in Settings does.
     fn succeeded(&self, local: bool, action: &MachineAction, cx: &mut App) {
         let action = match action {
-            MachineAction::CheckStatus(checked) => &checked.action(),
+            MachineAction::CheckStatus(checked, _) => &checked.action(),
             action => action,
         };
         let running = match action {

@@ -44,6 +44,7 @@ use crate::updates::push::{EmbeddedCore, EmbeddedCores};
 use super::{
     ActionFailure, Checked, MachineAction, MachineId, MachineLink, MachinePreview, MachineUpdate,
     MachineUpdatesAdapter, MachineUpdatesError, MachineUpdatesEvent, PreviewAnswer,
+    ServiceOperation,
 };
 
 /// How long a restart may take before the Machine reads "Can't confirm". It matches how long the
@@ -100,13 +101,14 @@ pub(crate) trait MachineLane: Send + Sync {
         change: LaneChange,
         waiting: &(dyn Fn() + Sync),
     ) -> Result<admin::Preview, ActionFailure>;
-    /// `Execute` of exactly `preview`, followed until it settles. `operation` receives the
+    /// `Execute` of exactly `preview`, followed until it settles. `report` receives the
     /// operation ID once the request may have reached the Core, so its outcome can be read
-    /// later when nothing confirms it now.
+    /// later when nothing confirms it now, and the outcome of each earlier operation of this
+    /// desktop that settled and was acknowledged on the way.
     fn execute(
         &self,
         preview: admin::Preview,
-        operation: &mut Option<String>,
+        report: &mut ExecuteReport,
         waiting: &(dyn Fn() + Sync),
     ) -> Result<(), ActionFailure>;
     /// What the receipt of `operation`, which this desktop executed, says now. `Unconfirmed`
@@ -114,6 +116,16 @@ pub(crate) trait MachineLane: Send + Sync {
     fn resolve(&self, _operation: &str) -> Result<(), ActionFailure> {
         Err(ActionFailure::Unconfirmed)
     }
+}
+
+/// What one `Execute` learned beside its own outcome.
+#[derive(Debug, Default)]
+pub(crate) struct ExecuteReport {
+    /// The operation ID, once the request may have reached the Core.
+    pub(crate) operation: Option<String>,
+    /// Earlier operations of this desktop that settled and were acknowledged before this
+    /// `Execute`, each with what its receipt said. Their receipts are gone from the Core.
+    pub(crate) settled: Vec<(String, Result<(), ActionFailure>)>,
 }
 
 /// How a Machine can be reached now.
@@ -222,19 +234,22 @@ impl LiveMachines {
         shared: &Arc<Shared>,
         machine: MachineId,
         action: MachineAction,
-        work: impl FnOnce(&Shared) -> Result<(), ActionFailure> + Send + 'static,
+        work: impl FnOnce(&Shared) -> (Result<(), ActionFailure>, Option<ServiceOperation>)
+        + Send
+        + 'static,
     ) {
         let thread_shared = Arc::clone(shared);
         let finished = action.clone();
         let spawned = std::thread::Builder::new()
             .name("spaceterm-machine-action".into())
             .spawn(move || {
-                let outcome = work(&thread_shared);
+                let (outcome, operation) = work(&thread_shared);
                 thread_shared.poke(machine);
                 thread_shared.emit(MachineUpdatesEvent::Finished {
                     machine,
                     action: finished,
                     outcome,
+                    operation: operation.filter(|_| outcome == Err(ActionFailure::Unconfirmed)),
                 });
             });
         if spawned.is_err() {
@@ -242,6 +257,7 @@ impl LiveMachines {
                 machine,
                 action,
                 outcome: Err(ActionFailure::Failed),
+                operation: None,
             });
         }
     }
@@ -309,23 +325,27 @@ impl MachineUpdatesAdapter for LiveMachines {
                 machine,
                 action,
                 outcome: Err(ActionFailure::Unreachable),
+                operation: None,
             });
             return;
         };
         let performed = action.clone();
-        if let MachineAction::CheckStatus(checked) = action {
+        if let MachineAction::CheckStatus(checked, operation) = &action {
+            let (checked, operation) = (*checked, operation.clone());
             self.spawn_action(shared, machine, action, move |shared| {
-                check_status(shared, machine, &target, checked)
+                check_status(shared, machine, &target, checked, operation)
             });
             return;
         }
         if action == MachineAction::ConnectAndCheck {
             self.spawn_action(shared, machine, action, move |shared| {
-                connect_and_check(shared, machine, &target)
+                (connect_and_check(shared, machine, &target), None)
             });
             return;
         }
-        self.spawn_action(shared, machine, action, move |_| act(&target, &performed));
+        self.spawn_action(shared, machine, action, move |_| {
+            (act(&target, &performed), None)
+        });
     }
 
     fn preview(&self, machine: MachineId, action: MachineAction) -> PreviewAnswer {
@@ -365,10 +385,10 @@ impl MachineUpdatesAdapter for LiveMachines {
         self.spawn_action(shared, machine, action, move |shared| {
             // A forgotten preview, or one of a removed Machine, is confirmed by nobody now.
             let (Some(lane_preview), Some(target)) = (retained, target) else {
-                return Err(ActionFailure::Changed);
+                return (Err(ActionFailure::Changed), None);
             };
             let Reach::Lane { lane, .. } = target.known.machine.reach() else {
-                return Err(ActionFailure::Unreachable);
+                return (Err(ActionFailure::Unreachable), None);
             };
             run_previewed(shared, machine, lane.as_ref(), &preview, lane_preview)
         });
@@ -435,40 +455,41 @@ fn preview(
     Ok(shared.retain_preview(previewed, lane_preview))
 }
 
-/// Executes `lane_preview`, which `preview` describes, and expects a Restart's return.
+/// Executes `lane_preview`, which `preview` describes, and expects a Restart's return. Returns
+/// the outcome and the operation, which Check Status reads while nothing confirmed it.
 fn run_previewed(
     shared: &Shared,
     machine: MachineId,
     lane: &dyn MachineLane,
     preview: &MachinePreview,
     lane_preview: admin::Preview,
-) -> Result<(), ActionFailure> {
+) -> (Result<(), ActionFailure>, Option<ServiceOperation>) {
     let restart = preview.action == MachineAction::Restart;
     if restart {
         shared.expect_restart(machine, preview.target.clone());
     }
-    let mut operation = None;
+    let mut report = ExecuteReport::default();
     let waiting = || {
         shared.emit(MachineUpdatesEvent::Waiting {
             machine,
             action: preview.action.clone(),
         });
     };
-    let outcome = lane.execute(lane_preview, &mut operation, &waiting);
-    let checked = if restart {
-        Checked::Restart
-    } else {
-        Checked::Stop
-    };
+    let outcome = lane.execute(lane_preview, &mut report, &waiting);
+    let operation = report.operation.as_deref().map(ServiceOperation::new);
     {
         let mut state = shared.lock();
-        match (&outcome, operation) {
-            (Err(ActionFailure::Unconfirmed), Some(operation)) => {
-                state.unconfirmed.insert(machine, (checked, operation));
-            }
-            _ => {
-                state.unconfirmed.remove(&machine);
-            }
+        // Each acknowledged receipt keeps its outcome until Check Status reads that exact
+        // operation, whatever this desktop runs meanwhile.
+        state.settled.extend(report.settled);
+        if outcome == Err(ActionFailure::Unconfirmed)
+            && let Some(awaited) = state
+                .entries
+                .get_mut(&machine)
+                .and_then(|entry| entry.restart.as_mut())
+                .filter(|_| restart)
+        {
+            awaited.operation.clone_from(&operation);
         }
     }
     // A restart whose outcome nothing confirmed may still be running, so the Machine keeps
@@ -476,50 +497,41 @@ fn run_previewed(
     if restart && outcome.is_err() && outcome != Err(ActionFailure::Unconfirmed) {
         shared.forget_restart(machine);
     }
-    outcome
+    (outcome, operation)
 }
 
-/// Check Status: reads the receipt of the Stop or Restart this desktop ran whose outcome nothing
-/// confirmed, from this Machine's own ledger when its Core is down and from its Core otherwise.
-/// It runs nothing again. With no such operation left, it only asks the Machine's routes to
-/// answer again, so the latest facts say what runs.
+/// Check Status: reads the receipt of exactly `operation`, the Stop or Restart this desktop ran
+/// whose outcome nothing confirmed. It reads an outcome this desktop acknowledged meanwhile
+/// first, then this Machine's own ledger when its Core is down, then its Core. It runs nothing
+/// again, and a later action on the same Machine never answers for it.
 fn check_status(
     shared: &Shared,
     machine: MachineId,
     target: &Target,
     checked: Checked,
-) -> Result<(), ActionFailure> {
-    let recorded = shared
-        .lock()
-        .unconfirmed
-        .get(&machine)
-        .filter(|(kind, _)| *kind == checked)
-        .map(|(_, operation)| operation.clone());
-    let Some(operation) = recorded else {
-        target.known.machine.retry();
-        return Ok(());
-    };
-    let offline = target.known.machine.resolve_offline(&operation);
-    let outcome = match offline {
-        Some(outcome) if outcome != Err(ActionFailure::Unconfirmed) => outcome,
-        _ => match target.known.machine.reach() {
-            Reach::Lane { lane, .. } => lane.resolve(&operation),
-            _ => Err(ActionFailure::Unconfirmed),
-        },
-    };
-    if outcome != Err(ActionFailure::Unconfirmed) {
-        shared.lock().unconfirmed.remove(&machine);
-        if checked == Checked::Restart && outcome.is_err() {
-            shared.forget_restart(machine);
+    operation: ServiceOperation,
+) -> (Result<(), ActionFailure>, Option<ServiceOperation>) {
+    let acknowledged = shared.lock().settled.remove(operation.id());
+    let outcome = acknowledged.unwrap_or_else(|| {
+        match target.known.machine.resolve_offline(operation.id()) {
+            Some(outcome) if outcome != Err(ActionFailure::Unconfirmed) => outcome,
+            _ => match target.known.machine.reach() {
+                Reach::Lane { lane, .. } => lane.resolve(operation.id()),
+                _ => Err(ActionFailure::Unconfirmed),
+            },
         }
+    });
+    if checked == Checked::Restart && outcome.is_err() && outcome != Err(ActionFailure::Unconfirmed)
+    {
+        shared.forget_restart(machine);
     }
     target.known.machine.retry();
-    outcome
+    (outcome, Some(operation))
 }
 
 fn act(target: &Target, action: &MachineAction) -> Result<(), ActionFailure> {
     match action {
-        MachineAction::CheckStatus(_) => return Err(ActionFailure::Failed),
+        MachineAction::CheckStatus(..) => return Err(ActionFailure::Failed),
         MachineAction::DismissFailure(_) => return Ok(()),
         MachineAction::Start if target.known.local => return target.known.machine.start(),
         // Restart and Stop run only through `execute`, on a preview the person confirmed. Start
@@ -673,9 +685,9 @@ struct State {
     /// Previews the Core issued that nobody executed yet, oldest first.
     previews: VecDeque<(MachinePreview, admin::Preview)>,
     next_preview: u64,
-    /// The Stop or Restart each Machine ran last whose outcome nothing confirmed, with its
-    /// operation ID, until Check Status reads its settled receipt.
-    unconfirmed: HashMap<MachineId, (Checked, String)>,
+    /// The outcome of each operation of this desktop whose receipt an `Execute` acknowledged
+    /// on its way, by operation ID, until Check Status reads it.
+    settled: HashMap<String, Result<(), ActionFailure>>,
 }
 
 struct Entry {
@@ -699,6 +711,8 @@ struct Awaited {
     deadline: Instant,
     /// When the follower last asked the Machine's routes to retry now.
     retried: Option<Instant>,
+    /// The restart's own operation, once it may have reached the Core.
+    operation: Option<ServiceOperation>,
 }
 
 impl Shared {
@@ -935,6 +949,7 @@ impl Shared {
                         announced: true,
                         deadline: Instant::now() + limit,
                         retried: None,
+                        operation: None,
                     });
                 }
                 (Some(awaited), Some(_)) => {
@@ -1011,6 +1026,7 @@ impl Shared {
                 entry.update.link = MachineLink::Unconfirmed {
                     expected,
                     since: crate::updates::now(),
+                    operation: awaited.operation.clone(),
                 };
                 entry.restart = None;
                 return (None, false);
@@ -1047,6 +1063,7 @@ impl Shared {
                 announced: false,
                 deadline: Instant::now() + limit,
                 retried: None,
+                operation: None,
             });
         });
     }

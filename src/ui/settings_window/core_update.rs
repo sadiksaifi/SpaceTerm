@@ -355,12 +355,13 @@ impl SettingsWindow {
                 if notice.local
                     && let Some(running) = match notice.action {
                         MachineAction::Stop
-                        | MachineAction::CheckStatus(crate::updates::machines::Checked::Stop) => {
+                        | MachineAction::CheckStatus(crate::updates::machines::Checked::Stop, _) => {
                             Some(false)
                         }
                         MachineAction::Restart
                         | MachineAction::CheckStatus(
                             crate::updates::machines::Checked::Restart,
+                            _,
                         ) => Some(true),
                         _ => None,
                     }

@@ -554,7 +554,13 @@ fn build() -> Deck {
                 ActionFailure::Unconfirmed,
                 ActionFailure::Failed,
             ] {
-                if let Some(alert) = dialogs::action_failure_alert(name, LOCAL, &action, failure) {
+                if let Some(alert) = dialogs::action_failure_alert(
+                    name,
+                    LOCAL,
+                    &action,
+                    failure,
+                    Some(&crate::updates::machines::ServiceOperation::new("deck")),
+                ) {
                     deck.field(Role::Text, &alert.title);
                     deck.field(Role::Text, &alert.message);
                     let buttons = match alert.follow_up() {

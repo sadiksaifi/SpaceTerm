@@ -6,7 +6,7 @@ use spaceterm_core::update::facts::{CheckFailure, StartFailure};
 use super::{Platform, list_and, this_ends};
 use crate::updates::UpdateError;
 use crate::updates::confirm::{Explanation, Previewed};
-use crate::updates::machines::{ActionFailure, Checked, MachineAction, MachineId};
+use crate::updates::machines::{ActionFailure, Checked, MachineAction, MachineId, ServiceOperation};
 use crate::updates::state::{
     AppRow, AppStage, CheckFailed, Command, DesktopAction, DownloadCause, MachineRow, MachineStage,
     PUSH_FAILURE, STEPPING_STONE,
@@ -385,10 +385,17 @@ pub(crate) fn not_confirmed(row: &MachineRow) -> Explanation {
             "{name} stopped responding while SpaceTerm Core restarted into {version}."
         )
         .into(),
-        // Check Status reads the restart's own receipt, and never restarts again.
+        // Check Status reads the restart's own receipt, and never restarts again. Without its
+        // operation, it asks the Machine to answer again.
         then: Some(Box::new(Command::Machine(
             row.id,
-            MachineAction::CheckStatus(Checked::Restart),
+            match &row.stage {
+                MachineStage::NotConfirmed {
+                    operation: Some(operation),
+                    ..
+                } => MachineAction::CheckStatus(Checked::Restart, operation.clone()),
+                _ => MachineAction::CheckAgain,
+            },
         ))),
         proceed: Some(CHECK_STATUS.into()),
         dismiss: None,
@@ -409,10 +416,10 @@ pub(crate) fn action_failure(
             format!("Couldn\u{2019}t Check for Updates on {name}")
         }
         MachineAction::Start => format!("Couldn\u{2019}t Start SpaceTerm Core on {name}"),
-        MachineAction::Stop | MachineAction::CheckStatus(Checked::Stop) => {
+        MachineAction::Stop | MachineAction::CheckStatus(Checked::Stop, _) => {
             format!("Couldn\u{2019}t Stop SpaceTerm Core on {name}")
         }
-        MachineAction::CheckStatus(Checked::Restart) => {
+        MachineAction::CheckStatus(Checked::Restart, _) => {
             format!("Couldn\u{2019}t Restart SpaceTerm Core on {name}")
         }
         MachineAction::DismissFailure(_) => return None,
@@ -445,7 +452,7 @@ pub(crate) fn action_failure(
 /// The title and message for an action SpaceTerm Core admitted whose outcome nothing confirms.
 fn unconfirmed(name: &str, action: &MachineAction) -> (SharedString, SharedString) {
     let (what, did) = match action {
-        MachineAction::Stop | MachineAction::CheckStatus(Checked::Stop) => ("Stop", "stopped"),
+        MachineAction::Stop | MachineAction::CheckStatus(Checked::Stop, _) => ("Stop", "stopped"),
         MachineAction::Start => ("Start", "started"),
         _ => ("Restart", "restarted"),
     };
@@ -468,20 +475,21 @@ pub(crate) fn action_failure_alert(
     machine: MachineId,
     action: &MachineAction,
     failure: ActionFailure,
+    operation: Option<&ServiceOperation>,
 ) -> Option<Explanation> {
     let (title, message) = action_failure(name, action, failure)?;
     // Check Status follows the original operation; Try Again asks for the action again.
     let checked = match action {
         MachineAction::Stop => Some(Checked::Stop),
         MachineAction::Restart => Some(Checked::Restart),
-        MachineAction::CheckStatus(checked) => Some(*checked),
+        MachineAction::CheckStatus(checked, _) => Some(*checked),
         _ => None,
     };
-    let (then, proceed) = match (failure, action, checked) {
-        (ActionFailure::Unconfirmed, _, Some(checked)) => (
+    let (then, proceed) = match (failure, action, checked.zip(operation)) {
+        (ActionFailure::Unconfirmed, _, Some((checked, operation))) => (
             Some(Command::Machine(
                 machine,
-                MachineAction::CheckStatus(checked),
+                MachineAction::CheckStatus(checked, operation.clone()),
             )),
             Some(CHECK_STATUS),
         ),
@@ -505,7 +513,7 @@ pub(crate) fn action_failure_alert(
             | ActionFailure::Unreachable
             | ActionFailure::DiskFull
             | ActionFailure::Failed,
-            MachineAction::CheckStatus(checked),
+            MachineAction::CheckStatus(checked, _),
             _,
         ) => (
             Some(Command::Machine(machine, checked.action())),

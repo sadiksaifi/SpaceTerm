@@ -284,6 +284,7 @@ fn a_settings_stop_runs_on_the_cores_session_bound_preview(cx: &mut TestAppConte
         machine: MACHINE,
         action: MachineAction::Stop,
         outcome: Ok(()),
+        operation: None,
     });
     cx.run_until_parked();
     assert_eq!(adapter.executed_actions().len(), 1, "nothing stops twice");
@@ -318,6 +319,7 @@ fn an_unconfirmed_settings_restart_offers_check_status(cx: &mut TestAppContext) 
         machine: MACHINE,
         action: MachineAction::Restart,
         outcome: Err(crate::updates::machines::ActionFailure::Unconfirmed),
+        operation: Some(crate::updates::machines::ServiceOperation::new("restart-1")),
     });
     cx.run_until_parked();
     A11yTree::read(cx).text("SpaceTerm Can\u{2019}t Confirm the Restart on This Mac");
@@ -327,7 +329,10 @@ fn an_unconfirmed_settings_restart_offers_check_status(cx: &mut TestAppContext) 
         adapter.performed(),
         [(
             MACHINE,
-            MachineAction::CheckStatus(crate::updates::machines::Checked::Restart)
+            MachineAction::CheckStatus(
+                crate::updates::machines::Checked::Restart,
+                crate::updates::machines::ServiceOperation::new("restart-1"),
+            )
         )],
         "Check Status reads the original restart's receipt"
     );
@@ -345,6 +350,7 @@ fn a_refused_approved_settings_restart_opens_d5(cx: &mut TestAppContext) {
         machine: MACHINE,
         action: MachineAction::Restart,
         outcome: Err(crate::updates::machines::ActionFailure::Busy),
+        operation: None,
     });
     cx.run_until_parked();
     A11yTree::read(cx).text(

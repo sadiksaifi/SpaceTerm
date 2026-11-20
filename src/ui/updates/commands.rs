@@ -243,7 +243,7 @@ fn explain(explanation: Explanation, presenter: Presenter, cx: &mut App) {
 pub(super) fn refusal(notice: &MachineUpdatesNotice) -> Option<Explanation> {
     if !matches!(
         notice.action,
-        MachineAction::Restart | MachineAction::Stop | MachineAction::CheckStatus(_)
+        MachineAction::Restart | MachineAction::Stop | MachineAction::CheckStatus(..)
     ) {
         return None;
     }

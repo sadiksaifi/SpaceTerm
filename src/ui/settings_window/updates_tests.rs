@@ -444,6 +444,7 @@ fn a_check_shows_on_a_core_whose_update_waits(cx: &mut TestAppContext) {
         machine: LOCAL,
         action: MachineAction::CheckAgain,
         outcome: Err(crate::updates::machines::ActionFailure::Unreachable),
+        operation: None,
     });
     cx.run_until_parked();
     let view = cx.update(|_, cx| state::current(cx));
@@ -512,6 +513,7 @@ fn a_check_reports_progress_and_failure_in_each_row_at_once(cx: &mut TestAppCont
         machine: PENGUIN,
         action: MachineAction::CheckAgain,
         outcome: Ok(()),
+        operation: None,
     });
     adapter.emit(MachineUpdatesEvent::Changed(Box::new(failing)));
     updater.emit(UpdateEvent::Failed(UpdateError::Check));

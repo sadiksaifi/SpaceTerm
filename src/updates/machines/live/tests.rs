@@ -75,6 +75,8 @@ struct ScriptedLane {
     execute_waits: Mutex<bool>,
     /// What each Resolve of an executed operation answers.
     resolve_result: Mutex<Result<(), ActionFailure>>,
+    /// Earlier operations the next `Execute` acknowledges on its way, with their outcomes.
+    execute_settles: Mutex<Vec<(String, Result<(), ActionFailure>)>>,
     requests: Mutex<Vec<String>>,
 }
 
@@ -90,6 +92,7 @@ impl ScriptedLane {
             execute_result: Mutex::new(Ok(())),
             execute_waits: Mutex::new(false),
             resolve_result: Mutex::new(Err(ActionFailure::Unconfirmed)),
+            execute_settles: Mutex::new(Vec::new()),
             requests: Mutex::new(Vec::new()),
         })
     }
@@ -195,14 +198,15 @@ impl MachineLane for ScriptedLane {
     fn execute(
         &self,
         preview: admin::Preview,
-        operation: &mut Option<String>,
+        report: &mut super::ExecuteReport,
         waiting: &(dyn Fn() + Sync),
     ) -> Result<(), ActionFailure> {
         self.record(format!("execute {}", preview.token));
         if *self.execute_waits.lock().unwrap() {
             waiting();
         }
-        *operation = Some(format!("operation-{}", preview.token));
+        report.operation = Some(format!("operation-{}", preview.token));
+        report.settled = std::mem::take(&mut *self.execute_settles.lock().unwrap());
         *self.execute_result.lock().unwrap()
     }
 
@@ -816,6 +820,22 @@ fn an_unconfirmed_restart_keeps_expecting_the_core_and_then_cannot_confirm_it() 
     });
 }
 
+/// The action that finished as `expected`, with its outcome and the operation Check Status reads.
+fn finished_operation(
+    events: &Events,
+    expected: &MachineAction,
+) -> (Result<(), ActionFailure>, Option<ServiceOperation>) {
+    until(events, "the action finishing", |event| match event {
+        MachineUpdatesEvent::Finished {
+            action,
+            outcome,
+            operation,
+            ..
+        } if action == expected => Some((*outcome, operation.clone())),
+        _ => None,
+    })
+}
+
 /// Check Status after an unconfirmed restart reads that restart's own receipt, also after an
 /// unrelated action on the same Machine, and restarts nothing again.
 #[test]
@@ -830,32 +850,24 @@ fn check_status_reads_the_original_restarts_receipt() {
 
     let preview = previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap();
     adapter.execute(preview);
-    assert_eq!(
-        finished(&events, &MachineAction::Restart),
-        Err(ActionFailure::Unconfirmed)
-    );
-    let original = lane
-        .requests()
-        .into_iter()
-        .find_map(|request| request.strip_prefix("execute ").map(str::to_owned))
-        .expect("the restart executed");
+    let (outcome, operation) = finished_operation(&events, &MachineAction::Restart);
+    assert_eq!(outcome, Err(ActionFailure::Unconfirmed));
+    let operation = operation.expect("the unconfirmed restart names its operation");
+    let check = MachineAction::CheckStatus(Checked::Restart, operation.clone());
 
     // An unrelated check runs on the same Machine first.
     adapter.perform(PENGUIN, MachineAction::CheckAgain);
     let _ = finished(&events, &MachineAction::CheckAgain);
-    // The receipt has not settled yet.
-    adapter.perform(PENGUIN, MachineAction::CheckStatus(Checked::Restart));
+    // The receipt has not settled yet, so Check Status offers itself again for the same one.
+    adapter.perform(PENGUIN, check.clone());
     assert_eq!(
-        finished(&events, &MachineAction::CheckStatus(Checked::Restart)),
-        Err(ActionFailure::Unconfirmed)
+        finished_operation(&events, &check),
+        (Err(ActionFailure::Unconfirmed), Some(operation.clone()))
     );
     // Later it says the restart was done.
     *lane.resolve_result.lock().unwrap() = Ok(());
-    adapter.perform(PENGUIN, MachineAction::CheckStatus(Checked::Restart));
-    assert_eq!(
-        finished(&events, &MachineAction::CheckStatus(Checked::Restart)),
-        Ok(())
-    );
+    adapter.perform(PENGUIN, check.clone());
+    assert_eq!(finished(&events, &check), Ok(()));
     let resolved: Vec<_> = lane
         .requests()
         .into_iter()
@@ -864,11 +876,51 @@ fn check_status_reads_the_original_restarts_receipt() {
     assert_eq!(
         resolved,
         [
-            format!("resolve operation-{original}"),
-            format!("resolve operation-{original}")
+            format!("resolve {}", operation.id()),
+            format!("resolve {}", operation.id())
         ]
     );
     assert_eq!(lane.count("execute"), 1, "Check Status restarts nothing");
+}
+
+/// A later Stop on the same Machine, which fails, never answers for an earlier unconfirmed
+/// restart. When that Stop's `Execute` acknowledges the restart's receipt on its way, Check
+/// Status for the restart still reads what that receipt said, once.
+#[test]
+fn check_status_keeps_its_own_operation_through_a_later_action() {
+    use crate::updates::machines::Checked;
+    let lane = ScriptedLane::new([Ok(facts(1, 0, None))]);
+    *lane.execute_result.lock().unwrap() = Err(ActionFailure::Unconfirmed);
+    let machine = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
+    let sources = ScriptedSources::with(vec![known(LOCAL, "This Mac", true, &machine)]);
+    let (adapter, events) = started(&sources, RESTART_LIMIT);
+    changed(&events, "the facts", |update| update.facts.is_some());
+
+    adapter.execute(previewed(&adapter, LOCAL, MachineAction::Restart).unwrap());
+    let (_, restart) = finished_operation(&events, &MachineAction::Restart);
+    let restart = restart.expect("the restart names its operation");
+
+    // The later Stop acknowledges the restart's settled, failed receipt, then fails itself.
+    *lane.execute_settles.lock().unwrap() =
+        vec![(restart.id().to_owned(), Err(ActionFailure::DiskFull))];
+    *lane.execute_result.lock().unwrap() = Err(ActionFailure::Failed);
+    adapter.execute(previewed(&adapter, LOCAL, MachineAction::Stop).unwrap());
+    assert_eq!(
+        finished(&events, &MachineAction::Stop),
+        Err(ActionFailure::Failed)
+    );
+
+    let check = MachineAction::CheckStatus(Checked::Restart, restart.clone());
+    adapter.perform(LOCAL, check.clone());
+    assert_eq!(
+        finished(&events, &check),
+        Err(ActionFailure::DiskFull),
+        "the restart's own receipt answers, not the Stop"
+    );
+    // The acknowledged outcome is read once; afterwards the Core is asked again.
+    adapter.perform(LOCAL, check.clone());
+    assert_eq!(finished(&events, &check), Err(ActionFailure::Unconfirmed));
+    assert_eq!(lane.count("resolve"), 1);
 }
 
 /// An incompatible Core that restarts into a compatible version and answers again before the

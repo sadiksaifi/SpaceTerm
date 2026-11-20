@@ -90,6 +90,9 @@ pub(crate) struct MachineUpdatesNotice {
     pub(crate) action: MachineAction,
     pub(crate) surface: Surface,
     pub(crate) outcome: Result<(), ActionFailure>,
+    /// The Stop or Restart whose outcome nothing confirmed, which this notice's Check Status
+    /// reads. Set only with `Unconfirmed`.
+    pub(crate) operation: Option<super::ServiceOperation>,
     /// The Core refused the click's restart at once, while the person waits on it: at its
     /// preview, or when the approved restart executed. Only such a refusal opens an alert unasked
     /// (D5); a later outcome shows once in the title bar.
@@ -108,7 +111,7 @@ impl MachineUpdatesNotice {
         let waiting = self.refused_at_once
             || matches!(
                 self.action,
-                MachineAction::Start | MachineAction::Stop | MachineAction::CheckStatus(_)
+                MachineAction::Start | MachineAction::Stop | MachineAction::CheckStatus(..)
             );
         if !waiting {
             return None;
@@ -118,6 +121,7 @@ impl MachineUpdatesNotice {
             self.machine,
             &self.action,
             failure,
+            self.operation.as_ref(),
         )
     }
 }
@@ -409,7 +413,7 @@ impl MachineUpdates {
             MachineAction::Restart
             | MachineAction::Start
             | MachineAction::Stop
-            | MachineAction::CheckStatus(_) => None,
+            | MachineAction::CheckStatus(..) => None,
         };
         if let Some(asked) = asked {
             self.serial += 1;
@@ -730,7 +734,14 @@ impl MachineUpdates {
                     Ok(preview) => previews.push((index, preview)),
                     Err(failure) => {
                         let _ = this.update(cx, |this, cx| {
-                            this.notify_outcome(machine, action, surface, Err(failure), true, cx);
+                            this.notify_outcome(
+                                machine,
+                                action,
+                                surface,
+                                (Err(failure), None),
+                                true,
+                                cx,
+                            );
                         });
                     }
                 }
@@ -842,7 +853,7 @@ impl MachineUpdates {
         machine: MachineId,
         action: MachineAction,
         surface: Surface,
-        outcome: Result<(), ActionFailure>,
+        (outcome, operation): (Result<(), ActionFailure>, Option<super::ServiceOperation>),
         refused_at_once: bool,
         cx: &mut Context<Self>,
     ) {
@@ -856,6 +867,7 @@ impl MachineUpdates {
             action,
             surface,
             outcome,
+            operation,
             refused_at_once,
         });
     }
@@ -895,6 +907,7 @@ impl MachineUpdates {
                 machine,
                 action,
                 outcome,
+                operation,
             } => {
                 self.waiting
                     .retain(|(id, waiting)| *id != machine || *waiting != action);
@@ -907,7 +920,7 @@ impl MachineUpdates {
                 }
                 if automatic.is_none() {
                     self.answer(machine, &action, &outcome, cx);
-                    self.finish_performed(machine, action, outcome, cx);
+                    self.finish_performed(machine, action, (outcome, operation), cx);
                 }
             }
         }
@@ -922,7 +935,7 @@ impl MachineUpdates {
         &mut self,
         machine: MachineId,
         action: MachineAction,
-        outcome: Result<(), ActionFailure>,
+        (outcome, operation): (Result<(), ActionFailure>, Option<super::ServiceOperation>),
         cx: &mut Context<Self>,
     ) {
         let Some(index) = self
@@ -947,7 +960,7 @@ impl MachineUpdates {
                     | ActionFailure::Unavailable(_)
                     | ActionFailure::Unconfirmed)
             );
-        self.notify_outcome(machine, action, surface, outcome, refused, cx);
+        self.notify_outcome(machine, action, surface, (outcome, operation), refused, cx);
     }
 
     /// Keeps the outcome of an Install that pushed the bundled Core: an automatic one of
@@ -1133,6 +1146,7 @@ mod tests {
             machine,
             action: MachineAction::CheckAgain,
             outcome,
+            operation: None,
         };
         let asked = |cx: &mut gpui::TestAppContext| {
             cx.read(|cx| state::current(cx).machines[0].asked_check)
@@ -1198,6 +1212,7 @@ mod tests {
             machine,
             action: MachineAction::CheckAgain,
             outcome: Ok(()),
+            operation: None,
         };
         let asked = |cx: &mut gpui::TestAppContext| {
             cx.read(|cx| state::current(cx).machines[0].asked_check)
@@ -1261,6 +1276,7 @@ mod tests {
             machine,
             action: MachineAction::ConnectAndCheck,
             outcome: Err(ActionFailure::Unreachable),
+            operation: None,
         });
         cx.run_until_parked();
         let row = cx.read(|cx| state::current(cx).machine_rows().remove(0));
@@ -1316,6 +1332,7 @@ mod tests {
             machine,
             action: MachineAction::CheckAgain,
             outcome: Err(failure),
+            operation: None,
         };
         let asked = |cx: &mut gpui::TestAppContext| {
             cx.read(|cx| state::current(cx).machines[0].asked_check)
@@ -1390,6 +1407,7 @@ mod tests {
             machine,
             action,
             outcome: Ok(()),
+            operation: None,
         };
         adapter.emit(MachineUpdatesEvent::Machines(vec![penguin.clone()]));
         cx.run_until_parked();
@@ -1456,6 +1474,7 @@ mod tests {
             machine,
             action: MachineAction::CheckAgain,
             outcome: Err(ActionFailure::Busy),
+            operation: None,
         });
         adapter.emit(MachineUpdatesEvent::Changed(Box::new(installing)));
         cx.run_until_parked();
@@ -1514,6 +1533,7 @@ mod tests {
             machine,
             action: MachineAction::Install,
             outcome: Err(ActionFailure::Failed),
+            operation: None,
         });
         cx.run_until_parked();
         assert_eq!(
@@ -1560,6 +1580,7 @@ mod tests {
             machine,
             action: MachineAction::Install,
             outcome: Ok(()),
+            operation: None,
         });
         cx.run_until_parked();
         assert_eq!(asked(cx), Some(Asked::Install));
@@ -1591,6 +1612,7 @@ mod tests {
             link: super::super::MachineLink::Unconfirmed {
                 expected: Version::parse("0.9.0").unwrap(),
                 since: 1,
+                operation: None,
             },
             ..update("0.8.0", None)
         };
@@ -1604,6 +1626,7 @@ mod tests {
             machine,
             action: MachineAction::CheckAgain,
             outcome: Ok(()),
+            operation: None,
         });
         cx.run_until_parked();
         assert_eq!(
@@ -1646,6 +1669,7 @@ mod tests {
             link: super::super::MachineLink::Unconfirmed {
                 expected: Version::parse("0.9.0").unwrap(),
                 since: 1,
+                operation: None,
             },
             ..update("0.8.0", None)
         };
@@ -1661,6 +1685,7 @@ mod tests {
                 machine,
                 action: MachineAction::CheckAgain,
                 outcome: Ok(()),
+                operation: None,
             });
             cx.run_until_parked();
         };
@@ -1751,6 +1776,7 @@ mod tests {
             machine: [2; 32],
             action: install.clone(),
             outcome: Err(ActionFailure::Failed),
+            operation: None,
         });
         adapter.emit(MachineUpdatesEvent::Changed(Box::new(offered(
             update("0.8.0", None),
@@ -1799,6 +1825,7 @@ mod tests {
                 machine: penguin,
                 action: install.clone(),
                 outcome: Err(failure),
+                operation: None,
             });
             adapter.emit(MachineUpdatesEvent::Changed(Box::new(idle())));
             cx.run_until_parked();
@@ -1838,6 +1865,7 @@ mod tests {
             machine: penguin,
             action: install.clone(),
             outcome: Ok(()),
+            operation: None,
         });
         cx.run_until_parked();
         let view = cx.update(|cx| state::current(cx));
@@ -1871,6 +1899,7 @@ mod tests {
             machine: penguin,
             action: install.clone(),
             outcome: Err(ActionFailure::DiskFull),
+            operation: None,
         });
         adapter.emit(MachineUpdatesEvent::Changed(Box::new(incompatible())));
         cx.run_until_parked();
@@ -1915,6 +1944,7 @@ mod tests {
             machine: [2; 32],
             action: MachineAction::Restart,
             outcome: Err(ActionFailure::Busy),
+            operation: None,
         });
         cx.run_until_parked();
         assert!(notices.borrow().is_empty());
@@ -1927,6 +1957,7 @@ mod tests {
             machine: [2; 32],
             action: MachineAction::Restart,
             outcome: Err(ActionFailure::Busy),
+            operation: None,
         });
         cx.run_until_parked();
 

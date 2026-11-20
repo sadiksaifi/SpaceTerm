@@ -223,7 +223,10 @@ fn a_stop_without_a_confirmed_outcome_offers_check_status_and_a_failed_one_try_a
         (
             ActionFailure::Unconfirmed,
             "Check Status",
-            MachineAction::CheckStatus(crate::updates::machines::Checked::Stop),
+            MachineAction::CheckStatus(
+                crate::updates::machines::Checked::Stop,
+                crate::updates::machines::ServiceOperation::new("stop-1"),
+            ),
         ),
         (ActionFailure::Failed, "Try Again", MachineAction::Stop),
     ] {
@@ -236,6 +239,8 @@ fn a_stop_without_a_confirmed_outcome_offers_check_status_and_a_failed_one_try_a
             machine: LOCAL,
             action: MachineAction::Stop,
             outcome: Err(failure),
+            operation: (failure == ActionFailure::Unconfirmed)
+                .then(|| crate::updates::machines::ServiceOperation::new("stop-1")),
         });
         fixture.host.answers.borrow_mut().push(true);
         cx.run_until_parked();
@@ -245,7 +250,7 @@ fn a_stop_without_a_confirmed_outcome_offers_check_status_and_a_failed_one_try_a
             Some(AlertButtons::FollowUp(follow_up.to_owned())),
             "{failure:?}"
         );
-        if matches!(then, MachineAction::CheckStatus(_)) {
+        if matches!(then, MachineAction::CheckStatus(..)) {
             assert_eq!(fixture.machines.performed(), [(LOCAL, then)]);
         } else {
             // Try Again previews the Stop again, so the person reviews it before it runs.
@@ -422,6 +427,7 @@ fn a_start_refused_by_login_items_opens_that_list_and_never_runs_by_itself(
         machine: LOCAL,
         action: MachineAction::Start,
         outcome: Err(ActionFailure::LoginItemOff),
+        operation: None,
     });
     cx.run_until_parked();
 
@@ -539,6 +545,7 @@ fn a_refused_preview_never_runs_again_without_a_fresh_confirmation(cx: &mut Test
             machine: PENGUIN,
             action: MachineAction::Restart,
             outcome: Err(ActionFailure::Changed),
+            operation: None,
         });
         cx.run_until_parked();
         let executed = fixture.machines.executed().len();
@@ -964,6 +971,7 @@ fn a_refused_approved_restart_opens_d5_once_and_a_later_failure_none(cx: &mut Te
             machine: PENGUIN,
             action: MachineAction::Restart,
             outcome: Err(failure),
+            operation: None,
         });
         cx.run_until_parked();
         let titles: Vec<String> = fixture
