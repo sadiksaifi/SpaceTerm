@@ -111,6 +111,9 @@ pub(crate) struct CorePaneState {
     prepared: Mutex<Option<[u8; 32]>>,
     /// This Pane's worker is starting its shell, or presents one that has not attached yet.
     shell_starting: AtomicBool,
+    /// The shell this client started is attached and has not reached its first prompt, named
+    /// itself or taken input, so its surface stays quiet.
+    startup_quiet: AtomicBool,
     /// This Pane's one place in the window's background start queue, from the worker's wait for
     /// a turn until the shell it started shows it is ready, fails or is cancelled.
     background: Mutex<Reservation>,
@@ -162,6 +165,7 @@ impl CorePaneState {
             foreground: AtomicBool::new(false),
             prepared: Mutex::default(),
             shell_starting: AtomicBool::new(false),
+            startup_quiet: AtomicBool::new(false),
             background: Mutex::new(Reservation::Idle),
             created_start: Arc::default(),
             take_over: AtomicBool::new(false),
@@ -281,9 +285,22 @@ impl CorePaneState {
         self.foreground.load(Ordering::Acquire)
     }
 
-    /// Whether this Pane's worker is starting its shell, which has not attached yet.
+    /// Whether this Pane's worker is starting its shell: one that has not attached yet, or one
+    /// this client started that has not reached its first prompt.
     pub(crate) fn shell_starting(&self) -> bool {
-        self.shell_starting.load(Ordering::Acquire)
+        self.shell_starting.load(Ordering::Acquire) || self.startup_quiet()
+    }
+
+    /// Whether the shell this client started keeps its surface quiet until its first prompt.
+    pub(crate) fn startup_quiet(&self) -> bool {
+        self.startup_quiet.load(Ordering::Acquire)
+    }
+
+    /// Starts or ends the quiet of the shell this client started.
+    pub(crate) fn set_startup_quiet(&self, quiet: bool) {
+        if self.startup_quiet.swap(quiet, Ordering::AcqRel) != quiet {
+            self.changed();
+        }
     }
 
     /// Records that this Pane's worker starts its shell now.
@@ -433,7 +450,7 @@ impl CorePaneState {
 
     /// Whether SpaceTerm Core's latest inventory shows Session `session` of Pane `pane` started:
     /// its shell reached a prompt, finished a command or named itself.
-    fn session_ready(&self, pane: [u8; 32], session: [u8; 32]) -> bool {
+    pub(crate) fn session_ready(&self, pane: [u8; 32], session: [u8; 32]) -> bool {
         use spaceterm_core::pane::metadata::{PromptZone, TitleProvenance};
         let Some((_, revision)) = self
             .directory_core()
@@ -443,7 +460,8 @@ impl CorePaneState {
             return false;
         };
         let inventory = &revision.inventory;
-        let current = inventory.close.as_ref().is_some_and(|close| {
+        // The live Session facts name the Session the metadata belongs to, when published.
+        let current = inventory.close.as_ref().is_none_or(|close| {
             close
                 .sessions
                 .iter()

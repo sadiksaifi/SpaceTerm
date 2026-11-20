@@ -458,7 +458,9 @@ pub(super) fn show(
         .set_view(view);
     mapping.local = generation;
     state.connected(epoch, mapping, paste_unconfirmed)?;
-    if let Some(presented) = presented {
+    // A shell this client started stays blank until its first prompt, so startup output
+    // doesn't flash before it. The worker presents the latest screen when the quiet ends.
+    if let Some(presented) = presented.filter(|_| !state.startup_quiet()) {
         let _ = events.force_send(TerminalSessionEvent::Screen(presented));
     }
     Ok(mapping)

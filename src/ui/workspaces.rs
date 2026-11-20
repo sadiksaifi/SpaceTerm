@@ -3877,6 +3877,24 @@ mod core_workspaces {
                 self.set(crate::terminal::core_session::CorePaneStatus::Connected);
             }
 
+            /// The shell this client started attached in one reading the view never saw it
+            /// connecting in, and stays quiet until its first prompt.
+            pub(crate) fn attach_quietly(&self) {
+                self.generation
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.set(crate::terminal::core_session::CorePaneStatus::Connected);
+                self.shell_starting
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                self.changes.publish();
+            }
+
+            /// The quiet shell reached its first prompt.
+            pub(crate) fn end_startup(&self) {
+                self.shell_starting
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                self.changes.publish();
+            }
+
             /// The server says why the Pane's Session ended, if it did.
             pub(crate) fn set_session_end(&self, end: Option<spaceterm_core::pane::SessionEnd>) {
                 *self.session_end.lock().expect("session end") = end;

@@ -1670,6 +1670,15 @@ pub(super) fn present(
                 .scrollback
                 .attach(lease.session);
             let mut demand = inbox::Demand::new(state.presentable.load(Ordering::Acquire), max_hz);
+            // A shell this client just started keeps its surface quiet until the Session shows
+            // its first prompt, names itself or takes the person's input, or until the limit,
+            // so a shell without prompt markers is still shown.
+            let mut quiet = state
+                .shell_starting
+                .load(Ordering::Acquire)
+                .then(|| std::time::Instant::now() + STARTUP_QUIET_LIMIT);
+            state.set_startup_quiet(quiet.is_some());
+            let mut inputs = connection.last_input();
             let attached = (|| loop {
                 if !alive.load(Ordering::Acquire) {
                     return Ok(());
@@ -1863,9 +1872,35 @@ pub(super) fn present(
                         send(&presenter, &alive, &mut connection, request)
                     })?;
                 }
+                // The quiet ends on the Session's own evidence, the Terminal Metadata SpaceTerm
+                // Core publishes for exactly this Session, so a reading the view coalesces never
+                // skips it.
+                if let Some(until) = quiet {
+                    let typed = connection.last_input() != inputs;
+                    let answered = state.session_ready(pane_id, lease.session);
+                    if typed || answered || std::time::Instant::now() >= until {
+                        quiet = None;
+                        state.set_startup_quiet(false);
+                        if let Some((_, mapping)) = &mut latest_screen {
+                            generation = generation.next();
+                            *mapping = show(
+                                &state,
+                                (&events, &semantics),
+                                &mut semantic,
+                                None,
+                                (epoch, generation, *mapping),
+                                paste_unconfirmed,
+                            )?;
+                        }
+                    }
+                }
+                inputs = connection.last_input();
                 // Graphics transfers continue one chunk per turn without waiting.
                 let mut busy = more_input;
-                let mut deadline = None;
+                // The published metadata is read again shortly while the quiet lasts.
+                let mut deadline = quiet.map(|until| {
+                    until.min(std::time::Instant::now() + STARTUP_QUIET_POLL)
+                });
                 if ready && let Some((_, mapping)) = &mut latest_screen {
                     // Pages decode outside the reading lock, which the main thread takes for
                     // every key, pointer and wheel event; the lock is held only to add the rows.
@@ -2000,6 +2035,8 @@ pub(super) fn present(
                     state.wake.wait(deadline);
                 }
             })();
+            // Whatever ended the attachment, the next one shows what it receives.
+            state.set_startup_quiet(false);
             if alive.load(Ordering::Acquire) {
                 return attached;
             }
@@ -2068,6 +2105,13 @@ pub(super) fn present(
         }
     }
 }
+
+/// How long a shell this client started may stay quiet without reaching its first prompt,
+/// naming itself or taking input.
+pub(super) const STARTUP_QUIET_LIMIT: Duration = Duration::from_secs(8);
+
+/// How often a quiet shell's published Terminal Metadata is read again.
+const STARTUP_QUIET_POLL: Duration = Duration::from_millis(100);
 
 /// Presents this client's view as `generation`, of `frame` when one arrived, then publishes the
 /// semantic document bound to that presentation and view. Returns the frame's mapping.

@@ -2540,3 +2540,45 @@ fn hiding_a_pane_keeps_its_semantic_demand_and_document() {
         "the kept rows keep their identities"
     );
 }
+
+/// A shell this client started stays blank while its startup prints: its screens reach the view
+/// only once the worker ends the quiet, and then the latest one does.
+#[test]
+fn a_starting_shell_stays_quiet_until_its_quiet_ends() {
+    let mut pane = PushedPane::new(4);
+    let state = Arc::clone(&pane.adapter.handle.state);
+    while pane.events.1.try_recv().is_ok() {}
+    state.set_startup_quiet(true);
+    assert!(state.shell_starting(), "a quiet shell is still starting");
+    pane.emulator.feed(b"startup banner\r\n");
+    pane.push_frame();
+    pane.turn();
+    assert!(
+        !std::iter::from_fn(|| pane.events.1.try_recv().ok())
+            .any(|event| matches!(event, TerminalSessionEvent::Screen(_))),
+        "startup output stays off the surface"
+    );
+
+    state.set_startup_quiet(false);
+    pane.generation = pane.generation.next();
+    pane.mapping = Some(
+        super::link::show(
+            &state,
+            (&pane.events.0, &pane.semantics.0),
+            &mut pane.semantic,
+            None,
+            (
+                pane.adapter.active.epoch,
+                pane.generation,
+                pane.mapping.unwrap(),
+            ),
+            false,
+        )
+        .unwrap(),
+    );
+    assert!(
+        std::iter::from_fn(|| pane.events.1.try_recv().ok())
+            .any(|event| matches!(event, TerminalSessionEvent::Screen(_))),
+        "the latest screen shows once the quiet ends"
+    );
+}

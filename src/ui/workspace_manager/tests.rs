@@ -9722,6 +9722,43 @@ fn a_starting_shell_waits_for_its_name_in_its_tab_and_caption(cx: &mut TestAppCo
     );
 }
 
+/// A shell whose Connecting state the view never read, because it attached in one reading,
+/// still waits for its name from the Session's own startup evidence, however long its startup
+/// takes, and resolves only once the Session leaves startup.
+#[gpui::test]
+fn a_shell_that_attached_in_one_reading_still_waits_for_its_name(cx: &mut TestAppContext) {
+    let (harness, cx) = close_harness(cx);
+    let (tab, pane) = harness.manager.read_with(cx, |manager, cx| {
+        manager
+            .active_tab_manager()
+            .expect("an active Workspace")
+            .read(cx)
+            .active_terminal_identity(cx)
+    });
+    let tab_pending: &'static str = format!("tab-name-pending-{}", tab.get()).leak();
+    let caption_pending: &'static str = format!("pane-caption-name-pending-{}", pane.get()).leak();
+    harness.panes.pane(CLOSE_ROOT_PANE).attach_quietly();
+    settle_panes(cx);
+    assert!(cx.debug_bounds(caption_pending).is_some());
+    assert!(cx.debug_bounds(tab_pending).is_some());
+    // A startup longer than the name wait still waits.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(6));
+    settle_panes(cx);
+    assert!(cx.debug_bounds(caption_pending).is_some());
+    assert!(cx.debug_bounds(tab_pending).is_some());
+
+    harness.panes.pane(CLOSE_ROOT_PANE).end_startup();
+    settle_panes(cx);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    settle_panes(cx);
+    assert!(
+        cx.debug_bounds(caption_pending).is_none() && cx.debug_bounds(tab_pending).is_none(),
+        "a shell past startup that never named itself says Terminal once its wait ends"
+    );
+}
+
 /// An approved Tab close hides its exact membership and focuses the surviving Tab immediately.
 /// The final Tab's close hides the Workspace while the server decides the operation.
 #[gpui::test]

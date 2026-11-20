@@ -1065,7 +1065,10 @@ impl TabView {
     /// Terminal, so their first words are its real name.
     fn caption_text(&self, pane_id: PaneId) -> PaneCaptionText {
         let mut text = self.named_caption(pane_id);
-        text.pending = self.title_waits.contains_key(&pane_id) && !self.pane_named(pane_id);
+        // While its shell starts, a name the Pane has is only provisional, such as the shell's
+        // executable before the shell names itself.
+        text.pending = self.title_waits.get(&pane_id) == Some(&None)
+            || (self.title_waits.contains_key(&pane_id) && !self.pane_named(pane_id));
         text
     }
 
@@ -1098,8 +1101,9 @@ impl TabView {
             let named = self.pane_named(pane_id);
             let starting = self.binding.title_starting(pane_id);
             let wait = match (status, self.title_waits.get(&pane_id).copied()) {
-                _ if named => None,
+                // A starting shell's name is provisional until it reaches its prompt.
                 _ if starting => Some(None),
+                _ if named => None,
                 (Some(CorePaneStatus::Connected), Some(None)) => Some(Some(now)),
                 (Some(CorePaneStatus::Connected), Some(Some(since)))
                     if now.saturating_duration_since(since) < NAME_WAIT =>
