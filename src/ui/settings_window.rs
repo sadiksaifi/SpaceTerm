@@ -456,6 +456,9 @@ pub(crate) struct SettingsWindow {
     local_operations: Entity<local_operations::LocalCoreOperations>,
     /// The service that runs the local server. `None` omits its row.
     core_service: Option<machines::MachineServiceRow>,
+    /// Whether this client's shared link to this computer's SpaceTerm Core was live when the
+    /// Machine updates last changed.
+    local_link_live: bool,
     /// The server version and its update journey. `None` omits its row.
     core_update: Option<core_update::MachineUpdateRow>,
     update_window: AnyWindowHandle,
@@ -880,6 +883,7 @@ impl SettingsWindow {
             end_all_sessions: end_sessions::EndAllSessions::new(),
             direct_access: direct_access::DirectAccess::new(),
             local_operations,
+            local_link_live: false,
             core_service: local_core
                 .as_ref()
                 .and_then(|offered| offered.service.clone())

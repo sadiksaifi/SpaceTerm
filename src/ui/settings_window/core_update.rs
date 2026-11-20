@@ -340,11 +340,40 @@ impl SettingsWindow {
         store::request(actions, always, Surface::Settings, ask, cx);
     }
 
+    /// Reads this computer's service again when this client's link to its SpaceTerm Core comes
+    /// back while the service row still says it does not run, as after a Start chosen in the
+    /// Workspace Window, the status menu or the CLI while this window stayed open.
+    fn follow_local_link(&mut self, cx: &mut Context<Self>) {
+        let live = self
+            .machine_update(&super::machine_list::MachineChoice::Local, cx)
+            .is_some_and(|update| {
+                matches!(
+                    update.link,
+                    crate::updates::machines::MachineLink::Connected
+                        | crate::updates::machines::MachineLink::Incompatible(_)
+                )
+            });
+        let returned = live && !std::mem::replace(&mut self.local_link_live, live);
+        let not_running = self
+            .core_service
+            .as_ref()
+            .and_then(|row| row.state.status)
+            .is_some_and(|status| !status.running || status.stopped);
+        if returned && not_running {
+            self.reread_core_service(cx);
+            self.check_local_core(cx);
+        }
+    }
+
     pub(super) fn observe_machine_updates(&mut self, cx: &mut Context<Self>) {
         let Some(store) = MachineUpdates::global(cx) else {
             return;
         };
-        cx.observe(&store, |_, _, cx| cx.notify()).detach();
+        cx.observe(&store, |settings, _, cx| {
+            settings.follow_local_link(cx);
+            cx.notify();
+        })
+        .detach();
         cx.subscribe(&store, |settings, _, notice, cx| {
             if notice.surface != Surface::Settings {
                 return;

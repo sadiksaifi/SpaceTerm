@@ -443,6 +443,31 @@ fn a_stopped_core_stays_stopped_until_start_core(cx: &mut TestAppContext) {
     assert_eq!(harness.launch_title(cx), None);
 }
 
+/// Start in the Workspace Window tells every open Settings window that this computer's
+/// SpaceTerm Core changed outside Settings, so none keeps showing it stopped.
+#[gpui::test]
+fn start_core_in_the_workspace_window_reaches_open_settings(cx: &mut TestAppContext) {
+    use crate::ui::settings_window::local_operations::{CompletedOperation, LocalCoreOperations};
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped), ready()], cx);
+    cx.run_until_parked();
+    let heard = Rc::new(std::cell::Cell::new(0));
+    let _subscription = cx.update(|_, cx| {
+        let operations = LocalCoreOperations::get(cx);
+        let heard = Rc::clone(&heard);
+        cx.subscribe(&operations, move |_, operation, _| {
+            if matches!(operation, CompletedOperation::Elsewhere) {
+                heard.set(heard.get() + 1);
+            }
+        })
+    });
+
+    harness.click(LAUNCH_START_SELECTOR, cx);
+    sync(&harness, cx);
+
+    assert_eq!(harness.launch.steps(), ["run", "start", "run"]);
+    assert_eq!(heard.get(), 1, "the Start's launch reached the running Core once");
+}
+
 /// A launch harness whose window opens for the person's own launch of SpaceTerm.
 fn foreground_harness(
     launch: ScriptedLaunch,

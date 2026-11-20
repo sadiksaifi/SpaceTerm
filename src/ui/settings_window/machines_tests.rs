@@ -1124,6 +1124,40 @@ fn a_start_from_the_status_item_shows_the_machine_running_in_open_settings(
     assert_eq!(status(&window, cx), "Running");
 }
 
+/// The person stops SpaceTerm Core in Settings and leaves that window open, then starts it from
+/// the Workspace Window. The same Settings window reads the service again: it shows the Machine
+/// running, offers Stop and no longer offers Start.
+#[gpui::test]
+fn a_workspace_window_start_after_a_settings_stop_reaches_the_same_open_settings(
+    cx: &mut TestAppContext,
+) {
+    let (window, core, service, cx) = open_machines_with_service(Ok(running()), cx);
+    core.answer_refresh(Err(CoreError::Stopped));
+    choose(STOP_SELECTOR, cx);
+    click_modal(STOP_CONFIRM_SELECTOR, cx);
+    assert_eq!(status(&window, cx), "Stopped");
+    assert!(row_offers(START_SERVICE_SELECTOR, cx));
+
+    // The Workspace Window's Start runs the service outside Settings, and its launch reaches the
+    // running Core.
+    service.report(Ok(running()));
+    core.answer_refresh(Ok(connected(1)));
+    cx.update(|_, cx| {
+        crate::ui::settings_window::local_operations::LocalCoreOperations::launched_elsewhere(cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(status(&window, cx), "Running");
+    assert!(!row_offers(START_SERVICE_SELECTOR, cx));
+    click(MENU_SELECTOR, cx);
+    assert_ne!(
+        spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Stop SpaceTerm Core\u{2026}")["aria"]
+            ["disabled"],
+        true,
+        "Stop is available again"
+    );
+}
+
 /// A read Settings began before the status item started the server answers what it saw then.
 /// Settings sets that answer aside and reads again, so it shows the server running rather than
 /// stopped.

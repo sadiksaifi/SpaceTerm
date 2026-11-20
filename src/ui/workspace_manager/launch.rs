@@ -894,6 +894,10 @@ impl WorkspaceManager {
         };
         self.launch.state = state;
         self.launch._task = None;
+        // Launch may have started this computer's SpaceTerm Core, as the person's Start here
+        // does, so an open Settings window reads the service again instead of keeping what it
+        // saw before, such as its own Stop.
+        crate::ui::settings_window::local_operations::LocalCoreOperations::launched_elsewhere(cx);
         if matches!(state, LaunchState::Incompatible(_)) {
             self.follow_blocked_updates(cx);
         }
