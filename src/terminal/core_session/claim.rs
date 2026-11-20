@@ -305,11 +305,17 @@ impl ClaimWorker<'_> {
                 // A shell about to start for a first use stays an ordinary start: the Pane keeps
                 // its blank surface rather than flashing the restored screen.
                 // A background start waits for its turn, so only a granted one is starting.
-                let background = !unavailable
+                let eligible = !unavailable
                     && session_ended.is_none()
                     && !state.start_unconfirmed()
-                    && state.prepares()
                     && state.will_prepare(boot);
+                let prepares = state.prepares();
+                let background = eligible && prepares;
+                // While the route's live work connection returns, a Core that offered work 1.4
+                // does not show that version yet, so the wait below looks again shortly. A Core
+                // that offered an older version never starts Panes in the background, and
+                // nothing polls it.
+                let recheck = eligible && !prepares && state.offers_prepare();
                 let starting = session_ended.is_none()
                     && (created_start
                         || state.start_restored.load(Ordering::Acquire)
@@ -425,14 +431,16 @@ impl ClaimWorker<'_> {
                             state.invalidate();
                             reply
                         }
-                        // SpaceTerm Core admitted nothing, so the Pane asks again on a later turn.
-                        Err(CoreError::ServiceBusy) => {
-                            state.release_prepare(boot);
-                            return Err(CoreError::ServiceBusy);
-                        }
                         // A Core that selected an older minor cannot start it in the background.
                         Err(CoreError::Unsupported) => reply,
-                        other => other?,
+                        // SpaceTerm Core admitted nothing, or the reply was lost, so the Pane asks
+                        // again on a later turn. Core starts a Pane at most once per boot: a
+                        // repeated Prepare for a Pane that has or had a Session only observes it.
+                        Err(error) => {
+                            state.release_prepare(boot);
+                            return Err(error);
+                        }
+                        Ok(reply) => reply,
                     };
                 } else {
                     if background {
@@ -441,7 +449,9 @@ impl ClaimWorker<'_> {
                     }
                     // Start, selection, repair and dismissal wake this wait, and so does
                     // anything `ControlWatch` sees that can change the server's answer.
-                    state.wake.wait(None);
+                    state.wake.wait(recheck.then(|| {
+                        std::time::Instant::now() + std::time::Duration::from_millis(250)
+                    }));
                     let size = *size.lock().unwrap_or_else(|e| e.into_inner());
                     grant_size = size;
                     grant_appearance = None;

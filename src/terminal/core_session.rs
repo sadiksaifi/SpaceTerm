@@ -345,6 +345,17 @@ impl CorePaneState {
         })
     }
 
+    /// Whether this Pane's Core offered work 1.4 at its latest admission, so it starts a
+    /// retained shell in the background once its live work connection selects that version.
+    pub(crate) fn offers_prepare(&self) -> bool {
+        self.directory_core().is_some_and(|core| {
+            core.core_versions().is_some_and(|offered| {
+                offered.work.major == spaceterm_core::protocol::version::WORK.major
+                    && offered.work.minor >= spaceterm_core::pane::MINOR_PREPARE
+            })
+        })
+    }
+
     pub(crate) fn select(&self) {
         let status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         if !self.start_unconfirmed()

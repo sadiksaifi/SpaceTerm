@@ -18,18 +18,16 @@ impl DirectConnector for Away {
     }
 }
 
-/// Gives each Pane of `states` its background start turn once it waits for one, as a window's
-/// start queue does, or leaves it when it never waits for one in time.
+/// Gives each Pane of `states` a background start turn whenever it waits for one, as a window's
+/// start queue does, until it waits unclaimed or the time runs out. A Pane whose attempt Core
+/// refused, or whose reply was lost, waits for another turn.
 fn grant_turns(states: &[Arc<crate::terminal::core_session::CorePaneState>]) {
     for state in states {
         let until = Instant::now() + Duration::from_secs(10);
-        while !state.awaiting_turn() && state.status() != CorePaneStatus::Takeover {
-            if Instant::now() >= until {
-                break;
-            }
+        while state.status() != CorePaneStatus::Takeover && Instant::now() < until {
+            state.grant_turn();
             std::thread::sleep(Duration::from_millis(5));
         }
-        state.grant_turn();
     }
 }
 
