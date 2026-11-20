@@ -2660,6 +2660,28 @@ mod flow {
         });
     }
 
+    /// A [`Shared`] whose first release hands the state to a migration and returns only once
+    /// the migration holds it alone, so the approval's next resume always meets that migration.
+    struct HandedOff {
+        shared: Shared,
+        /// Starts the migration, then reports that it holds the state.
+        handoff: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+        migrated: bool,
+    }
+    impl crate::service::lane::admin::Share for HandedOff {
+        fn release(&mut self) {
+            crate::service::lane::admin::Share::release(&mut self.shared);
+            if let Some((start, taken)) = self.handoff.take() {
+                start.send(()).unwrap();
+                taken.recv_timeout(Duration::from_secs(10)).unwrap();
+                self.migrated = true;
+            }
+        }
+        fn resume(&mut self, deadline: Instant) -> bool {
+            crate::service::lane::admin::Share::resume(&mut self.shared, deadline)
+        }
+    }
+
     /// A starting SpaceTerm Core's migration that takes the client's state alone while an
     /// approval waits for another operation, and keeps it past the deadline, never extends the
     /// approval: it ends by its deadline with the refusal that admitted nothing.
@@ -2670,19 +2692,30 @@ mod flow {
             let _settle = another_clients_restart(&lane);
             let state = lane.service.paths.data.join("client-state");
             let directory = Directory::open(&state, true).unwrap();
-            let mut share = Shared {
-                lock: Some(directory.lock_shared("state.lock").unwrap()),
-                directory,
+            let (start, started) = std::sync::mpsc::channel();
+            let (taken, took) = std::sync::mpsc::channel();
+            let mut share = HandedOff {
+                shared: Shared {
+                    lock: Some(directory.lock_shared("state.lock").unwrap()),
+                    directory,
+                },
+                handoff: Some((start, took)),
+                migrated: false,
             };
             let migrating = Directory::open(&state, false).unwrap();
-            let (taken, took) = std::sync::mpsc::channel();
             let (end, ended) = std::sync::mpsc::channel::<()>();
             let migration = std::thread::spawn(move || {
-                let lock = loop {
-                    if let Some(lock) = migrating.try_lock("state.lock").unwrap() {
-                        break lock;
-                    }
-                    std::thread::sleep(Duration::from_millis(5));
+                // The migration starts once the approval let its share go, and takes the state
+                // alone before the approval asks for its share again.
+                if started.recv_timeout(Duration::from_secs(10)).is_err() {
+                    return;
+                }
+                let lock = match migrating
+                    .wait_lock("state.lock", Duration::from_secs(5), None)
+                    .unwrap()
+                {
+                    crate::storage::LockWait::Locked(lock) => lock,
+                    _ => return,
                 };
                 taken.send(()).unwrap();
                 let _ = ended.recv_timeout(Duration::from_secs(10));
@@ -2703,13 +2736,14 @@ mod flow {
                 &mut |_| {},
             );
             assert_eq!(outcome, Err(LaneError::Code("service_busy".into())));
+            // The approval waited for its share until the deadline, and not past it.
+            let elapsed = began.elapsed();
             assert!(
-                began.elapsed() < Duration::from_millis(3500),
-                "{:?}",
-                began.elapsed()
+                elapsed >= Duration::from_secs(2) && elapsed < Duration::from_millis(3500),
+                "{elapsed:?}"
             );
-            assert!(took.try_recv().is_ok(), "the migration took the state");
-            assert!(share.lock.is_none());
+            assert!(share.migrated, "the migration took the state");
+            assert!(share.shared.lock.is_none());
             // Only the other client's Restart launched.
             assert_eq!(lane.launches.load(Ordering::SeqCst), 1);
             end.send(()).unwrap();
