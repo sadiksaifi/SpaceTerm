@@ -337,6 +337,35 @@ impl MachineUpdates {
             .map(|(_, action)| action)
     }
 
+    /// Each Machine's approved Stop or Restart that a surface executed and that has not
+    /// finished, and whether it still waits for another SpaceTerm Core operation. Settings, the
+    /// title-bar list and the status menu all show it from here.
+    pub(crate) fn approved(&self) -> Vec<(MachineId, crate::updates::state::Approved)> {
+        let checked = |action: &MachineAction| match action {
+            MachineAction::Stop => Some(super::Checked::Stop),
+            MachineAction::Restart => Some(super::Checked::Restart),
+            _ => None,
+        };
+        let mut approved: Vec<(MachineId, crate::updates::state::Approved)> = Vec::new();
+        for (machine, action, _) in &self.performed {
+            let Some(action) = checked(action) else {
+                continue;
+            };
+            if approved.iter().any(|(known, _)| known == machine) {
+                continue;
+            }
+            let waiting = self
+                .waiting(*machine)
+                .and_then(checked)
+                .is_some_and(|waiting| waiting == action);
+            approved.push((
+                *machine,
+                crate::updates::state::Approved { action, waiting },
+            ));
+        }
+        approved
+    }
+
     pub(crate) fn dismissed(&self) -> &Dismissed {
         &self.dismissed
     }
@@ -373,6 +402,7 @@ impl MachineUpdates {
             deferred: &HashMap::new(),
             pushes_held: self.holds_pushes(cx),
             checked: &self.checked,
+            approved: &[],
         };
         crate::updates::state::cancel_defers(update, marks, now)
     }
@@ -952,14 +982,22 @@ impl MachineUpdates {
         // An approved restart the Core refused without running it leaves no failure in its
         // facts, so the person waiting on the click hears it at once.
         // So does one whose outcome nothing confirmed: only Check Status reads its receipt.
+        // A restart without a Pending Version records no update failure the title bar could
+        // show, so its confirmed failure is heard at once as well.
+        let same_version = self
+            .machines
+            .iter()
+            .find(|known| known.machine == machine)
+            .and_then(|known| known.facts.as_ref())
+            .is_none_or(|facts| facts.pending.is_none());
         let refused = action == MachineAction::Restart
-            && matches!(
+            && (matches!(
                 outcome,
                 Err(ActionFailure::Busy
                     | ActionFailure::Unreachable
                     | ActionFailure::Unavailable(_)
                     | ActionFailure::Unconfirmed)
-            );
+            ) || (same_version && outcome.is_err()));
         self.notify_outcome(machine, action, surface, (outcome, operation), refused, cx);
     }
 

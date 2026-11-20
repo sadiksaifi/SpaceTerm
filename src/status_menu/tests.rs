@@ -267,6 +267,64 @@ fn a_stop_without_a_confirmed_outcome_offers_check_status_and_a_failed_one_try_a
     }
 }
 
+/// An approved Stop says it waits, then that it stops, until it finishes, and the menu offers
+/// no other Stop or Start of the same Core meanwhile.
+#[gpui::test]
+fn an_approved_stop_shows_its_progress_and_offers_nothing_else_until_it_finishes(
+    cx: &mut TestAppContext,
+) {
+    let fixture = start(vec![machine(LOCAL, "This Mac", 2)], cx);
+    let stop = submenu_command(&fixture.host.menu(), LOCAL, copy::STOP_CORE);
+    fixture.host.answers.borrow_mut().push(true);
+    cx.update(|cx| fixture.menu.perform(stop, None, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        fixture.machines.executed_actions(),
+        [(LOCAL, MachineAction::Stop)]
+    );
+    assert_eq!(
+        row(&fixture.host.menu(), LOCAL).status.as_deref(),
+        Some(crate::updates::copy::rows::STOPPING)
+    );
+    fixture.machines.emit(MachineUpdatesEvent::Waiting {
+        machine: LOCAL,
+        action: MachineAction::Stop,
+    });
+    cx.run_until_parked();
+    let menu = fixture.host.menu();
+    assert_eq!(
+        row(&menu, LOCAL).status.as_deref(),
+        Some(crate::updates::copy::rows::WAITING_FOR_OPERATION)
+    );
+    assert!(row(&menu, LOCAL).items.is_empty(), "nothing else is offered");
+
+    // The other operation settled and this Stop runs.
+    fixture.machines.emit(MachineUpdatesEvent::Finished {
+        machine: LOCAL,
+        action: MachineAction::CheckAgain,
+        outcome: Ok(()),
+        operation: None,
+    });
+    cx.run_until_parked();
+    let menu = fixture.host.menu();
+    assert_eq!(
+        row(&menu, LOCAL).status.as_deref(),
+        Some(crate::updates::copy::rows::WAITING_FOR_OPERATION),
+        "an unrelated answer changes nothing"
+    );
+    fixture.machines.emit(MachineUpdatesEvent::Finished {
+        machine: LOCAL,
+        action: MachineAction::Stop,
+        outcome: Ok(()),
+        operation: None,
+    });
+    cx.run_until_parked();
+    assert_ne!(
+        row(&fixture.host.menu(), LOCAL).status.as_deref(),
+        Some(crate::updates::copy::rows::WAITING_FOR_OPERATION)
+    );
+}
+
 #[gpui::test]
 fn a_restart_drawn_before_more_sessions_opened_asks_with_the_new_count(cx: &mut TestAppContext) {
     let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 1))], cx);

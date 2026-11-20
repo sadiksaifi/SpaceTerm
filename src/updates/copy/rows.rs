@@ -51,6 +51,10 @@ pub(crate) const RESTART_PENDING: &str = "Restart pending";
 pub(crate) const NOT_RESPONDING: &str = "Not responding";
 pub(crate) const OFFLINE: &str = "Offline";
 pub(crate) const STOPPED: &str = "Stopped";
+/// An approved Stop that SpaceTerm Core admitted and that has not finished.
+pub(crate) const STOPPING: &str = "Stopping\u{2026}";
+/// An approved Stop or Restart waiting for another SpaceTerm Core operation to settle.
+pub(crate) const WAITING_FOR_OPERATION: &str = "Waiting for another operation\u{2026}";
 /// A push held until SpaceTerm updates or its startup check ends.
 pub(crate) const WAITING_FOR_APP: &str = "Waiting for SpaceTerm update";
 /// SpaceTerm Core is too old for this SpaceTerm. The row sits under the SpaceTerm Core heading.
@@ -499,7 +503,35 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
     // The pill's failure alert when the row has one, so the list and the pill open the same
     // details.
     let failure_alert = || dialogs::machine_failure(row);
-    let mut shape = match &row.stage {
+    // An approved Stop or Restart on its way replaces the row's own state and actions on every
+    // surface, so none of them offers another action on the same Core meanwhile.
+    let approved = row.approved.map(|approved| match (approved.waiting, approved.action) {
+        (true, _) => Shape::new(format!(
+            "{subject} waits for another SpaceTerm Core operation to finish."
+        ))
+        .progress(WAITING_FOR_OPERATION),
+        (false, crate::updates::machines::Checked::Stop) => {
+            Shape::new(format!("{subject} is stopping.")).progress(STOPPING)
+        }
+        (false, crate::updates::machines::Checked::Restart) => {
+            // A restart into the Pending Version names it, as the Core's own announcement does.
+            let to = match &row.stage {
+                MachineStage::Restarting { to: Some(to), .. }
+                | MachineStage::Downloaded { version: to, .. } => Some(to.clone()),
+                _ => None,
+            };
+            match to {
+                Some(to) => Shape::new(format!("{subject} is restarting into {to}."))
+                    .progress(RESTARTING)
+                    .target(&to),
+                None => Shape::new(format!("{subject} is restarting.")).progress(RESTARTING),
+            }
+        }
+    });
+    let mut shape = if let Some(approved) = approved {
+        approved
+    } else {
+        match &row.stage {
         MachineStage::Running => match (row.blocked, &running) {
             (Some(Blocked::CoreTooOld), _) => {
                 Shape::new(format!("{subject} is too old for this SpaceTerm."))
@@ -730,12 +762,14 @@ pub(crate) fn machine_row(row: &MachineRow) -> RowView {
                     Command::Explain(dialogs::how_to_update(row)),
                 ))
         }
+    }
     };
     // A check the person asked for leads the row on every stage that doesn't already present
     // it, unless work the row reports is in progress. The row's own update or retry action and
     // its versions stay beside it in Settings; the title-bar list shows the check, and a failure
     // the check displaces stays among the details.
-    let presents_check = match &row.stage {
+    let presents_check = row.approved.is_some()
+        || match &row.stage {
         MachineStage::Running => row.blocked.is_none() && running.is_some(),
         MachineStage::Offline
         | MachineStage::Connecting

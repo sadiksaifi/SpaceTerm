@@ -124,6 +124,7 @@ impl Desk {
             deferred: &self.deferred,
             pushes_held: false,
             checked: &self.checked,
+            approved: &[],
         }
     }
 
@@ -1107,6 +1108,7 @@ fn store_view(cx: &mut gpui::TestAppContext, app: &AppFacts<'_>) -> (UpdateView,
             deferred: store.deferred(),
             pushes_held: false,
             checked: store.checked(),
+            approved: &[],
         };
         let view = UpdateView::new(*app, store.machines(), marks, NOW);
         let rows = view.machine_rows().len();

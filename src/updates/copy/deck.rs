@@ -318,6 +318,7 @@ fn build() -> Deck {
         deferred: &deferred,
         pushes_held: false,
         checked: &checked,
+        approved: &[],
     };
     let fleets: Vec<Vec<_>> = [
         (LOCAL, "This Mac"),

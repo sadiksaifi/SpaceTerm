@@ -26,6 +26,7 @@ fn row(update: &MachineUpdate, now: u64) -> MachineRow {
         deferred: &deferred,
         pushes_held: false,
         checked: &checked,
+        approved: &[],
     };
     MachineRow::new(update, marks, now)
 }
