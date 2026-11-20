@@ -1326,6 +1326,10 @@ mod core_workspaces {
         workspace: Id,
         tab: Id,
         panes: BTreeMap<PaneId, Id>,
+        /// The server identity each Pane's subscription was opened for. A provisional Pane has
+        /// none. A Pane binds until its subscription is for its server identity, however its
+        /// recorded identity is translated meanwhile.
+        bound: BTreeMap<PaneId, Id>,
         /// The opener generation each Pane's subscription came from, or `None` once another
         /// presentation of the same server Pane fenced it.
         opened: BTreeMap<PaneId, Option<u64>>,
@@ -1360,6 +1364,7 @@ mod core_workspaces {
                 workspace,
                 tab,
                 panes: BTreeMap::new(),
+                bound: BTreeMap::new(),
                 opened: BTreeMap::new(),
                 views: BTreeMap::new(),
                 screen_focus: BTreeMap::new(),
@@ -1386,10 +1391,14 @@ mod core_workspaces {
                 self.edits.defer_alias_retirement(previous);
             }
             if self.edits.provisional(core) {
+                self.bound.remove(&pane_id);
                 self.pending_starts.borrow_mut().insert(pane_id);
-            } else if self.pending_starts.borrow_mut().remove(&pane_id) {
-                state.start_created();
-                self.shell_starts.borrow_mut().insert(pane_id);
+            } else {
+                self.bound.insert(pane_id, core);
+                if self.pending_starts.borrow_mut().remove(&pane_id) {
+                    state.start_created();
+                    self.shell_starts.borrow_mut().insert(pane_id);
+                }
             }
             state.observe(self.changes.0.clone());
             self.opened
@@ -1451,6 +1460,7 @@ mod core_workspaces {
             if let Some(previous) = self.panes.remove(&pane_id) {
                 self.edits.defer_alias_retirement(previous);
             }
+            self.bound.remove(&pane_id);
             self.pending_starts.borrow_mut().remove(&pane_id);
             self.shell_starts.borrow_mut().remove(&pane_id);
             self.opened.remove(&pane_id);
@@ -1518,10 +1528,12 @@ mod core_workspaces {
                 .is_some_and(|generation| *generation != Some(self.sessions.generation()))
         }
 
-        /// Whether the Pane must open again: the server confirmed its provisional identity, or
-        /// its route connected or disconnected since it opened.
+        /// Whether the Pane must open again: no subscription was opened for its server identity
+        /// yet, as for a provisional Pane the server confirmed, or its route connected or
+        /// disconnected since it opened.
         pub(crate) fn needs_binding(&self, pane_id: PaneId, core: Id) -> bool {
-            self.panes.get(&pane_id).is_some_and(|id| *id != core) || self.reopened(pane_id)
+            (self.panes.contains_key(&pane_id) && self.bound.get(&pane_id) != Some(&core))
+                || self.reopened(pane_id)
         }
 
         pub(crate) fn edits(&self) -> WorkspaceEditSource {
@@ -4074,9 +4086,27 @@ mod core_workspaces {
             connected: bool,
             /// Every server Pane opened so far, in the order it was opened.
             order: Mutex<Vec<super::Id>>,
+            /// Panes no subscription opens for yet, as the account-local opener refuses a Pane
+            /// its attachment catalog does not list yet.
+            refused: Mutex<std::collections::BTreeSet<super::Id>>,
         }
 
         impl ScriptedPanes {
+            /// Opens no subscription for `pane` until [`Self::allow`].
+            pub(crate) fn refuse(&self, pane: super::Id) {
+                self.refused.lock().expect("refused").insert(pane);
+            }
+
+            /// Opens subscriptions for `pane` again.
+            pub(crate) fn allow(&self, pane: super::Id) {
+                self.refused.lock().expect("refused").remove(&pane);
+            }
+
+            /// Whether a subscription was ever opened for `pane`.
+            pub(crate) fn was_opened(&self, pane: super::Id) -> bool {
+                self.panes.lock().expect("panes").contains_key(&pane)
+            }
+
             pub(crate) fn new(
                 session_factory: crate::terminal::WorkspaceTerminalSessionFactory,
             ) -> std::rc::Rc<Self> {
@@ -4092,6 +4122,7 @@ mod core_workspaces {
                     local_files,
                     session_factory,
                     panes: Mutex::new(std::collections::BTreeMap::new()),
+                    refused: Mutex::default(),
                     connected: false,
                     order: Mutex::default(),
                 })
@@ -4106,6 +4137,7 @@ mod core_workspaces {
                     local_files: crate::runtime::local_filesystem(),
                     session_factory,
                     panes: Mutex::new(std::collections::BTreeMap::new()),
+                    refused: Mutex::default(),
                     connected: true,
                     order: Mutex::default(),
                 })
@@ -4160,6 +4192,9 @@ mod core_workspaces {
             }
 
             fn open(&self, pane: super::Id) -> Option<super::WorkspacePaneSubscription> {
+                if self.refused.lock().expect("refused").contains(&pane) {
+                    return None;
+                }
                 let connection = ScriptedPane::new();
                 connection
                     .connect_when_observed

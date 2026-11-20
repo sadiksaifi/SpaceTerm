@@ -2165,3 +2165,71 @@ fn optimistic_field_presentation_never_renews_an_unseen_conflicting_version() {
     }
     assert!(model.take_conflict().is_none());
 }
+
+/// The person opens a Tab and splits it, and asks for another Tab after the server answered the
+/// first but before this window polled that answer. The second request presents the first Tab's
+/// confirmed Pane at once, while the account-local opener's attachment catalog does not list it
+/// yet and opens no subscription. That Pane still binds to its server identity once it can, and
+/// starts its shell, so a rapid burst never leaves a Pane without a shell.
+#[gpui::test]
+fn a_confirmed_tab_whose_subscription_could_not_open_yet_still_binds_and_starts(
+    cx: &mut TestAppContext,
+) {
+    confirmed_panes_bind_once_their_subscriptions_open(false, cx);
+}
+
+/// [`a_confirmed_tab_whose_subscription_could_not_open_yet_still_binds_and_starts`], for New Tab
+/// then Split Right.
+#[gpui::test]
+fn a_confirmed_split_whose_subscription_could_not_open_yet_still_binds_and_starts(
+    cx: &mut TestAppContext,
+) {
+    confirmed_panes_bind_once_their_subscriptions_open(true, cx);
+}
+
+fn confirmed_panes_bind_once_their_subscriptions_open(split: bool, cx: &mut TestAppContext) {
+    {
+        let (harness, cx) = window_harness(cx);
+        cx.dispatch_action(crate::ui::NewTab);
+        if split {
+            cx.dispatch_action(crate::ui::SplitRight);
+        }
+        harness.core.finish(true, true);
+        let created = harness.core.inventory().workspaces[0]
+            .tabs
+            .last()
+            .unwrap()
+            .root_pane;
+        harness.panes.refuse(created);
+        // The next request presents what the server answered before any poll.
+        cx.dispatch_action(crate::ui::NewTab);
+        if split {
+            cx.dispatch_action(crate::ui::SplitRight);
+        }
+        cx.run_until_parked();
+        harness.panes.allow(created);
+        for _ in 0..8 {
+            project_window(&harness, cx);
+            if harness.core.0.borrow().original.is_some() {
+                harness.core.finish(true, true);
+            }
+        }
+        let inventory = harness.core.inventory();
+        let panes: Vec<Id> = inventory.workspaces[0].tabs[1..]
+            .iter()
+            .flat_map(|tab| tab.panes.iter().map(|pane| pane.id))
+            .collect();
+        assert_eq!(panes.len(), if split { 4 } else { 2 });
+        for pane in panes {
+            assert!(
+                harness.panes.was_opened(pane),
+                "split={split}: every confirmed Pane gets its subscription"
+            );
+            assert_eq!(
+                harness.panes.pane(pane).created_starts(),
+                1,
+                "split={split}: every created Pane starts its shell once"
+            );
+        }
+    }
+}
