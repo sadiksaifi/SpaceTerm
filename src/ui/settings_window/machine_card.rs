@@ -974,8 +974,8 @@ impl SettingsWindow {
     }
 
     /// The Server row's steps: at most one button, and every other step in the ⋯ menu. The
-    /// button is Update when one is offered, otherwise
-    /// Start SpaceTerm Core for a stopped server.
+    /// button is Update when one is offered, otherwise Open Login Items for a server that is off
+    /// there. Start SpaceTerm Core stays in the ⋯ menu.
     fn machine_row_view(&self, cx: &App) -> Option<MachineRowView> {
         let choice = self.selected_machine()?;
         let version = self.version_view(cx);
@@ -1360,7 +1360,7 @@ impl SettingsWindow {
                 _ => SharedString::new_static(status_step_label(&step)),
             };
             // Steps that replace each other share a slot, so keyboard focus stays on it when,
-            // say, Start SpaceTerm Core gives way to Update.
+            // say, Open Login Items gives way to Update.
             let slot = status_step_slot(&step).unwrap_or_else(|| status_step_selector(&step));
             let description = if matches!(step, StatusStep::Shared(_)) {
                 row.map(|row| row.accessibility)
@@ -1589,7 +1589,8 @@ fn status_step_primary(step: &StatusStep) -> bool {
 fn button_rank(step: &StatusStep) -> Option<u8> {
     match step {
         StatusStep::Shared(_) => Some(1),
-        StatusStep::Local(ServiceAction::Start | ServiceAction::OpenLoginItems) => Some(2),
+        // Start SpaceTerm Core lives in the ⋯ menu with Restart and Stop.
+        StatusStep::Local(ServiceAction::OpenLoginItems) => Some(2),
         _ => None,
     }
 }

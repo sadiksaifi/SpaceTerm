@@ -1174,7 +1174,11 @@ fn a_confirmed_stop_stays_stopped_and_offers_start(cx: &mut TestAppContext) {
 
     assert_eq!(service.changes(), vec![ServiceCall::Stop]);
     assert_eq!(status(&window, cx), "Stopped");
-    assert!(rendered(START_SERVICE_SELECTOR, cx));
+    assert!(
+        !rendered(START_SERVICE_SELECTOR, cx),
+        "Start SpaceTerm Core is no button beside the state"
+    );
+    assert!(row_offers(START_SERVICE_SELECTOR, cx));
     let presented = service_presentation(&window, cx);
     assert_eq!(
         presented.actions,
@@ -1211,7 +1215,7 @@ fn start_restores_a_stopped_core_without_asking(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_start_refused_for_login_items_never_runs_by_itself(cx: &mut TestAppContext) {
     let (window, _core, service, cx) = open_machines_with_service(Ok(not_running()), cx);
-    assert!(rendered(START_SERVICE_SELECTOR, cx));
+    assert!(row_offers(START_SERVICE_SELECTOR, cx));
 
     service.turn_off_in_login_items(true);
     click(START_SERVICE_SELECTOR, cx);
@@ -1224,7 +1228,7 @@ fn a_start_refused_for_login_items_never_runs_by_itself(cx: &mut TestAppContext)
         presented.actions,
         vec![ServiceAction::OpenLoginItems, ServiceAction::Uninstall]
     );
-    assert!(!rendered(START_SERVICE_SELECTOR, cx));
+    assert!(!row_offers(START_SERVICE_SELECTOR, cx));
 
     click(OPEN_LOGIN_ITEMS_SELECTOR, cx);
     assert_eq!(service.calls().last(), Some(&ServiceCall::OpenLoginItems));
@@ -1237,7 +1241,7 @@ fn a_start_refused_for_login_items_never_runs_by_itself(cx: &mut TestAppContext)
     cx.run_until_parked();
 
     assert_eq!(status(&window, cx), "Not running");
-    assert!(rendered(START_SERVICE_SELECTOR, cx));
+    assert!(row_offers(START_SERVICE_SELECTOR, cx));
     assert_eq!(
         service.changes(),
         vec![ServiceCall::Start],
