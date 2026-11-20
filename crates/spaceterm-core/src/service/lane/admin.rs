@@ -326,6 +326,7 @@ pub fn open(
         }
     }
     let receipts: Vec<_> = settled.iter().map(|(_, receipt)| receipt.clone()).collect();
+    // Every outcome is kept before any receipt is acknowledged.
     pending.keep_by(&receipts, deadline)?;
     // An operation SpaceTerm Core no longer holds was acknowledged by an earlier connection
     // whose reply was lost, or its pairing was revoked. Only the first kept an outcome.
@@ -338,17 +339,45 @@ pub fn open(
     }
     for (id, receipt) in settled {
         let by = deadline.min(Instant::now() + REQUEST_LIMIT);
-        if let Err(error) = super::client::acknowledge(&mut session, &id, by) {
+        if let Err(error) = acknowledge_kept(&mut session, pending, &id, by) {
             return Err(Unopened {
                 error,
                 settled: acknowledged,
             });
         }
-        // An acknowledged record the server no longer holds settles as gone next time.
-        let _ = pending.remove_by(&receipt.operation, deadline);
         acknowledged.push(receipt);
     }
     Ok((session, acknowledged))
+}
+
+/// Settles the receipt of `id`, which this route and identity recorded: keeps its outcome, then
+/// acknowledges it. Every connection that settles a receipt of a recorded operation does it this
+/// way, whether a flow follows its own operation or a later connection settles leftovers.
+fn settle_receipt(
+    session: &mut Session,
+    pending: &PendingOperations,
+    id: &OperationId,
+    receipt: &LaneReceipt,
+    deadline: Instant,
+) -> Result<(), LaneError> {
+    pending.keep_by(std::slice::from_ref(receipt), deadline)?;
+    acknowledge_kept(session, pending, id, deadline)
+}
+
+/// Acknowledges the receipt of `id`, whose outcome is already kept, and forgets the operation
+/// once SpaceTerm Core confirmed the acknowledgement. An acknowledgement that may not have
+/// arrived leaves the operation recorded: a later connection acknowledges a receipt SpaceTerm
+/// Core still holds, and returns the kept outcome of one it no longer holds.
+fn acknowledge_kept(
+    session: &mut Session,
+    pending: &PendingOperations,
+    id: &OperationId,
+    deadline: Instant,
+) -> Result<(), LaneError> {
+    super::client::acknowledge(session, id, deadline)?;
+    // An acknowledged record the server no longer holds settles as gone next time.
+    let _ = pending.remove_by(&id.to_string(), deadline);
+    Ok(())
 }
 
 /// Check Status: what became of `operation`, which this identity admitted on this route, read
@@ -371,10 +400,8 @@ pub fn check(
     match super::client::leftover(&mut session, operation, by)? {
         Leftover::Settled(receipt) => {
             pending.keep_by(std::slice::from_ref(&receipt), deadline)?;
-            if let Some(_settling) = pending.settle()?
-                && super::client::acknowledge(&mut session, operation, by).is_ok()
-            {
-                let _ = pending.remove_by(&key, deadline);
+            if let Some(_settling) = pending.settle()? {
+                let _ = acknowledge_kept(&mut session, pending, operation, by);
             }
             Ok(Leftover::Settled(receipt))
         }
@@ -700,8 +727,9 @@ struct Journal {
 }
 
 /// One `Execute` attempt of operation `id` under [`Lane::perform_as`]. The operation is recorded
-/// in `pending` before its first `Execute` only, after `dispatch` allows each attempt, and
-/// removed once its receipt settled and was acknowledged. `accepted` runs once the server is
+/// in `pending` before its first `Execute` only, after `dispatch` allows each attempt. Its
+/// settled receipt's outcome is kept before the receipt is acknowledged, and the operation is
+/// removed only once SpaceTerm Core confirmed the acknowledgement. `accepted` runs once the server is
 /// known to have admitted it. Also returns whether `share` was shared again afterwards.
 #[allow(
     clippy::too_many_arguments,
@@ -719,12 +747,18 @@ fn execute_as(
     interrupted: &dyn Fn() -> Option<Instant>,
 ) -> (Result<Outcome, LaneError>, bool) {
     let until = Instant::now() + wait;
+    // Recording the operation and settling its receipt both write the record and move the share.
+    let journal = std::cell::RefCell::new(journal);
+    let share = std::cell::RefCell::new(share);
+    // Whether the state the record lives in was shared again, once the flow settled its receipt.
+    let mut resumed = None;
     let outcome = lane.perform_as(
         session,
         (action, token, id),
         wait,
         &mut |operation| {
             dispatch()?;
+            let mut journal = journal.borrow_mut();
             if !journal.journaled {
                 // A record another caller holds past the deadline dispatches nothing.
                 let following = pending.follow(until)?;
@@ -737,16 +771,24 @@ fn execute_as(
                 journal._following = Some(following);
                 journal.journaled = true;
             }
-            share.release();
+            share.borrow_mut().release();
             Ok(())
         },
-        accepted,
+        (accepted, &mut |session, id, receipt, by| {
+            // The record is written only while the state it lives in is shared. Without it,
+            // the receipt stays with SpaceTerm Core for the client that reads the record.
+            let shared = share.borrow_mut().resume(until);
+            resumed = Some(shared);
+            if shared && journal.borrow().journaled {
+                let _ = settle_receipt(session, pending, id, receipt, by);
+            }
+        }),
         interrupted,
     );
-    let shared = share.resume(until);
-    if shared && let Ok(Outcome::Settled { receipt, .. }) = &outcome {
-        let _ = pending.remove_by(&receipt.operation, until);
-    }
+    let shared = match resumed {
+        Some(shared) => shared,
+        None => share.borrow_mut().resume(until),
+    };
     (outcome, shared)
 }
 

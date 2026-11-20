@@ -383,12 +383,29 @@ pub(crate) fn perform(
         wait,
         admitted,
         &mut || {},
+        &mut acknowledge_only,
         interrupted,
     )
 }
 
+/// Acknowledges a settled receipt on `session` for a caller that keeps no record of its
+/// operations.
+fn acknowledge_only(session: &mut Session, id: &OperationId, _: &LaneReceipt, by: Instant) {
+    let _ = acknowledge(session, id, by);
+}
+
+/// What a flow does with its operation's settled receipt on the session that read it, by the
+/// instant it passes. A caller that records its operations keeps the outcome before it
+/// acknowledges the receipt.
+pub type Settle<'a> = dyn FnMut(&mut Session, &OperationId, &LaneReceipt, Instant) + 'a;
+
 /// [`perform`] that runs `accepted` once, as soon as the server is known to have admitted the
-/// operation: its `Accepted` reply, or a receipt for it.
+/// operation: its `Accepted` reply, or a receipt for it, and hands its settled receipt to
+/// `settle` on the session that read it.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one execution's parts, used once"
+)]
 fn perform_following(
     connector: &Arc<dyn Connector>,
     session: Session,
@@ -396,6 +413,7 @@ fn perform_following(
     wait: Duration,
     admitted: &mut dyn FnMut(&OperationId) -> Result<(), LaneError>,
     accepted: &mut dyn FnMut(),
+    settle: &mut Settle<'_>,
     interrupted: &dyn Fn() -> Option<Instant>,
 ) -> Result<Outcome, LaneError> {
     let started = Instant::now();
@@ -480,12 +498,7 @@ fn perform_following(
             Some(session) => {
                 match resolve(session, &operation, &request_deadline(Instant::now())) {
                     Ok(LaneReply::Receipt(receipt)) if settled(&receipt) => {
-                        let _ = session.request_within(
-                            &LaneRequest::Acknowledge {
-                                operation: operation.clone(),
-                            },
-                            &request_deadline(Instant::now()),
-                        );
+                        settle(session, &id, &receipt, request_deadline(Instant::now())());
                         let boot = boot.unwrap_or_else(|| receipt.boot.clone());
                         return Ok(Outcome::Settled { receipt, boot });
                     }
@@ -785,20 +798,21 @@ impl Lane {
             (action, token, id),
             wait,
             admitted,
-            &mut || {},
+            (&mut || {}, &mut acknowledge_only),
             interrupted,
         )
     }
 
     /// Executes a previewed action as operation `id` and follows it. See [`perform`]. `accepted`
-    /// runs once, as soon as the server is known to have admitted the operation.
+    /// runs once, as soon as the server is known to have admitted the operation, and `settle`
+    /// takes its settled receipt on the session that read it.
     pub fn perform_as(
         &self,
         session: Session,
         (action, token, id): (LaneAction, String, OperationId),
         wait: Duration,
         admitted: &mut dyn FnMut(&OperationId) -> Result<(), LaneError>,
-        accepted: &mut dyn FnMut(),
+        (accepted, settle): (&mut dyn FnMut(), &mut Settle<'_>),
         interrupted: &dyn Fn() -> Option<Instant>,
     ) -> Result<Outcome, LaneError> {
         perform_following(
@@ -808,6 +822,7 @@ impl Lane {
             wait,
             admitted,
             accepted,
+            settle,
             interrupted,
         )
     }

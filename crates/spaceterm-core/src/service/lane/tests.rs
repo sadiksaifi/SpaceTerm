@@ -3016,6 +3016,80 @@ mod flow {
         });
     }
 
+    /// A flow that follows its own Restart keeps the receipt's outcome before it acknowledges the
+    /// receipt, and forgets the operation only once SpaceTerm Core confirmed the
+    /// acknowledgement. An acknowledgement cut before the Core handled it leaves the receipt with
+    /// the Core and the operation recorded, so the next connection acknowledges it. One cut after
+    /// the Core forgot the receipt leaves the operation recorded too, and the kept outcome
+    /// answers the next connection.
+    #[test]
+    fn a_followed_receipt_is_kept_before_its_acknowledgement_and_forgotten_once_confirmed() {
+        for answered in [false, true] {
+            with_lane(|lane| {
+                let pending = pending(&lane);
+                let ledger_lane = lane.lane.clone();
+                *lane.hook.lock().unwrap() = Some(Box::new(move |op: &OperationId| {
+                    let (old, op) = (ledger_lane.clone(), *op);
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(300));
+                        let _helper = helper_lock(&old);
+                        let mut ledger = old.ledger().unwrap();
+                        ledger.claim(&op).unwrap();
+                        ledger.mark(&op, State::Done).unwrap();
+                    });
+                }));
+                let (route, cut) = cutting(&lane, answered);
+                let (mut session, _) =
+                    admin::open(&route, &pending, Instant::now() + REQUEST_LIMIT).unwrap();
+                let preview = admin::preview(&mut session, LaneAction::Restart).unwrap();
+                *cut.lock().unwrap() = Some((acknowledge as fn(&LaneRequest) -> bool, 1));
+                let outcome = admin::execute_approved(
+                    &route,
+                    session,
+                    LaneAction::Restart,
+                    preview.token,
+                    Instant::now() + Duration::from_secs(20),
+                    Duration::from_secs(20),
+                    &pending,
+                    &mut admin::Unshared,
+                    &mut || Ok(()),
+                    &|| None,
+                    &mut |_| {},
+                )
+                .unwrap();
+                let Outcome::Settled { receipt, .. } = outcome else {
+                    panic!("answered={answered}: expected a settled receipt, got {outcome:?}");
+                };
+                assert_eq!(receipt.state, LaneOperationState::Done);
+                let id = OperationId::parse(&receipt.operation).unwrap();
+                assert_eq!(
+                    pending.list().unwrap(),
+                    vec![receipt.operation.clone()],
+                    "answered={answered}: an unconfirmed acknowledgement forgets nothing"
+                );
+                assert_eq!(
+                    pending
+                        .kept_by(&receipt.operation, Instant::now() + REQUEST_LIMIT)
+                        .unwrap()
+                        .as_ref(),
+                    Some(&receipt),
+                    "answered={answered}: the outcome was kept before the acknowledgement"
+                );
+                assert_eq!(
+                    lane.lane.ledger().unwrap().resolve(&id).unwrap().is_some(),
+                    !answered,
+                    "answered={answered}"
+                );
+
+                let (_, settled) =
+                    admin::open(&route, &pending, Instant::now() + REQUEST_LIMIT).unwrap();
+                assert_eq!(settled, vec![receipt], "answered={answered}");
+                assert!(pending.list().unwrap().is_empty(), "answered={answered}");
+                assert_eq!(lane.lane.ledger().unwrap().resolve(&id).unwrap(), None);
+            });
+        }
+    }
+
     /// Settings' Check Now on a paired Machine opens the lane as the original surface's identity
     /// and acknowledges its leftovers, whole or in part. The original surface's Check Status for
     /// each operation then reads the same outcome.
