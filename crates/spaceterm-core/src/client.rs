@@ -670,6 +670,8 @@ impl MachineConnection {
     /// and returns its carrier. A local admission waits for a Restart or Update to finish;
     /// `cancelled` ends that wait early.
     /// With `deadline`, the dial, the wait for a Restart or Update and admission end by it.
+    /// Without it, admission has its own [`protocol::CONNECTION_LIMIT`] from the handshake on,
+    /// however long the dial or that wait took.
     fn connect_admitted(
         &self,
         cancelled: Option<&dyn Fn() -> bool>,
@@ -679,7 +681,7 @@ impl MachineConnection {
             return Err(CoreError::ServiceBusy);
         }
         let admission =
-            deadline.unwrap_or_else(|| std::time::Instant::now() + protocol::CONNECTION_LIMIT);
+            || deadline.unwrap_or_else(|| std::time::Instant::now() + protocol::CONNECTION_LIMIT);
         if let Some(direct) = &self.direct {
             let connection = match deadline {
                 Some(deadline) => direct.connector.connect_by(deadline),
@@ -699,7 +701,7 @@ impl MachineConnection {
                     name: &self.client_name(),
                     agent: self.agent(),
                 },
-                admission,
+                admission(),
             );
             self.record_work(
                 &admitted
@@ -738,7 +740,7 @@ impl MachineConnection {
             },
             &core,
             &self.identity,
-            admission,
+            admission(),
         );
         self.record_work(&admitted);
         admitted?;
@@ -1378,6 +1380,83 @@ mod tests {
             !clients.join("desktop").exists(),
             "the CLI never touches the desktop's state"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// An ordinary connection waits at admission while a Restart holds the service lock, longer
+    /// than the protocol's admission budget. Its handshake then still gets that whole budget,
+    /// because the budget starts at the handshake. A connection with an explicit deadline ends
+    /// that same wait by its deadline instead.
+    #[test]
+    fn ordinary_admission_gets_its_whole_budget_after_a_restart_wait() {
+        use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+        use std::time::{Duration, Instant};
+
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "st-wait-{:x}",
+            u64::from_be_bytes(protocol::random().unwrap()[..8].try_into().unwrap())
+        ));
+        let paths = Paths {
+            identity: "spaceterm-development".into(),
+            data: root.join("d"),
+            runtime: root.join("r"),
+        };
+        let core = MachineConnection::with_paths(paths.clone()).unwrap();
+        core.setup().unwrap();
+        let data = Directory::open(&paths.data, false).unwrap();
+        // A stopped service waits at admission for the operation that may start it.
+        data.write_json(
+            c"service.json",
+            &serde_json::json!({
+                "installation": "a".repeat(64),
+                "stopped": true,
+                "automatic_start": true,
+                "installed": true,
+                "removing": false,
+                "run": null,
+            }),
+        )
+        .unwrap();
+        let operation = data.lock("service.lock", false).unwrap();
+
+        let deadline = Instant::now() + Duration::from_millis(400);
+        assert_eq!(core.link_by(deadline).err(), Some(CoreError::ServiceBusy));
+        let late = Instant::now().saturating_duration_since(deadline);
+        assert!(
+            late < Duration::from_millis(300),
+            "the explicit deadline's wait outlived it by {late:?}"
+        );
+
+        Directory::open(&paths.runtime, true).unwrap();
+        let listener = UnixListener::bind(paths.socket()).unwrap();
+        std::fs::set_permissions(paths.socket(), std::fs::Permissions::from_mode(0o600)).unwrap();
+        let pin = core.machine_id().unwrap();
+        let identity = paths.identity.clone();
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            protocol::admit_core(
+                &mut stream,
+                &pin,
+                &identity,
+                &protocol::CoreVersions::for_tests(),
+            )
+            .unwrap()
+            .work()
+        });
+        let service = paths.data.join("service.json");
+        let restart = std::thread::spawn(move || {
+            std::thread::sleep(protocol::CONNECTION_LIMIT + Duration::from_millis(300));
+            // The Restart started the service and releases the lock.
+            std::fs::remove_file(service).unwrap();
+            drop(operation);
+        });
+        let started = Instant::now();
+        let link = core.connect(Arc::new(|_: LinkEvent| {}));
+        assert!(started.elapsed() > protocol::CONNECTION_LIMIT);
+        restart.join().unwrap();
+        assert!(link.is_ok(), "{:?}", link.err());
+        peer.join().unwrap();
+        link.unwrap().close();
         std::fs::remove_dir_all(root).unwrap();
     }
 
