@@ -421,7 +421,7 @@ fn a_real_integrated_shell_computing_in_a_builtin_trap_is_refused_and_finishes_a
     wait_for_shell_prompt(&session, &events);
     session
         .event_publisher
-        .note_activity(Instant::now() - Duration::from_secs(7200), true);
+        .note_activity(Instant::now() - Duration::from_secs(7200), true, 0);
     let observed = session.idle_session().unwrap();
     let scan = || {
         let deadline = Instant::now() + REAL_SHELL_DEADLINE;
@@ -429,7 +429,7 @@ fn a_real_integrated_shell_computing_in_a_builtin_trap_is_refused_and_finishes_a
             // Advance the test's quiet period after real startup and resume output drained.
             session
                 .event_publisher
-                .note_activity(Instant::now() - Duration::from_secs(7200), true);
+                .note_activity(Instant::now() - Duration::from_secs(7200), true, 0);
             if let Some(lease) = spaceterm_core::idle_restart::Lease::scan(
                 std::slice::from_ref(&observed),
                 Instant::now() + Duration::from_secs(7200),

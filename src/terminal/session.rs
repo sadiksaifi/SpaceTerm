@@ -10,6 +10,7 @@ pub(crate) use scrollback::ScrollbackReply;
 mod publication;
 pub(crate) use publication::DEFAULT_FRAME_RATE;
 mod activity;
+pub(crate) use activity::{PromptProgress, ShellZone};
 mod subscriptions;
 pub use clipboard::ClipboardCompletion;
 pub use clipboard::{ClientEffectGrant, ClientEffectRequest, ClipboardRequest};
@@ -1471,7 +1472,7 @@ impl TerminalWorker {
         });
 
         events.set_probe(native_pty.session_probe());
-        events.note_activity(Instant::now(), false);
+        events.note_activity(Instant::now(), false, 0);
         let mut worker = Self {
             metadata_state,
             native_pty,
@@ -1682,13 +1683,22 @@ impl TerminalWorker {
     }
 
     fn process_command(&mut self, command: Command) -> bool {
-        // The worker processes each submitted line once, in the order input accepted it.
+        // The worker processes each submitted line once, in the order input accepted it. The
+        // line counts as written once the PTY accepted all of its bytes.
         if !matches!(command, Command::Received(..)) && command.submits_line() {
             let result = self.process_command_once(command);
-            self.events.note_written();
+            self.input.note_line();
+            self.note_lines_written();
             return result;
         }
         self.process_command_once(command)
+    }
+
+    /// Records each submitted line whose bytes the PTY has now accepted whole.
+    fn note_lines_written(&mut self) {
+        for _ in 0..self.input.take_written_lines() {
+            self.events.note_written(self.emulator.prompt_progress());
+        }
     }
 
     fn process_command_once(&mut self, command: Command) -> bool {
@@ -2488,11 +2498,14 @@ impl TerminalWorker {
             self.emulator.at_empty_prompt()
                 && self.input.deadline().is_none()
                 && !self.clipboard.pending(),
+            self.emulator.prompt_progress().fresh,
         );
     }
 
     fn flush_input(&mut self) -> bool {
-        if let Err(error) = self.input.drain(&mut self.native_pty) {
+        let drained = self.input.drain(&mut self.native_pty);
+        self.note_lines_written();
+        if let Err(error) = drained {
             let _ = self.send_runtime_failure(
                 TerminalFailure::pty("write-shell-input")
                     .with_reason(FailureReason::Io(error.kind())),

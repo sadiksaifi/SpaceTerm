@@ -27,6 +27,22 @@ impl TerminalEmulator {
         self.metadata.note_input(bytes);
     }
 
+    /// The owning shell's prompt as the close fence reads it: the fresh prompts it drew, and
+    /// whether it was at one, with or without input, rather than running a command or starting.
+    pub(crate) fn prompt_progress(&self) -> crate::terminal::session::PromptProgress {
+        let prompt = self.metadata.owned_prompt();
+        crate::terminal::session::PromptProgress {
+            fresh: prompt.fresh,
+            zone: match prompt.zone {
+                None => crate::terminal::session::ShellZone::Starting,
+                Some(PromptZone::Prompt | PromptZone::CommandInput) => {
+                    crate::terminal::session::ShellZone::AtPrompt
+                }
+                Some(_) => crate::terminal::session::ShellZone::Running,
+            },
+        }
+    }
+
     /// Whether the owning shell waits at its own empty prompt, which Run admission also requires.
     /// A shell without prompt markers never does.
     pub(crate) fn at_empty_prompt(&self) -> bool {

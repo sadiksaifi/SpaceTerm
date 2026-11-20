@@ -22,16 +22,20 @@ pub(super) struct ActivityState {
 }
 
 /// The ordered evidence that answers each submitted line. Input reaches the worker in the order
-/// it was accepted, so the `n`th line the worker writes is the `n`th one accepted. Only evidence
-/// the worker observes after writing a line answers it: a fresh prompt of the owning shell, or
-/// for a shell without prompt markers, a program that took the foreground and gave it back.
-/// Output alone answers nothing, since the shell itself echoes and ends the line before the
-/// program it runs takes the foreground.
+/// it was accepted, so the `n`th line the PTY accepts whole is the `n`th one accepted. Only
+/// evidence the worker observes after the PTY accepted a line answers it: the fresh prompt of
+/// the owning shell that follows the prompt the line is read at, or for a shell without prompt
+/// markers, a program that took the foreground and gave it back. Output alone answers nothing,
+/// since the shell itself echoes and ends the line before the program it runs takes the
+/// foreground.
 #[derive(Default)]
 struct Submissions {
     accepted: u64,
     written: u64,
     answered: u64,
+    /// For each written line nothing answered yet, oldest first, the count of fresh prompts the
+    /// owning shell must have drawn before one answers it.
+    awaiting: std::collections::VecDeque<u64>,
     /// A program other than the shell owned the foreground after the last written line.
     started: bool,
 }
@@ -40,6 +44,61 @@ impl Submissions {
     const fn pending(&self) -> bool {
         self.accepted > self.answered
     }
+
+    /// The PTY accepted the next line whole while the owning shell was as `progress` says, and
+    /// `program` held the foreground instead of the shell.
+    fn written(&mut self, progress: PromptProgress, program: bool) {
+        self.written = (self.written + 1).min(self.accepted);
+        self.started = false;
+        // A line typed at a prompt is read there and answered by the next fresh prompt. A
+        // running program reads what it is given and ends with a fresh prompt too. A line
+        // written while the shell runs a command or starts is read at a prompt yet to come,
+        // which may already wait unread, so only the fresh prompt after that one answers it.
+        let reads_at = match progress.zone {
+            _ if program => progress.fresh,
+            ShellZone::AtPrompt => progress.fresh,
+            ShellZone::Running | ShellZone::Starting => progress.fresh + 1,
+        };
+        // Each line is read at the prompt that answers the line before it, at the earliest.
+        let needs = self
+            .awaiting
+            .back()
+            .map_or(reads_at + 1, |before| (reads_at + 1).max(before + 1));
+        self.awaiting.push_back(needs);
+    }
+
+    /// The owning shell has drawn `fresh` fresh prompts. Each answers at most one line.
+    fn prompted(&mut self, fresh: u64) {
+        while self.awaiting.front().is_some_and(|needs| *needs <= fresh) {
+            self.awaiting.pop_front();
+            self.answered = (self.answered + 1).min(self.written);
+        }
+    }
+
+    /// A program ran after the last written line and gave the foreground back, so every line
+    /// written is answered.
+    fn returned(&mut self) {
+        self.answered = self.written;
+        self.awaiting.clear();
+    }
+}
+
+/// Where the owning shell is, as its own prompt markers say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShellZone {
+    /// No prompt of its own yet.
+    Starting,
+    /// At its prompt, with or without input.
+    AtPrompt,
+    /// Running a command line, or finishing one before its next prompt.
+    Running,
+}
+
+/// The owning shell's fresh prompts, ever, and where it is now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PromptProgress {
+    pub(crate) fresh: u64,
+    pub(crate) zone: ShellZone,
 }
 
 impl Default for ActivityState {
@@ -60,15 +119,11 @@ impl ActivityState {
     }
 
     /// Input or output arrived at `now`, after which the owning shell `empty_prompt` waits at
-    /// its own empty prompt or not.
-    pub(super) fn note(&mut self, now: Instant, empty_prompt: bool) {
+    /// its own empty prompt or not, having drawn `fresh` fresh prompts.
+    pub(super) fn note(&mut self, now: Instant, empty_prompt: bool, fresh: u64) {
         self.last = Some(now);
         self.empty_prompt = empty_prompt;
-        // The worker reads its prompt only after writing every line it counted, and a written
-        // line leaves the prompt with input until the shell draws a fresh one.
-        if empty_prompt {
-            self.submitted.answered = self.submitted.written;
-        }
+        self.submitted.prompted(fresh);
     }
 }
 
@@ -163,9 +218,9 @@ impl TerminalEventPublisher {
         state.activity.set_probe(probe);
     }
 
-    pub(super) fn note_activity(&self, now: Instant, empty_prompt: bool) {
+    pub(super) fn note_activity(&self, now: Instant, empty_prompt: bool, fresh: u64) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        state.activity.note(now, empty_prompt);
+        state.activity.note(now, empty_prompt, fresh);
     }
 
     /// Records that accepted input submits a line, before the worker writes it.
@@ -174,12 +229,16 @@ impl TerminalEventPublisher {
         state.activity.submitted.accepted += 1;
     }
 
-    /// The worker processed the next submitted line, in the order it was accepted.
-    pub(super) fn note_written(&self) {
+    /// The PTY accepted the next submitted line whole, in the order it was accepted, while the
+    /// owning shell was as `progress` says.
+    pub(super) fn note_written(&self, progress: PromptProgress) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        let submitted = &mut state.activity.submitted;
-        submitted.written = (submitted.written + 1).min(submitted.accepted);
-        submitted.started = false;
+        let activity = &mut state.activity;
+        let program = activity
+            .probe
+            .as_ref()
+            .is_some_and(|probe| matches!(probe.shell_foreground(), Ok(false)));
+        activity.submitted.written(progress, program);
     }
 
     /// The worker read output after its writes. A program that took the foreground after the
@@ -197,7 +256,7 @@ impl TerminalEventPublisher {
         {
             Some(Ok(false)) => activity.submitted.started = true,
             Some(Ok(true)) if activity.submitted.started => {
-                activity.submitted.answered = activity.submitted.written;
+                activity.submitted.returned();
             }
             _ => {}
         }

@@ -5144,7 +5144,15 @@ impl crate::platform::native_pty::SessionProbe for FixedProbe {
 /// A worker whose shell marks its prompts as owner `0f1e`, whose PTY reports `line`, and whose
 /// terminal session holds `others`.
 fn idle_worker(line: LineMode, others: Option<bool>) -> TerminalWorker {
-    let records = ScriptedPtyRecords::default();
+    idle_worker_on(ScriptedPtyRecords::default(), line, others)
+}
+
+/// [`idle_worker`] over a PTY whose `records` the test reads and changes.
+fn idle_worker_on(
+    records: ScriptedPtyRecords,
+    line: LineMode,
+    others: Option<bool>,
+) -> TerminalWorker {
     records.update(|state| state.line_mode = line);
     let (_command_tx, commands) = mpsc::channel();
     let (_reader_events, reader_events) = reader_output::reader_output(PTY_OUTPUT_QUEUE_CAPACITY);
@@ -5496,5 +5504,91 @@ fn only_evidence_after_the_written_line_answers_a_submitted_line() {
         !worker.events.running_work(),
         "a fresh prompt after the line"
     );
+    worker.finish();
+}
+
+
+/// The owning shell's fresh prompt: its directory report, then its own prompt markers.
+const FRESH_PROMPT: &[u8] =
+    b"\x1b]7;file://mac.local/initial\x07\x1b]133;A;spaceterm=0f1e\x07% \x1b]133;B;spaceterm=0f1e\x07";
+
+/// Two lines the PTY accepted before the shell's output for the first: the fresh prompt that
+/// ends the first line is the one the second is read at, so it answers only the first, and a
+/// close admitted then still finds the second line's work. The next fresh prompt answers it.
+#[test]
+fn a_fresh_prompt_answers_only_the_oldest_written_line() {
+    let probe = Arc::new(MovingForeground(AtomicBool::new(true)));
+    let mut worker = idle_worker(SHELL_FOREGROUND, Some(false));
+    worker.events.set_probe(Some(probe.clone()));
+    reads(&mut worker, FRESH_PROMPT);
+    assert!(!worker.events.running_work(), "an idle prompt");
+
+    for _ in 0..2 {
+        worker.events.note_submitted();
+        assert!(worker.process_command(Command::Key(enter_key())));
+    }
+    reads(&mut worker, b"\r\n");
+    reads(&mut worker, FRESH_PROMPT);
+    assert!(
+        worker.events.running_work(),
+        "the first line's prompt is where the second is read"
+    );
+    reads(&mut worker, b"\r\n");
+    reads(&mut worker, FRESH_PROMPT);
+    assert!(!worker.events.running_work(), "the second line's own prompt");
+    worker.finish();
+}
+
+/// A line the PTY has not accepted whole is not written yet, so no prompt answers it, until
+/// the queued bytes reach the PTY and a fresh prompt follows them.
+#[test]
+fn a_line_still_queued_for_the_pty_stays_unanswered() {
+    let records = ScriptedPtyRecords::default();
+    let probe = Arc::new(MovingForeground(AtomicBool::new(true)));
+    let mut worker = idle_worker_on(records.clone(), SHELL_FOREGROUND, Some(false));
+    worker.events.set_probe(Some(probe.clone()));
+    reads(&mut worker, FRESH_PROMPT);
+
+    records.update(|state| state.write_blocked = true);
+    worker.events.note_submitted();
+    assert!(worker.process_command(Command::Key(enter_key())));
+    assert!(records.snapshot().written.is_empty(), "the PTY took nothing");
+    // A fresh prompt drawn while the line waits in the queue answers nothing.
+    reads(&mut worker, FRESH_PROMPT);
+    assert!(worker.events.running_work());
+
+    records.update(|state| state.write_blocked = false);
+    assert!(worker.flush_input());
+    assert_eq!(records.snapshot().written, b"\r");
+    assert!(worker.events.running_work(), "written, not yet answered");
+    reads(&mut worker, b"\r\n");
+    reads(&mut worker, FRESH_PROMPT);
+    assert!(!worker.events.running_work());
+    worker.finish();
+}
+
+/// A line typed while the shell still finishes a command is read at the shell's next prompt,
+/// which may already wait unread, so that prompt answers nothing and the one after it does.
+#[test]
+fn a_line_written_while_the_shell_runs_waits_for_the_prompt_after_the_next() {
+    let probe = Arc::new(MovingForeground(AtomicBool::new(true)));
+    let mut worker = idle_worker(SHELL_FOREGROUND, Some(false));
+    worker.events.set_probe(Some(probe.clone()));
+    reads(&mut worker, FRESH_PROMPT);
+    worker.events.note_submitted();
+    assert!(worker.process_command(Command::Key(enter_key())));
+    // The shell runs a builtin: it starts and finishes the command in its own foreground.
+    reads(&mut worker, b"\r\n\x1b]133;C;spaceterm=0f1e\x07");
+    worker.events.note_submitted();
+    assert!(worker.process_command(Command::Key(enter_key())));
+    reads(&mut worker, b"\x1b]133;D;0;spaceterm=0f1e\x07");
+    reads(&mut worker, FRESH_PROMPT);
+    assert!(
+        worker.events.running_work(),
+        "the second line is read at this prompt"
+    );
+    reads(&mut worker, b"\r\n");
+    reads(&mut worker, FRESH_PROMPT);
+    assert!(!worker.events.running_work());
     worker.finish();
 }
