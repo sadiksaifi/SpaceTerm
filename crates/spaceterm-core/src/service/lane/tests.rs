@@ -2598,11 +2598,14 @@ mod flow {
         });
     }
 
+    /// Which requests [`Cutting`] counts, and at which of them it cuts the connection.
+    type Cut = Arc<Mutex<Option<(fn(&LaneRequest) -> bool, usize)>>>;
+
     /// A server that answers like the lane and cuts its connection at the `nth` request that
     /// `cut` matches.
     struct Cutting {
         lane: Arc<LaneCore>,
-        cut: Arc<Mutex<Option<(fn(&LaneRequest) -> bool, usize)>>>,
+        cut: Cut,
     }
     impl Connector for Cutting {
         fn connect(&self, _: Instant) -> Result<client::Connected, CoreError> {

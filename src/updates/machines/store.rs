@@ -2154,15 +2154,17 @@ mod tests {
         assert_eq!(adapter.performed(), [([2; 32], MachineAction::Install)]);
     }
 
-    /// A store with one connected Machine, and every notice it reports.
-    fn lifecycle_store(
-        cx: &mut gpui::TestAppContext,
-    ) -> (
+    /// The scripted adapter, the store, every notice the store reports, and the subscription
+    /// that collects them.
+    type LifecycleStore = (
         Rc<ScriptedMachines>,
         Entity<MachineUpdates>,
         Rc<std::cell::RefCell<Vec<MachineUpdatesNotice>>>,
         gpui::Subscription,
-    ) {
+    );
+
+    /// A store with one connected Machine, and every notice it reports.
+    fn lifecycle_store(cx: &mut gpui::TestAppContext) -> LifecycleStore {
         let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
         cx.update(|cx| crate::updates::ApplicationUpdates::install(updater.clone(), cx));
         let adapter = Rc::new(ScriptedMachines::default());
