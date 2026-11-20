@@ -2022,6 +2022,7 @@ fn initialize_admitted(cx: &mut App, host: &HostComposition) -> Result<(), Runti
     crate::updates::ApplicationUpdates::install(Rc::clone(&host.adapters.updates), cx);
     if let Some(machines) = &host.adapters.machine_updates {
         crate::updates::machines::store::MachineUpdates::install(Rc::clone(machines), cx);
+        crate::ui::follow_local_core_runs(cx);
     }
     if let Some(reminders) = &host.adapters.update_reminders {
         crate::updates::reminders::UpdateReminders::install(Rc::clone(reminders), cx);

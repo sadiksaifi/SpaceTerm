@@ -754,6 +754,40 @@ pub(crate) fn resume_waiting_launches(cx: &mut App) {
     }
 }
 
+/// Resumes waiting Workspace launches, as [`resume_waiting_launches`] does, each time Machine
+/// updates confirm that this computer's SpaceTerm Core answers again after they read it
+/// deliberately stopped, as after a Start from the command line. Reading it stopped, or
+/// unreachable, resumes nothing, so a deliberate Stop stays. Each Core run that answers resumes
+/// once.
+pub(crate) fn follow_local_core_runs(cx: &mut App) {
+    use crate::updates::machines::{MachineLink, store::MachineUpdates};
+    let Some(store) = MachineUpdates::global(cx) else {
+        return;
+    };
+    let stopped = std::cell::Cell::new(false);
+    cx.observe(&store, move |store, cx| {
+        let Some(link) = store
+            .read(cx)
+            .machines()
+            .iter()
+            .find(|update| update.local)
+            .map(|update| update.link.clone())
+        else {
+            return;
+        };
+        match link {
+            MachineLink::Stopped => stopped.set(true),
+            MachineLink::Connected | MachineLink::Incompatible(_) | MachineLink::Unreported
+                if stopped.replace(false) =>
+            {
+                resume_waiting_launches(cx);
+            }
+            _ => {}
+        }
+    })
+    .detach();
+}
+
 impl WorkspaceManager {
     /// The application's New Workspace, chosen while no Workspace Window was open. This window
     /// opened for it, so it creates a Workspace as soon as this computer's server presents its

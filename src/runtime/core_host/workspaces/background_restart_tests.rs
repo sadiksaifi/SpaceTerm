@@ -386,3 +386,58 @@ fn a_stopped_worker_is_asked_to_connect_again_once_per_core_run() {
         std::thread::sleep(Duration::from_millis(5));
     }
 }
+
+/// A Pane another client controlled when its Core stopped waits on the window's start queue like
+/// a stopped Pane of its own. The queue leaves it alone while the route reaches no Core run, so
+/// nothing connects to the stopped Core, and asks it once to connect again when the route
+/// reaches the next run.
+#[test]
+fn a_stopped_take_over_worker_connects_again_once_the_next_core_run_answers() {
+    let mut original = crate::runtime::directory_testing::terminal_host();
+    original.prepare_initial_organization().unwrap();
+    let organization: Organization =
+        serde_json::from_slice(&serde_json::to_vec(&original.state.envelope()).unwrap()).unwrap();
+    let core = ConnectedPane::with_host(paired_connection(Arc::new(Away)), original);
+    let state = Arc::clone(&core.state);
+    let reached = |cx: &ConnectedPane| {
+        cx.connection()
+            .live_link()
+            .and_then(|link| link.inventory())
+            .is_some_and(|(_, revision)| revision.inventory.close.is_some())
+    };
+    let until = Instant::now() + Duration::from_secs(10);
+    while !reached(&core) {
+        assert!(Instant::now() < until, "the route never reached the Core");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    state.set_status_for_test(CorePaneStatus::TakeoverFailed(CoreError::Protocol));
+    assert!(
+        !state.rearm_background(),
+        "only a stop parks a Take Over Pane for the queue"
+    );
+
+    core.stop_core();
+    let until = Instant::now() + Duration::from_secs(10);
+    while reached(&core) {
+        assert!(Instant::now() < until, "the stopped Core still answered");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    state.set_status_for_test(CorePaneStatus::TakeoverFailed(CoreError::Stopped));
+    assert!(
+        !state.rearm_background(),
+        "nothing connects while the Core is stopped"
+    );
+
+    let mut host = crate::runtime::directory_testing::terminal_host();
+    host.restore_organization(Some(&organization));
+    core.restore_core(host);
+    (core.reconnect)();
+    let until = Instant::now() + Duration::from_secs(10);
+    while !state.rearm_background() {
+        assert!(Instant::now() < until, "the next Core run never asked");
+        state.set_status_for_test(CorePaneStatus::TakeoverFailed(CoreError::Stopped));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    state.set_status_for_test(CorePaneStatus::TakeoverFailed(CoreError::Stopped));
+    assert!(!state.rearm_background(), "once per Core run");
+}

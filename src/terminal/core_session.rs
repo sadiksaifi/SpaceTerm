@@ -570,12 +570,15 @@ impl CorePaneState {
     /// Asks this Pane's worker, which stopped reconnecting after a failure that needs the
     /// person, to connect once more, at most once per Core run, while the route reaches that
     /// run. A retained Pane whose worker gave up while its Core was replaced then still waits
-    /// for its background turn instead of staying unstarted. Returns whether it asked.
+    /// for its background turn instead of staying unstarted. A Pane another client controlled
+    /// when its Core stopped connects again the same way, and only offers Take Over again.
+    /// Returns whether it asked.
     pub(crate) fn rearm_background(&self) -> bool {
-        let parked = matches!(
-            self.status(),
-            CorePaneStatus::Failed(error) if error != CoreError::DirectoryUnavailable
-        );
+        let parked = match self.status() {
+            CorePaneStatus::Failed(error) => error != CoreError::DirectoryUnavailable,
+            CorePaneStatus::TakeoverFailed(error) => error == CoreError::Stopped,
+            _ => false,
+        };
         if !parked {
             return false;
         }

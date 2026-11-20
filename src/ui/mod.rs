@@ -80,7 +80,7 @@ pub(crate) use workspace_manager::launch_testing;
 pub(crate) use workspace_manager::tests::assert_scroll_shortcuts_from_sidebar_focus;
 pub(crate) use workspace_manager::{
     LaunchIntent, LocalCoreAdapters, WorkspaceManager, WorkspaceManagerAdapters,
-    serve_desktop_requests,
+    follow_local_core_runs, serve_desktop_requests,
 };
 pub(crate) use workspace_sidebar::MachineTarget;
 

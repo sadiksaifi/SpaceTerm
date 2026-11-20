@@ -3197,3 +3197,130 @@ fn retained_panes_nobody_opened_take_bounded_background_turns_after_a_restart(
         assert_eq!(harness.panes.pane(pane).selections(), 0);
     }
 }
+
+/// This computer's Machine as Machine updates read it, with `link`.
+fn local_machine(
+    link: crate::updates::machines::MachineLink,
+) -> crate::updates::machines::MachineUpdate {
+    crate::updates::machines::MachineUpdate {
+        link,
+        ..too_old_core(|_| {})
+    }
+}
+
+/// Machine updates that follow this computer's Core, as the application installs them.
+fn following_local_core(
+    cx: &mut TestAppContext,
+) -> impl Fn(crate::updates::machines::MachineLink, &mut VisualTestContext) + use<> {
+    let machines = scripted_machines(cx);
+    cx.update(crate::ui::workspace_manager::follow_local_core_runs);
+    move |link, cx: &mut VisualTestContext| {
+        machines.emit(crate::updates::machines::MachineUpdatesEvent::Changed(
+            Box::new(local_machine(link)),
+        ));
+        cx.run_until_parked();
+    }
+}
+
+/// A window that opened while this computer's Core was deliberately stopped, as a replacement
+/// window does, opens its Workspaces once Machine updates confirm the Core answers again, as
+/// after a Start from the command line. Reading it stopped or unreachable keeps the Stop, and
+/// a later answer from the same run resumes nothing again.
+#[gpui::test]
+fn a_command_line_start_opens_a_window_that_opened_while_stopped(cx: &mut TestAppContext) {
+    use crate::updates::machines::MachineLink;
+    let read = following_local_core(cx);
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped), ready()], cx);
+    cx.run_until_parked();
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+
+    read(MachineLink::Stopped, cx);
+    read(MachineLink::Offline { since: 1 }, cx);
+    assert_eq!(
+        harness.launch.steps(),
+        ["run"],
+        "a stopped Core stays stopped"
+    );
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+
+    read(MachineLink::Connected, cx);
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "run"],
+        "no Start of its own"
+    );
+    assert_eq!(harness.launch_title(cx), None);
+    assert_eq!(harness.rows(cx), 1);
+    assert!(harness.panes.was_opened(PANE), "its retained Pane opens");
+
+    read(MachineLink::Connected, cx);
+    assert_eq!(harness.launch.steps(), ["run", "run"]);
+}
+
+/// A Core that answers without Machine updates having read it stopped, as after a network
+/// interruption, resumes no launch.
+#[gpui::test]
+fn a_core_that_answers_again_without_a_stop_resumes_nothing(cx: &mut TestAppContext) {
+    use crate::updates::machines::MachineLink;
+    let read = following_local_core(cx);
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped), ready()], cx);
+    cx.run_until_parked();
+
+    read(MachineLink::Offline { since: 1 }, cx);
+    read(MachineLink::Connected, cx);
+    assert_eq!(harness.launch.steps(), ["run"]);
+}
+
+/// A window that stayed open through a Stop and a Start from the command line reconnects every
+/// Pane the Stop left waiting, in its Active Workspace and in a background attached Workspace,
+/// including Panes another client controlled. Nothing takes control, starts a shell or runs a
+/// Start, and nothing reconnects while the Core is still stopped or after it already answered.
+#[gpui::test]
+fn a_command_line_start_reconnects_the_stopped_panes_of_an_open_window(cx: &mut TestAppContext) {
+    use crate::terminal::core_session::CorePaneStatus;
+    use crate::updates::machines::MachineLink;
+    let read = following_local_core(cx);
+    let (harness, cx) = ready_harness(cx);
+    harness.edits.set_inventory(with_detached_workspace());
+    sync(&harness, cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.attach_detached_workspace(MachineKey::LOCAL, OTHER_WORKSPACE, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    let active = harness
+        .manager
+        .read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let panes = [harness.panes.pane(PANE), harness.panes.pane(OTHER_PANE)];
+    for pane in &panes {
+        pane.set(CorePaneStatus::TakeoverFailed(CoreError::Stopped));
+    }
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let counts = |panes: &[std::sync::Arc<crate::ui::workspaces::testing::ScriptedPane>; 2]| {
+        panes
+            .iter()
+            .map(|pane| (pane.retries(), pane.take_overs(), pane.restored_starts()))
+            .collect::<Vec<_>>()
+    };
+
+    read(MachineLink::Stopped, cx);
+    read(MachineLink::Offline { since: 1 }, cx);
+    assert_eq!(counts(&panes), [(0, 0, 0); 2], "the Core is still stopped");
+
+    read(MachineLink::Connected, cx);
+    assert_eq!(counts(&panes), [(1, 0, 0); 2]);
+    assert_eq!(harness.launch.steps(), ["run"], "no Start of its own");
+    assert_eq!(
+        harness.manager.read_with(cx, |manager, _| {
+            manager.workspaces.active_workspace_id()
+        }),
+        active,
+        "the Active Workspace stays"
+    );
+
+    read(MachineLink::Connected, cx);
+    assert_eq!(counts(&panes), [(1, 0, 0); 2], "once per Core run");
+}

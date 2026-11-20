@@ -5895,7 +5895,8 @@ mod launch;
 #[cfg(test)]
 pub(crate) use launch::testing as launch_testing;
 pub(crate) use launch::{
-    LaunchIntent, LocalCoreAdapters, resume_waiting_launches, start_local_core,
+    LaunchIntent, LocalCoreAdapters, follow_local_core_runs, resume_waiting_launches,
+    start_local_core,
 };
 mod core_bindings;
 use core_bindings::CoreBindings;
