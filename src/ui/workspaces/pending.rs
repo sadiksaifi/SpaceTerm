@@ -218,11 +218,13 @@ impl PendingEdits {
         &mut self,
         intent: WorkspaceCloseIntent,
     ) -> Result<(), WorkspaceRefusalReason> {
-        if self
+        if let Some(pending) = self
             .close_intents
-            .iter()
-            .any(|pending| pending.core == intent.core)
+            .iter_mut()
+            .find(|pending| pending.core == intent.core)
         {
+            // A Review of a queued close keeps asking when the close resumes.
+            pending.review |= intent.review;
             return Ok(());
         }
         if self.full() {

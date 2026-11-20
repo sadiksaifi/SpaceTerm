@@ -445,6 +445,10 @@ pub(crate) enum TabViewEvent {
         tab_id: TabId,
         pane_id: PaneId,
     },
+    /// A person pressed one of this Tab's Panes, which chooses this Tab as well as that Pane.
+    PanePressed {
+        tab_id: TabId,
+    },
 }
 
 impl std::fmt::Debug for TabViewEvent {
@@ -455,6 +459,7 @@ impl std::fmt::Debug for TabViewEvent {
             Self::PresentationChanged { .. } => "TabViewEvent::PresentationChanged",
             Self::RevealRequested { .. } => "TabViewEvent::RevealRequested",
             Self::PaneDropped { .. } => "TabViewEvent::PaneDropped",
+            Self::PanePressed { .. } => "TabViewEvent::PanePressed",
         })
     }
 }
@@ -2398,6 +2403,9 @@ impl TabView {
                         .any(|(_, control)| control.is_hovered_at(event.position, window));
                     if !on_unselecting_control {
                         view.select_pane(pane_id);
+                        cx.emit(TabViewEvent::PanePressed {
+                            tab_id: view.tab.id(),
+                        });
                     }
                     if view.tab.focused_pane_id() != pane_id {
                         view.focus_pane(pane_id, cx);

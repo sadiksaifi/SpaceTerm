@@ -307,6 +307,10 @@ pub(crate) struct WorkspaceManager {
     /// directly, and the confirmation presents the refusal's notice, if any. The confirmation
     /// presents the refusal only while it ends exactly what the refusal proved.
     close_review: Option<RefusedCloseReview>,
+    /// Set while a request follows a Review, whose answer is a fresh confirmation of what the
+    /// close ends now. The request never closes directly, and a request it defers or holds for a
+    /// starting shell keeps asking for confirmation when it resumes.
+    review_request: bool,
     /// Reads every server again once the window's modal closes, while a reading waits on it.
     modal_reread: Option<gpui::Subscription>,
     sidebar_worktrees: worktrees::SidebarWorktrees,
@@ -457,6 +461,7 @@ impl WorkspaceManager {
             close_keyboard: WorkspaceCloseKeyboard::default(),
             close_start: CloseStartWait::default(),
             close_review: None,
+            review_request: false,
             modal_reread: None,
             sidebar_worktrees: worktrees::SidebarWorktrees::default(),
             workspace_repositories: workspace_repositories::WorkspaceRepositories::default(),
@@ -3024,7 +3029,9 @@ impl WorkspaceManager {
                 && intent.keyboard == keyboard_before_reconciliation
                 && self.close_target_is_active(intent.local, cx);
             self.close_keyboard.reviewed = Some(held_keyboard);
+            self.review_request = intent.review;
             self.request_core_close(intent.local, window, cx);
+            self.review_request = false;
             self.close_keyboard.reviewed = None;
         }
         // Each server's reading may present the Worktree it created or change the one under
@@ -3598,6 +3605,7 @@ impl WorkspaceManager {
         };
 
         let workspace_id = close_target_workspace(target);
+        let reviewing = std::mem::take(&mut self.review_request);
         if !self.has_workspace(workspace_id) {
             return false;
         }
@@ -3625,6 +3633,7 @@ impl WorkspaceManager {
             core: machine_target,
             local: target,
             keyboard: held_keyboard.then(|| window.focused(cx)).flatten(),
+            review: reviewing,
         }) {
             Ok(true) => return true,
             Ok(false) => {}
@@ -3666,8 +3675,10 @@ impl WorkspaceManager {
             .close_review
             .take_if(|review| !approval.ends_exactly(&review.observed))
         {
+            // The refusal's own scope changed, perhaps by this client, so the notice names no
+            // other client.
             self.present_close_changed(
-                approval.changed_title(),
+                approval.scope_changed_title(),
                 Some(target),
                 held_keyboard,
                 review.notice.as_ref(),
@@ -3685,13 +3696,12 @@ impl WorkspaceManager {
                 .is_some_and(|entry| entry.payload().read(cx).pane_shell_starting(pane, cx))
         });
         if starting && self.close_start.waits(target) {
-            self.wait_for_starting_shell(target, window, cx);
+            self.wait_for_starting_shell(target, reviewing, window, cx);
             return true;
         }
-        // A close the server refused for work in this client's own Panes asks the person.
-        let direct = self
-            .close_review
-            .is_none()
+        // A close the server refused for work in this client's own Panes asks the person, and so
+        // does a Review.
+        let direct = (self.close_review.is_none() && !reviewing)
             .then(|| {
                 approval.direct_close(|pane, live_session| {
                     self.workspaces
@@ -4081,7 +4091,9 @@ impl WorkspaceManager {
                 let _ = window_handle.update(cx, |_, window, cx| {
                     let _ = manager.update(cx, |manager, cx| {
                         manager.close_keyboard.reviewed = Some(held_keyboard);
+                        manager.review_request = true;
                         manager.request_close(target, window, cx);
+                        manager.review_request = false;
                         manager.close_keyboard.reviewed = None;
                     });
                 });
@@ -4206,7 +4218,11 @@ impl WorkspaceManager {
                 observed,
             });
             self.close_keyboard.reviewed = Some(held_keyboard);
+            // A review the request defers or holds for a starting shell outlives this refusal's
+            // record, and still asks rather than closing directly when it resumes.
+            self.review_request = true;
             self.request_close(local, window, cx);
+            self.review_request = false;
             self.close_keyboard.reviewed = None;
             // A request that opened no confirmation leaves the outcome unseen.
             if let Some(notice) = self.close_review.take().and_then(|review| review.notice) {
@@ -5444,10 +5460,18 @@ const CLOSE_START_LIMIT: std::time::Duration = std::time::Duration::from_secs(2)
 /// A close that waits for a shell its target is still starting.
 #[derive(Default)]
 struct CloseStartWait {
-    /// The waiting close and what looks again.
-    waiting: Option<(CloseTarget, gpui::Task<()>)>,
+    /// The waiting close.
+    waiting: Option<StartingShellClose>,
     /// A close whose wait ran out, which reviews without waiting again.
     expired: Option<CloseTarget>,
+}
+
+/// A close that waits for a starting shell, and what looks again.
+struct StartingShellClose {
+    target: CloseTarget,
+    /// Whether the resumed request is a Review.
+    review: bool,
+    _task: gpui::Task<()>,
 }
 
 impl CloseStartWait {
@@ -5461,19 +5485,21 @@ impl CloseStartWait {
 impl WorkspaceManager {
     /// Holds the close of `target` until the shells it would end have started, failed or ended,
     /// or [`CLOSE_START_LIMIT`] passed, then asks for it again. Asking again while it waits
-    /// changes nothing.
+    /// changes nothing, except that a Review makes the resumed request a Review.
     fn wait_for_starting_shell(
         &mut self,
         target: CloseTarget,
+        review: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self
+        if let Some(waiting) = self
             .close_start
             .waiting
-            .as_ref()
-            .is_some_and(|(waiting, _)| *waiting == target)
+            .as_mut()
+            .filter(|waiting| waiting.target == target)
         {
+            waiting.review |= review;
             return;
         }
         let task = cx.spawn_in(window, async move |manager, cx| {
@@ -5486,11 +5512,17 @@ impl WorkspaceManager {
                     if starting && waited < CLOSE_START_LIMIT {
                         return false;
                     }
-                    manager.close_start.waiting = None;
+                    let review = manager
+                        .close_start
+                        .waiting
+                        .take()
+                        .is_some_and(|waiting| waiting.review);
                     if starting {
                         manager.close_start.expired = Some(target);
                     }
+                    manager.review_request = review;
                     manager.request_close(target, window, cx);
+                    manager.review_request = false;
                     true
                 });
                 if !matches!(settled, Ok(false)) {
@@ -5498,7 +5530,11 @@ impl WorkspaceManager {
                 }
             }
         });
-        self.close_start.waiting = Some((target, task));
+        self.close_start.waiting = Some(StartingShellClose {
+            target,
+            review,
+            _task: task,
+        });
     }
 
     /// Whether a Pane the close of `target` would end is still starting its shell.

@@ -3164,6 +3164,7 @@ mod core_workspaces {
                                             core: *target,
                                             local: *local,
                                             keyboard: None,
+                                            review: false,
                                         })
                                         .is_ok()
                                 });
@@ -3178,7 +3179,9 @@ mod core_workspaces {
                                 .close
                                 .as_ref()
                                 .is_some_and(|live| {
-                                    reviewed.iter().all(|control| live.controls.contains(control))
+                                    reviewed
+                                        .iter()
+                                        .all(|control| live.controls.contains(control))
                                 })
                                 .then_some(current)
                         });
@@ -3630,6 +3633,17 @@ mod core_workspaces {
             close_changed_title(self.target)
         }
 
+        /// The title of the notice that ends a refusal's review because what the close ends
+        /// changed, by any client, after the refusal.
+        pub(crate) const fn scope_changed_title(&self) -> &'static str {
+            match self.target {
+                MachineCloseTarget::Pane { .. } => "Pane Changed",
+                MachineCloseTarget::Tab { .. } => "Tab Changed",
+                MachineCloseTarget::Worktree { .. } => "Tabs Changed",
+                MachineCloseTarget::KillWorkspace { .. } => "Workspace Changed",
+            }
+        }
+
         /// The title of the notice that replaces a confirmation whose target another client
         /// already removed.
         pub(crate) const fn missing_title(&self) -> &'static str {
@@ -3680,6 +3694,8 @@ mod core_workspaces {
         pub(crate) local: CloseTarget,
         /// The initiating keyboard owner, before any confirmation or later navigation.
         pub(crate) keyboard: Option<gpui::FocusHandle>,
+        /// Whether the close follows a Review, so it asks for confirmation when it resumes.
+        pub(crate) review: bool,
     }
 
     /// One shared close confirmation on screen: its Close Confirmation generation, the local
@@ -4712,6 +4728,7 @@ mod restart_tests {
                     pane_id: crate::domain::PaneId::new(3),
                 },
                 keyboard: None,
+                review: false,
             };
             assert!(binding.defer_close(intent()).unwrap());
             binding.poll();

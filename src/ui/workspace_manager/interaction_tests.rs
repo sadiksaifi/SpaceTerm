@@ -1345,7 +1345,10 @@ const REMOTE_WORKSPACE: [u8; 32] = [61; 32];
 fn present_paired_machine(
     harness: &WorkspaceCloseHarness,
     cx: &mut VisualTestContext,
-) -> (Rc<crate::ui::workspaces::testing::ScriptedEdits>, MachineKey) {
+) -> (
+    Rc<crate::ui::workspaces::testing::ScriptedEdits>,
+    MachineKey,
+) {
     use crate::ui::workspaces::{DirectMachine, WorkspaceEditSource, WorkspacePaneSessions};
 
     let mut remote = close_inventory(1, &[([62; 32], &[([63; 32], Some([64; 32]))])]);
@@ -1623,15 +1626,45 @@ fn close_idle_tabs() -> spaceterm_core::hierarchy::Inventory {
     idle
 }
 
+/// How a person answers the fresh confirmation a changed close's Review opens.
+#[derive(Clone, Copy)]
+enum ReviewAnswer {
+    Cancel,
+    /// Another change arrives before the answer, and the person reviews and confirms again.
+    ConfirmAfterAnotherChange,
+}
+
+/// `inventory` with the Root Pane running Terminal Session `session` under this client's grant
+/// `epoch`, at the next revision.
+fn replace_root_session(
+    mut inventory: spaceterm_core::hierarchy::Inventory,
+    session: [u8; 32],
+    epoch: u64,
+) -> spaceterm_core::hierarchy::Inventory {
+    inventory.revision += 1;
+    let live = inventory.close.as_mut().unwrap();
+    for pane in &mut live.sessions {
+        if pane.id == CLOSE_ROOT_PANE {
+            pane.session = Some(session);
+        }
+    }
+    live.controls[0].session = Some(session);
+    live.controls[0].epoch = epoch;
+    inventory
+}
+
 /// An own direct close of the Root Pane is refused for work while a paired Machine's
 /// confirmation holds the window. Before that confirmation closes, `changed` is published. The
 /// refusal proved only what it would end then, so its review never presents other work: it ends
-/// as a changed close, whose Review asks again, and nothing closes.
+/// as a changed close that names no other client, and nothing closes. Its Review opens a fresh
+/// confirmation of what the close ends now and submits nothing until the person confirms, even
+/// though this client controls that idle work.
 fn a_queued_refusal_never_reviews_changed_work(
     changed: spaceterm_core::hierarchy::Inventory,
+    answer: ReviewAnswer,
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_core::hierarchy::{Mutation, Outcome};
+    use spaceterm_core::hierarchy::{CloseTarget as MachineCloseTarget, Mutation, Outcome};
 
     let (harness, cx) = close_harness(cx);
     let idle = close_idle_tabs();
@@ -1655,7 +1688,7 @@ fn a_queued_refusal_never_reviews_changed_work(
         "the refusal waits for the paired confirmation"
     );
 
-    harness.publish(changed, cx);
+    harness.publish(changed.clone(), cx);
     settle_panes(cx);
     click("modal-action-close-cancel", cx);
     settle_panes(cx);
@@ -1665,17 +1698,71 @@ fn a_queued_refusal_never_reviews_changed_work(
         "the refusal never reviews work it did not prove"
     );
     assert!(
-        tree.find("Pane Changed on Another Client").is_some(),
+        tree.find("Pane Changed").is_some(),
         "the refusal ends as a changed close"
+    );
+    assert!(
+        tree.find("Pane Changed on Another Client").is_none(),
+        "the change may be this client's own"
     );
     assert!(
         cx.debug_bounds("modal-action-close-review").is_some(),
         "Review asks again from the person's own request"
     );
 
-    click("modal-action-close-dismiss", cx);
+    click("modal-action-close-review", cx);
     settle_panes(cx);
-    assert_eq!(harness.closes().len(), 1, "nothing more closes");
+    assert!(
+        spaceterm_ui::a11y_testing::A11yTree::read(cx)
+            .find("Close Pane?")
+            .is_some(),
+        "Review opens a fresh confirmation"
+    );
+    assert_eq!(harness.closes().len(), 1, "Review closes nothing by itself");
+
+    match answer {
+        ReviewAnswer::Cancel => {
+            click("modal-action-close-cancel", cx);
+            settle_panes(cx);
+            assert!(
+                spaceterm_ui::a11y_testing::A11yTree::read(cx)
+                    .find("Close Pane?")
+                    .is_none()
+            );
+            assert_eq!(harness.closes().len(), 1, "Cancel closes nothing");
+        }
+        ReviewAnswer::ConfirmAfterAnotherChange => {
+            // A change between the Review and the answer makes that confirmation stale too.
+            let current = replace_root_session(changed, [36; 32], 3);
+            harness.publish(current, cx);
+            settle_panes(cx);
+            let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+            assert!(tree.find("Close Pane?").is_none(), "the stale review ends");
+            assert!(cx.debug_bounds("modal-action-close-review").is_some());
+            assert_eq!(harness.closes().len(), 1, "the stale review closes nothing");
+
+            click("modal-action-close-review", cx);
+            settle_panes(cx);
+            assert!(
+                spaceterm_ui::a11y_testing::A11yTree::read(cx)
+                    .find("Close Pane?")
+                    .is_some(),
+                "Review opens a fresh confirmation again"
+            );
+            assert_eq!(harness.closes().len(), 1);
+            click("modal-action-close-confirm", cx);
+            settle_panes(cx);
+            let closes = harness.closes();
+            assert_eq!(closes.len(), 2, "{closes:?}");
+            assert!(
+                matches!(closes.last(), Some(Mutation::Close { target: MachineCloseTarget::Pane { tab, pane, .. }, confirmation })
+                    if *tab == CLOSE_ROOT_TAB && *pane == CLOSE_ROOT_PANE
+                        && confirmation.own_controls.is_none()
+                        && confirmation.panes.iter().map(|p| (p.id, p.session)).eq([(CLOSE_ROOT_PANE, Some([36; 32]))])),
+                "the confirmed close ends exactly what the fresh confirmation showed: {closes:?}"
+            );
+        }
+    }
     assert!(
         remote_edits
             .submitted()
@@ -1686,25 +1773,29 @@ fn a_queued_refusal_never_reviews_changed_work(
 }
 
 /// The Root Pane starts a new Terminal Session in the same Pane while its refusal waits.
+fn close_replaced_root() -> spaceterm_core::hierarchy::Inventory {
+    replace_root_session(close_idle_tabs(), [35; 32], 2)
+}
+
 #[gpui::test]
 fn a_queued_refusal_never_reviews_a_replacement_session_in_the_same_pane(cx: &mut TestAppContext) {
-    let mut replaced = close_idle_tabs();
-    replaced.revision += 1;
-    let live = replaced.close.as_mut().unwrap();
-    for pane in &mut live.sessions {
-        if pane.id == CLOSE_ROOT_PANE {
-            pane.session = Some([35; 32]);
-        }
-    }
-    live.controls[0].session = Some([35; 32]);
-    live.controls[0].epoch = 2;
-    a_queued_refusal_never_reviews_changed_work(replaced, cx);
+    a_queued_refusal_never_reviews_changed_work(close_replaced_root(), ReviewAnswer::Cancel, cx);
+}
+
+#[gpui::test]
+fn reviewing_a_replacement_session_confirms_only_what_the_fresh_confirmation_shows(
+    cx: &mut TestAppContext,
+) {
+    a_queued_refusal_never_reviews_changed_work(
+        close_replaced_root(),
+        ReviewAnswer::ConfirmAfterAnotherChange,
+        cx,
+    );
 }
 
 /// The Root Pane's Tab gains a split while its refusal waits, so closing that Pane no longer
 /// closes the Tab.
-#[gpui::test]
-fn a_queued_refusal_never_reviews_after_a_split_joins_its_tab(cx: &mut TestAppContext) {
+fn close_split_root() -> spaceterm_core::hierarchy::Inventory {
     let mut split = close_inventory(
         3,
         &[
@@ -1719,7 +1810,23 @@ fn a_queued_refusal_never_reviews_after_a_split_joins_its_tab(cx: &mut TestAppCo
         ],
     );
     split.close.as_mut().unwrap().controls = close_idle_tabs().close.unwrap().controls;
-    a_queued_refusal_never_reviews_changed_work(split, cx);
+    split
+}
+
+#[gpui::test]
+fn a_queued_refusal_never_reviews_after_a_split_joins_its_tab(cx: &mut TestAppContext) {
+    a_queued_refusal_never_reviews_changed_work(close_split_root(), ReviewAnswer::Cancel, cx);
+}
+
+#[gpui::test]
+fn reviewing_after_a_split_joins_confirms_only_what_the_fresh_confirmation_shows(
+    cx: &mut TestAppContext,
+) {
+    a_queued_refusal_never_reviews_changed_work(
+        close_split_root(),
+        ReviewAnswer::ConfirmAfterAnotherChange,
+        cx,
+    );
 }
 
 /// A split's own direct close is refused for work while a paired Machine's confirmation holds
@@ -1766,7 +1873,10 @@ fn a_refused_split_close_beneath_another_machines_confirmation_returns_its_keybo
     click("modal-action-close-cancel", cx);
     settle_panes(cx);
     let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
-    assert!(tree.find("Close Pane?").is_some(), "the refusal is reviewed");
+    assert!(
+        tree.find("Close Pane?").is_some(),
+        "the refusal is reviewed"
+    );
     assert!(tree.find("Pane Changed on Another Client").is_none());
     assert_eq!(close_identity(&harness, cx), original);
 
@@ -1832,7 +1942,8 @@ fn a_refusal_keeps_the_successor_tab_a_person_clicked(cx: &mut TestAppContext) {
             .commands()
             .iter()
             .filter(|call| {
-                call.session_id == closing_session && matches!(call.command, RecordedCommand::Key(_))
+                call.session_id == closing_session
+                    && matches!(call.command, RecordedCommand::Key(_))
             })
             .count()
     };
@@ -1841,11 +1952,11 @@ fn a_refusal_keeps_the_successor_tab_a_person_clicked(cx: &mut TestAppContext) {
     redraw(cx);
     assert_eq!(harness.closes().len(), 1);
     let successor = close_identity(&harness, cx);
-    assert_ne!(successor.0, original.0, "the direct close opens the neighbor");
-    click(
-        format!("tab-item-{}-active", successor.0.get()).leak(),
-        cx,
+    assert_ne!(
+        successor.0, original.0,
+        "the direct close opens the neighbor"
     );
+    click(format!("tab-item-{}-active", successor.0.get()).leak(), cx);
     settle_panes(cx);
     assert_eq!(close_identity(&harness, cx), successor);
 
@@ -1902,11 +2013,11 @@ fn a_refusal_keeps_the_successor_pane_a_person_clicked(cx: &mut TestAppContext) 
     assert_eq!(harness.closes().len(), 1);
     let successor = close_identity(&harness, cx);
     assert_eq!(successor.0, original.0);
-    assert_ne!(successor.1, original.1, "the direct close focuses the split");
-    click(
-        format!("pane-surface-{}", successor.1.get()).leak(),
-        cx,
+    assert_ne!(
+        successor.1, original.1,
+        "the direct close focuses the split"
     );
+    click(format!("pane-surface-{}", successor.1.get()).leak(), cx);
     settle_panes(cx);
     cx.simulate_keystrokes("b");
     let chosen_session = last_key_session(&records).expect("the chosen shell reads keys");
@@ -1937,5 +2048,77 @@ fn a_refusal_keeps_the_successor_pane_a_person_clicked(cx: &mut TestAppContext) 
         "the next key reaches a shell"
     );
     assert_eq!(last_key_session(&records), Some(chosen_session));
+    assert_eq!(harness.closes().len(), 1, "Cancel closes nothing");
+}
+
+/// A person who clicks inside the terminal of the Tab a direct close selected in its place chose
+/// that Tab. A later refusal reviews the close without returning the closed Tab, and its Cancel
+/// leaves the keyboard in the chosen Tab.
+#[gpui::test]
+fn a_refusal_keeps_the_successor_tab_whose_terminal_a_person_clicked(cx: &mut TestAppContext) {
+    use spaceterm_core::hierarchy::Outcome;
+
+    let records = TestTerminalSessionRecords::default();
+    let (harness, cx) = close_harness_recording(records.clone(), cx);
+    let idle = close_idle_tabs();
+    harness.publish(idle.clone(), cx);
+    harness.panes.pane(CLOSE_SECOND_PANE).reconnect();
+    settle_panes(cx);
+    focus_active_workspace(&harness.manager, cx);
+    let original = close_identity(&harness, cx);
+    cx.simulate_keystrokes("a");
+    let closing_session = last_key_session(&records).expect("the closing shell reads keys");
+    let closing_keys = |records: &TestTerminalSessionRecords| {
+        records
+            .commands()
+            .iter()
+            .filter(|call| {
+                call.session_id == closing_session
+                    && matches!(call.command, RecordedCommand::Key(_))
+            })
+            .count()
+    };
+
+    cx.simulate_keystrokes("cmd-w");
+    redraw(cx);
+    assert_eq!(harness.closes().len(), 1);
+    let successor = close_identity(&harness, cx);
+    assert_ne!(
+        successor.0, original.0,
+        "the direct close opens the neighbor"
+    );
+    click(format!("pane-surface-{}", successor.1.get()).leak(), cx);
+    settle_panes(cx);
+    assert_eq!(close_identity(&harness, cx), successor);
+
+    harness.edits.answer(Outcome::StaleConfirmation);
+    harness.publish(idle, cx);
+    settle_panes(cx);
+    assert!(
+        spaceterm_ui::a11y_testing::A11yTree::read(cx)
+            .find("Close Pane?")
+            .is_some(),
+        "the refusal is reviewed"
+    );
+    assert_eq!(
+        close_identity(&harness, cx),
+        successor,
+        "the refusal keeps the chosen Tab"
+    );
+
+    click("modal-action-close-cancel", cx);
+    settle_panes(cx);
+    assert_eq!(close_identity(&harness, cx), successor);
+    assert!(
+        close_terminal_is_focused(&harness, cx),
+        "the keyboard returns to the chosen Tab's Pane"
+    );
+    let keys = closing_keys(&records);
+    cx.simulate_keystrokes("x");
+    assert_eq!(
+        closing_keys(&records),
+        keys,
+        "the next key never reaches the shell the person asked to close"
+    );
     assert_eq!(harness.closes().len(), 1, "Cancel closes nothing");
 }

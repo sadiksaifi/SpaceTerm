@@ -635,6 +635,13 @@ impl TabManager {
                 TabViewEvent::PaneDropped { tab_id, pane_id } => {
                     manager.drop_pane(*tab_id, *pane_id, window, cx);
                 }
+                // A press in the Active Tab's Pane chooses that Tab, so a refused close no longer
+                // returns the selection or keyboard it moved.
+                TabViewEvent::PanePressed { tab_id } => {
+                    if manager.tabs.active_tab_id() == *tab_id {
+                        manager.tabs.claim_active_tab();
+                    }
+                }
             },
         )
         .detach();
@@ -4363,9 +4370,9 @@ impl TabManager {
             .take_if(|returned| *returned == tab_id)
             .is_some();
         let pane = pane_id.is_some_and(|pane_id| {
-            self.tabs.tab(tab_id).is_some_and(|view| {
-                view.update(cx, |view, _| view.take_returned_keyboard(pane_id))
-            })
+            self.tabs
+                .tab(tab_id)
+                .is_some_and(|view| view.update(cx, |view, _| view.take_returned_keyboard(pane_id)))
         });
         tab || pane
     }
