@@ -465,7 +465,11 @@ fn start_core_in_the_workspace_window_reaches_open_settings(cx: &mut TestAppCont
     sync(&harness, cx);
 
     assert_eq!(harness.launch.steps(), ["run", "start", "run"]);
-    assert_eq!(heard.get(), 1, "the Start's launch reached the running Core once");
+    assert_eq!(
+        heard.get(),
+        1,
+        "the Start's launch reached the running Core once"
+    );
 }
 
 /// A launch harness whose window opens for the person's own launch of SpaceTerm.

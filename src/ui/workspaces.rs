@@ -27,8 +27,7 @@ pub(crate) use core_workspaces::{
     WorkspaceEditability, WorkspaceEdits, WorkspaceFacts, WorkspaceHost, WorkspacePaneOpener,
     WorkspacePaneSessions, WorkspacePaneSubscription, WorkspacePanes, WorkspacePlan,
     WorkspaceRefusal, WorkspaceRefusalReason, WorkspaceRemoval, WorkspaceRowStatus,
-    WorkspaceSubmission, WorkspaceTabs, Workspaces, close_changed_title,
-    presenting_window,
+    WorkspaceSubmission, WorkspaceTabs, Workspaces, close_changed_title, presenting_window,
 };
 #[cfg(test)]
 pub(crate) use core_workspaces::{WorkspaceOwner, testing};

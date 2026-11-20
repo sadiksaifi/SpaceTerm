@@ -5450,7 +5450,10 @@ fn without_owned_prompts_a_written_line_stays_work_after_its_program_returns() {
     let mut worker = idle_worker(SHELL_FOREGROUND, Some(false));
     worker.events.set_probe(Some(probe.clone()));
     reads(&mut worker, b"% ");
-    assert!(!worker.events.running_work(), "an idle shell before any line");
+    assert!(
+        !worker.events.running_work(),
+        "an idle shell before any line"
+    );
 
     worker.events.note_submitted();
     assert!(worker.process_command(Command::Key(enter_key())));
