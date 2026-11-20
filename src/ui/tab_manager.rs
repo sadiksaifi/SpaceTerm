@@ -454,6 +454,13 @@ pub(crate) struct TabManager {
         TabId,
         crate::domain::tab_collection::ParkedTab<Entity<TabView>>,
     >,
+    /// The parked Tabs that held the keyboard as their close parked them, which a refusal
+    /// returns it to while it still rests in the Tab parking opened in their place.
+    parked_keyboard: std::collections::BTreeSet<TabId>,
+    /// The Tab a refusal returned the selection to while a modal, such as another Machine's
+    /// confirmation, held the keyboard its close had moved. The refusal's review returns the
+    /// keyboard to it. Choosing a Tab clears it.
+    returned_keyboard: Option<TabId>,
     /// The Active Tab this client's just-submitted shared close ends, when the keyboard rested
     /// in this strip as the person asked for it. The next reconciliation takes it.
     close_keyboard: Option<TabId>,
@@ -550,6 +557,8 @@ impl TabManager {
             close_workspace_requested: false,
             binding,
             parked_tabs: std::collections::BTreeMap::new(),
+            parked_keyboard: std::collections::BTreeSet::new(),
+            returned_keyboard: None,
             close_keyboard: None,
             pane_strip_drop: None,
             tab_picture: None,
@@ -1579,6 +1588,7 @@ impl TabManager {
             eprintln!("cannot activate unknown Tab {tab_id}");
             return false;
         };
+        self.returned_keyboard = None;
         let previous_tab_id = self.tabs.active_tab_id();
         let previous_tab = self.tabs.active_tab().clone();
         if let Err(error) = self.tabs.activate_tab(tab_id) {
@@ -2015,8 +2025,8 @@ impl TabManager {
         // grows in, so its first words are its real name. One that never gets a name says
         // Terminal once its wait ends. While its Focused Pane's shell starts, any name it has is
         // provisional, such as the shell's executable, so the Tab still says nothing.
-        let named = !identity.pending
-            && (identity.is_named() || !self.unnamed_since.contains_key(&tab_id));
+        let named =
+            !identity.pending && (identity.is_named() || !self.unnamed_since.contains_key(&tab_id));
         // A Tab growing in offers its close control once the control shows whole, so no part of
         // it cut off by the Tab's slot takes a press or reaches assistive technology.
         let close_control = if role != TabItemRole::InBar || reveal.close <= 0.0 {
@@ -3668,7 +3678,17 @@ impl TabManager {
             .collect::<Vec<_>>();
         for id in restoring {
             if let Some(parked) = self.parked_tabs.remove(&id) {
-                self.tabs.restore_parked_tab(parked);
+                // A refused close returns the selection it moved, and the keyboard it moved with
+                // it, unless the person chose another Tab or moved the keyboard since.
+                let held_keyboard = self.parked_keyboard.remove(&id);
+                if self.tabs.restore_parked_tab(parked) {
+                    let focus =
+                        held_keyboard && self.tabs.active_tab().read(cx).holds_keyboard(window, cx);
+                    self.activate_tab_focusing(id, focus, window, cx);
+                    if held_keyboard && !focus && spaceterm_ui::window_modal_is_open(window, cx) {
+                        self.returned_keyboard = Some(id);
+                    }
+                }
                 changed = true;
             }
         }
@@ -3697,6 +3717,7 @@ impl TabManager {
             .collect::<Vec<_>>();
         for id in retired {
             if let Some(parked) = self.parked_tabs.remove(&id) {
+                self.parked_keyboard.remove(&id);
                 self.tabs
                     .discard_parked_tab(parked)
                     .update(cx, |view, cx| view.close_all(cx));
@@ -3795,6 +3816,9 @@ impl TabManager {
                         }
                     });
                     self.parked_tabs.insert(tab_id, parked);
+                    if was_active && held_keyboard {
+                        self.parked_keyboard.insert(tab_id);
+                    }
                     if was_active && self.active {
                         self.tabs
                             .active_tab()
@@ -4316,6 +4340,14 @@ impl TabManager {
 
     fn forget_tab(&mut self, tab_id: TabId) {
         self.binding.forget(tab_id);
+    }
+
+    /// Whether a refusal returned `tab_id` the selection while something else held the keyboard
+    /// its close had moved, which the keyboard now owes it. Asking clears it.
+    pub(crate) fn take_returned_keyboard(&mut self, tab_id: TabId) -> bool {
+        self.returned_keyboard
+            .take_if(|returned| *returned == tab_id)
+            .is_some()
     }
 
     /// Whether the keyboard rests in one of this strip's Tabs or their Panes.

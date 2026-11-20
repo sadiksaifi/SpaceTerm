@@ -24,6 +24,8 @@ struct TabEntry<T> {
 pub(crate) struct ParkedTab<T> {
     entry: TabEntry<T>,
     was_root: bool,
+    /// The Tab parking selected in its place, when this Tab was the Active Tab.
+    successor: Option<TabId>,
 }
 
 impl<T> ParkedTab<T> {
@@ -344,12 +346,14 @@ impl<T> TabCollection<T> {
         let scope = self.tabs[index].scope;
         let (_, position) = self.retained_position(id)?;
         let was_root = self.root_tab_id == id;
+        let was_active = self.active_tab_id == id;
         match self.take_tab(id)? {
             CloseTabOutcome::TabClosed { payload, .. } => {
                 self.parked_positions.insert(id, (scope, position));
                 Ok(Some(ParkedTab {
                     entry: TabEntry { id, scope, payload },
                     was_root,
+                    successor: was_active.then_some(self.active_tab_id),
                 }))
             }
             CloseTabOutcome::CloseWorkspace { .. } => Ok(None),
@@ -357,7 +361,12 @@ impl<T> TabCollection<T> {
     }
 
     /// A refusal restores only this Tab. Later selection and rearrangement stay where they are.
-    pub(crate) fn restore_parked_tab(&mut self, parked: ParkedTab<T>) {
+    ///
+    /// Returns whether the Tab should take the selection back: it was the Active Tab, and the
+    /// Tab parking selected in its place still is, so nobody chose another Tab since. The caller
+    /// activates it.
+    pub(crate) fn restore_parked_tab(&mut self, parked: ParkedTab<T>) -> bool {
+        let reselect = parked.successor == Some(self.active_tab_id);
         let (scope, retained) = self
             .parked_positions
             .remove(&parked.entry.id)
@@ -379,6 +388,7 @@ impl<T> TabCollection<T> {
         }
         self.activation_order.insert(0, parked.entry.id);
         self.tabs.insert(position, parked.entry);
+        reselect
     }
 
     pub(crate) fn discard_parked_tab(&mut self, parked: ParkedTab<T>) -> T {
@@ -442,12 +452,39 @@ mod tests {
         let refused = tabs.park_tab(third).unwrap().unwrap();
         tabs.close_tab(first).unwrap();
         tabs.discard_parked_tab(accepted);
-        tabs.restore_parked_tab(refused);
+        assert!(!tabs.restore_parked_tab(refused));
         assert_eq!(
             tabs.iter().map(|(id, _)| id).collect::<Vec<_>>(),
             [third, fourth]
         );
         assert_eq!(tabs.active_tab_id(), fourth);
+    }
+
+    #[test]
+    fn a_refused_close_takes_the_selection_back_only_from_the_tab_parking_selected() {
+        let mut tabs = TabCollection::new(|id| id);
+        let first = tabs.root_tab_id();
+        let second = tabs.create_tab(|id| id).unwrap();
+        let third = tabs.create_tab(|id| id).unwrap();
+        tabs.activate_tab(second).unwrap();
+        let parked = tabs.park_tab(second).unwrap().unwrap();
+        let successor = tabs.active_tab_id();
+        assert_ne!(successor, second);
+        assert!(tabs.restore_parked_tab(parked));
+
+        // A person who chose another Tab meanwhile keeps it.
+        let parked = tabs.park_tab(second).unwrap().unwrap();
+        let chosen = if tabs.active_tab_id() == first {
+            third
+        } else {
+            first
+        };
+        tabs.activate_tab(chosen).unwrap();
+        assert!(!tabs.restore_parked_tab(parked));
+
+        // An inactive Tab never takes the selection.
+        let parked = tabs.park_tab(second).unwrap().unwrap();
+        assert!(!tabs.restore_parked_tab(parked));
     }
 
     #[test]

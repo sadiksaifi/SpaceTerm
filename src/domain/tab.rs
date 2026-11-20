@@ -274,6 +274,8 @@ pub(crate) struct ParkedPane<T> {
     original: PaneNode,
     remaining: PaneNode,
     was_root: bool,
+    /// The Pane parking focused in its place, when this Pane was the Focused Pane.
+    successor: Option<PaneId>,
 }
 
 impl<T> ParkedPane<T> {
@@ -767,6 +769,7 @@ impl<T> Tab<T> {
     pub(crate) fn park_pane(&mut self, id: PaneId) -> Result<Option<ParkedPane<T>>, PaneError> {
         let original = self.root.clone();
         let was_root = self.root_pane_id == id;
+        let was_focused = self.focused_pane_id == id;
         match self.close_pane(id)? {
             ClosePaneOutcome::PaneClosed { closed_pane, .. } => Ok(Some(ParkedPane {
                 id,
@@ -774,17 +777,22 @@ impl<T> Tab<T> {
                 original,
                 remaining: self.root.clone(),
                 was_root,
+                successor: was_focused.then_some(self.focused_pane_id),
             })),
             ClosePaneOutcome::CloseTab { .. } => Ok(None),
         }
     }
 
+    /// Returns the Pane to the layout. It takes the focus back when it was the Focused Pane and
+    /// the Pane parking focused in its place still is, so nobody focused another Pane since.
+    /// Returns whether it did.
     pub(crate) fn restore_parked_pane(
         &mut self,
         parked: ParkedPane<T>,
         source: PaneId,
         edge: PaneEdge,
-    ) -> Result<PaneId, PaneError> {
+    ) -> Result<bool, PaneError> {
+        let refocus = parked.successor == Some(self.focused_pane_id);
         if self.root == parked.remaining {
             self.root = parked.original;
         } else {
@@ -805,7 +813,10 @@ impl<T> Tab<T> {
         }
         self.panes.insert(parked.id, parked.payload);
         self.focus_history.insert(0, parked.id);
-        Ok(parked.id)
+        if refocus {
+            self.set_focused_pane(parked.id);
+        }
+        Ok(refocus)
     }
 
     /// Moves each Split ratio that would leave a Pane below its minimum size in `available` to
@@ -1479,6 +1490,40 @@ mod tests {
         )
         .unwrap();
         tab
+    }
+
+    #[test]
+    fn a_refused_close_takes_the_focus_back_only_from_the_pane_parking_focused() {
+        let mut tab = four_pane_tab();
+        tab.focus_pane(PaneId::new(3)).unwrap();
+        let parked = tab.park_pane(PaneId::new(3)).unwrap().unwrap();
+        assert_ne!(tab.focused_pane_id(), PaneId::new(3));
+        assert!(
+            tab.restore_parked_pane(parked, PaneId::new(1), PaneEdge::Right)
+                .unwrap()
+        );
+        assert_eq!(tab.focused_pane_id(), PaneId::new(3));
+
+        // A person who focused another Pane meanwhile keeps it.
+        let parked = tab.park_pane(PaneId::new(3)).unwrap().unwrap();
+        let chosen = [PaneId::new(1), PaneId::new(2), PaneId::new(4)]
+            .into_iter()
+            .find(|pane| *pane != tab.focused_pane_id())
+            .unwrap();
+        tab.focus_pane(chosen).unwrap();
+        assert!(
+            !tab.restore_parked_pane(parked, PaneId::new(1), PaneEdge::Right)
+                .unwrap()
+        );
+        assert_eq!(tab.focused_pane_id(), chosen);
+
+        // An unfocused Pane never takes the focus.
+        let parked = tab.park_pane(PaneId::new(3)).unwrap().unwrap();
+        assert!(
+            !tab.restore_parked_pane(parked, PaneId::new(1), PaneEdge::Right)
+                .unwrap()
+        );
+        assert_eq!(tab.focused_pane_id(), chosen);
     }
 
     #[test]

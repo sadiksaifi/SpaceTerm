@@ -1658,7 +1658,7 @@ fn optimistic_close_hides_before_a_doomed_pane_status_and_restores_the_same_view
         harness.core.finish(true, true).outcome,
         Outcome::StaleConfirmation
     );
-    let focus = cx.update(|window, cx| window.focused(cx));
+    let survivor = cx.update(|window, cx| window.focused(cx));
     project_window(&harness, cx);
     assert_eq!(
         harness.manager.read_with(cx, |manager, cx| manager
@@ -1667,11 +1667,18 @@ fn optimistic_close_hides_before_a_doomed_pane_status_and_restores_the_same_view
             .pane_count()),
         2
     );
-    assert_eq!(
-        cx.update(|window, cx| window.focused(cx)),
-        focus,
-        "rollback never steals the survivor's keyboard"
-    );
+    // The close moved the keyboard to the survivor, and nobody moved it since, so the refusal
+    // returns it to the Pane the person asked to close, whose takeover screen takes it.
+    assert_eq!(local_view(&harness, cx), closed_view);
+    assert_ne!(cx.update(|window, cx| window.focused(cx)), survivor);
+    assert!(cx.update(|window, cx| {
+        harness
+            .manager
+            .read(cx)
+            .active_tab_view()
+            .read(cx)
+            .holds_keyboard(window, cx)
+    }));
     // The restored Pane retains its original local identity and layout, not a replacement Pane.
     assert!(
         cx.debug_bounds(format!("pane-surface-{}", closed_view.1.get()).leak())

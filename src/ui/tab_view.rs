@@ -739,6 +739,9 @@ pub(crate) struct TabView {
     /// The server Tab this Tab presents.
     binding: WorkspacePaneBinding,
     parked_panes: BTreeMap<PaneId, crate::domain::tab::ParkedPane<Entity<TerminalPane>>>,
+    /// The parked Panes that held the keyboard as their close parked them, which a refusal
+    /// returns it to while it still rests in the Pane parking focused in their place.
+    parked_keyboard: std::collections::BTreeSet<PaneId>,
     directory_recovery: Option<Entity<super::core_pane::DirectoryRecovery>>,
     /// Reads every Pane's connection status while the Tab lives.
     /// The Panes whose shell started or is starting without a name yet. `None` while it
@@ -852,6 +855,7 @@ impl TabView {
             tab_focus: cx.focus_handle(),
             binding,
             parked_panes: BTreeMap::new(),
+            parked_keyboard: std::collections::BTreeSet::new(),
             directory_recovery: None,
             _blocked_updates: blocked_updates,
             background_turns: false,
@@ -1213,6 +1217,7 @@ impl TabView {
         for terminal in self.tab.panes() {
             terminal.update(cx, |terminal, _| terminal.close());
         }
+        self.parked_keyboard.clear();
         for (_, parked) in std::mem::take(&mut self.parked_panes) {
             parked.payload().update(cx, |terminal, _| terminal.close());
         }
@@ -2735,12 +2740,21 @@ impl TabView {
                         .and_then(|id| binding.local_pane(id))
                         .filter(|id| self.tab.pane(*id).is_some())
                         .unwrap_or_else(|| self.tab.root_pane_id());
-                    if self
-                        .tab
-                        .restore_parked_pane(parked, source, side_edge(pane.side))
-                        .is_ok()
+                    // A refused close returns the focus it moved, and the keyboard it moved with
+                    // it, unless the person focused another Pane or moved the keyboard since.
+                    let held_keyboard =
+                        self.parked_keyboard.remove(&pane_id) && self.holds_keyboard(window, cx);
+                    if let Ok(refocused) =
+                        self.tab
+                            .restore_parked_pane(parked, source, side_edge(pane.side))
                     {
+                        if refocused {
+                            self.focus_epoch = self.focus_epoch.wrapping_add(1);
+                        }
                         self.finish_insertion(pane_id, cx);
+                        if refocused && held_keyboard && self.active {
+                            self.focus(window, cx);
+                        }
                         changed = true;
                     }
                 }
@@ -2836,6 +2850,7 @@ impl TabView {
             .collect::<Vec<_>>();
         for id in retired {
             if let Some(parked) = self.parked_panes.remove(&id) {
+                self.parked_keyboard.remove(&id);
                 parked.payload().update(cx, |terminal, _| terminal.close());
                 self.forget_pane(id);
             }
@@ -2898,6 +2913,9 @@ impl TabView {
                         terminal.set_accessibility_hierarchy(false);
                     });
                     self.parked_panes.insert(pane_id, parked);
+                    if held_keyboard {
+                        self.parked_keyboard.insert(pane_id);
+                    }
                     self.advance_native_service_hierarchy_generation(cx);
                     self.pane_layout_revision += 1;
                     self.pane_motion.expect_change();
