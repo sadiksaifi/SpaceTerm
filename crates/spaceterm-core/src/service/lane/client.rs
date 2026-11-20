@@ -189,25 +189,37 @@ impl Session {
             return (Err(CoreError::Protocol), false);
         };
         self.used = Instant::now();
-        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let starting = Arc::clone(&started);
+        let progress = Arc::new(Progress::default());
+        let sending = Arc::clone(&progress);
         let finished = within(LANE_IO, &|| Some(deadline()), move || {
             // Marked before the clock is read, so a caller that saw the deadline pass and then
             // found this unmarked knows the check below refuses to write.
-            starting.store(true, std::sync::atomic::Ordering::SeqCst);
+            sending.mark(Progress::STARTED);
             if Instant::now() >= fixed {
+                sending.mark(Progress::UNSENT);
                 return (stream, Err(CoreError::Protocol), false);
             }
-            let reply = stream
-                .send(&bytes, fixed)
-                .and_then(|()| stream.receive(MAX_FRAME, fixed));
-            (stream, reply, true)
+            // The transport checks the deadline again before each write, and says whether any
+            // byte left before it passed.
+            match stream.send_frame(&bytes, fixed) {
+                Ok(()) => {
+                    sending.mark(Progress::SENT);
+                    let reply = stream.receive(MAX_FRAME, fixed);
+                    (stream, reply, true)
+                }
+                Err(unsent) if !unsent.written => {
+                    sending.mark(Progress::UNSENT);
+                    (stream, Err(unsent.error), false)
+                }
+                Err(unsent) => {
+                    sending.mark(Progress::SENT);
+                    (stream, Err(unsent.error), true)
+                }
+            }
         });
         let Some((stream, reply, wrote)) = finished else {
             // The caller stopped waiting while the I/O may still run.
-            let past = Instant::now() >= fixed;
-            let unstarted = !started.load(std::sync::atomic::Ordering::SeqCst);
-            return (Err(CoreError::Protocol), !(past && unstarted));
+            return (Err(CoreError::Protocol), progress.may_have_written(fixed));
         };
         self.stream = Some(stream);
         (reply.and_then(|reply| self.decode(&reply)), wrote)
@@ -227,6 +239,51 @@ impl Session {
         }
     }
 }
+
+/// How far lane I/O that [`Session::send_within`] runs got with its request's bytes.
+#[derive(Default)]
+struct Progress(std::sync::atomic::AtomicU8);
+
+impl Progress {
+    const STARTED: u8 = 1;
+    /// It ended without writing a byte, and writes none later.
+    const UNSENT: u8 = 2;
+    /// A byte may have left.
+    const SENT: u8 = 3;
+
+    fn mark(&self, phase: u8) {
+        self.0.store(phase, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn phase(&self) -> u8 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Whether a byte may have left, said by a caller that stopped waiting. I/O that had not
+    /// started by the deadline `fixed` never writes. I/O that was sending then stops at `fixed`
+    /// too, before its next write, so the caller waits [`SEND_GRACE`] at most for it to say
+    /// whether any byte left before that.
+    fn may_have_written(&self, fixed: Instant) -> bool {
+        if Instant::now() < fixed {
+            // An interrupt ended the wait early: the I/O may still write until `fixed`.
+            return self.phase() != Progress::UNSENT;
+        }
+        let grace = Instant::now() + SEND_GRACE;
+        loop {
+            match self.phase() {
+                0 => return false,
+                Progress::UNSENT => return false,
+                Progress::SENT => return true,
+                _ if Instant::now() >= grace => return true,
+                _ => std::thread::sleep(Duration::from_millis(2)),
+            }
+        }
+    }
+}
+
+/// How long a caller past its deadline waits for lane I/O that was sending to say whether any
+/// byte left. The transport stops at the same deadline, so this covers only scheduling.
+const SEND_GRACE: Duration = Duration::from_millis(250);
 
 /// `error`, or [`LaneError::Deadline`] when it ended a wait that `deadline` bounded.
 pub(crate) fn past(error: CoreError, deadline: Instant) -> LaneError {
@@ -632,7 +689,9 @@ impl Connector for Paired {
         if Instant::now() >= deadline {
             return Err(crate::direct::DirectError::Transport.into());
         }
-        let connection = self.connector.connect()?;
+        // Each dial follows the deadline of the lane request that needs it, never one the
+        // connector fixed before the caller's approval began.
+        let connection = self.connector.connect_by(deadline)?;
         if connection.paired() != &self.paired {
             return Err(CoreError::AuthenticationRefused);
         }

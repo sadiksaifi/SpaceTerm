@@ -244,18 +244,26 @@ impl Context<'_> {
     /// starts can then migrate or restore the state. Code that touches the state afterward,
     /// such as a CLI connection, calls [`Self::require_state`] first.
     pub fn unshared<T>(&self, call: impl FnOnce() -> T) -> T {
+        self.unshared_until(None, call)
+    }
+
+    /// [`Self::unshared`] that waits no later than `deadline` to share the state again.
+    pub fn unshared_by<T>(&self, deadline: Instant, call: impl FnOnce() -> T) -> T {
+        self.unshared_until(Some(deadline), call)
+    }
+
+    fn unshared_until<T>(&self, deadline: Option<Instant>, call: impl FnOnce() -> T) -> T {
         use spaceterm_core::service::lane::admin::Share;
         self.state.borrow_mut().release();
         let result = call();
-        self.state.borrow_mut().resume();
+        self.state.borrow_mut().share_by(deadline);
         result
     }
 
     /// Takes the command's share of its CLI state again after [`Self::unshared`]. A state that
     /// left this build's generation meanwhile fails with `IncompatibleState`.
     pub fn require_state(&self) -> Result<(), Failure> {
-        use spaceterm_core::service::lane::admin::Share;
-        if self.state.borrow_mut().resume() {
+        if self.state.borrow_mut().share_by(None) {
             Ok(())
         } else {
             Err(contract::from_core_error(CoreError::IncompatibleState))

@@ -2378,9 +2378,19 @@ mod flow {
         fn release(&mut self) {
             self.lock = None;
         }
-        fn resume(&mut self) -> bool {
-            self.lock = Some(self.directory.lock_shared("state.lock").unwrap());
-            true
+        fn resume(&mut self, deadline: Instant) -> bool {
+            let limit = deadline.saturating_duration_since(Instant::now());
+            match self
+                .directory
+                .wait_lock_shared("state.lock", limit)
+                .unwrap()
+            {
+                crate::storage::LockWait::Locked(lock) => {
+                    self.lock = Some(lock);
+                    true
+                }
+                _ => false,
+            }
         }
     }
 
@@ -2596,6 +2606,193 @@ mod flow {
             assert!(lane.lane.ledger().unwrap().records().unwrap().is_empty());
             assert!(pending.list().unwrap().is_empty());
         });
+    }
+
+    /// Another caller of the same route and identity that holds the operation record past the
+    /// deadline ends the recovery and the approval by it. The approval sends no `Execute`.
+    #[test]
+    fn a_record_another_caller_holds_past_the_deadline_dispatches_nothing() {
+        with_lane(|lane| {
+            let (client, session, approved) = approved_stop(&lane);
+            let pending = pending(&lane);
+            let record =
+                Directory::open(&lane.service.paths.data.with_extension("pending"), false).unwrap();
+            let held = record.lock("service-operations.lock", false).unwrap();
+
+            let began = Instant::now();
+            let opened = admin::open(&client, &pending, began + Duration::from_millis(500));
+            assert_eq!(
+                opened.err().map(|unopened| unopened.error),
+                Some(LaneError::Deadline)
+            );
+            assert!(
+                began.elapsed() < Duration::from_millis(1500),
+                "{:?}",
+                began.elapsed()
+            );
+
+            let began = Instant::now();
+            let outcome = admin::execute_approved(
+                &client,
+                session,
+                LaneAction::Stop,
+                approved.token,
+                began + Duration::from_secs(1),
+                Duration::from_secs(90),
+                &pending,
+                &mut admin::Unshared,
+                &mut || Ok(()),
+                &|| None,
+                &mut |_| {},
+            );
+            assert_eq!(outcome, Err(LaneError::Deadline));
+            assert!(
+                began.elapsed() < Duration::from_secs(2),
+                "{:?}",
+                began.elapsed()
+            );
+            std::thread::sleep(Duration::from_millis(300));
+            assert_eq!(lane.launches.load(Ordering::SeqCst), 0);
+            assert!(lane.lane.ledger().unwrap().records().unwrap().is_empty());
+            drop(held);
+            assert!(pending.list().unwrap().is_empty());
+        });
+    }
+
+    /// A starting SpaceTerm Core's migration that takes the client's state alone while an
+    /// approval waits for another operation, and keeps it past the deadline, never extends the
+    /// approval: it ends by its deadline with the refusal that admitted nothing.
+    #[test]
+    fn a_migration_that_holds_the_state_past_the_deadline_ends_the_approval_by_it() {
+        with_lane(|lane| {
+            let (client, session, approved) = approved_stop(&lane);
+            let _settle = another_clients_restart(&lane);
+            let state = lane.service.paths.data.join("client-state");
+            let directory = Directory::open(&state, true).unwrap();
+            let mut share = Shared {
+                lock: Some(directory.lock_shared("state.lock").unwrap()),
+                directory,
+            };
+            let migrating = Directory::open(&state, false).unwrap();
+            let (taken, took) = std::sync::mpsc::channel();
+            let (end, ended) = std::sync::mpsc::channel::<()>();
+            let migration = std::thread::spawn(move || {
+                let lock = loop {
+                    if let Some(lock) = migrating.try_lock("state.lock").unwrap() {
+                        break lock;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                };
+                taken.send(()).unwrap();
+                let _ = ended.recv_timeout(Duration::from_secs(10));
+                drop(lock);
+            });
+            let began = Instant::now();
+            let outcome = admin::execute_approved(
+                &client,
+                session,
+                LaneAction::Stop,
+                approved.token,
+                began + Duration::from_secs(2),
+                Duration::from_secs(90),
+                &pending(&lane),
+                &mut share,
+                &mut || Ok(()),
+                &|| None,
+                &mut |_| {},
+            );
+            assert_eq!(outcome, Err(LaneError::Code("service_busy".into())));
+            assert!(
+                began.elapsed() < Duration::from_millis(3500),
+                "{:?}",
+                began.elapsed()
+            );
+            assert!(took.try_recv().is_ok(), "the migration took the state");
+            assert!(share.lock.is_none());
+            // Only the other client's Restart launched.
+            assert_eq!(lane.launches.load(Ordering::SeqCst), 1);
+            end.send(()).unwrap();
+            migration.join().unwrap();
+        });
+    }
+
+    /// A transport whose write of every frame stops at its deadline, after a byte of the frame
+    /// left when `written`.
+    struct Expiring {
+        written: bool,
+    }
+    impl crate::protocol::Preamble for Expiring {
+        fn send_frame(
+            &mut self,
+            _: &[u8],
+            deadline: Instant,
+        ) -> Result<(), crate::protocol::Unsent> {
+            std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+            Err(crate::protocol::Unsent {
+                error: CoreError::Protocol,
+                written: self.written,
+            })
+        }
+        fn receive(&mut self, _: usize, _: Instant) -> Result<Vec<u8>, CoreError> {
+            Err(CoreError::Protocol)
+        }
+    }
+
+    /// One [`Expiring`] connection; every later dial finds no server.
+    struct OneDial {
+        written: bool,
+        dials: AtomicUsize,
+    }
+    impl Connector for OneDial {
+        fn connect(&self, _: Instant) -> Result<client::Connected, CoreError> {
+            if self.dials.fetch_add(1, Ordering::SeqCst) > 0 {
+                return Err(CoreError::NotRunning);
+            }
+            Ok((
+                Box::new(Expiring {
+                    written: self.written,
+                }),
+                crate::protocol::version::SERVICE,
+                crate::protocol::version::SERVICE,
+            ))
+        }
+    }
+
+    /// An `Execute` whose write stops at the deadline dispatched nothing when no byte of it left,
+    /// and stays an unconfirmed outcome of its operation when one did.
+    #[test]
+    fn an_execute_whose_write_expires_is_unsent_only_when_no_byte_left() {
+        for written in [false, true] {
+            let connector: Arc<dyn Connector> = Arc::new(OneDial {
+                written,
+                dials: AtomicUsize::new(0),
+            });
+            let session =
+                Session::open(connector.as_ref(), Instant::now() + Duration::from_secs(5)).unwrap();
+            let id = OperationId::random().unwrap();
+            let outcome = client::perform(
+                &connector,
+                session,
+                LaneAction::Restart,
+                "c1-00".into(),
+                id,
+                Duration::from_millis(1500),
+                &mut |_| Ok(()),
+                &|| None,
+            );
+            if written {
+                assert_eq!(
+                    outcome,
+                    Ok(Outcome::Unconfirmed {
+                        operation: id.to_string(),
+                        boot: String::new(),
+                        last: None,
+                    })
+                );
+            } else {
+                assert_eq!(outcome, Err(LaneError::Deadline));
+            }
+        }
     }
 
     /// Which requests [`Cutting`] counts, and at which of them it cuts the connection.

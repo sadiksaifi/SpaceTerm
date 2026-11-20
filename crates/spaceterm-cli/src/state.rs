@@ -232,11 +232,10 @@ impl Default for StateShare {
     }
 }
 
-impl spaceterm_core::service::lane::admin::Share for StateShare {
-    fn release(&mut self) {
-        self.lock = None;
-    }
-    fn resume(&mut self) -> bool {
+impl StateShare {
+    /// Shares the state again. With a `deadline`, a migration that holds it alone past then
+    /// leaves it unshared; without one, this waits for that migration.
+    pub fn share_by(&mut self, deadline: Option<Instant>) -> bool {
         let Some(root) = &self.root else {
             return true;
         };
@@ -246,7 +245,17 @@ impl spaceterm_core::service::lane::admin::Share for StateShare {
         let Ok(directory) = Directory::open(root, false) else {
             return false;
         };
-        let Ok(lock) = directory.lock_shared(GENERATION_LOCK) else {
+        let lock = match deadline {
+            None => directory.lock_shared(GENERATION_LOCK).ok(),
+            Some(deadline) => match directory.wait_lock_shared(
+                GENERATION_LOCK,
+                deadline.saturating_duration_since(Instant::now()),
+            ) {
+                Ok(LockWait::Locked(lock)) => Some(lock),
+                Ok(LockWait::Held | LockWait::Cancelled) | Err(_) => None,
+            },
+        };
+        let Some(lock) = lock else {
             return false;
         };
         if !migration::is_current(self.registry, &store_at(root.clone())).unwrap_or(false) {
@@ -254,6 +263,15 @@ impl spaceterm_core::service::lane::admin::Share for StateShare {
         }
         self.lock = Some(lock);
         true
+    }
+}
+
+impl spaceterm_core::service::lane::admin::Share for StateShare {
+    fn release(&mut self) {
+        self.lock = None;
+    }
+    fn resume(&mut self, deadline: Instant) -> bool {
+        self.share_by(Some(deadline))
     }
 }
 
@@ -982,7 +1000,7 @@ mod tests {
         };
         // Nothing migrated while the command waited, so it shares the state again.
         share.release();
-        assert!(share.resume());
+        assert!(share.resume(Instant::now() + std::time::Duration::from_secs(5)));
         share.release();
         // The Pending Version the restart started migrates the state before it is ready.
         prepare_for_core_at(
@@ -994,7 +1012,42 @@ mod tests {
         )
         .unwrap();
         // This build no longer reads the state, so the command leaves it alone.
-        assert!(!share.resume());
+        assert!(!share.resume(Instant::now() + std::time::Duration::from_secs(5)));
+        std::fs::remove_dir_all(&state.root).unwrap();
+    }
+
+    /// A migration that keeps the state alone past an approval's deadline leaves the command
+    /// unshared at that deadline, so the command's `--timeout` still bounds it.
+    #[test]
+    fn a_command_shares_its_state_again_no_later_than_its_deadline() {
+        use spaceterm_core::service::lane::admin::Share;
+        let state = temporary("share-deadline");
+        let never = || Ok(false);
+        let mut share = StateShare {
+            registry: &REGISTRY,
+            root: Some(state.root.clone()),
+            lock: Some(
+                prepare_at(state.root.clone(), &mut migration::NoCredentials, &never)
+                    .unwrap()
+                    .lock,
+            ),
+        };
+        share.release();
+        let migrating = Directory::open(&state.root, false)
+            .unwrap()
+            .try_lock(GENERATION_LOCK)
+            .unwrap()
+            .expect("the released state is free");
+        let began = Instant::now();
+        assert!(!share.resume(began + std::time::Duration::from_millis(300)));
+        let waited = began.elapsed();
+        assert!(
+            waited >= std::time::Duration::from_millis(250)
+                && waited < std::time::Duration::from_secs(2),
+            "{waited:?}"
+        );
+        drop(migrating);
+        assert!(share.resume(Instant::now() + std::time::Duration::from_secs(5)));
         std::fs::remove_dir_all(&state.root).unwrap();
     }
 

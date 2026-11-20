@@ -412,6 +412,13 @@ impl Invitation {
 #[cfg(feature = "client")]
 pub trait DirectConnector: Send + Sync {
     fn connect(&self) -> Result<DirectConnection, DirectError>;
+    /// Connects by `deadline`, the deadline of the request that needs the connection. A
+    /// connector that bounds its dials by a deadline of its own replaces it with this one, so a
+    /// dial that starts after a person answered a prompt follows the budget their answer began.
+    fn connect_by(&self, deadline: std::time::Instant) -> Result<DirectConnection, DirectError> {
+        let _ = deadline;
+        self.connect()
+    }
 }
 
 /// An authenticated QUIC connection before admission. Admission turns it into the connection's

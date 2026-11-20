@@ -146,7 +146,7 @@ fn not_running(
     let failure = if failure.code == Code::Timeout {
         failure
     } else if routed.local
-        && let Ok(Some(_)) = context.unshared(|| {
+        && let Ok(Some(_)) = context.unshared_by(deadline, || {
             Service::for_identity(context.identity)
                 .and_then(|service| service.stop_if_stopped_by(deadline))
         })
@@ -472,17 +472,19 @@ fn execute(
             .as_ref()
             .is_some_and(|failure| failure.code == Code::StartupFailed)
     {
-        // SpaceTerm Core returned to the version it ran before. Its update facts say why.
+        // SpaceTerm Core returned to the version it ran before. Its update facts say why, when
+        // they arrive within the command's one deadline; this read starts no budget of its own.
+        let deadline = crate::interrupt::limit(deadline);
         let after = match super::open_lane(
             context,
             &routed.connection,
             &routed.route,
             pending,
-            Instant::now() + admin::REQUEST_LIMIT,
+            deadline,
         ) {
             Ok(mut opened) => {
                 recovered.append(&mut opened.recovered);
-                admin::facts(&mut opened.session).ok()
+                admin::facts_by(&mut opened.session, deadline).ok()
             }
             Err(mut unopened) => {
                 recovered.append(&mut unopened.recovered);

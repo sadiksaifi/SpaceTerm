@@ -57,12 +57,16 @@ pub fn wait(action: &LaneAction) -> Duration {
 /// The record of one route and identity's admitted operations, kept in `directory`.
 const PENDING: &str = "service-operations.json";
 const PENDING_FILE: &std::ffi::CStr = c"service-operations.json";
+/// Held across each read-modify-write of the pending operations.
+const RECORD_LOCK: &str = "service-operations.lock";
 /// Held shared by each flow that follows an operation it recorded, and exclusively while a lane
 /// connection settles the identity's leftovers, so that settlement never acknowledges a receipt
 /// a running flow still waits to read.
 const FOLLOWING: &str = "service-operations-following.lock";
 /// At most this many pending operations are kept. The server holds no more than 16.
 const MAX_PENDING: usize = 16;
+/// How long a caller that set no deadline of its own waits for another holder of the record.
+const RECORD_WAIT: Duration = REQUEST_LIMIT;
 
 /// Whether `value` is a client's `service-operations.json` this build reads.
 pub(crate) fn readable(value: &serde_json::Value) -> bool {
@@ -81,11 +85,23 @@ impl PendingOperations {
         Self { directory }
     }
 
-    fn change(
+    /// The record's lock, waiting for another holder until `deadline`. A holder that keeps it
+    /// past then is [`LaneError::Deadline`].
+    fn lock_by(&self, deadline: Instant) -> Result<Lock, LaneError> {
+        let limit = deadline.saturating_duration_since(Instant::now());
+        match self.directory.wait_lock(RECORD_LOCK, limit, None) {
+            Ok(LockWait::Locked(lock)) => Ok(lock),
+            Ok(LockWait::Held | LockWait::Cancelled) => Err(LaneError::Deadline),
+            Err(error) => Err(LaneError::Core(error)),
+        }
+    }
+
+    fn change_by(
         &self,
+        deadline: Instant,
         apply: impl FnOnce(&mut Vec<String>) -> Result<(), CoreError>,
-    ) -> Result<Vec<String>, CoreError> {
-        let _lock = self.directory.lock("service-operations.lock", false)?;
+    ) -> Result<Vec<String>, LaneError> {
+        let _lock = self.lock_by(deadline)?;
         let mut pending: Vec<String> = self.directory.read_json(PENDING)?.unwrap_or_default();
         let before = pending.clone();
         apply(&mut pending)?;
@@ -96,12 +112,24 @@ impl PendingOperations {
     }
 
     pub fn list(&self) -> Result<Vec<String>, CoreError> {
-        self.change(|_| Ok(()))
+        self.list_by(Instant::now() + RECORD_WAIT)
+            .map_err(record_error)
+    }
+
+    /// The pending operations, read by `deadline`.
+    pub fn list_by(&self, deadline: Instant) -> Result<Vec<String>, LaneError> {
+        self.change_by(deadline, |_| Ok(()))
     }
 
     /// Records an operation right before its `Execute` is sent.
     pub fn add(&self, operation: &OperationId) -> Result<(), CoreError> {
-        self.change(|pending| {
+        self.add_by(operation, Instant::now() + RECORD_WAIT)
+            .map_err(record_error)
+    }
+
+    /// [`Self::add`] by `deadline`.
+    fn add_by(&self, operation: &OperationId, deadline: Instant) -> Result<(), LaneError> {
+        self.change_by(deadline, |pending| {
             if pending.len() >= MAX_PENDING {
                 return Err(CoreError::Capacity);
             }
@@ -112,7 +140,13 @@ impl PendingOperations {
     }
 
     pub fn remove(&self, operation: &str) -> Result<(), CoreError> {
-        self.change(|pending| {
+        self.remove_by(operation, Instant::now() + RECORD_WAIT)
+            .map_err(record_error)
+    }
+
+    /// [`Self::remove`] by `deadline`. A deadline that already passed tries once.
+    pub fn remove_by(&self, operation: &str, deadline: Instant) -> Result<(), LaneError> {
+        self.change_by(deadline, |pending| {
             pending.retain(|v| v != operation);
             Ok(())
         })
@@ -160,6 +194,15 @@ impl From<CoreError> for Unopened {
     }
 }
 
+/// A record failure for a caller that set no deadline: a holder that kept the record past
+/// [`RECORD_WAIT`] leaves it unavailable.
+fn record_error(error: LaneError) -> CoreError {
+    match error {
+        LaneError::Core(error) => error,
+        _ => CoreError::StorageUnavailable,
+    }
+}
+
 /// Opens one lane connection by `deadline` and settles what earlier commands of this identity
 /// left on it. Returns the receipts it settled and acknowledged. An operation that has not
 /// settled stays recorded for a later connection, and so does every leftover while a flow of
@@ -177,15 +220,15 @@ pub fn open(
         return Ok((session, Vec::new()));
     };
     let mut settled = Vec::new();
-    for operation in pending.list()? {
+    for operation in pending.list_by(deadline)? {
         let Some(id) = OperationId::parse(&operation) else {
-            pending.remove(&operation)?;
+            pending.remove_by(&operation, deadline)?;
             continue;
         };
         let by = deadline.min(Instant::now() + REQUEST_LIMIT);
         match super::client::leftover(&mut session, &id, by)? {
             Leftover::Settled(receipt) => settled.push((id, receipt)),
-            Leftover::Gone => pending.remove(&operation)?,
+            Leftover::Gone => pending.remove_by(&operation, deadline)?,
             Leftover::Pending => {}
         }
     }
@@ -199,7 +242,7 @@ pub fn open(
             });
         }
         // An acknowledged record the server no longer holds settles as gone next time.
-        let _ = pending.remove(&receipt.operation);
+        let _ = pending.remove_by(&receipt.operation, deadline);
         acknowledged.push(receipt);
     }
     Ok((session, acknowledged))
@@ -457,9 +500,11 @@ fn read_full(from: &mut dyn Read, buffer: &mut [u8]) -> std::io::Result<usize> {
 pub trait Share {
     /// Lets the state go once the record is written.
     fn release(&mut self);
-    /// Shares the state again after the wait. False when the state left this build's
-    /// generation meanwhile: the record then stays for the client that reads it.
-    fn resume(&mut self) -> bool;
+    /// Shares the state again after the wait, waiting until `deadline` at most for a migration
+    /// that holds it alone. False when the state left this build's generation meanwhile, or the
+    /// migration still holds it at `deadline`: the record then stays for the client that reads
+    /// it.
+    fn resume(&mut self, deadline: Instant) -> bool;
 }
 
 /// The share of a client that holds no lock on its state, such as the desktop's.
@@ -467,7 +512,7 @@ pub struct Unshared;
 
 impl Share for Unshared {
     fn release(&mut self) {}
-    fn resume(&mut self) -> bool {
+    fn resume(&mut self, _: Instant) -> bool {
         true
     }
 }
@@ -543,10 +588,14 @@ fn execute_as(
         &mut |operation| {
             dispatch()?;
             if !journal.journaled {
+                // A record another caller holds past the deadline dispatches nothing.
                 let following = pending.follow(until)?;
                 pending
-                    .add(operation)
-                    .map_err(|_| LaneError::Core(CoreError::StorageUnavailable))?;
+                    .add_by(operation, until)
+                    .map_err(|error| match error {
+                        LaneError::Deadline => LaneError::Deadline,
+                        _ => LaneError::Core(CoreError::StorageUnavailable),
+                    })?;
                 journal._following = Some(following);
                 journal.journaled = true;
             }
@@ -556,9 +605,9 @@ fn execute_as(
         accepted,
         interrupted,
     );
-    let shared = share.resume();
+    let shared = share.resume(until);
     if shared && let Ok(Outcome::Settled { receipt, .. }) = &outcome {
-        let _ = pending.remove(&receipt.operation);
+        let _ = pending.remove_by(&receipt.operation, until);
     }
     (outcome, shared)
 }
@@ -578,7 +627,9 @@ fn forget_refused(
         && journaled
         && (busy(error) || *error == LaneError::Deadline)
     {
-        let _ = pending.remove(&id.to_string());
+        // Past the caller's deadline this only tries: a record left behind settles as gone on a
+        // later connection, because nothing admitted it.
+        let _ = pending.remove_by(&id.to_string(), Instant::now());
     }
 }
 

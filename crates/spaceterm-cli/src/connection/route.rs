@@ -272,8 +272,8 @@ struct Connector {
     interaction: Interaction,
     deadline: Option<Instant>,
 }
-impl DirectConnector for Connector {
-    fn connect(&self) -> Result<DirectConnection, DirectError> {
+impl Connector {
+    fn dial(&self, deadline: Option<Instant>) -> Result<DirectConnection, DirectError> {
         let secret = self
             .credentials
             .read(&self.saved.credential, self.interaction)
@@ -283,7 +283,7 @@ impl DirectConnector for Connector {
             })?
             .ok_or(DirectError::CredentialUnavailable)?;
         let credential = DeviceCredential::from_bytes(&secret)?;
-        match self.deadline {
+        match deadline {
             Some(deadline) => DirectConnection::connect_until(
                 &self.saved.endpoint,
                 &self.saved.paired,
@@ -294,6 +294,17 @@ impl DirectConnector for Connector {
                 DirectConnection::connect(&self.saved.endpoint, &self.saved.paired, &credential)
             }
         }
+    }
+}
+impl DirectConnector for Connector {
+    fn connect(&self) -> Result<DirectConnection, DirectError> {
+        self.dial(self.deadline)
+    }
+    /// A service-lane dial follows its request's deadline. After a confirmation prompt that is
+    /// the approved action's budget, which began when the person answered, so the deadline this
+    /// connector took before the prompt never ends it early.
+    fn connect_by(&self, deadline: Instant) -> Result<DirectConnection, DirectError> {
+        self.dial(Some(deadline))
     }
 }
 
@@ -386,6 +397,87 @@ mod tests {
     use super::validate_command;
     use crate::args::Cli;
     use clap::Parser;
+
+    /// The one credential of a Saved Connection.
+    struct OneCredential(zeroize::Zeroizing<Vec<u8>>);
+    impl super::CredentialStore for OneCredential {
+        fn kind(&self) -> spaceterm_connections::StoreKind {
+            spaceterm_connections::StoreKind::Keychain
+        }
+        fn read(
+            &self,
+            _: &[u8; 32],
+            _: super::Interaction,
+        ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, super::CredentialError> {
+            Ok(Some(self.0.clone()))
+        }
+        fn insert(&self, _: &[u8; 32], _: &[u8]) -> Result<(), super::CredentialError> {
+            Err(super::CredentialError::Unavailable)
+        }
+        fn remove(
+            &self,
+            _: &[u8; 32],
+            _: super::Interaction,
+        ) -> Result<(), super::CredentialError> {
+            Err(super::CredentialError::Unavailable)
+        }
+    }
+
+    /// An interactive confirmation can outlast the deadline the paired connector took when the
+    /// command began. The approved action's service-lane dials then follow its own budget, so
+    /// the receipt dial after the person answered does not fail at once.
+    #[test]
+    fn a_service_lane_dial_follows_its_request_deadline_after_a_confirmation_prompt() {
+        use spaceterm_core::direct::{DeviceCredential, DirectConnector, MachinePin, PairedDevice};
+        use std::time::{Duration, Instant};
+        // A silent endpoint never answers a handshake, so a dial ends only at its deadline.
+        let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let credential = DeviceCredential::generate().unwrap();
+        let connector = super::Connector {
+            saved: super::SavedConnection {
+                name: "Penguin".into(),
+                route: [1; 32],
+                endpoint: format!("quic://{}", silent.local_addr().unwrap()),
+                paired: PairedDevice {
+                    pin: MachinePin {
+                        build: "spaceterm-development".into(),
+                        core: [3; 32],
+                        public_key: [4; 32],
+                        certificate: [5; 32],
+                    },
+                    pairing: [6; 32],
+                    client: [7; 32],
+                },
+                credential: [1; 32],
+                credential_store: spaceterm_connections::StoreKind::Keychain,
+                unpair: spaceterm_connections::UnpairState::Paired,
+            },
+            credentials: std::sync::Arc::new(OneCredential(zeroize::Zeroizing::new(
+                credential.expose_bytes().to_vec(),
+            ))),
+            interaction: super::Interaction::Quiet,
+            // Taken when the command began; reading the confirmation used all of it.
+            deadline: Some(Instant::now()),
+        };
+        let began = Instant::now();
+        assert!(connector.connect().is_err());
+        assert!(
+            began.elapsed() < Duration::from_millis(250),
+            "{:?}",
+            began.elapsed()
+        );
+        let began = Instant::now();
+        assert!(
+            connector
+                .connect_by(began + Duration::from_millis(600))
+                .is_err()
+        );
+        let waited = began.elapsed();
+        assert!(
+            waited >= Duration::from_millis(500) && waited < Duration::from_secs(3),
+            "{waited:?}"
+        );
+    }
 
     #[test]
     fn paired_routes_admit_remote_admin_verbs_and_work_commands() {
