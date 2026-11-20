@@ -23,9 +23,9 @@ use std::time::Duration;
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, SharedString, Task};
 use spaceterm_core::update::facts::{Operation, UpdateCheck, Version};
 
-use super::{Request, 
+use super::{
     ActionFailure, Asked, FailedPush, MachineAction, MachineId, MachineLink, MachinePreview,
-    MachineUpdate, MachineUpdatesAdapter, MachineUpdatesEvent,
+    MachineUpdate, MachineUpdatesAdapter, MachineUpdatesEvent, Request,
 };
 use crate::updates::confirm::{self, Approval, Confirmation};
 use crate::updates::state::{Checked, Dismissed, PUSH_FAILURE};
@@ -489,7 +489,8 @@ impl MachineUpdates {
         }
         self.mark();
         cx.notify();
-        self.performed.push((machine, action.clone(), surface, None));
+        self.performed
+            .push((machine, action.clone(), surface, None));
         self.adapter.perform(machine, action);
     }
 
@@ -777,7 +778,9 @@ impl MachineUpdates {
             cx.background_executor()
                 .spawn(async move {
                     let outcome = answer.recv().await.unwrap_or(Err(ActionFailure::Failed));
-                    let _ = answered.send((index, machine, action, outcome, request)).await;
+                    let _ = answered
+                        .send((index, machine, action, outcome, request))
+                        .await;
                 })
                 .detach();
         }
@@ -2230,7 +2233,9 @@ mod tests {
 
         // Once it finished, another surface's approval runs.
         cx.update(|cx| {
-            store.update(cx, |store, cx| store.execute(restart(), Surface::Window, cx));
+            store.update(cx, |store, cx| {
+                store.execute(restart(), Surface::Window, cx)
+            });
         });
         cx.run_until_parked();
         assert_eq!(adapter.executed().len(), 2);
@@ -2251,7 +2256,11 @@ mod tests {
             waiting,
         };
         for answer in [
-            Ok(super::super::testing::preview(machine, MachineAction::Stop, 0)),
+            Ok(super::super::testing::preview(
+                machine,
+                MachineAction::Stop,
+                0,
+            )),
             Err(ActionFailure::Unreachable),
         ] {
             let prepared = cx.update(|cx| {
@@ -2295,13 +2304,21 @@ mod tests {
         // Another surface's preview waits behind the same Core operation.
         adapter.emit(waits(executed + 100, true));
         cx.run_until_parked();
-        assert_eq!(approved(cx), Some(false), "another request's wait isn't this one's");
+        assert_eq!(
+            approved(cx),
+            Some(false),
+            "another request's wait isn't this one's"
+        );
         adapter.emit(waits(executed, true));
         cx.run_until_parked();
         assert_eq!(approved(cx), Some(true));
         // The Core admitted the Stop.
         adapter.emit(waits(executed, false));
         cx.run_until_parked();
-        assert_eq!(approved(cx), Some(false), "Stopping shows once the Core admitted it");
+        assert_eq!(
+            approved(cx),
+            Some(false),
+            "Stopping shows once the Core admitted it"
+        );
     }
 }

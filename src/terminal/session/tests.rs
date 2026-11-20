@@ -5507,7 +5507,6 @@ fn only_evidence_after_the_written_line_answers_a_submitted_line() {
     worker.finish();
 }
 
-
 /// The owning shell's fresh prompt: its directory report, then its own prompt markers.
 const FRESH_PROMPT: &[u8] =
     b"\x1b]7;file://mac.local/initial\x07\x1b]133;A;spaceterm=0f1e\x07% \x1b]133;B;spaceterm=0f1e\x07";
@@ -5535,7 +5534,10 @@ fn a_fresh_prompt_answers_only_the_oldest_written_line() {
     );
     reads(&mut worker, b"\r\n");
     reads(&mut worker, FRESH_PROMPT);
-    assert!(!worker.events.running_work(), "the second line's own prompt");
+    assert!(
+        !worker.events.running_work(),
+        "the second line's own prompt"
+    );
     worker.finish();
 }
 
@@ -5552,7 +5554,10 @@ fn a_line_still_queued_for_the_pty_stays_unanswered() {
     records.update(|state| state.write_blocked = true);
     worker.events.note_submitted();
     assert!(worker.process_command(Command::Key(enter_key())));
-    assert!(records.snapshot().written.is_empty(), "the PTY took nothing");
+    assert!(
+        records.snapshot().written.is_empty(),
+        "the PTY took nothing"
+    );
     // A fresh prompt drawn while the line waits in the queue answers nothing.
     reads(&mut worker, FRESH_PROMPT);
     assert!(worker.events.running_work());

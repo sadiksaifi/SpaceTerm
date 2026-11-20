@@ -492,9 +492,8 @@ impl ClaimWorker<'_> {
                     // Start, selection, repair and dismissal wake this wait, and so does
                     // anything `ControlWatch` sees that can change the server's answer. A place
                     // a lost start still holds looks again when its time runs out.
-                    let recheck = recheck.then(|| {
-                        std::time::Instant::now() + std::time::Duration::from_millis(250)
-                    });
+                    let recheck = recheck
+                        .then(|| std::time::Instant::now() + std::time::Duration::from_millis(250));
                     state.wake.wait(
                         [recheck, state.background_deadline()]
                             .into_iter()
@@ -1548,9 +1547,15 @@ mod tests {
             other => panic!("nothing else is asked: {other:?}"),
         });
         assert_eq!(result.err(), Some(CoreError::Stopped));
-        assert!(!state.start_unconfirmed(), "the other client's Session settles it");
+        assert!(
+            !state.start_unconfirmed(),
+            "the other client's Session settles it"
+        );
         assert_eq!(state.status(), CorePaneStatus::Takeover);
-        assert!(state.starting_in_background(), "its place lasts until readiness");
+        assert!(
+            state.starting_in_background(),
+            "its place lasts until readiness"
+        );
         assert!(state.settle_background([2; 32], sent + BACKGROUND_READY_LIMIT));
         assert!(!state.starting_in_background());
     }

@@ -613,7 +613,10 @@ fn actions_become_lane_requests_and_stop_stays_local() {
         adapter.perform(PENGUIN, action.clone());
         assert_eq!(finished(&events, &action), Ok(()));
     }
-    adapter.execute(previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap(), 1);
+    adapter.execute(
+        previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap(),
+        1,
+    );
     assert_eq!(finished(&events, &MachineAction::Restart), Ok(()));
     assert_eq!(
         previewed(&adapter, PENGUIN, MachineAction::Stop),
@@ -731,7 +734,10 @@ fn a_restart_that_does_not_come_back_reads_cant_confirm() {
     let (adapter, events) = started(&sources, Duration::from_millis(300));
     changed(&events, "the facts", |update| update.facts.is_some());
 
-    adapter.execute(previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap(), 1);
+    adapter.execute(
+        previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap(),
+        1,
+    );
     assert_eq!(finished(&events, &MachineAction::Restart), Ok(()));
     // The Core closes its lane to restart and does not come back.
     let unconfirmed = changed(&events, "the unconfirmed restart", |update| {
@@ -753,7 +759,10 @@ fn an_expected_restart_retries_the_machines_routes_until_the_core_returns() {
     let (adapter, events) = started(&sources, RESTART_LIMIT);
     changed(&events, "the facts", |update| update.facts.is_some());
 
-    adapter.execute(previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap(), 1);
+    adapter.execute(
+        previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap(),
+        1,
+    );
     assert_eq!(finished(&events, &MachineAction::Restart), Ok(()));
     // The Core closes its lane to restart, and its route drops.
     machine.set(Script::Offline);
@@ -809,7 +818,10 @@ fn an_unconfirmed_restart_keeps_expecting_the_core_and_then_cannot_confirm_it() 
     let (adapter, events) = started(&sources, Duration::from_millis(300));
     changed(&events, "the facts", |update| update.facts.is_some());
 
-    adapter.execute(previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap(), 1);
+    adapter.execute(
+        previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap(),
+        1,
+    );
     assert_eq!(
         finished(&events, &MachineAction::Restart),
         Err(ActionFailure::Unconfirmed)
@@ -897,7 +909,10 @@ fn check_status_keeps_its_own_operation_through_a_later_action() {
     let (adapter, events) = started(&sources, RESTART_LIMIT);
     changed(&events, "the facts", |update| update.facts.is_some());
 
-    adapter.execute(previewed(&adapter, LOCAL, MachineAction::Restart).unwrap(), 1);
+    adapter.execute(
+        previewed(&adapter, LOCAL, MachineAction::Restart).unwrap(),
+        1,
+    );
     let (_, restart) = finished_operation(&events, &MachineAction::Restart);
     let restart = restart.expect("the restart names its operation");
 

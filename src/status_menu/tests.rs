@@ -241,7 +241,7 @@ fn a_stop_without_a_confirmed_outcome_offers_check_status_and_a_failed_one_try_a
             outcome: Err(failure),
             operation: (failure == ActionFailure::Unconfirmed)
                 .then(|| crate::updates::machines::ServiceOperation::new("stop-1")),
-                request: None,
+            request: None,
         });
         fixture.host.answers.borrow_mut().push(true);
         cx.run_until_parked();

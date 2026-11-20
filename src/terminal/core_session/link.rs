@@ -2950,4 +2950,3 @@ mod tests {
         assert_eq!(batches, 1, "nothing is replayed");
     }
 }
-

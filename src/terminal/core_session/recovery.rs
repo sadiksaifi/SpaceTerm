@@ -262,7 +262,10 @@ mod tests {
             recovery.observed(&observation).unwrap();
             assert!(!recovery.start_unconfirmed(), "{observation:?}");
         }
-        for observation in [takeover([9; 32], Controller::Nobody), takeover([9; 32], other())] {
+        for observation in [
+            takeover([9; 32], Controller::Nobody),
+            takeover([9; 32], other()),
+        ] {
             let mut ordinary = lost(false);
             assert!(ordinary.observed(&observation).is_err());
             assert!(ordinary.start_unconfirmed());

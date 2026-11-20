@@ -260,12 +260,18 @@ fn a_restarted_focused_shell_stays_blank_until_it_names_itself() {
     let began = Instant::now();
     while began.elapsed() < Duration::from_millis(1200) {
         assert!(state.shell_starting(), "the name waits for the shell's own");
-        assert!(!screened(&started), "the startup banner stays off the surface");
+        assert!(
+            !screened(&started),
+            "the startup banner stays off the surface"
+        );
         std::thread::sleep(Duration::from_millis(25));
     }
     let until = Instant::now() + Duration::from_secs(10);
     while state.shell_starting() {
-        assert!(Instant::now() < until, "the restarted shell never ended its quiet");
+        assert!(
+            Instant::now() < until,
+            "the restarted shell never ended its quiet"
+        );
         std::thread::sleep(Duration::from_millis(25));
     }
     drop(started);
@@ -322,7 +328,11 @@ fn a_lost_prepare_reply_keeps_its_place_until_its_shell_settles() {
     let starts = core.starts();
     (core.reconnect)();
     await_status(&state, CorePaneStatus::Takeover);
-    assert_eq!(core.sessions().len(), 1, "the lost start's shell is the only one");
+    assert_eq!(
+        core.sessions().len(),
+        1,
+        "the lost start's shell is the only one"
+    );
     assert_eq!(core.starts(), starts, "nothing took control");
 }
 
@@ -356,7 +366,10 @@ fn a_stopped_worker_is_asked_to_connect_again_once_per_core_run() {
     };
     reaches(&core);
     state.set_status_for_test(CorePaneStatus::Reconnecting);
-    assert!(!state.rearm_background(), "a worker that reconnects is left alone");
+    assert!(
+        !state.rearm_background(),
+        "a worker that reconnects is left alone"
+    );
     state.set_status_for_test(CorePaneStatus::Failed(CoreError::Protocol));
     assert!(state.rearm_background());
     state.set_status_for_test(CorePaneStatus::Failed(CoreError::Protocol));
@@ -373,4 +386,3 @@ fn a_stopped_worker_is_asked_to_connect_again_once_per_core_run() {
         std::thread::sleep(Duration::from_millis(5));
     }
 }
-

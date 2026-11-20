@@ -177,7 +177,11 @@ mod tests {
         input.enqueue(b"pwd\r").unwrap();
         input.note_line();
         input.drain(&mut Budget(2)).unwrap();
-        assert_eq!(input.take_written_lines(), 0, "a partial write writes no line");
+        assert_eq!(
+            input.take_written_lines(),
+            0,
+            "a partial write writes no line"
+        );
         input.drain(&mut Budget(3)).unwrap();
         assert_eq!(input.take_written_lines(), 1);
         input.drain(&mut Budget(64)).unwrap();

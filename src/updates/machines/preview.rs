@@ -827,7 +827,10 @@ mod tests {
         machine: MachineId,
         action: MachineAction,
     ) -> Result<(), ActionFailure> {
-        let previewed = preview.preview(machine, action, 1).recv_blocking().unwrap()?;
+        let previewed = preview
+            .preview(machine, action, 1)
+            .recv_blocking()
+            .unwrap()?;
         preview.execute(previewed, 1);
         Ok(())
     }

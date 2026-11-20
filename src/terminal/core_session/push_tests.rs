@@ -1062,12 +1062,18 @@ fn a_starting_shell_stays_blank_and_unnamed_through_its_own_focus_report() {
     let began = Instant::now();
     while began.elapsed() < Duration::from_millis(1200) {
         assert!(state.shell_starting(), "the name waits for the shell's own");
-        assert!(!screened(&started), "the startup banner stays off the surface");
+        assert!(
+            !screened(&started),
+            "the startup banner stays off the surface"
+        );
         std::thread::sleep(Duration::from_millis(25));
     }
     let until = Instant::now() + Duration::from_secs(10);
     while state.shell_starting() {
-        assert!(Instant::now() < until, "the named shell never ended its quiet");
+        assert!(
+            Instant::now() < until,
+            "the named shell never ended its quiet"
+        );
         std::thread::sleep(Duration::from_millis(25));
     }
     assert!(
@@ -1122,4 +1128,3 @@ fn the_persons_typing_ends_a_starting_shells_quiet() {
     drop(core);
     let _ = std::fs::remove_dir_all(directory);
 }
-

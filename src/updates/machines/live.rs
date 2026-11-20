@@ -43,8 +43,8 @@ use crate::updates::push::{EmbeddedCore, EmbeddedCores};
 
 use super::{
     ActionFailure, Checked, MachineAction, MachineId, MachineLink, MachinePreview, MachineUpdate,
-    MachineUpdatesAdapter, MachineUpdatesError, MachineUpdatesEvent, PreviewAnswer,
-    Request, ServiceOperation,
+    MachineUpdatesAdapter, MachineUpdatesError, MachineUpdatesEvent, PreviewAnswer, Request,
+    ServiceOperation,
 };
 
 /// How long a restart may take before the Machine reads "Can't confirm". It matches how long the
