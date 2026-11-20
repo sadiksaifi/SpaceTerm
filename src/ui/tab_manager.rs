@@ -4386,9 +4386,10 @@ impl TabManager {
         window: &Window,
         cx: &App,
     ) -> bool {
-        self.tabs
-            .tab(tab_id)
-            .is_some_and(|view| view.read(cx).close_removes_focus(pane_id, focus, window, cx))
+        self.tabs.tab(tab_id).is_some_and(|view| {
+            view.read(cx)
+                .close_removes_focus(pane_id, focus, window, cx)
+        })
     }
 
     /// Whether the keyboard rests in one of this strip's Tabs or their Panes.

@@ -2129,9 +2129,7 @@ fn a_refusal_keeps_the_successor_tab_whose_terminal_a_person_clicked(cx: &mut Te
 /// later reading presents that outcome again as a second notice. Its Review opens one fresh
 /// confirmation of what the close ends now, and only its Confirm closes.
 #[gpui::test]
-fn a_shell_exit_under_a_refused_close_reviews_once_without_another_notice(
-    cx: &mut TestAppContext,
-) {
+fn a_shell_exit_under_a_refused_close_reviews_once_without_another_notice(cx: &mut TestAppContext) {
     use spaceterm_core::hierarchy::{CloseTarget as MachineCloseTarget, ConfirmedControl};
     use spaceterm_core::hierarchy::{Mutation, Outcome};
 
@@ -2183,7 +2181,10 @@ fn a_shell_exit_under_a_refused_close_reviews_once_without_another_notice(
     harness.sync(cx);
     harness.sync(cx);
     let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
-    assert!(tree.find("Close Pane?").is_none(), "the stale confirmation ends");
+    assert!(
+        tree.find("Close Pane?").is_none(),
+        "the stale confirmation ends"
+    );
     assert!(tree.find("Pane Changed").is_some());
     assert!(
         tree.find("Pane Changed on Another Client").is_none(),
@@ -2313,7 +2314,10 @@ fn a_review_held_for_a_starting_shell_waits_for_another_confirmation(cx: &mut Te
         tree.find("Close Tab?").is_some(),
         "the waiting Review opens its fresh confirmation once the window is free"
     );
-    assert!(harness.closes().is_empty(), "Cancel of the kill closes nothing");
+    assert!(
+        harness.closes().is_empty(),
+        "Cancel of the kill closes nothing"
+    );
     assert!(
         remote_edits
             .submitted()
@@ -2322,7 +2326,12 @@ fn a_review_held_for_a_starting_shell_waits_for_another_confirmation(cx: &mut Te
         "Cancel kills nothing"
     );
     assert_eq!(
-        cx.update(|_, cx| harness.manager.read(cx).close_confirmation.pending().map(|p| p.target)),
+        cx.update(|_, cx| harness
+            .manager
+            .read(cx)
+            .close_confirmation
+            .pending()
+            .map(|p| p.target)),
         Some(target),
         "the fresh confirmation is the Review's own"
     );
@@ -2416,25 +2425,28 @@ fn a_repeat_close_joins_the_review_waiting_for_a_started_shell(cx: &mut TestAppC
     harness.publish(started, cx);
     redraw(cx);
     assert!(
-        cx.update(|_, cx| {
-            !harness
-                .manager
-                .read(cx)
-                .close_shell_starting(target, cx)
-        }),
+        cx.update(|_, cx| { !harness.manager.read(cx).close_shell_starting(target, cx) }),
         "the shell no longer starts"
     );
 
     cx.simulate_keystrokes("cmd-w");
     redraw(cx);
-    assert!(harness.closes().is_empty(), "the repeat never closes directly");
+    assert!(
+        harness.closes().is_empty(),
+        "the repeat never closes directly"
+    );
     let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
     assert!(
         tree.find("Close Pane?").is_some(),
         "the repeat opens the waiting Review's fresh confirmation"
     );
     assert_eq!(
-        cx.update(|_, cx| harness.manager.read(cx).close_confirmation.pending().map(|p| p.target)),
+        cx.update(|_, cx| harness
+            .manager
+            .read(cx)
+            .close_confirmation
+            .pending()
+            .map(|p| p.target)),
         Some(target)
     );
 
@@ -2516,7 +2528,11 @@ fn confirming_an_inactive_tab_close_from_its_focused_strip_item_keeps_typing_in_
     perform(cx, tree.with_role("Tab")[1], Action::Focus);
     let tree = A11yTree::read(cx);
     perform(cx, tree.with_role("Tab")[1], Action::ShowContextMenu);
-    assert_eq!(close_identity(&harness, cx), active, "the menu selects nothing");
+    assert_eq!(
+        close_identity(&harness, cx),
+        active,
+        "the menu selects nothing"
+    );
     click("tab-menu-row-close", cx);
     redraw(cx);
     assert!(
@@ -2539,7 +2555,11 @@ fn confirming_an_inactive_tab_close_from_its_focused_strip_item_keeps_typing_in_
     );
     let keys = key_count(&records);
     cx.simulate_keystrokes("x");
-    assert_eq!(key_count(&records), keys + 1, "the next key reaches a shell");
+    assert_eq!(
+        key_count(&records),
+        keys + 1,
+        "the next key reaches a shell"
+    );
     assert_eq!(
         last_key_session(&records),
         Some(active_session),
@@ -2604,7 +2624,9 @@ fn confirm_a_close_fenced_by_a_restart(chooses_survivor: bool, cx: &mut TestAppC
     live.boot = [77; 32];
     let survivor_shell = Some([88; 32]);
     for pane in &mut live.sessions {
-        pane.session = (pane.id == CLOSE_ROOT_PANE).then_some(survivor_shell).flatten();
+        pane.session = (pane.id == CLOSE_ROOT_PANE)
+            .then_some(survivor_shell)
+            .flatten();
     }
     live.controls = vec![
         ConfirmedControl {
@@ -2661,7 +2683,11 @@ fn confirm_a_close_fenced_by_a_restart(chooses_survivor: bool, cx: &mut TestAppC
     );
     let keys = key_count(&records);
     cx.simulate_keystrokes("x");
-    assert_eq!(key_count(&records), keys + 1, "the next key reaches a shell");
+    assert_eq!(
+        key_count(&records),
+        keys + 1,
+        "the next key reaches a shell"
+    );
     assert_eq!(
         last_key_session(&records),
         Some(survivor_session),

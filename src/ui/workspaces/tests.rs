@@ -15,8 +15,8 @@ use spaceterm_core::hierarchy::{
     Axis, CloseInventory, ConfirmedPane, Id, Inventory, Mutation, Outcome, Pane, Tab, Workspace,
 };
 
-use super::core_workspaces::testing::{ScriptedEdits, ScriptedPanes};
 use super::core_workspaces::CloseConsent;
+use super::core_workspaces::testing::{ScriptedEdits, ScriptedPanes};
 use super::core_workspaces::{
     WorkspaceDraft, WorkspaceEditSource, WorkspaceEditability, WorkspaceEdits, WorkspaceFacts,
     WorkspaceField, WorkspacePaneOpener, WorkspacePaneSessions, WorkspacePlan, WorkspaceRefusal,

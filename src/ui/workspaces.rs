@@ -2687,10 +2687,14 @@ mod core_workspaces {
                         && current.removes_tab == approved.removes_tab
                         && current.removes_workspace == approved.removes_workspace
                         && current.panes.len() == approved.panes.len()
-                        && current.panes.iter().zip(&approved.panes).all(|(now, then)| {
-                            now.id == then.id
-                                && (now.session.is_none() || now.session == then.session)
-                        })
+                        && current
+                            .panes
+                            .iter()
+                            .zip(&approved.panes)
+                            .all(|(now, then)| {
+                                now.id == then.id
+                                    && (now.session.is_none() || now.session == then.session)
+                            })
                 });
             if ended_only {
                 approval.scope_changed_title()

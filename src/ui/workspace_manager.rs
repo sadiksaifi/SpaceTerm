@@ -3054,7 +3054,15 @@ impl WorkspaceManager {
             && self.close_confirmation.pending().is_none()
             && let Some((target, keyboard)) = self.close_reviews.next()
         {
-            self.resume_close(target, CloseRequest { review: true, keyboard }, window, cx);
+            self.resume_close(
+                target,
+                CloseRequest {
+                    review: true,
+                    keyboard,
+                },
+                window,
+                cx,
+            );
         }
         // Each server's reading may present the Worktree it created or change the one under
         // review; both look up their own Workspace's server.
@@ -4027,7 +4035,8 @@ impl WorkspaceManager {
             .take_owner(generation)
             .is_some_and(|owner| {
                 self.close_target_is_active(target, cx)
-                    || owner.is_some_and(|owner| self.close_removes_focus(target, &owner, window, cx))
+                    || owner
+                        .is_some_and(|owner| self.close_removes_focus(target, &owner, window, cx))
             });
 
         // The review lives with the server that owns what it would close.
@@ -5731,7 +5740,15 @@ impl WorkspaceManager {
         if request.review && keyboard == Some(true) && window_free {
             self.focus(window, cx);
         }
-        self.request_core_close_as(target, CloseRequest { keyboard, ..request }, window, cx);
+        self.request_core_close_as(
+            target,
+            CloseRequest {
+                keyboard,
+                ..request
+            },
+            window,
+            cx,
+        );
     }
 
     /// Joins `request` to the close of `target` that still waits: a Review held for an open
@@ -5750,10 +5767,13 @@ impl WorkspaceManager {
         use super::workspaces::CloseKeyboard;
 
         // The earliest request's keyboard answer wins as each joins.
-        let mut waiting = self.close_reviews.take(target).map(|keyboard| CloseRequest {
-            review: true,
-            keyboard,
-        });
+        let mut waiting = self
+            .close_reviews
+            .take(target)
+            .map(|keyboard| CloseRequest {
+                review: true,
+                keyboard,
+            });
         if self
             .close_start
             .waiting
@@ -5771,7 +5791,8 @@ impl WorkspaceManager {
                 return WaitingClose::Waits;
             }
             if let Some(starting) = self.close_start.waiting.take() {
-                waiting = Some(waiting.map_or(starting.request, |held| held.join(starting.request)));
+                waiting =
+                    Some(waiting.map_or(starting.request, |held| held.join(starting.request)));
             }
         }
         if let Some(intent) = self
@@ -5829,7 +5850,10 @@ impl WorkspaceCloseKeyboard {
     /// Takes the answer for confirmation `generation` with the focus it took the keyboard from.
     /// `None` when the close held no keyboard, or for another generation.
     fn take_owner(&mut self, generation: u64) -> Option<Option<gpui::FocusHandle>> {
-        match self.pending.take_if(|(pending, _, _)| *pending == generation) {
+        match self
+            .pending
+            .take_if(|(pending, _, _)| *pending == generation)
+        {
             Some((_, true, owner)) => Some(owner),
             _ => None,
         }

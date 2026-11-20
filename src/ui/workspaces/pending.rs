@@ -251,7 +251,10 @@ impl PendingEdits {
             .close_intents
             .iter()
             .position(|intent| intent.core == core && intent.local == local)?;
-        if close_references(core).iter().any(|id| self.provisional(*id)) {
+        if close_references(core)
+            .iter()
+            .any(|id| self.provisional(*id))
+        {
             return None;
         }
         self.close_intents.remove(index)
