@@ -72,15 +72,15 @@ fn open<'a>(
 }
 
 /// Settings for This Mac as `update` describes it, whose service `service` reads.
-fn open_with<'a>(
-    cx: &'a mut TestAppContext,
+fn open_with(
+    cx: &mut TestAppContext,
     update: MachineUpdate,
     service: Arc<ScriptedService>,
 ) -> (
     Entity<SettingsWindow>,
     Rc<ScriptedMachines>,
     Arc<ScriptedService>,
-    &'a mut VisualTestContext,
+    &mut VisualTestContext,
 ) {
     let adapter = Rc::new(ScriptedMachines::default());
     cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
