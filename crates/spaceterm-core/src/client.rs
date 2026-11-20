@@ -477,17 +477,26 @@ impl MachineConnection {
     }
     /// The journal writer of this handle's identity under `lock`, which the caller took on the
     /// identity directory's `operations.lock`. A CLI holds that lock from sequence allocation
-    /// through acknowledgement.
+    /// through acknowledgement. A paired route's client records are waited for until
+    /// `deadline` at most; ServiceBusy when another holder keeps the route's lock past it.
     pub fn operation_journal_locked(
         &self,
         lock: crate::storage::Lock,
+        deadline: std::time::Instant,
     ) -> Result<crate::hierarchy::ClientJournal, CoreError> {
-        crate::hierarchy::ClientJournal::open_locked(
-            self.client_directory()?,
-            lock,
-            self.machine_id()?,
-            self.client_id()?,
-        )
+        let directory = self
+            .client_directory_until(Some(deadline))?
+            .ok_or(CoreError::ServiceBusy)?;
+        // A paired route's identities come from its pairing, so reading them takes the route's
+        // lock no second time.
+        let (core, client) = match &self.direct {
+            Some(direct) => (
+                direct.paired.pin.core,
+                self.effective_client(&direct.paired.client),
+            ),
+            None => (self.machine_id()?, self.client_id()?),
+        };
+        crate::hierarchy::ClientJournal::open_locked(directory, lock, core, client)
     }
     /// Opens the private arrangement without contacting or starting the server.
     pub fn client_view_store(&self) -> Result<crate::client_view::ClientViewStore, CoreError> {
@@ -660,15 +669,23 @@ impl MachineConnection {
     /// Admits a new connection through its route's verified authority, without implicit Start,
     /// and returns its carrier. A local admission waits for a Restart or Update to finish;
     /// `cancelled` ends that wait early.
+    /// With `deadline`, the dial, the wait for a Restart or Update and admission end by it.
     fn connect_admitted(
         &self,
         cancelled: Option<&dyn Fn() -> bool>,
+        deadline: Option<std::time::Instant>,
     ) -> Result<(Box<dyn crate::connection::carrier::Carrier>, ClientScope), CoreError> {
         if cancelled.is_some_and(|cancelled| cancelled()) {
             return Err(CoreError::ServiceBusy);
         }
+        let admission =
+            deadline.unwrap_or_else(|| std::time::Instant::now() + protocol::CONNECTION_LIMIT);
         if let Some(direct) = &self.direct {
-            let connection = direct.connector.connect().map_err(CoreError::from)?;
+            let connection = match deadline {
+                Some(deadline) => direct.connector.connect_by(deadline),
+                None => direct.connector.connect(),
+            }
+            .map_err(CoreError::from)?;
             if cancelled.is_some_and(|cancelled| cancelled()) {
                 return Err(CoreError::ServiceBusy);
             }
@@ -676,11 +693,14 @@ impl MachineConnection {
                 return Err(CoreError::AuthenticationRefused);
             }
             // `with_direct` fixed the pin's build to this handle's identity.
-            let admitted = connection.admit(protocol::Caller {
-                client: &direct.paired.client,
-                name: &self.client_name(),
-                agent: self.agent(),
-            });
+            let admitted = connection.admit_by(
+                protocol::Caller {
+                    client: &direct.paired.client,
+                    name: &self.client_name(),
+                    agent: self.agent(),
+                },
+                admission,
+            );
             self.record_work(
                 &admitted
                     .as_ref()
@@ -696,14 +716,20 @@ impl MachineConnection {
                 ),
             ));
         }
-        crate::service::check_admission(&self.paths, self.admission_wait(), cancelled)?;
+        let wait = match deadline {
+            Some(deadline) => self
+                .admission_wait()
+                .min(deadline.saturating_duration_since(std::time::Instant::now())),
+            None => self.admission_wait(),
+        };
+        crate::service::check_admission(&self.paths, wait, cancelled)?;
         if host::capacity::full(&self.paths)? {
             return Err(CoreError::Capacity);
         }
         let mut stream = host::connect(&self.paths)?;
         let base = self.base_client_id()?;
         let core = self.machine_id()?;
-        let admitted = protocol::admit_client(
+        let admitted = protocol::admit_client_by(
             &mut stream,
             protocol::Caller {
                 client: &base,
@@ -712,6 +738,7 @@ impl MachineConnection {
             },
             &core,
             &self.identity,
+            admission,
         );
         self.record_work(&admitted);
         admitted?;
@@ -781,14 +808,15 @@ impl MachineConnection {
     /// Opens a new connection of its own, separate from the shared one. `events` receives its
     /// pushed inventory and health. Dropping every handle of the link closes it.
     pub fn connect(&self, events: Arc<dyn LinkSink>) -> Result<CoreLink, CoreError> {
-        self.connect_cancellable(events, None)
+        self.connect_cancellable(events, None, None)
     }
     fn connect_cancellable(
         &self,
         events: Arc<dyn LinkSink>,
         cancelled: Option<&dyn Fn() -> bool>,
+        deadline: Option<std::time::Instant>,
     ) -> Result<CoreLink, CoreError> {
-        let (carrier, scope) = self.connect_admitted(cancelled)?;
+        let (carrier, scope) = self.connect_admitted(cancelled, deadline)?;
         self.bind_scope(scope)?;
         let link =
             crate::connection::io::spawn_link(carrier, events).map_err(|_| CoreError::Protocol)?;
@@ -800,7 +828,13 @@ impl MachineConnection {
     /// The one live connection this handle and its clones share with the server. Connects when
     /// none is live. A link that ended is never reused; its pending requests already failed.
     pub fn link(&self) -> Result<CoreLink, CoreError> {
-        self.link_with(None)
+        self.link_with(None, None)
+    }
+    /// [`Self::link`] that connects, waits for a Restart or Update and admits by `deadline`, so
+    /// a confirmed action's one deadline also bounds the work it settles first. ServiceBusy when
+    /// another caller of this handle is still connecting at `deadline`.
+    pub fn link_by(&self, deadline: std::time::Instant) -> Result<CoreLink, CoreError> {
+        self.link_with(None, Some(deadline))
     }
     /// Reads the shared live connection without opening one or waiting for a pending dial.
     /// Paired presentation follows its route owner's connection and backoff through this read.
@@ -831,9 +865,14 @@ impl MachineConnection {
     /// [`Self::link`] for a worker that may stop while another caller connects or admission
     /// waits for a Restart or Update. `cancelled` ends those waits with ServiceBusy.
     pub fn link_cancellable(&self, cancelled: &dyn Fn() -> bool) -> Result<CoreLink, CoreError> {
-        self.link_with(Some(cancelled))
+        self.link_with(Some(cancelled), None)
     }
-    fn link_with(&self, cancelled: Option<&dyn Fn() -> bool>) -> Result<CoreLink, CoreError> {
+    fn link_with(
+        &self,
+        cancelled: Option<&dyn Fn() -> bool>,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<CoreLink, CoreError> {
+        let passed = || deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline);
         // Callers share a successful connection. Paired presentation reads live_link instead
         // of queuing behind a dial.
         let mut saved = loop {
@@ -843,12 +882,17 @@ impl MachineConnection {
             match self.shared.link.try_lock() {
                 Ok(saved) => break saved,
                 Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) if cancelled.is_none() => {
+                Err(std::sync::TryLockError::WouldBlock)
+                    if cancelled.is_none() && deadline.is_none() =>
+                {
                     break self.shared.link.lock().unwrap_or_else(|e| e.into_inner());
                 }
                 // The callback has no wake handle. A bounded wait lets a queued caller
                 // cancel without waiting for another caller's network deadline.
                 Err(std::sync::TryLockError::WouldBlock) => {
+                    if passed() {
+                        return Err(CoreError::ServiceBusy);
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
             }
@@ -862,8 +906,15 @@ impl MachineConnection {
             return Ok(link.clone());
         }
         *saved = None;
-        let link =
-            self.connect_cancellable(Arc::new(Fanout(Arc::downgrade(&self.shared))), cancelled)?;
+        // A dial that starts after the deadline could only outlive it.
+        if passed() {
+            return Err(CoreError::ServiceBusy);
+        }
+        let link = self.connect_cancellable(
+            Arc::new(Fanout(Arc::downgrade(&self.shared))),
+            cancelled,
+            deadline,
+        )?;
         *saved = Some(link.clone());
         let generation = LINK_GENERATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         self.shared
@@ -936,7 +987,7 @@ impl MachineConnection {
             crate::service::check_admission(&self.paths, self.admission_wait(), cancelled)?;
             self.machine_id()?;
         }
-        self.link_with(cancelled)?;
+        self.link_with(cancelled, None)?;
         let capabilities = self.admissions().capabilities(true);
         Ok(AuthenticatedStatus {
             work: capabilities.work().map_err(|_| CoreError::Protocol)?,
@@ -1770,6 +1821,102 @@ mod tests {
         assert!(remote.service_lane_by(deadline).is_ok());
         assert!(remote.service_operations_by(deadline).is_ok());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A confirmed action on a paired CLI route settles the identity's pending Workspace edit
+    /// after its service lane opened. The work connection authenticates and then stalls, and
+    /// another command holds the route's lock while the journal opens. Both end by the action's
+    /// one deadline, well before the work connection's own admission budget, and the pending
+    /// edit stays for a later command.
+    #[test]
+    fn a_stalled_work_admission_and_a_held_route_lock_end_journal_recovery_at_its_deadline() {
+        use crate::direct::{self, DirectConnection, DirectConnector, DirectError};
+        use std::time::{Duration, Instant};
+        struct Connector {
+            endpoint: String,
+            paired: direct::PairedDevice,
+            credential: direct::DeviceCredential,
+        }
+        impl DirectConnector for Connector {
+            fn connect(&self) -> Result<DirectConnection, DirectError> {
+                self.connect_by(Instant::now() + Duration::from_secs(30))
+            }
+            fn connect_by(&self, deadline: Instant) -> Result<DirectConnection, DirectError> {
+                DirectConnection::connect_until(
+                    &self.endpoint,
+                    &self.paired,
+                    &self.credential,
+                    deadline,
+                )
+            }
+        }
+        let fixture = direct::tests::Fixture::new();
+        fixture.enable();
+        let credential = direct::DeviceCredential::generate().unwrap();
+        let paired = fixture.enroll(&credential);
+        let remote = MachineConnection::with_paths(fixture.paths.clone())
+            .unwrap()
+            .into_cli(
+                CliRoute::Paired {
+                    route: [42; 32],
+                    paired: paired.clone(),
+                    connector: Arc::new(Connector {
+                        endpoint: fixture.endpoint(),
+                        paired,
+                        credential,
+                    }),
+                },
+                None,
+            )
+            .unwrap();
+        let records = Directory::open(
+            &remote.paths.data.join("clients").join(&remote.account),
+            true,
+        )
+        .unwrap();
+        let mutation = crate::hierarchy::Mutation::CreateWorkspace {
+            name: "Pending".into(),
+            directory: None,
+            control: crate::hierarchy::CreateControl::Unclaimed,
+        };
+        let far = Instant::now() + Duration::from_secs(5);
+        remote
+            .operation_journal_locked(records.lock("operations.lock", false).unwrap(), far)
+            .unwrap()
+            .submit(4, mutation.clone())
+            .unwrap();
+        assert!(remote.service_lane_by(far).is_ok());
+
+        let (release, stalled) = std::sync::mpsc::channel();
+        let server = direct::tests::authenticate_then_stall(&fixture.state, stalled);
+        let deadline = Instant::now() + Duration::from_millis(600);
+        assert!(remote.link_by(deadline).is_err());
+        let late = Instant::now().saturating_duration_since(deadline);
+        drop(release);
+        server.join().unwrap();
+        assert!(
+            late < Duration::from_millis(300),
+            "the stalled work admission outlived the deadline by {late:?}"
+        );
+
+        let held = records.lock(ROUTE_LOCK, false).unwrap();
+        let deadline = Instant::now() + Duration::from_millis(300);
+        assert_eq!(
+            remote
+                .operation_journal_locked(records.lock("operations.lock", false).unwrap(), deadline)
+                .err(),
+            Some(CoreError::ServiceBusy)
+        );
+        assert!(
+            Instant::now() < deadline + Duration::from_millis(200),
+            "the journal opening outlived the deadline"
+        );
+        drop(held);
+        let journal = remote
+            .operation_journal_locked(records.lock("operations.lock", false).unwrap(), far)
+            .unwrap();
+        let pending = journal.pending().unwrap();
+        assert_eq!((pending.sequence, &pending.mutation), (4, &mutation));
     }
 
     #[test]

@@ -20,7 +20,7 @@ use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 const MAX_FRAME: usize = 8192;
-const CONNECTION_LIMIT: Duration = Duration::from_secs(5);
+pub(crate) const CONNECTION_LIMIT: Duration = Duration::from_secs(5);
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -594,8 +594,29 @@ pub(crate) fn admit_client<'a>(
     core: &[u8; 32],
     build: &str,
 ) -> Result<Negotiated, Refused> {
+    admit_client_by(
+        stream,
+        caller,
+        core,
+        build,
+        Instant::now() + CONNECTION_LIMIT,
+    )
+}
+
+/// [`admit_client`] that sends and waits for no admission frame after `deadline`.
+#[cfg_attr(
+    not(feature = "client"),
+    allow(dead_code, reason = "client side used by desktop and admission tests")
+)]
+pub(crate) fn admit_client_by<'a>(
+    stream: &mut UnixStream,
+    caller: impl Into<Caller<'a>>,
+    core: &[u8; 32],
+    build: &str,
+    deadline: Instant,
+) -> Result<Negotiated, Refused> {
     crate::host::check_peer(stream)?;
-    admit_transport(&mut LocalCaller(stream), caller, core, build)
+    admit_transport_by(&mut LocalCaller(stream), caller, core, build, deadline)
 }
 
 struct LocalCaller<'a>(&'a mut UnixStream);
@@ -617,11 +638,30 @@ impl Preamble for LocalCaller<'_> {
 }
 
 /// Admits a work connection as `caller`, offering this build's work versions.
+#[cfg(test)]
 pub(crate) fn admit_transport<'a>(
     stream: &mut dyn Preamble,
     caller: impl Into<Caller<'a>>,
     core: &[u8; 32],
     build: &str,
+) -> Result<Negotiated, Refused> {
+    admit_transport_by(
+        stream,
+        caller,
+        core,
+        build,
+        Instant::now() + CONNECTION_LIMIT,
+    )
+}
+
+/// Admits a work connection as `caller`, offering this build's work versions. No admission frame
+/// is sent or waited for after `deadline`.
+pub(crate) fn admit_transport_by<'a>(
+    stream: &mut dyn Preamble,
+    caller: impl Into<Caller<'a>>,
+    core: &[u8; 32],
+    build: &str,
+    deadline: Instant,
 ) -> Result<Negotiated, Refused> {
     admit_lane(
         stream,
@@ -629,7 +669,7 @@ pub(crate) fn admit_transport<'a>(
         core,
         build,
         (Lane::Work, &Lane::Work.offered()),
-        Instant::now() + CONNECTION_LIMIT,
+        deadline,
     )
 }
 

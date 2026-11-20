@@ -68,15 +68,17 @@ pub struct WriterGuard {
 
 impl WriterGuard {
     /// This identity's Workspace edit journal, opened once under the guard's lock. `connection`
-    /// must be the handle of the same route and identity.
+    /// must be the handle of the same route and identity. Opening it waits for a paired route's
+    /// client records until `deadline` at most.
     pub fn journal(
         &mut self,
         connection: &MachineConnection,
+        deadline: Instant,
     ) -> Result<&mut ClientJournal, Failure> {
         if let Some(lock) = self.lock.take() {
             self.journal = Some(
                 connection
-                    .operation_journal_locked(lock)
+                    .operation_journal_locked(lock, deadline)
                     .map_err(from_core_error)?,
             );
         }

@@ -302,11 +302,9 @@ impl DirectConnection {
     pub(crate) fn paired(&self) -> &PairedDevice {
         &self.paired
     }
-    /// Admits this client on the authenticated connection and returns its carrier.
-    #[cfg_attr(
-        not(any(feature = "client", test)),
-        allow(dead_code, reason = "the desktop admits and carries the connection")
-    )]
+    /// Admits this client on the authenticated connection within the admission budget and
+    /// returns its carrier.
+    #[cfg(test)]
     pub(crate) fn admit<'a>(
         self,
         client: impl Into<crate::protocol::Caller<'a>>,
@@ -317,12 +315,35 @@ impl DirectConnection {
         ),
         crate::protocol::Refused,
     > {
+        self.admit_by(
+            client,
+            std::time::Instant::now() + crate::protocol::CONNECTION_LIMIT,
+        )
+    }
+    /// Admits this client on the authenticated connection and returns its carrier. No admission
+    /// frame is sent or waited for after `deadline`.
+    #[cfg_attr(
+        not(any(feature = "client", test)),
+        allow(dead_code, reason = "the desktop admits and carries the connection")
+    )]
+    pub(crate) fn admit_by<'a>(
+        self,
+        client: impl Into<crate::protocol::Caller<'a>>,
+        deadline: std::time::Instant,
+    ) -> Result<
+        (
+            Box<dyn crate::connection::carrier::Carrier>,
+            crate::protocol::Negotiated,
+        ),
+        crate::protocol::Refused,
+    > {
         let mut stream = *self.stream;
-        let negotiated = crate::protocol::admit_transport(
+        let negotiated = crate::protocol::admit_transport_by(
             &mut stream,
             client,
             &self.paired.pin.core,
             &self.paired.pin.build,
+            deadline,
         )?;
         Ok((Box::new(stream.into_carrier()), negotiated))
     }

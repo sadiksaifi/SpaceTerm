@@ -645,7 +645,9 @@ fn settle_journals(
     if state.held(route).map_or(true, |held| held.is_empty()) {
         return Vec::new();
     }
-    let Ok(link) = connection.link() else {
+    // The work connection and every journal step end by the confirmed action's own deadline.
+    let deadline = deadline.min(Instant::now() + Duration::from_secs(30));
+    let Ok(link) = connection.link_by(deadline) else {
         return Vec::new();
     };
     let agent = context.agent();
@@ -666,7 +668,7 @@ fn settle_journals(
             }
             RouteKey::Paired(_) => Err(CoreError::Unsupported),
         },
-        deadline.min(Instant::now() + Duration::from_secs(30)),
+        deadline,
     )
     .unwrap_or_default()
 }
