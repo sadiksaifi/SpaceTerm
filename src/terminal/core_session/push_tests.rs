@@ -26,6 +26,10 @@ struct StartReplyLoss {
     starts: AtomicUsize,
     accepted: Mutex<Option<[u8; 32]>>,
     observed: Mutex<Vec<[u8; 32]>>,
+    /// Loses the reply to the next background start once set, after the real host ran it.
+    lose_prepare: AtomicBool,
+    /// A background start's reply was lost.
+    prepare_lost: AtomicBool,
 }
 
 /// Frames and bytes on one connection, in each direction.
@@ -59,6 +63,7 @@ struct Counting {
     start_loss: Arc<StartReplyLoss>,
     requests: protocol::frame::Assembler,
     starting: Option<protocol::RequestId>,
+    preparing: Option<protocol::RequestId>,
 }
 
 impl Carrier for Counting {
@@ -68,6 +73,14 @@ impl Carrier for Counting {
         let raw = RawFrame::parse(frame)?;
         let attached = if raw.kind == protocol::frame::Kind::Reply as u8 {
             match protocol::frame::Assembler::default().core(raw)? {
+                Some(protocol::CoreMessage::Reply(reply))
+                    if self.preparing == Some(reply.id)
+                        && self.start_loss.lose_prepare.swap(false, Ordering::AcqRel) =>
+                {
+                    self.start_loss.prepare_lost.store(true, Ordering::Release);
+                    self.inner.close();
+                    return Err(CarrierError::Closed);
+                }
                 Some(protocol::CoreMessage::Reply(reply)) => match reply.result {
                     Ok(protocol::ReplyBody::Claim(protocol::ClaimReply::Attached { lease })) => {
                         if self.starting == Some(reply.id)
@@ -135,6 +148,13 @@ impl Carrier for Counting {
                 self.start_loss.starts.fetch_add(1, Ordering::SeqCst);
                 self.starting = Some(request.id);
             }
+            if let Some(protocol::ClientMessage::Request(request)) =
+                self.requests.client(frame.clone())?
+                && matches!(&request.operation, protocol::Operation::Claim(claim)
+                    if matches!(claim.claim, pane::AttachmentClaim::Prepare { .. }))
+            {
+                self.preparing = Some(request.id);
+            }
             self.traffic.client_frames.fetch_add(1, Ordering::SeqCst);
             // The length prefix and the kind byte, then the body.
             self.traffic
@@ -194,6 +214,8 @@ fn ticking(
 /// A real server and loopback connection shared by Pane presentation tests.
 pub(crate) struct ConnectedPane {
     pub(crate) factory: CoreSessionFactory,
+    /// The state of the first Pane, which `factory` starts.
+    pub(crate) state: Arc<CorePaneState>,
     traffic: Arc<Traffic>,
     start_loss: Arc<StartReplyLoss>,
     stop: Option<Box<dyn FnOnce()>>,
@@ -243,6 +265,7 @@ impl ConnectedPane {
             Arc::clone(&state),
             pane_id,
         )]));
+        let first = Arc::clone(&state);
         let factory = factory.with_attachment(permit);
         let traffic = Arc::new(Traffic::default());
         let start_loss = Arc::new(StartReplyLoss::default());
@@ -272,6 +295,7 @@ impl ConnectedPane {
                     start_loss: Arc::clone(&start_loss),
                     requests: protocol::frame::Assembler::default(),
                     starting: None,
+                    preparing: None,
                 };
                 let (waker, wake) = io::Waker::new().unwrap();
                 let outbox =
@@ -337,6 +361,7 @@ impl ConnectedPane {
         reconnect();
         Self {
             factory,
+            state: first,
             traffic,
             start_loss,
             reconnect,
@@ -393,6 +418,16 @@ impl ConnectedPane {
         let bell = Arc::clone(&self.bell);
         service.ticker(Arc::new(move || ring(&bell)));
         ring(&self.bell);
+    }
+
+    /// Loses the reply to the next background start, after the real host ran it.
+    pub(crate) fn lose_next_prepare_reply(&self) {
+        self.start_loss.lose_prepare.store(true, Ordering::Release);
+    }
+
+    /// Whether a background start's reply was lost.
+    pub(crate) fn prepare_reply_lost(&self) -> bool {
+        self.start_loss.prepare_lost.load(Ordering::Acquire)
     }
 
     pub(crate) fn starts(&self) -> usize {
@@ -767,7 +802,9 @@ fn a_visible_idle_pane_sends_no_periodic_requests() {
         .unwrap();
     started.handle.set_presentable(true);
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // The shell this client started marks no prompt and never names itself, so it shows once
+    // its startup quiet runs out.
+    let deadline = Instant::now() + super::link::STARTUP_QUIET_LIMIT + Duration::from_secs(10);
     let shell_shown = || {
         while let Ok(event) = started.events.try_recv() {
             if let TerminalSessionEvent::Screen(screen) = event
@@ -956,4 +993,207 @@ fn a_demanding_pane_worker_publishes_pushed_semantics_across_output_hide_and_rec
     // The server rebuilt its store for the new demand, so only row identity carries across.
     assert_eq!(row_of(&again, "SEMANTIC-one").0, kept.0);
     drop(started);
+}
+
+/// A shell that prints a banner from its startup files and then waits before it names itself
+/// and prompts, as a slow rc file does. `wait` is in seconds.
+pub(crate) fn slow_shell(wait: &str) -> (std::path::PathBuf, crate::runtime::WorkspaceHost) {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = std::env::temp_dir().canonicalize().unwrap().join(format!(
+        "spaceterm-slow-shell-{}-{}",
+        std::process::id(),
+        Instant::now().elapsed().as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let shell = directory.join("shell");
+    write_slow_shell(&shell, wait);
+    std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut host = crate::runtime::directory_testing::terminal_host_with_shell(&shell);
+    host.prepare_initial_organization().unwrap();
+    (directory, host)
+}
+
+/// Writes the shell of [`slow_shell`] at `shell`, waiting `wait` seconds.
+pub(crate) fn write_slow_shell(shell: &std::path::Path, wait: &str) {
+    std::fs::write(
+        shell,
+        format!(
+            "#!/bin/sh\nprintf 'R3 startup banner\\r\\n'\nsleep {wait}\nprintf '\\033]0;R3 Ready\\007$ '\nexec sleep 60\n"
+        ),
+    )
+    .unwrap();
+}
+
+/// Whether any screen reached the view since the last call.
+pub(crate) fn screened(started: &crate::terminal::StartedTerminalSession) -> bool {
+    std::iter::from_fn(|| started.events.try_recv().ok())
+        .filter(|event| matches!(event, TerminalSessionEvent::Screen(_)))
+        .count()
+        > 0
+}
+
+/// The Pane worker's own first focus report is not the person's input: a shell this client
+/// starts stays blank and its name waits through it, while the startup banner prints and the
+/// Core publishes the provisional shell name, until the Session names itself.
+#[test]
+fn a_starting_shell_stays_blank_and_unnamed_through_its_own_focus_report() {
+    let (directory, host) = slow_shell("2");
+    let core = ConnectedPane::with_host(
+        MachineConnection::for_identity("spaceterm-development").unwrap(),
+        host,
+    );
+    let state = Arc::clone(&core.state);
+    let started = core
+        .factory
+        .start(
+            *super::tests::Adapter::new().handle.geometry.lock().unwrap(),
+            TerminalAppearanceUpdate::builtin().unwrap(),
+        )
+        .unwrap();
+    started.handle.set_presentable(true);
+    started.handle.interactive_focus(true, true);
+    let until = Instant::now() + Duration::from_secs(10);
+    while !state.startup_quiet() {
+        assert!(Instant::now() < until, "the Pane never attached");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // What the window showed before the Pane attached is not the shell's.
+    let _ = screened(&started);
+    let began = Instant::now();
+    while began.elapsed() < Duration::from_millis(1200) {
+        assert!(state.shell_starting(), "the name waits for the shell's own");
+        assert!(
+            !screened(&started),
+            "the startup banner stays off the surface"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let until = Instant::now() + Duration::from_secs(10);
+    while state.shell_starting() {
+        assert!(
+            Instant::now() < until,
+            "the named shell never ended its quiet"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        began.elapsed() >= Duration::from_millis(1500),
+        "only the Session's own name ended the quiet"
+    );
+    let until = Instant::now() + Duration::from_secs(5);
+    while !screened(&started) {
+        assert!(Instant::now() < until, "the named shell never showed");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    drop(started);
+    drop(core);
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+/// A shell whose startup files report its directory before its first prompt, as zsh's `chpwd`
+/// does, stays blank and unnamed: SpaceTerm Core's title derived from that directory is no name.
+/// Only the Session's own terminal title and prompt end the quiet.
+#[test]
+fn a_directory_reported_during_startup_keeps_a_starting_shells_quiet() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = std::env::temp_dir().canonicalize().unwrap().join(format!(
+        "spaceterm-chpwd-shell-{}-{}",
+        std::process::id(),
+        Instant::now().elapsed().as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let shell = directory.join("shell");
+    std::fs::write(
+        &shell,
+        "#!/bin/sh\nprintf '\\033]7;file://localhost/tmp\\007R3 startup banner\\r\\n'\nsleep 2\nprintf '\\033]0;R3 Ready\\007$ '\nexec sleep 60\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut host = crate::runtime::directory_testing::terminal_host_with_shell(&shell);
+    host.prepare_initial_organization().unwrap();
+    let core = ConnectedPane::with_host(
+        MachineConnection::for_identity("spaceterm-development").unwrap(),
+        host,
+    );
+    let state = Arc::clone(&core.state);
+    let started = core
+        .factory
+        .start(
+            *super::tests::Adapter::new().handle.geometry.lock().unwrap(),
+            TerminalAppearanceUpdate::builtin().unwrap(),
+        )
+        .unwrap();
+    started.handle.set_presentable(true);
+    let until = Instant::now() + Duration::from_secs(10);
+    while !state.startup_quiet() {
+        assert!(Instant::now() < until, "the Pane never attached");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let _ = screened(&started);
+    let began = Instant::now();
+    while began.elapsed() < Duration::from_millis(1200) {
+        assert!(
+            state.shell_starting(),
+            "a reported directory is not the shell's name"
+        );
+        assert!(
+            !screened(&started),
+            "the startup banner stays off the surface"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let until = Instant::now() + Duration::from_secs(10);
+    while state.shell_starting() {
+        assert!(
+            Instant::now() < until,
+            "the named shell never ended its quiet"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        began.elapsed() >= Duration::from_millis(1500),
+        "only the Session's own title or prompt ended the quiet"
+    );
+    drop(started);
+    drop(core);
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+/// The person's own typing during the quiet ends it at once, and what they typed reaches the
+/// Session.
+#[test]
+fn the_persons_typing_ends_a_starting_shells_quiet() {
+    let (directory, host) = slow_shell("5");
+    let core = ConnectedPane::with_host(
+        MachineConnection::for_identity("spaceterm-development").unwrap(),
+        host,
+    );
+    let state = Arc::clone(&core.state);
+    let started = core
+        .factory
+        .start(
+            *super::tests::Adapter::new().handle.geometry.lock().unwrap(),
+            TerminalAppearanceUpdate::builtin().unwrap(),
+        )
+        .unwrap();
+    started.handle.set_presentable(true);
+    started.handle.interactive_focus(true, true);
+    let until = Instant::now() + Duration::from_secs(10);
+    while !state.startup_quiet() {
+        assert!(Instant::now() < until, "the Pane never attached");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    admitted(&started);
+    let began = Instant::now();
+    started.handle.key(KeyInput::text_input("x"));
+    while state.shell_starting() {
+        assert!(
+            began.elapsed() < Duration::from_secs(3),
+            "typing never ended the quiet"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(started);
+    drop(core);
+    let _ = std::fs::remove_dir_all(directory);
 }

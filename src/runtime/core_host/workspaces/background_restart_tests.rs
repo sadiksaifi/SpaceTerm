@@ -8,13 +8,26 @@ use crate::terminal::geometry::{
     BackingScale, CellGridSize, LogicalCellSize, LogicalSize, TerminalGeometry,
 };
 use crate::terminal::session::{TerminalAppearanceUpdate, TerminalSessionFactory as _};
-use crate::ui::core_pane::{CorePaneScreen, CorePaneView, DormantCopy};
+use crate::ui::core_pane::{CorePaneScreen, CorePaneView};
 use spaceterm_core::direct::{DirectConnection, DirectConnector, DirectError};
 
 struct Away;
 impl DirectConnector for Away {
     fn connect(&self) -> Result<DirectConnection, DirectError> {
         Err(DirectError::Transport)
+    }
+}
+
+/// Gives each Pane of `states` a background start turn whenever it waits for one, as a window's
+/// start queue does, until it waits unclaimed or the time runs out. A Pane whose attempt Core
+/// refused, or whose reply was lost, waits for another turn.
+fn grant_turns(states: &[Arc<crate::terminal::core_session::CorePaneState>]) {
+    for state in states {
+        let until = Instant::now() + Duration::from_secs(10);
+        while state.status() != CorePaneStatus::Takeover && Instant::now() < until {
+            state.grant_turn();
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 }
 
@@ -96,16 +109,24 @@ fn three_panes_observe_restart_after_the_window_reopens_offline() {
     core.stop_core();
     core.restore_core(restored());
     (core.reconnect)();
-    for (_, state) in &window {
-        await_status(state, CorePaneStatus::Restored);
-    }
-    assert!(
-        core.sessions().is_empty(),
-        "restart started a shell without first use"
+    // Each Pane waits for a background start turn, which a window's start queue gives. Each
+    // fresh shell then starts once, and no client controls it.
+    let starts = core.starts();
+    grant_turns(
+        &window
+            .iter()
+            .map(|(_, state)| state.clone())
+            .collect::<Vec<_>>(),
     );
-    window[2].1.start_restored();
+    for (_, state) in &window {
+        await_status(state, CorePaneStatus::Takeover);
+    }
+    assert_eq!(core.sessions().len(), 3, "each Pane started once");
+    assert_eq!(core.starts(), starts, "no background start claimed a Pane");
+    // Selecting a prepared Pane acquires its running shell without starting another.
+    window[2].1.select();
     await_status(&window[2].1, CorePaneStatus::Connected);
-    assert_eq!(core.sessions().len(), 1);
+    assert_eq!(core.sessions().len(), 3);
 
     // Close the Workspace window, stop the server, then reopen the window while offline.
     drop(window);
@@ -134,7 +155,7 @@ fn three_panes_observe_restart_after_the_window_reopens_offline() {
         && core.connection().live_link().is_some()
         && reopened
             .iter()
-            .any(|(_, state)| state.status() != CorePaneStatus::Restored)
+            .any(|(_, state)| state.status() != CorePaneStatus::Takeover)
     {
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -148,8 +169,10 @@ fn three_panes_observe_restart_after_the_window_reopens_offline() {
     );
     reopened[2].0.handle.focus(true);
     for (index, (_, state)) in reopened.iter().enumerate() {
+        // A Pane whose returning connection closed asks for its turn again.
         let until = Instant::now() + Duration::from_secs(10);
-        while state.status() != CorePaneStatus::Restored && Instant::now() < until {
+        while state.status() != CorePaneStatus::Takeover && Instant::now() < until {
+            state.grant_turn();
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(
@@ -158,33 +181,263 @@ fn three_panes_observe_restart_after_the_window_reopens_offline() {
         );
         let mut view = CorePaneView::new(state.clone());
         view.sync();
-        let Some(CorePaneScreen::Restored {
-            starting: false,
-            unconfirmed: false,
-            offered: true,
-            ended,
-        }) = view.screen()
-        else {
-            panic!(
-                "Pane {index} on the connected route did not offer Start Session: status={:?}, screen={:?}, notice={:?}",
-                state.status(),
+        assert!(
+            matches!(
                 view.screen(),
-                view.notice()
-            );
-        };
-        let copy = DormantCopy::of(ended);
-        assert_eq!(
-            (copy.title.as_ref(), copy.label),
-            ("SpaceTerm Core Restarted", "Start Session")
+                Some(CorePaneScreen::Takeover {
+                    offered: true,
+                    ended: false,
+                    ..
+                })
+            ),
+            "Pane {index} on the connected route did not wait unclaimed: status={:?}, screen={:?}",
+            state.status(),
+            view.screen(),
         );
     }
     assert_eq!(
         core.starts(),
         starts,
-        "reconnection submitted a shell start"
+        "reconnection claimed no Pane and selected none"
     );
+    assert_eq!(
+        core.sessions().len(),
+        3,
+        "each Pane of the restarted server started once in the background"
+    );
+}
+
+/// After a Core replacement, the focused Pane that was attached starts its shell again at once.
+/// That restarted shell stays blank and its name waits, through the worker's own focus report,
+/// until the Session names itself.
+#[test]
+fn a_restarted_focused_shell_stays_blank_until_it_names_itself() {
+    use crate::terminal::core_session::push_tests::{screened, slow_shell, write_slow_shell};
+    let (directory, original) = slow_shell("0");
+    let shell = directory.join("shell");
+    let organization: Organization =
+        serde_json::from_slice(&serde_json::to_vec(&original.state.envelope()).unwrap()).unwrap();
+    let core = ConnectedPane::with_host(
+        crate::machine_connection::MachineConnection::for_identity("spaceterm-development")
+            .unwrap(),
+        original,
+    );
+    let state = Arc::clone(&core.state);
+    let started = core
+        .factory
+        .start(
+            TerminalGeometry::from_viewport(
+                LogicalSize::new(640.0, 432.0),
+                LogicalCellSize::new(8.0, 18.0),
+                BackingScale::ONE,
+                CellGridSize::new(80, 24),
+            ),
+            TerminalAppearanceUpdate::builtin().unwrap(),
+        )
+        .unwrap();
+    started.handle.set_presentable(true);
+    started.handle.interactive_focus(true, true);
+    state.set_foreground(true);
+    await_status(&state, CorePaneStatus::Connected);
+    let until = Instant::now() + Duration::from_secs(10);
+    while state.shell_starting() {
+        assert!(Instant::now() < until, "the first shell never named itself");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    write_slow_shell(&shell, "2");
+    core.stop_core();
+    let mut restored = crate::runtime::directory_testing::terminal_host_with_shell(&shell);
+    restored.restore_organization(Some(&organization));
+    core.restore_core(restored);
+    (core.reconnect)();
+    let until = Instant::now() + Duration::from_secs(10);
+    while !state.startup_quiet() {
+        assert!(Instant::now() < until, "the restarted shell never attached");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let _ = screened(&started);
+    let began = Instant::now();
+    while began.elapsed() < Duration::from_millis(1200) {
+        assert!(state.shell_starting(), "the name waits for the shell's own");
+        assert!(
+            !screened(&started),
+            "the startup banner stays off the surface"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let until = Instant::now() + Duration::from_secs(10);
+    while state.shell_starting() {
+        assert!(
+            Instant::now() < until,
+            "the restarted shell never ended its quiet"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    drop(started);
+    drop(core);
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+/// A background start whose reply is lost after SpaceTerm Core ran it keeps its place in the
+/// window's start queue, so the queue starts no other shell meanwhile. Once the worker
+/// reconnects, it settles on the shell that start began, without starting another or taking
+/// control.
+#[test]
+fn a_lost_prepare_reply_keeps_its_place_until_its_shell_settles() {
+    let mut original = crate::runtime::directory_testing::terminal_host();
+    original.prepare_initial_organization().unwrap();
+    let organization: Organization =
+        serde_json::from_slice(&serde_json::to_vec(&original.state.envelope()).unwrap()).unwrap();
+    let restored = || {
+        let mut host = crate::runtime::directory_testing::terminal_host();
+        host.restore_organization(Some(&organization));
+        host
+    };
+    let core = ConnectedPane::with_host(paired_connection(Arc::new(Away)), original);
+    let state = Arc::clone(&core.state);
+    let _started = core
+        .factory
+        .start(
+            TerminalGeometry::from_viewport(
+                LogicalSize::new(640.0, 432.0),
+                LogicalCellSize::new(8.0, 18.0),
+                BackingScale::ONE,
+                CellGridSize::new(2, 2),
+            ),
+            TerminalAppearanceUpdate::builtin().unwrap(),
+        )
+        .unwrap();
+    state.select();
+    await_status(&state, CorePaneStatus::Connected);
+
+    core.stop_core();
+    core.restore_core(restored());
+    core.lose_next_prepare_reply();
+    (core.reconnect)();
+    let until = Instant::now() + Duration::from_secs(10);
+    while !core.prepare_reply_lost() {
+        assert!(Instant::now() < until, "the background start never ran");
+        state.grant_turn();
+        std::thread::sleep(Duration::from_millis(5));
+    }
     assert!(
-        core.sessions().is_empty(),
-        "reconnection started a shell without first use"
+        state.starting_in_background(),
+        "a lost reply keeps the start's place in the queue"
     );
+    let starts = core.starts();
+    (core.reconnect)();
+    await_status(&state, CorePaneStatus::Takeover);
+    assert_eq!(
+        core.sessions().len(),
+        1,
+        "the lost start's shell is the only one"
+    );
+    assert_eq!(core.starts(), starts, "nothing took control");
+}
+
+/// A Pane worker that stopped reconnecting is asked to connect again once per Core run, and
+/// only while the route reaches that run. A worker that still reconnects by itself is left
+/// alone.
+#[test]
+fn a_stopped_worker_is_asked_to_connect_again_once_per_core_run() {
+    let mut original = crate::runtime::directory_testing::terminal_host();
+    original.prepare_initial_organization().unwrap();
+    let organization: Organization =
+        serde_json::from_slice(&serde_json::to_vec(&original.state.envelope()).unwrap()).unwrap();
+    let restored = || {
+        let mut host = crate::runtime::directory_testing::terminal_host();
+        host.restore_organization(Some(&organization));
+        host
+    };
+    let core = ConnectedPane::with_host(paired_connection(Arc::new(Away)), original);
+    let state = Arc::clone(&core.state);
+    let reaches = |cx: &ConnectedPane| {
+        let until = Instant::now() + Duration::from_secs(10);
+        while cx
+            .connection()
+            .live_link()
+            .and_then(|link| link.inventory())
+            .is_none_or(|(_, revision)| revision.inventory.close.is_none())
+        {
+            assert!(Instant::now() < until, "the route never reached the Core");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    reaches(&core);
+    state.set_status_for_test(CorePaneStatus::Reconnecting);
+    assert!(
+        !state.rearm_background(),
+        "a worker that reconnects is left alone"
+    );
+    state.set_status_for_test(CorePaneStatus::Failed(CoreError::Protocol));
+    assert!(state.rearm_background());
+    state.set_status_for_test(CorePaneStatus::Failed(CoreError::Protocol));
+    assert!(!state.rearm_background(), "once per Core run");
+
+    core.stop_core();
+    core.restore_core(restored());
+    (core.reconnect)();
+    reaches(&core);
+    state.set_status_for_test(CorePaneStatus::Failed(CoreError::Protocol));
+    let until = Instant::now() + Duration::from_secs(10);
+    while !state.rearm_background() {
+        assert!(Instant::now() < until, "the new Core run never asked again");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A Pane another client controlled when its Core stopped waits on the window's start queue like
+/// a stopped Pane of its own. The queue leaves it alone while the route reaches no Core run, so
+/// nothing connects to the stopped Core, and asks it once to connect again when the route
+/// reaches the next run.
+#[test]
+fn a_stopped_take_over_worker_connects_again_once_the_next_core_run_answers() {
+    let mut original = crate::runtime::directory_testing::terminal_host();
+    original.prepare_initial_organization().unwrap();
+    let organization: Organization =
+        serde_json::from_slice(&serde_json::to_vec(&original.state.envelope()).unwrap()).unwrap();
+    let core = ConnectedPane::with_host(paired_connection(Arc::new(Away)), original);
+    let state = Arc::clone(&core.state);
+    let reached = |cx: &ConnectedPane| {
+        cx.connection()
+            .live_link()
+            .and_then(|link| link.inventory())
+            .is_some_and(|(_, revision)| revision.inventory.close.is_some())
+    };
+    let until = Instant::now() + Duration::from_secs(10);
+    while !reached(&core) {
+        assert!(Instant::now() < until, "the route never reached the Core");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    state.set_status_for_test(CorePaneStatus::TakeoverFailed(CoreError::Protocol));
+    assert!(
+        !state.rearm_background(),
+        "only a stop parks a Take Over Pane for the queue"
+    );
+
+    core.stop_core();
+    let until = Instant::now() + Duration::from_secs(10);
+    while reached(&core) {
+        assert!(Instant::now() < until, "the stopped Core still answered");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    state.set_status_for_test(CorePaneStatus::TakeoverFailed(CoreError::Stopped));
+    assert!(
+        !state.rearm_background(),
+        "nothing connects while the Core is stopped"
+    );
+
+    let mut host = crate::runtime::directory_testing::terminal_host();
+    host.restore_organization(Some(&organization));
+    core.restore_core(host);
+    (core.reconnect)();
+    let until = Instant::now() + Duration::from_secs(10);
+    while !state.rearm_background() {
+        assert!(Instant::now() < until, "the next Core run never asked");
+        state.set_status_for_test(CorePaneStatus::TakeoverFailed(CoreError::Stopped));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    state.set_status_for_test(CorePaneStatus::TakeoverFailed(CoreError::Stopped));
+    assert!(!state.rearm_background(), "once per Core run");
 }

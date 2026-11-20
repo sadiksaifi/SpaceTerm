@@ -863,6 +863,7 @@ fn notice(failure: ActionFailure, refused_at_once: bool) -> MachineUpdatesNotice
         action: MachineAction::Restart,
         surface: Surface::Window,
         outcome: Err(failure),
+        operation: None,
         refused_at_once,
     }
 }
@@ -885,7 +886,7 @@ fn only_a_restart_refused_at_its_preview_has_an_alert() {
         commands::refusal(&notice(ActionFailure::Busy, true)).expect("a busy Core explains itself");
     assert_eq!(
         busy.message,
-        "SpaceTerm Core on penguin is busy with another update. Try again when it finishes."
+        "SpaceTerm Core on penguin is busy with another operation. Try again when it finishes."
     );
     for failure in [
         ActionFailure::Unreachable,
@@ -944,6 +945,8 @@ fn a_restart_that_ran_opens_no_alert_and_a_refused_preview_does(cx: &mut gpui::T
         machine: PENGUIN,
         action: MachineAction::Restart,
         outcome: Err(ActionFailure::Failed),
+        operation: None,
+        request: None,
     });
     visual.run_until_parked();
     assert!(
@@ -1322,6 +1325,7 @@ fn waiting(machine: MachineId, sessions: u32) -> MachineUpdate {
             skipped: None,
             last_failure: None,
         }),
+        boot: None,
         capabilities: Capabilities::fake(&Capability::ALL),
         push: None,
         bundled: None,
@@ -1436,6 +1440,8 @@ fn a_failed_check_row_beside_a_waiting_update_opens_its_details(cx: &mut gpui::T
         machine: PENGUIN,
         action: MachineAction::CheckAgain,
         outcome: Err(ActionFailure::Busy),
+        operation: None,
+        request: None,
     });
     visual.run_until_parked();
     click("update-pill-menu", visual);

@@ -26,6 +26,7 @@ fn row(update: &MachineUpdate, now: u64) -> MachineRow {
         deferred: &deferred,
         pushes_held: false,
         checked: &checked,
+        approved: &[],
     };
     MachineRow::new(update, marks, now)
 }
@@ -69,6 +70,14 @@ struct ScriptedLane {
     previewed: Mutex<u32>,
     /// The facts each Install answers with.
     install_result: Mutex<Result<UpdateFacts, ActionFailure>>,
+    /// What each Execute answers.
+    execute_result: Mutex<Result<(), ActionFailure>>,
+    /// Each Execute first waits for another operation.
+    execute_waits: Mutex<bool>,
+    /// What each Resolve of an executed operation answers.
+    resolve_result: Mutex<Result<(), ActionFailure>>,
+    /// Earlier operations the next `Execute` acknowledges on its way, with their outcomes.
+    execute_settles: Mutex<Vec<(String, Result<(), ActionFailure>)>>,
     requests: Mutex<Vec<String>>,
 }
 
@@ -81,6 +90,10 @@ impl ScriptedLane {
             answer: Mutex::new(answer),
             previewed: Mutex::new(0),
             install_result: Mutex::new(Ok(self::facts(2, 0, Some("0.9.0")).facts)),
+            execute_result: Mutex::new(Ok(())),
+            execute_waits: Mutex::new(false),
+            resolve_result: Mutex::new(Err(ActionFailure::Unconfirmed)),
+            execute_settles: Mutex::new(Vec::new()),
             requests: Mutex::new(Vec::new()),
         })
     }
@@ -158,7 +171,11 @@ impl MachineLane for ScriptedLane {
         self.install_result.lock().unwrap().clone()
     }
 
-    fn preview(&self, change: LaneChange) -> Result<admin::Preview, ActionFailure> {
+    fn preview(
+        &self,
+        change: LaneChange,
+        _: &(dyn Fn(bool) + Sync),
+    ) -> Result<admin::Preview, ActionFailure> {
         self.record(format!("preview {change:?}"));
         let ends = *self.previewed.lock().unwrap();
         Ok(admin::Preview {
@@ -179,9 +196,24 @@ impl MachineLane for ScriptedLane {
         })
     }
 
-    fn execute(&self, preview: admin::Preview) -> Result<(), ActionFailure> {
+    fn execute(
+        &self,
+        preview: admin::Preview,
+        report: &mut super::ExecuteReport,
+        waiting: &(dyn Fn(bool) + Sync),
+    ) -> Result<(), ActionFailure> {
         self.record(format!("execute {}", preview.token));
-        Ok(())
+        if *self.execute_waits.lock().unwrap() {
+            waiting(true);
+        }
+        report.operation = Some(format!("operation-{}", preview.token));
+        report.settled = std::mem::take(&mut *self.execute_settles.lock().unwrap());
+        *self.execute_result.lock().unwrap()
+    }
+
+    fn resolve(&self, operation: &str) -> Result<(), ActionFailure> {
+        self.record(format!("resolve {operation}"));
+        *self.resolve_result.lock().unwrap()
     }
 }
 
@@ -189,6 +221,7 @@ impl MachineLane for ScriptedLane {
 enum Script {
     Stopped,
     Offline,
+    ServiceLaneRefused,
     /// Reached over the service lane of a route refused as incompatible, whose Core still
     /// refuses this desktop's work protocol.
     Incompatible,
@@ -239,6 +272,7 @@ impl Machine for ScriptedMachine {
         match *self.script.lock().unwrap() {
             Script::Stopped => Reach::Stopped,
             Script::Offline => Reach::Offline,
+            Script::ServiceLaneRefused => Reach::Incompatible(Incompatible::CallerTooOld),
             Script::Incompatible => Reach::Lane {
                 lane: Arc::clone(&self.lane) as Arc<dyn MachineLane>,
                 work: Err(Incompatible::ListenerTooOld),
@@ -420,7 +454,7 @@ fn previewed(
     machine: MachineId,
     action: MachineAction,
 ) -> Result<MachinePreview, ActionFailure> {
-    adapter.preview(machine, action).recv_blocking().unwrap()
+    adapter.preview(machine, action, 1).recv_blocking().unwrap()
 }
 
 fn listing(events: &Events) -> Vec<MachineId> {
@@ -459,6 +493,24 @@ fn a_local_core_reports_its_facts_and_follows_each_change() {
         version("0.9.0")
     );
     assert_eq!(lane.requests()[..2], ["facts", "wait boot-1 1"]);
+}
+
+#[test]
+fn a_service_lane_refusal_does_not_report_an_earlier_boot() {
+    let lane = ScriptedLane::new([Ok(facts(1, 0, None))]);
+    let machine = ScriptedMachine::new(Script::Lane, lane);
+    let sources = ScriptedSources::with(vec![known(LOCAL, "This Mac", true, &machine)]);
+    let (_adapter, events) = started(&sources, RESTART_LIMIT);
+
+    let connected = changed(&events, "the first run", |update| update.boot.is_some());
+    assert_eq!(connected.boot.as_deref(), Some("boot-1"));
+
+    machine.set(Script::ServiceLaneRefused);
+    sources.change();
+    let incompatible = changed(&events, "the incompatible answer", |update| {
+        matches!(update.link, MachineLink::Incompatible(_))
+    });
+    assert_eq!(incompatible.boot, None);
 }
 
 /// A Core that answers `Facts` with `unsupported` reads as "Can't check", not as a missing
@@ -581,14 +633,17 @@ fn actions_become_lane_requests_and_stop_stays_local() {
         adapter.perform(PENGUIN, action.clone());
         assert_eq!(finished(&events, &action), Ok(()));
     }
-    adapter.execute(previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap());
+    adapter.execute(
+        previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap(),
+        1,
+    );
     assert_eq!(finished(&events, &MachineAction::Restart), Ok(()));
     assert_eq!(
         previewed(&adapter, PENGUIN, MachineAction::Stop),
         Err(ActionFailure::Failed),
         "Stop is This Mac's alone"
     );
-    adapter.execute(previewed(&adapter, LOCAL, MachineAction::Stop).unwrap());
+    adapter.execute(previewed(&adapter, LOCAL, MachineAction::Stop).unwrap(), 1);
     assert_eq!(finished(&events, &MachineAction::Stop), Ok(()));
 
     assert_eq!(
@@ -654,7 +709,7 @@ fn an_executed_preview_runs_the_cores_own_token() {
     });
 
     let preview = adapter
-        .preview(PENGUIN, MachineAction::Restart)
+        .preview(PENGUIN, MachineAction::Restart, 1)
         .recv_blocking()
         .unwrap()
         .unwrap();
@@ -665,14 +720,14 @@ fn an_executed_preview_runs_the_cores_own_token() {
         id: preview.id + 1,
         ..preview.clone()
     };
-    adapter.execute(forged);
+    adapter.execute(forged, 1);
     assert_eq!(
         finished(&events, &MachineAction::Restart),
         Err(ActionFailure::Changed)
     );
-    adapter.execute(preview.clone());
+    adapter.execute(preview.clone(), 1);
     assert_eq!(finished(&events, &MachineAction::Restart), Ok(()));
-    adapter.execute(preview);
+    adapter.execute(preview, 1);
     assert_eq!(
         finished(&events, &MachineAction::Restart),
         Err(ActionFailure::Changed)
@@ -683,7 +738,7 @@ fn an_executed_preview_runs_the_cores_own_token() {
     );
 
     let refused = adapter
-        .preview(PENGUIN, MachineAction::Stop)
+        .preview(PENGUIN, MachineAction::Stop, 1)
         .recv_blocking()
         .unwrap();
     assert_eq!(refused, Err(ActionFailure::Failed), "Stop stays local");
@@ -699,7 +754,10 @@ fn a_restart_that_does_not_come_back_reads_cant_confirm() {
     let (adapter, events) = started(&sources, Duration::from_millis(300));
     changed(&events, "the facts", |update| update.facts.is_some());
 
-    adapter.execute(previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap());
+    adapter.execute(
+        previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap(),
+        1,
+    );
     assert_eq!(finished(&events, &MachineAction::Restart), Ok(()));
     // The Core closes its lane to restart and does not come back.
     let unconfirmed = changed(&events, "the unconfirmed restart", |update| {
@@ -721,7 +779,10 @@ fn an_expected_restart_retries_the_machines_routes_until_the_core_returns() {
     let (adapter, events) = started(&sources, RESTART_LIMIT);
     changed(&events, "the facts", |update| update.facts.is_some());
 
-    adapter.execute(previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap());
+    adapter.execute(
+        previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap(),
+        1,
+    );
     assert_eq!(finished(&events, &MachineAction::Restart), Ok(()));
     // The Core closes its lane to restart, and its route drops.
     machine.set(Script::Offline);
@@ -766,6 +827,138 @@ fn an_expected_restart_retries_the_machines_routes_until_the_core_returns() {
     );
 }
 
+/// A restart whose outcome nothing confirmed may still be running, so the Machine keeps
+/// expecting it and says it can't confirm the restart once its wait ends, instead of offline.
+#[test]
+fn an_unconfirmed_restart_keeps_expecting_the_core_and_then_cannot_confirm_it() {
+    let lane = ScriptedLane::new([Ok(facts(1, 0, Some("0.9.0")))]);
+    *lane.execute_result.lock().unwrap() = Err(ActionFailure::Unconfirmed);
+    let machine = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
+    let sources = ScriptedSources::with(vec![known(PENGUIN, "penguin", false, &machine)]);
+    let (adapter, events) = started(&sources, Duration::from_millis(300));
+    changed(&events, "the facts", |update| update.facts.is_some());
+
+    adapter.execute(
+        previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap(),
+        1,
+    );
+    assert_eq!(
+        finished(&events, &MachineAction::Restart),
+        Err(ActionFailure::Unconfirmed)
+    );
+    machine.set(Script::Offline);
+    lane.answer(Err(ActionFailure::Unreachable));
+    changed(&events, "the unconfirmed restart", |update| {
+        matches!(update.link, MachineLink::Unconfirmed { .. })
+    });
+}
+
+/// The action that finished as `expected`, with its outcome and the operation Check Status reads.
+fn finished_operation(
+    events: &Events,
+    expected: &MachineAction,
+) -> (Result<(), ActionFailure>, Option<ServiceOperation>) {
+    until(events, "the action finishing", |event| match event {
+        MachineUpdatesEvent::Finished {
+            action,
+            outcome,
+            operation,
+            ..
+        } if action == expected => Some((*outcome, operation.clone())),
+        _ => None,
+    })
+}
+
+/// Check Status after an unconfirmed restart reads that restart's own receipt, also after an
+/// unrelated action on the same Machine, and restarts nothing again.
+#[test]
+fn check_status_reads_the_original_restarts_receipt() {
+    use crate::updates::machines::Checked;
+    let lane = ScriptedLane::new([Ok(facts(1, 0, None))]);
+    *lane.execute_result.lock().unwrap() = Err(ActionFailure::Unconfirmed);
+    let machine = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
+    let sources = ScriptedSources::with(vec![known(PENGUIN, "penguin", false, &machine)]);
+    let (adapter, events) = started(&sources, RESTART_LIMIT);
+    changed(&events, "the facts", |update| update.facts.is_some());
+
+    let preview = previewed(&adapter, PENGUIN, MachineAction::Restart).unwrap();
+    adapter.execute(preview, 1);
+    let (outcome, operation) = finished_operation(&events, &MachineAction::Restart);
+    assert_eq!(outcome, Err(ActionFailure::Unconfirmed));
+    let operation = operation.expect("the unconfirmed restart names its operation");
+    let check = MachineAction::CheckStatus(Checked::Restart, operation.clone());
+
+    // An unrelated check runs on the same Machine first.
+    adapter.perform(PENGUIN, MachineAction::CheckAgain);
+    let _ = finished(&events, &MachineAction::CheckAgain);
+    // The receipt has not settled yet, so Check Status offers itself again for the same one.
+    adapter.perform(PENGUIN, check.clone());
+    assert_eq!(
+        finished_operation(&events, &check),
+        (Err(ActionFailure::Unconfirmed), Some(operation.clone()))
+    );
+    // Later it says the restart was done.
+    *lane.resolve_result.lock().unwrap() = Ok(());
+    adapter.perform(PENGUIN, check.clone());
+    assert_eq!(finished(&events, &check), Ok(()));
+    let resolved: Vec<_> = lane
+        .requests()
+        .into_iter()
+        .filter(|request| request.starts_with("resolve "))
+        .collect();
+    assert_eq!(
+        resolved,
+        [
+            format!("resolve {}", operation.id()),
+            format!("resolve {}", operation.id())
+        ]
+    );
+    assert_eq!(lane.count("execute"), 1, "Check Status restarts nothing");
+}
+
+/// A later Stop on the same Machine, which fails, never answers for an earlier unconfirmed
+/// restart. When that Stop's `Execute` acknowledges the restart's receipt on its way, Check
+/// Status for the restart still reads what that receipt said, once.
+#[test]
+fn check_status_keeps_its_own_operation_through_a_later_action() {
+    use crate::updates::machines::Checked;
+    let lane = ScriptedLane::new([Ok(facts(1, 0, None))]);
+    *lane.execute_result.lock().unwrap() = Err(ActionFailure::Unconfirmed);
+    let machine = ScriptedMachine::new(Script::Lane, Arc::clone(&lane));
+    let sources = ScriptedSources::with(vec![known(LOCAL, "This Mac", true, &machine)]);
+    let (adapter, events) = started(&sources, RESTART_LIMIT);
+    changed(&events, "the facts", |update| update.facts.is_some());
+
+    adapter.execute(
+        previewed(&adapter, LOCAL, MachineAction::Restart).unwrap(),
+        1,
+    );
+    let (_, restart) = finished_operation(&events, &MachineAction::Restart);
+    let restart = restart.expect("the restart names its operation");
+
+    // The later Stop acknowledges the restart's settled, failed receipt, then fails itself.
+    *lane.execute_settles.lock().unwrap() =
+        vec![(restart.id().to_owned(), Err(ActionFailure::DiskFull))];
+    *lane.execute_result.lock().unwrap() = Err(ActionFailure::Failed);
+    adapter.execute(previewed(&adapter, LOCAL, MachineAction::Stop).unwrap(), 1);
+    assert_eq!(
+        finished(&events, &MachineAction::Stop),
+        Err(ActionFailure::Failed)
+    );
+
+    let check = MachineAction::CheckStatus(Checked::Restart, restart.clone());
+    adapter.perform(LOCAL, check.clone());
+    assert_eq!(
+        finished(&events, &check),
+        Err(ActionFailure::DiskFull),
+        "the restart's own receipt answers, not the Stop"
+    );
+    // The acknowledged outcome is read once; afterwards the Core is asked again.
+    adapter.perform(LOCAL, check.clone());
+    assert_eq!(finished(&events, &check), Err(ActionFailure::Unconfirmed));
+    assert_eq!(lane.count("resolve"), 1);
+}
+
 /// An incompatible Core that restarts into a compatible version and answers again before the
 /// follower finds it unreachable still gets its refused work route checked once more, so the
 /// work connection returns without Reconnect. Later changes check it no further.
@@ -787,7 +980,7 @@ fn a_restart_out_of_incompatibility_that_returns_at_once_rechecks_the_work_route
     returned.facts.running = version("0.9.0");
     lane.facts.lock().unwrap().push_back(Ok(returned));
     machine.set(Script::Readmitted);
-    adapter.execute(preview);
+    adapter.execute(preview, 1);
     assert_eq!(finished(&events, &MachineAction::Restart), Ok(()));
     changed(&events, "the compatible Core", |update| {
         update.link == MachineLink::Connected

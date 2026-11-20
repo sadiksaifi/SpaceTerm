@@ -34,10 +34,17 @@ pub(crate) struct PaneCloseFacts<'a> {
     pub(crate) state: &'a PaneTerminalState,
     pub(crate) disconnected: bool,
     pub(crate) metadata: &'a TerminalMetadataSnapshot,
+    /// Whether a program other than the shell owns the foreground of this exact Terminal
+    /// Session, as SpaceTerm Core last read its Line Mode. `None` when no reading describes it.
+    pub(crate) foreground_job: Option<bool>,
 }
 
 impl PaneCloseFacts<'_> {
-    pub(crate) fn requires_confirmation(&self) -> bool {
+    /// Whether current facts about this exact Terminal Session verify a running command: a
+    /// program other than the shell owns its foreground, or live shell integration says a
+    /// command's output is running. A Terminal Session alone, missing or stale prompt metadata,
+    /// and a shell that has not drawn its first prompt verify nothing, so they close directly.
+    pub(crate) fn running_command(&self) -> bool {
         if !self.live_session
             || matches!(self.state, PaneTerminalState::Exited(_))
             || self
@@ -48,19 +55,15 @@ impl PaneCloseFacts<'_> {
         {
             return false;
         }
-        if self.metadata.freshness == MetadataFreshness::Stale {
+        if self.foreground_job == Some(true) {
             return true;
         }
-        if matches!(
-            self.metadata.command.as_ref().map(|command| &command.state),
-            Some(CommandState::Finished { .. })
-        ) {
-            return false;
-        }
-        matches!(
-            self.metadata.prompt_zone,
-            PromptZone::Unknown | PromptZone::CommandOutput
-        )
+        self.metadata.freshness == MetadataFreshness::Live
+            && self.metadata.prompt_zone == PromptZone::CommandOutput
+            && !matches!(
+                self.metadata.command.as_ref().map(|command| &command.state),
+                Some(CommandState::Finished { .. })
+            )
     }
 }
 
@@ -171,85 +174,31 @@ mod tests {
     }
 
     #[test]
-    fn close_confirmation_classifies_lifecycle_and_metadata_at_the_hierarchy_interface() {
+    fn only_current_facts_about_the_session_verify_a_running_command() {
         let screen =
             crate::terminal::ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix);
         let running = PaneTerminalState::Running;
         let exited = PaneTerminalState::exited(crate::terminal::TerminalSessionExit::Success);
         let failed = PaneTerminalState::failed(crate::terminal::TerminalFailure::pty("read"), None);
-        for (live, disconnected, state, freshness, zone, expected) in [
-            (
-                true,
-                false,
-                &running,
-                MetadataFreshness::Live,
-                PromptZone::Unknown,
-                true,
-            ),
-            (
-                true,
-                false,
-                &running,
-                MetadataFreshness::Live,
-                PromptZone::CommandOutput,
-                true,
-            ),
-            (
-                true,
-                false,
-                &running,
-                MetadataFreshness::Live,
-                PromptZone::Prompt,
-                false,
-            ),
-            (
-                true,
-                false,
-                &running,
-                MetadataFreshness::Live,
-                PromptZone::CommandInput,
-                false,
-            ),
-            (
-                true,
-                false,
-                &running,
-                MetadataFreshness::Stale,
-                PromptZone::Prompt,
-                true,
-            ),
-            (
-                false,
-                false,
-                &running,
-                MetadataFreshness::Stale,
-                PromptZone::Unknown,
-                false,
-            ),
-            (
-                true,
-                true,
-                &running,
-                MetadataFreshness::Stale,
-                PromptZone::Unknown,
-                false,
-            ),
-            (
-                true,
-                false,
-                &exited,
-                MetadataFreshness::Stale,
-                PromptZone::Unknown,
-                false,
-            ),
-            (
-                true,
-                false,
-                &failed,
-                MetadataFreshness::Stale,
-                PromptZone::Unknown,
-                false,
-            ),
+        use MetadataFreshness::{Live, Stale};
+        use PromptZone::{CommandInput, CommandOutput, Prompt, Unknown};
+        for (live, disconnected, state, freshness, zone, foreground_job, expected) in [
+            // A fresh shell that has drawn no prompt yet runs nothing.
+            (true, false, &running, Live, Unknown, None, false),
+            (true, false, &running, Live, Unknown, Some(false), false),
+            // A shell without integration still says when another program owns the terminal.
+            (true, false, &running, Live, Unknown, Some(true), true),
+            (true, false, &running, Live, CommandOutput, None, true),
+            (true, false, &running, Live, CommandOutput, Some(true), true),
+            (true, false, &running, Live, Prompt, None, false),
+            (true, false, &running, Live, CommandInput, None, false),
+            // Stale metadata verifies nothing; the shell's foreground still does.
+            (true, false, &running, Stale, CommandOutput, None, false),
+            (true, false, &running, Stale, Prompt, Some(true), true),
+            (false, false, &running, Stale, Unknown, Some(true), false),
+            (true, true, &running, Stale, Unknown, Some(true), false),
+            (true, false, &exited, Live, CommandOutput, Some(true), false),
+            (true, false, &failed, Live, CommandOutput, Some(true), false),
         ] {
             let mut metadata = (*screen.metadata).clone();
             metadata.freshness = freshness;
@@ -259,13 +208,18 @@ mod tests {
                 state,
                 disconnected,
                 metadata: &metadata,
+                foreground_job,
             };
-            assert_eq!(facts.requires_confirmation(), expected);
+            assert_eq!(
+                facts.running_command(),
+                expected,
+                "{live} {disconnected} {freshness:?} {zone:?} {foreground_job:?}"
+            );
         }
     }
 
     #[test]
-    fn finished_commands_are_safe_to_close_only_while_metadata_is_live() {
+    fn a_finished_command_runs_nothing() {
         let screen =
             crate::terminal::ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix);
         let mut metadata = (*screen.metadata).clone();
@@ -277,18 +231,16 @@ mod tests {
                 duration: std::time::Duration::from_secs(1),
             },
         });
-        for (freshness, expected) in [
-            (MetadataFreshness::Live, false),
-            (MetadataFreshness::Stale, true),
-        ] {
+        for freshness in [MetadataFreshness::Live, MetadataFreshness::Stale] {
             metadata.freshness = freshness;
             let facts = PaneCloseFacts {
                 live_session: true,
                 state: &PaneTerminalState::Running,
                 disconnected: false,
                 metadata: &metadata,
+                foreground_job: None,
             };
-            assert_eq!(facts.requires_confirmation(), expected);
+            assert!(!facts.running_command());
         }
     }
 

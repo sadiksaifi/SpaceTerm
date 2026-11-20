@@ -449,11 +449,17 @@ impl Service {
         crate::MachineConnection::with_paths(self.paths.clone())
     }
     /// Serialize normal launch with installation and explicit service controls.
+    ///
+    /// A [`crate::LaunchIntent::Foreground`] launch starts an installed SpaceTerm Core that the
+    /// person stopped, as explicit Start does. A passive one leaves the Stop in force. `starting`
+    /// runs once, right before this launch installs or starts the server.
     #[cfg(feature = "client")]
     pub(crate) fn launch(
         &self,
+        intent: crate::LaunchIntent,
         provision: impl FnOnce() -> Result<PathBuf, CoreError>,
         cancelled: impl Fn() -> bool,
+        starting: &dyn Fn(),
     ) -> Result<Option<ServiceStatus>, CoreError> {
         if cancelled() {
             return Ok(None);
@@ -477,7 +483,8 @@ impl Service {
         }
         if let Some(mut state) = Self::state(&data)? {
             let status = self.snapshot(&state)?;
-            if status.stopped {
+            let explicit = intent == crate::LaunchIntent::Foreground && status.installed;
+            if status.stopped && !explicit {
                 return Ok(Some(status));
             }
             if !status.installed {
@@ -488,7 +495,8 @@ impl Service {
                 if cancelled() {
                     return Ok(None);
                 }
-                self.start_locked(&data, &mut state, false)?;
+                starting();
+                self.start_locked(&data, &mut state, explicit)?;
                 return self.snapshot(&state).map(Some);
             }
             return Ok(Some(status));
@@ -505,6 +513,7 @@ impl Service {
         if cancelled() {
             return Ok(None);
         }
+        starting();
         // Registration/start is now admitted. Observe its result even if cancellation arrives.
         self.install_locked(&data, &installation).map(Some)
     }
@@ -728,13 +737,46 @@ impl Service {
     pub fn stop(&self) -> Result<ServiceStatus, CoreError> {
         self.apply_control(control::Action::Stop, None)
     }
+    /// Stops SpaceTerm Core only where that ends no Terminal Session a preview did not cover:
+    /// it finishes the native cleanup of a Stop already published, or stops a service whose
+    /// Core does not run, both checked under the service lock. A running Core that no published
+    /// Stop covers refuses with [`CoreError::Changed`]; it stops through its own preview of the
+    /// exact Sessions that end.
+    pub fn stop_offline(&self) -> Result<ServiceStatus, CoreError> {
+        let (data, _) = self.read()?.ok_or(CoreError::NotInstalled)?;
+        let _operation = data.lock("service.lock", false)?;
+        let stopped = Self::state(&data)?.is_some_and(|state| state.stopped);
+        let observed = (!stopped).then_some(false);
+        self.apply_control_locked(&data, control::Action::Stop, observed)
+    }
     /// Confirm an already completed Stop without issuing another native service action.
     pub fn stop_if_stopped(&self) -> Result<Option<ServiceStatus>, CoreError> {
         let Some((data, _)) = self.read()? else {
             return Ok(None);
         };
         let _operation = data.lock("service.lock", false)?;
-        let state = Self::state(&data)?.ok_or(CoreError::NotInstalled)?;
+        self.stopped_locked(&data)
+    }
+    /// [`Self::stop_if_stopped`] that waits for the service lock only until `deadline`. A lock
+    /// another operation holds past it is [`CoreError::ServiceBusy`].
+    pub fn stop_if_stopped_by(
+        &self,
+        deadline: Instant,
+    ) -> Result<Option<ServiceStatus>, CoreError> {
+        let Some((data, _)) = self.read()? else {
+            return Ok(None);
+        };
+        let limit = deadline.saturating_duration_since(Instant::now());
+        let crate::storage::LockWait::Locked(_operation) =
+            data.wait_lock("service.lock", limit, None)?
+        else {
+            return Err(CoreError::ServiceBusy);
+        };
+        self.stopped_locked(&data)
+    }
+    /// What [`Self::stop_if_stopped`] confirms, under the service lock.
+    fn stopped_locked(&self, data: &Directory) -> Result<Option<ServiceStatus>, CoreError> {
+        let state = Self::state(data)?.ok_or(CoreError::NotInstalled)?;
         if !state.stopped || !state.installed {
             return Ok(None);
         }
@@ -1739,8 +1781,10 @@ mod tests {
         );
         let status = service
             .launch(
+                crate::LaunchIntent::Passive,
                 || panic!("warm launch must preserve the approved runtime"),
                 || false,
+                &|| {},
             )
             .unwrap()
             .unwrap();
@@ -1951,7 +1995,7 @@ mod tests {
     #[cfg(feature = "client")]
     mod launch {
         use super::*;
-        use crate::{LocalStartup, StartupOutcome, pane, protocol};
+        use crate::{LaunchIntent, LocalStartup, StartupOutcome, pane, protocol};
         use std::sync::{
             Arc, Mutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -2367,7 +2411,7 @@ mod tests {
                     // This is the boundary after LocalStartup's launch operation releases its lock.
                     assert!(
                         service
-                            .launch(no_provision, || false)
+                            .launch(LaunchIntent::Passive, no_provision, || false, &|| {})
                             .unwrap()
                             .unwrap()
                             .running
@@ -2568,6 +2612,68 @@ mod tests {
                     assert_eq!(service.restart(), Err(CoreError::Stopped));
                     assert!(service.start().unwrap().running);
                     ready(startup.run(no_provision, || false).unwrap());
+                    assert_eq!(supervisor.starts.load(Ordering::Relaxed), 2);
+                },
+            );
+        }
+
+        #[test]
+        fn a_foreground_launch_starts_a_stopped_core_and_a_passive_one_keeps_it_stopped() {
+            let fixture = Fixture::new();
+            fresh(&fixture);
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            let service = supervisor.service();
+            runtime::test_support::with_artifact(
+                &fixture.root.join("artifact"),
+                &fixture.paths.identity,
+                |archive, signature| {
+                    let startup = LocalStartup::with_service(service.clone()).unwrap();
+                    ready(
+                        startup
+                            .run(|| provision(&service, archive, signature), || false)
+                            .unwrap(),
+                    );
+                    // A running Core that no Stop covers stops only through its own preview.
+                    assert_eq!(service.stop_offline().err(), Some(CoreError::Changed));
+                    assert!(
+                        !Service::state(&Directory::open(&fixture.paths.data, false).unwrap())
+                            .unwrap()
+                            .unwrap()
+                            .stopped
+                    );
+                    service.stop().unwrap();
+                    // Once a Stop is published, the offline Stop only confirms its cleanup.
+                    assert!(service.stop_offline().unwrap().stopped);
+                    let starting = std::cell::Cell::new(0);
+                    assert!(matches!(
+                        startup.launch(LaunchIntent::Passive, no_provision, || false, &|| {
+                            starting.set(starting.get() + 1);
+                        }),
+                        Ok(StartupOutcome::Stopped)
+                    ));
+                    assert_eq!(starting.get(), 0);
+                    ready(
+                        startup
+                            .launch(LaunchIntent::Foreground, no_provision, || false, &|| {
+                                starting.set(starting.get() + 1);
+                            })
+                            .unwrap(),
+                    );
+                    assert_eq!(starting.get(), 1);
+                    let state =
+                        Service::state(&Directory::open(&fixture.paths.data, false).unwrap())
+                            .unwrap()
+                            .unwrap();
+                    assert!(!state.stopped);
+                    // A running Core is reused without starting it again.
+                    ready(
+                        startup
+                            .launch(LaunchIntent::Foreground, no_provision, || false, &|| {
+                                starting.set(starting.get() + 1);
+                            })
+                            .unwrap(),
+                    );
+                    assert_eq!(starting.get(), 1);
                     assert_eq!(supervisor.starts.load(Ordering::Relaxed), 2);
                 },
             );

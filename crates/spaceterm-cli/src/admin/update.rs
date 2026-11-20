@@ -16,6 +16,7 @@ use spaceterm_core::update::facts::UpdateFacts;
 use spaceterm_core::update::sources::SourceError;
 use std::io::Read;
 use std::path::Path;
+use std::time::Instant;
 
 const COMMAND: &str = "update";
 
@@ -28,10 +29,21 @@ pub fn run(context: &Context<'_>, files: Option<(&Path, &Path)>) -> Reply {
         Ok(pending) => pending,
         Err(failure) => return Reply::failure(COMMAND, Some(routed.machine), failure),
     };
-    match super::open_lane(context, &routed.connection, &routed.route, &pending) {
+    match super::open_lane(
+        context,
+        &routed.connection,
+        &routed.route,
+        &pending,
+        Instant::now() + admin::REQUEST_LIMIT,
+    ) {
         Ok(opened) => running(context, routed, opened, files),
-        Err(failure) if routed.local && offline(&failure) => stopped(context, routed, files),
-        Err(failure) => Reply::failure(COMMAND, Some(routed.machine), failure),
+        // A connection that fails settles nothing, so the offline install reports nothing lost.
+        Err(unopened)
+            if routed.local && offline(&unopened.failure) && unopened.recovered.is_empty() =>
+        {
+            stopped(context, routed, files)
+        }
+        Err(unopened) => Reply::unopened(COMMAND, Some(routed.machine), unopened),
     }
 }
 

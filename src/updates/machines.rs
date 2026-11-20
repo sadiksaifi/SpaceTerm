@@ -31,6 +31,8 @@ pub(crate) struct MachineUpdate {
     pub(crate) link: MachineLink,
     /// The latest facts received in this run over either lane. None before the first.
     pub(crate) facts: Option<UpdateFacts>,
+    /// The Core run that supplied `facts`, cleared when a newer answer cannot identify its run.
+    pub(crate) boot: Option<std::sync::Arc<str>>,
     /// The latest detailed update facts, from a Core whose service lane offers them. They hold
     /// the same facts as `facts` and the engine's own continuation, which takes precedence over
     /// [`spaceterm_core::update::continuation`]. None from an older Core. Every writer that
@@ -120,7 +122,13 @@ pub(crate) enum MachineLink {
     Offline { since: u64 },
     /// A restart began, and the Core did not come back on `expected` before the deadline
     /// ("Can't confirm").
-    Unconfirmed { expected: Version, since: u64 },
+    Unconfirmed {
+        expected: Version,
+        since: u64,
+        /// The restart's own operation, which Check Status reads, once it may have reached the
+        /// Core.
+        operation: Option<ServiceOperation>,
+    },
     /// The Core's service lane admits this desktop but answers `Facts` with `unsupported`: it
     /// predates update facts, so SpaceTerm can't check its updates ("Can't check").
     Unreported,
@@ -140,6 +148,63 @@ pub(crate) enum MachineAction {
     DismissFailure(u64),
     Start,
     Stop,
+    /// Reads what became of the Stop or Restart this desktop sent whose outcome nothing
+    /// confirmed, from that exact operation's own receipt. It never runs the action again.
+    CheckStatus(Checked, ServiceOperation),
+}
+
+/// One Stop or Restart a Core may have admitted for this desktop, by its operation ID and the
+/// route that admitted it. A paired route is its own Client Identity, so only that route's
+/// record and that route's Core answer for the operation.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ServiceOperation {
+    id: std::sync::Arc<str>,
+    route: Option<crate::direct_connections::DirectRouteId>,
+}
+
+impl ServiceOperation {
+    /// An operation the account-local lane admitted.
+    pub(crate) fn new(id: &str) -> Self {
+        Self::admitted(id, None)
+    }
+
+    /// An operation `route` admitted, or the account-local lane when `route` is None.
+    pub(crate) fn admitted(
+        id: &str,
+        route: Option<crate::direct_connections::DirectRouteId>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            route,
+        }
+    }
+
+    /// The operation ID the Core's ledger names it by.
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The paired route that admitted it. None for the account-local lane.
+    pub(crate) const fn route(&self) -> Option<&crate::direct_connections::DirectRouteId> {
+        self.route.as_ref()
+    }
+}
+
+/// The action a [`MachineAction::CheckStatus`] reads the outcome of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Checked {
+    Stop,
+    Restart,
+}
+
+impl Checked {
+    /// The action whose outcome this reads.
+    pub(crate) const fn action(self) -> MachineAction {
+        match self {
+            Self::Stop => MachineAction::Stop,
+            Self::Restart => MachineAction::Restart,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,6 +226,10 @@ pub(crate) enum ActionFailure {
     SteppingStoneSkipped([u64; 3]),
     /// The Machine must fetch this release before it can accept the bundled Core.
     NeedsFloor(spaceterm_core::update::ordering::Floor),
+    /// The action was admitted, and nothing proves whether it finished: its answer was lost, or
+    /// SpaceTerm Core stopped before its native cleanup was confirmed. Checking again reads what
+    /// happened. Trying again could repeat the action, so nothing offers that.
+    Unconfirmed,
     Failed,
 }
 
@@ -173,6 +242,22 @@ pub(crate) enum MachineUpdatesEvent {
         machine: MachineId,
         action: MachineAction,
         outcome: Result<(), ActionFailure>,
+        /// The Stop or Restart whose outcome nothing confirmed yet, which Check Status reads.
+        /// Set only with `Unconfirmed`, once the operation may have reached the Core.
+        operation: Option<ServiceOperation>,
+        /// The store's request that [`MachineUpdatesAdapter::execute`] ran, so its outcome
+        /// reaches that request's surface alone. `None` for an action performed without a
+        /// confirmation.
+        request: Option<Request>,
+    },
+    /// `request`'s preview or approved `action` on `machine` began to wait for another
+    /// SpaceTerm Core operation to settle, when `waiting`, or that wait ended: the Core
+    /// answered the preview or admitted the action, or the request ended.
+    Waiting {
+        machine: MachineId,
+        action: MachineAction,
+        request: Request,
+        waiting: bool,
     },
 }
 
@@ -221,6 +306,9 @@ pub(crate) struct MachinePreview {
     pub(crate) id: u64,
 }
 
+/// The store's name for one preview or one execution of a Restart or Stop, unique in its run.
+pub(crate) type Request = u64;
+
 /// The answer to [`MachineUpdatesAdapter::preview`], sent once.
 pub(crate) type PreviewAnswer = async_channel::Receiver<Result<MachinePreview, ActionFailure>>;
 
@@ -232,9 +320,11 @@ pub(crate) trait MachineUpdatesAdapter {
     /// Performs an action that needs no confirmation: Install, Check Again, Dismiss Failure or
     /// Start. Restart and Stop run only through [`Self::preview`] and [`Self::execute`].
     fn perform(&self, machine: MachineId, action: MachineAction);
-    /// Asks the Machine's Core to preview a Restart or Stop.
-    fn preview(&self, machine: MachineId, action: MachineAction) -> PreviewAnswer;
-    /// Executes exactly `preview`. It ends with one [`MachineUpdatesEvent::Finished`] for
-    /// `preview.action`.
-    fn execute(&self, preview: MachinePreview);
+    /// Asks the Machine's Core to preview a Restart or Stop for the store's `request`, which
+    /// names its [`MachineUpdatesEvent::Waiting`] events.
+    fn preview(&self, machine: MachineId, action: MachineAction, request: Request)
+    -> PreviewAnswer;
+    /// Executes exactly `preview` for the store's `request`. It ends with one
+    /// [`MachineUpdatesEvent::Finished`] for `preview.action` that names `request`.
+    fn execute(&self, preview: MachinePreview, request: Request);
 }

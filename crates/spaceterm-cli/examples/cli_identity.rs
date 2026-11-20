@@ -117,7 +117,9 @@ fn abandon(name: &str) -> Result<()> {
     let mut writer = state
         .writer(&RouteKey::Local, agent.as_ref(), Instant::now())
         .map_err(|code| code.as_str())?;
-    let journal = writer.journal(&core).map_err(|failure| failure.text())?;
+    let journal = writer
+        .journal(&core, Instant::now() + std::time::Duration::from_secs(5))
+        .map_err(|failure| failure.text())?;
     let (_, revision) = link.next_inventory(0)?;
     let mutation = Mutation::CreateWorkspace {
         name: format!("abandoned {name}"),

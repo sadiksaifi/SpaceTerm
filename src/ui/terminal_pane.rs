@@ -1659,6 +1659,11 @@ impl TerminalPane {
             state: &self.pane_state,
             disconnected: self.terminal_session.connection_interrupted,
             metadata: self.metadata(),
+            foreground_job: self
+                .terminal_session
+                .session
+                .as_ref()
+                .and_then(|session| session.foreground_job()),
         }
     }
 
@@ -1666,6 +1671,11 @@ impl TerminalPane {
     /// other keyboard owners sit inside the Pane and answer `false`.
     pub(crate) fn is_focused(&self, window: &Window) -> bool {
         self.focus_handle.is_focused(window)
+    }
+
+    /// Whether `focus` is this Pane's terminal or a control inside it.
+    pub(crate) fn contains_focus(&self, focus: &FocusHandle, window: &Window) -> bool {
+        self.focus_handle.contains(focus, window)
     }
 
     #[cfg(test)]
@@ -2150,6 +2160,17 @@ impl TerminalPane {
     }
 
     /// Whether readiness may ask this Pane's session for hidden screens to prepare.
+    /// Asks the window's start queue to open this Pane's worker although nobody showed the Pane
+    /// yet, so its Core can start its shell in the background.
+    pub(crate) fn request_worker(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.readiness_requested || self.terminal_session.session.is_some() {
+            return false;
+        }
+        self.readiness_requested = true;
+        self.readiness.dirty(cx.entity_id());
+        true
+    }
+
     pub(crate) fn readiness_preparation_eligible(&self) -> bool {
         self.native_attention_pane.is_some()
             && !self.terminal_session.session_factory.is_pending()

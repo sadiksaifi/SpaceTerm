@@ -2,9 +2,11 @@
 //!
 //! The Workspace Window opens at once and owns no local Workspace of its own. A worker prepares
 //! or reuses the server for this account off the event thread, and the window's empty stage says
-//! what is happening until the server's Workspaces arrive. Launch never reverses a deliberate
-//! Stop and never asks for authorization by itself: Start Server and startup authorization
-//! run only when the person chooses them here, and each then runs launch again.
+//! what is happening until the server's Workspaces arrive. Only the window a person's own launch
+//! of SpaceTerm opens starts a SpaceTerm Core they stopped, as Start Core does; a window reopened
+//! in the running desktop and every later launch leave the Stop in force. Launch never asks for
+//! authorization by itself: startup authorization runs only when the person chooses it here, and
+//! then runs launch again.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -22,6 +24,7 @@ use crate::ui::pane_lifecycle::PaneConstruction;
 use crate::ui::settings_window::{AuthorizationPrompt, AuthorizedRequest};
 use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
 use crate::updates::copy::pane::{AppRelease, BlockedAction};
+pub(crate) use spaceterm_core::LaunchIntent;
 use spaceterm_core::protocol::version::Incompatible;
 
 pub(super) const LAUNCH_SELECTOR: &str = "server-launch";
@@ -62,10 +65,22 @@ pub(crate) enum LaunchOutcome {
 
 /// The blocking steps of local launch. Each runs on a background thread.
 pub(crate) trait LocalLaunch: Send + Sync {
-    /// Prepares or reuses the account's service and connects. Never reverses Stop and never asks
-    /// for authorization. It may install, enable and start the service, except one off in Login
-    /// Items, which it refuses with [`CoreError::LoginItemOff`].
-    fn run(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<LaunchOutcome, CoreError>;
+    /// Prepares or reuses the account's service and connects. Only a
+    /// [`LaunchIntent::Foreground`] run reverses Stop, and no run asks for authorization. It may
+    /// install, enable and start the service, except one off in Login Items, which it refuses
+    /// with [`CoreError::LoginItemOff`]. `starting` runs once, right before it installs or
+    /// starts the server.
+    fn run(
+        &self,
+        intent: LaunchIntent,
+        starting: &(dyn Fn() + Sync),
+        cancelled: &(dyn Fn() -> bool + Sync),
+    ) -> Result<LaunchOutcome, CoreError>;
+    /// Connects to the account's SpaceTerm Core only when it already runs, as after a Start from
+    /// the command line. It reads only: it never installs, enables or starts the service, and
+    /// never changes Stop. A stopped server answers [`LaunchOutcome::Stopped`], and a server that
+    /// does not run fails with [`CoreError::NotRunning`].
+    fn connect(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<LaunchOutcome, CoreError>;
     /// Whether macOS keeps SpaceTerm Core's background item off, because the person turned it
     /// off in Login Items or has not approved it yet. Reads only: it changes nothing. Launch reads
     /// it when an open connection fails, since only [`Self::run`] and [`Self::start`] refuse.
@@ -113,6 +128,9 @@ pub(crate) trait WorkspaceCoreConnector {
 pub(crate) struct LocalCoreAdapters {
     pub(crate) launch: Arc<dyn LocalLaunch>,
     pub(crate) connector: Rc<dyn WorkspaceCoreConnector>,
+    /// Why this window launches: only the window a person's launch of SpaceTerm opens is
+    /// [`LaunchIntent::Foreground`].
+    pub(crate) intent: LaunchIntent,
 }
 
 impl LocalCoreAdapters {
@@ -121,7 +139,13 @@ impl LocalCoreAdapters {
         Self {
             launch: Arc::new(AccountLaunch),
             connector: Rc::new(AccountConnector),
+            intent: LaunchIntent::Passive,
         }
+    }
+
+    /// These adapters for a window that launches for `intent`.
+    pub(crate) fn launching(self, intent: LaunchIntent) -> Self {
+        Self { intent, ..self }
     }
 }
 
@@ -136,15 +160,17 @@ impl AccountLaunch {
 }
 
 impl LocalLaunch for AccountLaunch {
-    fn run(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<LaunchOutcome, CoreError> {
-        use spaceterm_core::StartupOutcome;
-        Ok(match crate::local_startup::run(cancelled)? {
-            StartupOutcome::Ready { .. } => LaunchOutcome::Ready,
-            StartupOutcome::Stopped => LaunchOutcome::Stopped,
-            StartupOutcome::AuthorizationRequired => LaunchOutcome::AuthorizationRequired,
-            StartupOutcome::ServiceBusy => LaunchOutcome::ServiceBusy,
-            StartupOutcome::Cancelled => LaunchOutcome::Cancelled,
-        })
+    fn run(
+        &self,
+        intent: LaunchIntent,
+        starting: &(dyn Fn() + Sync),
+        cancelled: &(dyn Fn() -> bool + Sync),
+    ) -> Result<LaunchOutcome, CoreError> {
+        crate::local_startup::run(intent, starting, cancelled).map(launch_outcome)
+    }
+
+    fn connect(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<LaunchOutcome, CoreError> {
+        crate::local_startup::connect(cancelled).map(launch_outcome)
     }
 
     fn background_item_off(&self) -> bool {
@@ -171,6 +197,18 @@ impl LocalLaunch for AccountLaunch {
         // account only. No SpaceTerm code runs as root.
         Self::service()?
             .enable_linger(crate::machine_connection::service::LingerAuthorization::Desktop)
+    }
+}
+
+/// What the window presents of one startup outcome.
+fn launch_outcome(outcome: spaceterm_core::StartupOutcome) -> LaunchOutcome {
+    use spaceterm_core::StartupOutcome;
+    match outcome {
+        StartupOutcome::Ready { .. } => LaunchOutcome::Ready,
+        StartupOutcome::Stopped => LaunchOutcome::Stopped,
+        StartupOutcome::AuthorizationRequired => LaunchOutcome::AuthorizationRequired,
+        StartupOutcome::ServiceBusy => LaunchOutcome::ServiceBusy,
+        StartupOutcome::Cancelled => LaunchOutcome::Cancelled,
     }
 }
 
@@ -224,6 +262,8 @@ pub(super) enum LaunchStep {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum LaunchState {
     Launching,
+    /// Launch is starting or installing SpaceTerm Core itself.
+    Starting,
     Working(LaunchStep),
     Stopped,
     /// `declined` is whether the person's last authorization did not complete.
@@ -335,6 +375,13 @@ pub(super) const OPENING_TITLE: &str = "Opening Workspaces";
 // Launch reuses a running server or starts it, so the detail claims neither.
 const OPENING_DETAIL: &str = "SpaceTerm is waiting for SpaceTerm Core.";
 pub(super) const STOPPED_TITLE: &str = "SpaceTerm Core is stopped";
+pub(super) const STARTING_TITLE: &str = "Starting SpaceTerm Core\u{2026}";
+
+/// What the window waits for while SpaceTerm Core starts. `place` is the host's name for this
+/// computer, such as "This Mac".
+fn starting_detail(place: &str) -> SharedString {
+    format!("Your Workspaces on {place} open as soon as it\u{2019}s ready.").into()
+}
 
 /// Why this computer's Workspaces are closed while its server is stopped. `place` is the host's
 /// name for this computer, such as "This Mac".
@@ -429,10 +476,11 @@ pub(super) fn present(state: LaunchState, place: &str) -> LaunchPresentation {
             waiting: true,
             blocked: None,
         },
-        LaunchState::Working(LaunchStep::Start) => LaunchPresentation {
-            title: STOPPED_TITLE,
-            detail: stopped_detail(place),
-            progress: Some("Starting SpaceTerm Core\u{2026}"),
+        // Starting SpaceTerm Core is progress the person waits for, so it shows at once.
+        LaunchState::Starting | LaunchState::Working(LaunchStep::Start) => LaunchPresentation {
+            title: STARTING_TITLE,
+            detail: starting_detail(place),
+            progress: Some(STARTING_TITLE),
             actions: &[],
             icon: None,
             waiting: false,
@@ -551,9 +599,24 @@ pub(super) struct LocalLaunchState {
     _background_item: Option<Task<()>>,
     cancelled: Arc<AtomicBool>,
     _task: Option<Task<()>>,
+    /// Says SpaceTerm Core is starting once the running launch starts it.
+    _starting: Option<Task<()>>,
+    /// Why the next launch runs. A foreground launch stays foreground through a wait for another
+    /// service operation, and every launch after it is passive, so a Stop the person chooses
+    /// later stays in force.
+    intent: LaunchIntent,
+    /// The person's launch of SpaceTerm still owes them a shell: once this computer's first
+    /// inventory is presented, the window opens the Active Workspace's Focused Pane, or creates
+    /// one Workspace when nothing is attached.
+    landing: bool,
+    /// The owed landing saw this computer's inventory and waits for the server to take it.
+    landing_seen: bool,
     /// The server was started elsewhere while this launch was answering. A launch that then
     /// finishes waiting runs once more, because its answer may predate that start.
-    resume: bool,
+    resume: Option<Resume>,
+    /// The running launch only connects to a Core run Machine updates read, and this is what the
+    /// window presented before it began. None while launch itself runs.
+    connecting: Option<LaunchState>,
     /// The message assistive technology last announced, so each change is spoken once.
     announced: std::cell::RefCell<Option<SharedString>>,
     /// When the window's first launch may start saying it is waiting, once that launch began.
@@ -575,12 +638,77 @@ pub(super) struct LocalLaunchState {
     /// The failed connection attempts counted when the person last chose Try Again on the empty
     /// view, while that view still waits for this computer's server.
     pub(super) reconnect_from: std::cell::Cell<Option<u64>>,
+    /// What Machine updates read of this computer's SpaceTerm Core when the latest launch began.
+    began_with: LocalCoreReading,
+    /// The reading this window waits to change since its own launch read a deliberate Stop.
+    /// None while nothing waits.
+    stopped_past: Option<LocalCoreReading>,
+    /// Follows Machine updates once a launch of this window read a deliberate Stop.
+    _core_runs: Option<gpui::Subscription>,
+}
+
+/// What a launch runs once more when it finishes waiting, because SpaceTerm Core started
+/// elsewhere while it answered. Launch outranks a connection when both are owed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+enum Resume {
+    /// Machine updates read a Core run answer. The window only connects to that run, so
+    /// nothing in the background installs or starts the server.
+    Connect,
+    /// The person started or installed the server, or turned it on in Login Items.
+    Launch,
+}
+
+/// What Machine updates read of this computer's SpaceTerm Core, as a window that read a
+/// deliberate Stop compares it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LocalCoreReading {
+    /// A Core run answered over `link`. The boot names the run whose facts arrived, if any.
+    Answers(crate::updates::machines::MachineLink, Option<Arc<str>>),
+    /// The Core is stopped, unreachable or unconfirmed, no reading verified a run yet, or
+    /// Machine updates do not follow this computer.
+    Silent,
+}
+
+impl LocalCoreReading {
+    /// What Machine updates read of this computer's SpaceTerm Core now. Connected counts only
+    /// with facts of a known run, so the reading listed before the first answer is silent.
+    fn read(cx: &App) -> Self {
+        use crate::updates::machines::{MachineLink, store::MachineUpdates};
+        let Some(store) = MachineUpdates::global(cx) else {
+            return Self::Silent;
+        };
+        let store = store.read(cx);
+        let Some(update) = store.machines().iter().find(|update| update.local) else {
+            return Self::Silent;
+        };
+        match &update.link {
+            MachineLink::Connected if update.boot.is_none() => Self::Silent,
+            link @ (MachineLink::Connected
+            | MachineLink::Incompatible(_)
+            | MachineLink::Unreported) => Self::Answers(link.clone(), update.boot.clone()),
+            MachineLink::Stopped
+            | MachineLink::Offline { .. }
+            | MachineLink::Unconfirmed { .. } => Self::Silent,
+        }
+    }
+
+    /// Whether this reading names the same Core run as `past`. Two readings of one known boot
+    /// are one run whatever their links, so each run connects a waiting window at most once.
+    fn same_run(&self, past: &Self) -> bool {
+        match (self, past) {
+            (Self::Answers(_, Some(boot)), Self::Answers(_, Some(past))) => boot == past,
+            _ => self == past,
+        }
+    }
 }
 
 impl LocalLaunchState {
     /// `place` is the host's name for this computer, such as "This Mac".
     pub(super) fn new(adapters: LocalCoreAdapters, place: &'static str) -> Self {
         Self {
+            intent: adapters.intent,
+            landing: adapters.intent == LaunchIntent::Foreground,
+            landing_seen: false,
             adapters,
             state: LaunchState::Launching,
             place,
@@ -590,7 +718,9 @@ impl LocalLaunchState {
             _background_item: None,
             cancelled: Arc::new(AtomicBool::new(false)),
             _task: None,
-            resume: false,
+            _starting: None,
+            resume: None,
+            connecting: None,
             announced: std::cell::RefCell::default(),
             quiet_until: None,
             spoke: std::cell::Cell::new(false),
@@ -599,7 +729,32 @@ impl LocalLaunchState {
             _blocked_updates: Vec::new(),
             create_when_presented: false,
             reconnect_from: std::cell::Cell::new(None),
+            began_with: LocalCoreReading::Silent,
+            stopped_past: None,
+            _core_runs: None,
         }
+    }
+
+    /// Whether the person's launch still owes them a shell.
+    pub(super) const fn landing_owed(&self) -> bool {
+        self.landing
+    }
+
+    /// Whether an owed landing already saw this computer's inventory, so each later reading
+    /// tries it again even when the inventory is unchanged.
+    pub(super) const fn landing_presented(&self) -> bool {
+        self.landing && self.landing_seen
+    }
+
+    /// Records that the owed landing saw this computer's inventory and must wait.
+    pub(super) fn landing_waits(&mut self) {
+        self.landing_seen = self.landing;
+    }
+
+    /// The landing happened, or the person's own choice replaced it.
+    pub(super) fn finish_landing(&mut self) {
+        self.landing = false;
+        self.landing_seen = false;
     }
 
     /// The account-local connection that retains this desktop's Workspace order, if any.
@@ -656,6 +811,12 @@ pub(crate) fn start_local_core(window: &mut Window, cx: &mut App) {
 /// the Panes the stop interrupted instead. A window still launching runs launch once more if it
 /// then finishes waiting. Nothing here starts the server itself, so a retained Stop stays.
 pub(crate) fn resume_waiting_launches(cx: &mut App) {
+    resume_waiting(Resume::Launch, cx);
+}
+
+/// Runs `resume` in every Workspace Window still waiting on the server, as
+/// [`resume_waiting_launches`] describes.
+fn resume_waiting(resume: Resume, cx: &mut App) {
     for window in cx.windows() {
         let Some(window) = window.downcast::<WorkspaceManager>() else {
             continue;
@@ -670,14 +831,49 @@ pub(crate) fn resume_waiting_launches(cx: &mut App) {
                     | LaunchState::Incompatible(_)
             ) && manager.launch._task.is_none()
             {
-                manager.run_local_launch(None, window, cx);
+                manager.resume_local_core(resume, window, cx);
             } else if manager.launch._task.is_some() {
-                manager.launch.resume = true;
+                manager.launch.resume = manager.launch.resume.max(Some(resume));
             } else if manager.launch.state == LaunchState::Ready {
                 manager.core_started(cx);
             }
         });
     }
+}
+
+/// Connects waiting Workspace Windows, as [`resume_waiting_launches`] resumes them, each time
+/// Machine updates confirm that this computer's SpaceTerm Core answers again after they read it
+/// deliberately stopped, as after a Start from the command line. The windows only connect to the
+/// running Core, so nothing here installs or starts it, even when it exits first. Reading it
+/// stopped, or unreachable, resumes nothing, so a deliberate Stop stays. Each Core run that
+/// answers resumes once.
+pub(crate) fn follow_local_core_runs(cx: &mut App) {
+    use crate::updates::machines::{MachineLink, store::MachineUpdates};
+    let Some(store) = MachineUpdates::global(cx) else {
+        return;
+    };
+    let stopped = std::cell::Cell::new(false);
+    cx.observe(&store, move |store, cx| {
+        let Some(link) = store
+            .read(cx)
+            .machines()
+            .iter()
+            .find(|update| update.local)
+            .map(|update| update.link.clone())
+        else {
+            return;
+        };
+        match link {
+            MachineLink::Stopped => stopped.set(true),
+            MachineLink::Connected | MachineLink::Incompatible(_) | MachineLink::Unreported
+                if stopped.replace(false) =>
+            {
+                resume_waiting(Resume::Connect, cx);
+            }
+            _ => {}
+        }
+    })
+    .detach();
 }
 
 impl WorkspaceManager {
@@ -689,6 +885,8 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The person chose a new Workspace, which the launch's saved selection never replaces.
+        self.person_input(cx);
         self.launch.create_when_presented = true;
         self.create_pending_workspace(super::MachineKey::LOCAL, window, cx);
     }
@@ -722,8 +920,42 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.reach_local_core(step, false, window, cx);
+    }
+
+    /// Connects to a Core run Machine updates read, as after a Start from the command line.
+    /// Unlike launch, it never installs or starts the server and never changes Stop. A run that
+    /// is gone or stopped by then leaves the window presenting what it did before.
+    fn connect_local_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reach_local_core(None, true, window, cx);
+    }
+
+    /// Runs what `resume` names.
+    fn resume_local_core(&mut self, resume: Resume, window: &mut Window, cx: &mut Context<Self>) {
+        match resume {
+            Resume::Launch => self.run_local_launch(None, window, cx),
+            Resume::Connect => self.connect_local_run(window, cx),
+        }
+    }
+
+    /// Runs launch, or only a connection to the running Core when `connect` is set, after
+    /// `step` when there is one.
+    fn reach_local_core(
+        &mut self,
+        step: Option<LaunchStep>,
+        connect: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let began_with = LocalCoreReading::read(cx);
         let launch = &mut self.launch;
+        // A connection that waits for another service operation keeps what the window presented
+        // before the connection began.
+        let before = launch.connecting.unwrap_or(launch.state);
+        launch.connecting = connect.then_some(before);
         launch.state = step.map_or(LaunchState::Launching, LaunchState::Working);
+        launch.began_with = began_with;
+        launch.stopped_past = None;
         // Only the window's first launch begins quietly. A later one follows a screen the person
         // already sees, so it keeps saying what it is doing.
         if launch.quiet_until.is_none() {
@@ -735,6 +967,18 @@ impl WorkspaceManager {
         }
         let adapter = Arc::clone(&launch.adapters.launch);
         let cancelled = Arc::clone(&launch.cancelled);
+        let intent = launch.intent;
+        let (started, starting) = async_channel::bounded::<()>(1);
+        launch._starting = Some(cx.spawn_in(window, async move |manager, cx| {
+            if starting.recv().await.is_ok() {
+                let _ = manager.update(cx, |manager, cx| {
+                    if matches!(manager.launch.state, LaunchState::Launching) {
+                        manager.launch.state = LaunchState::Starting;
+                        cx.notify();
+                    }
+                });
+            }
+        }));
         let work = cx.background_spawn(async move {
             // The service refuses to start what is off in Login Items, so neither the person's
             // Start nor launch turns it back on.
@@ -756,7 +1000,15 @@ impl WorkspaceManager {
                 return refused;
             }
             let observed = move || cancelled.load(Ordering::Acquire);
-            match adapter.run(&observed) {
+            let starting = move || {
+                let _ = started.try_send(());
+            };
+            let reached = if connect {
+                adapter.connect(&observed)
+            } else {
+                adapter.run(intent, &starting, &observed)
+            };
+            match reached {
                 Ok(outcome) => StepResult::Outcome(outcome),
                 Err(error) => StepResult::Failed(error),
             }
@@ -776,13 +1028,48 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Only the launch the person's own opening of SpaceTerm ran is foreground. A wait for
+        // another operation runs that same launch again.
+        let busy = matches!(result, StepResult::Outcome(LaunchOutcome::ServiceBusy));
+        if !busy {
+            self.launch.intent = LaunchIntent::Passive;
+        }
+        let connected_from = if busy {
+            None
+        } else {
+            self.launch.connecting.take()
+        };
+        self.launch._starting = None;
+        // A connection that found the Core gone or stopped changes nothing the window presents.
+        // A window that read a deliberate Stop waits past the run the connection began with, so
+        // only a later answer connects again.
+        if let Some(before) = connected_from
+            && matches!(
+                result,
+                StepResult::Outcome(LaunchOutcome::Stopped)
+                    | StepResult::Failed(CoreError::Stopped | CoreError::NotRunning)
+            )
+        {
+            self.launch.state = before;
+            self.launch._task = None;
+            if let Some(resume) = self.launch.resume.take() {
+                self.resume_local_core(resume, window, cx);
+                return;
+            }
+            if before == LaunchState::Stopped {
+                self.await_local_core_run(window, cx);
+            }
+            cx.notify();
+            return;
+        }
         let state = match result {
             StepResult::Outcome(LaunchOutcome::Ready) => self.connect_local_core(window, cx),
             StepResult::Outcome(LaunchOutcome::Stopped) => LaunchState::Stopped,
             StepResult::Failed(CoreError::LoginItemOff) => LaunchState::LoginItemOff,
             // The operation decides what launch finds next, so launch runs again once it ends.
             StepResult::Outcome(LaunchOutcome::ServiceBusy) => {
-                self.run_local_launch(Some(LaunchStep::WaitForService), window, cx);
+                let connect = self.launch.connecting.is_some();
+                self.reach_local_core(Some(LaunchStep::WaitForService), connect, window, cx);
                 return;
             }
             StepResult::Outcome(LaunchOutcome::AuthorizationRequired)
@@ -797,6 +1084,10 @@ impl WorkspaceManager {
         };
         self.launch.state = state;
         self.launch._task = None;
+        // Launch may have started this computer's SpaceTerm Core, as the person's Start here
+        // does, so an open Settings window reads the service again instead of keeping what it
+        // saw before, such as its own Stop.
+        crate::ui::settings_window::local_operations::LocalCoreOperations::launched_elsewhere(cx);
         if matches!(state, LaunchState::Incompatible(_)) {
             self.follow_blocked_updates(cx);
         }
@@ -804,7 +1095,7 @@ impl WorkspaceManager {
             &mut self.launch.turned_off,
             state == LaunchState::LoginItemOff,
         );
-        if std::mem::take(&mut self.launch.resume)
+        if let Some(resume) = self.launch.resume.take()
             && matches!(
                 state,
                 LaunchState::Stopped
@@ -814,7 +1105,10 @@ impl WorkspaceManager {
                     | LaunchState::Incompatible(_)
             )
         {
-            self.run_local_launch(None, window, cx);
+            self.resume_local_core(resume, window, cx);
+            return;
+        }
+        if state == LaunchState::Stopped && self.await_local_core_run(window, cx) {
             return;
         }
         // A running server answers the Panes a stop interrupted, so they connect again, and the
@@ -845,6 +1139,49 @@ impl WorkspaceManager {
             self.focus(window, cx);
         }
         cx.notify();
+    }
+
+    /// After this window's launch read a deliberate Stop, connects once to the running Core when
+    /// Machine updates read a Core run answer that the launch did not see before it began, as
+    /// after a Start from the command line, even when they never read the Core stopped. A run
+    /// they read while the launch ran connects at once. Nothing here installs or starts the
+    /// server. Returns whether a connection runs.
+    fn await_local_core_run(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.launch.stopped_past = Some(self.launch.began_with.clone());
+        if self.launch._core_runs.is_none()
+            && let Some(store) = crate::updates::machines::store::MachineUpdates::global(cx)
+        {
+            self.launch._core_runs =
+                Some(cx.observe_in(&store, window, |manager, _, window, cx| {
+                    manager.local_core_read(window, cx);
+                }));
+        }
+        self.local_core_read(window, cx)
+    }
+
+    /// Compares Machine updates' latest reading of this computer's SpaceTerm Core with the one
+    /// a stopped window waits past, and connects once when a Core run answers anew. A silent
+    /// reading replaces the one it waits past, so the next answer of any run resumes. Returns
+    /// whether a connection runs.
+    fn local_core_read(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(past) = &self.launch.stopped_past else {
+            return false;
+        };
+        // Launch already ran again, as Settings or the central follower ran it.
+        if self.launch.state != LaunchState::Stopped || self.launch._task.is_some() {
+            self.launch.stopped_past = None;
+            return false;
+        }
+        let reading = LocalCoreReading::read(cx);
+        if reading.same_run(past) {
+            return false;
+        }
+        if reading == LocalCoreReading::Silent {
+            self.launch.stopped_past = Some(reading);
+            return false;
+        }
+        self.connect_local_run(window, cx);
+        true
     }
 
     /// Reconnects each Pane a stop or Login Items interrupted, once this computer's server runs
@@ -1268,7 +1605,7 @@ impl WorkspaceManager {
                 self.run_local_launch(None, window, cx);
             } else {
                 // The running launch may have read the item before the person turned it on.
-                self.launch.resume = true;
+                self.launch.resume = Some(Resume::Launch);
             }
         }
     }
@@ -1409,7 +1746,9 @@ pub(crate) mod testing {
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
 
-    use super::{LaunchOutcome, LocalCoreAdapters, LocalLaunch, WorkspaceCoreConnector};
+    use super::{
+        LaunchIntent, LaunchOutcome, LocalCoreAdapters, LocalLaunch, WorkspaceCoreConnector,
+    };
     use crate::machine_connection::CoreError;
 
     /// A ready server presenting one Workspace, "Default", whose Panes run in `session_factory`.
@@ -1477,6 +1816,7 @@ pub(crate) mod testing {
                 ..ScriptedLaunch::default()
             }),
             connector: Rc::new(Presenting(session_factory)),
+            intent: LaunchIntent::Passive,
         }
     }
 
@@ -1496,6 +1836,7 @@ pub(crate) mod testing {
         LocalCoreAdapters {
             launch: Arc::new(ScriptedLaunch::default()),
             connector: Rc::new(Unreachable),
+            intent: LaunchIntent::Passive,
         }
     }
 
@@ -1510,6 +1851,12 @@ pub(crate) mod testing {
         authorize: Mutex<Option<CoreError>>,
         /// Each background item read in order. It is on once the queue is empty.
         background_item_off: Mutex<VecDeque<bool>>,
+        /// The intent of each run, in order.
+        intents: Mutex<Vec<LaunchIntent>>,
+        /// The next run starts SpaceTerm Core before it answers.
+        starts_core: std::sync::atomic::AtomicBool,
+        /// Runs once inside the next run, before it answers.
+        during_run: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     }
 
     impl ScriptedLaunch {
@@ -1528,16 +1875,56 @@ pub(crate) mod testing {
         pub(crate) fn refuse_authorization(&self, error: CoreError) {
             *self.authorize.lock().unwrap() = Some(error);
         }
-        /// Every step in order: `run`, `start`, `authorize`, `wait_for_service`, and
+        /// Every step in order: `run`, `connect`, `start`, `authorize`, `wait_for_service`, and
         /// `open_login_items`.
         pub(crate) fn steps(&self) -> Vec<&'static str> {
             self.steps.lock().unwrap().clone()
         }
+        /// The intent of each run, in order.
+        pub(crate) fn intents(&self) -> Vec<LaunchIntent> {
+            self.intents.lock().unwrap().clone()
+        }
+        /// The next run says it starts SpaceTerm Core before it answers.
+        pub(crate) fn start_core(&self) {
+            self.starts_core
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        /// Runs `during` inside the next run, before it answers.
+        pub(crate) fn during_next_run(&self, during: impl FnOnce() + Send + 'static) {
+            *self.during_run.lock().unwrap() = Some(Box::new(during));
+        }
     }
 
     impl LocalLaunch for ScriptedLaunch {
-        fn run(&self, _: &(dyn Fn() -> bool + Sync)) -> Result<LaunchOutcome, CoreError> {
+        fn run(
+            &self,
+            intent: LaunchIntent,
+            starting: &(dyn Fn() + Sync),
+            _: &(dyn Fn() -> bool + Sync),
+        ) -> Result<LaunchOutcome, CoreError> {
             self.steps.lock().unwrap().push("run");
+            self.intents.lock().unwrap().push(intent);
+            if self
+                .starts_core
+                .swap(false, std::sync::atomic::Ordering::Relaxed)
+            {
+                starting();
+            }
+            if let Some(during) = self.during_run.lock().unwrap().take() {
+                during();
+            }
+            self.runs
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Ok(if self.ready {
+                    LaunchOutcome::Ready
+                } else {
+                    LaunchOutcome::Cancelled
+                }))
+        }
+        fn connect(&self, _: &(dyn Fn() -> bool + Sync)) -> Result<LaunchOutcome, CoreError> {
+            self.steps.lock().unwrap().push("connect");
             self.runs
                 .lock()
                 .unwrap()

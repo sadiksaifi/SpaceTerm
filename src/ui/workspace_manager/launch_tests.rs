@@ -178,7 +178,14 @@ fn launch_harness_restoring(
     for answer in answers {
         launch.answer(answer);
     }
-    scripted_harness(launch, edits, selections, remembered, cx)
+    scripted_harness(
+        launch,
+        edits,
+        selections,
+        remembered,
+        launch::LaunchIntent::Passive,
+        cx,
+    )
 }
 
 /// A launch harness whose background item reads answer `off` in order before launch begins.
@@ -192,7 +199,14 @@ fn launch_harness_reading_background_item(
         launch.answer(answer);
     }
     launch.background_item(off);
-    scripted_harness(launch, ScriptedEdits::new(Some(inventory())), [], None, cx)
+    scripted_harness(
+        launch,
+        ScriptedEdits::new(Some(inventory())),
+        [],
+        None,
+        launch::LaunchIntent::Passive,
+        cx,
+    )
 }
 
 fn scripted_harness(
@@ -202,6 +216,7 @@ fn scripted_harness(
         Item = Result<Option<PathBuf>, crate::directory_selection::DirectoryChooserError>,
     >,
     remembered: Option<crate::ui::remembered_view::WindowView>,
+    intent: launch::LaunchIntent,
     cx: &mut TestAppContext,
 ) -> (LaunchHarness, &mut VisualTestContext) {
     cx.update(crate::ui::init)
@@ -219,6 +234,7 @@ fn scripted_harness(
     let adapters = LocalCoreAdapters {
         launch: Arc::clone(&launch) as Arc<_>,
         connector,
+        intent,
     };
     let (manager, cx) = cx.add_window_view(|window, cx| {
         let mut manager = WorkspaceManager::new_with_adapters(
@@ -425,6 +441,228 @@ fn a_stopped_core_stays_stopped_until_start_core(cx: &mut TestAppContext) {
     sync(&harness, cx);
     assert_eq!(harness.rows(cx), 1);
     assert_eq!(harness.launch_title(cx), None);
+}
+
+/// Start in the Workspace Window tells every open Settings window that this computer's
+/// SpaceTerm Core changed outside Settings, so none keeps showing it stopped.
+#[gpui::test]
+fn start_core_in_the_workspace_window_reaches_open_settings(cx: &mut TestAppContext) {
+    use crate::ui::settings_window::local_operations::{CompletedOperation, LocalCoreOperations};
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped), ready()], cx);
+    cx.run_until_parked();
+    let heard = Rc::new(std::cell::Cell::new(0));
+    let _subscription = cx.update(|_, cx| {
+        let operations = LocalCoreOperations::get(cx);
+        let heard = Rc::clone(&heard);
+        cx.subscribe(&operations, move |_, operation, _| {
+            if matches!(operation, CompletedOperation::Elsewhere) {
+                heard.set(heard.get() + 1);
+            }
+        })
+    });
+
+    harness.click(LAUNCH_START_SELECTOR, cx);
+    sync(&harness, cx);
+
+    assert_eq!(harness.launch.steps(), ["run", "start", "run"]);
+    assert_eq!(
+        heard.get(),
+        1,
+        "the Start's launch reached the running Core once"
+    );
+}
+
+/// A launch harness whose window opens for the person's own launch of SpaceTerm.
+fn foreground_harness(
+    launch: ScriptedLaunch,
+    cx: &mut TestAppContext,
+) -> (LaunchHarness, &mut VisualTestContext) {
+    foreground_harness_with(launch, ScriptedEdits::new(Some(inventory())), cx)
+}
+
+/// [`foreground_harness`] presenting `edits`.
+fn foreground_harness_with(
+    launch: ScriptedLaunch,
+    edits: ScriptedEdits,
+    cx: &mut TestAppContext,
+) -> (LaunchHarness, &mut VisualTestContext) {
+    scripted_harness(
+        launch,
+        edits,
+        [],
+        None,
+        launch::LaunchIntent::Foreground,
+        cx,
+    )
+}
+
+fn no_workspaces() -> Inventory {
+    Inventory {
+        workspaces: Vec::new(),
+        ..inventory()
+    }
+}
+
+#[gpui::test]
+fn the_persons_launch_creates_one_workspace_when_none_is_attached(cx: &mut TestAppContext) {
+    use spaceterm_core::hierarchy::Mutation;
+    let launch = ScriptedLaunch::default();
+    launch.answer(ready());
+    let (harness, cx) =
+        foreground_harness_with(launch, ScriptedEdits::new(Some(no_workspaces())), cx);
+    sync(&harness, cx);
+    sync(&harness, cx);
+    assert_eq!(
+        harness.edits.submitted(),
+        vec![Mutation::CreateWorkspace {
+            name: String::new(),
+            directory: None,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
+        }],
+        "one launch creates one Workspace"
+    );
+}
+
+/// A cold launch presents this computer's inventory before its server can take a creation.
+/// The landing waits without an alert, then creates exactly one Workspace once it can.
+#[gpui::test]
+fn a_cold_launch_creates_its_workspace_once_the_core_can_take_it(cx: &mut TestAppContext) {
+    use spaceterm_core::hierarchy::Mutation;
+    let launch = ScriptedLaunch::default();
+    launch.answer(ready());
+    let edits = ScriptedEdits::new(Some(no_workspaces()));
+    edits.set_connected(false);
+    let (harness, cx) = foreground_harness_with(launch, edits, cx);
+    sync(&harness, cx);
+    sync(&harness, cx);
+    assert!(
+        harness.edits.submitted().is_empty(),
+        "nothing is asked of a server that cannot take it"
+    );
+    assert!(
+        !cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)),
+        "the wait is not a failure"
+    );
+
+    harness.edits.set_connected(true);
+    sync(&harness, cx);
+    sync(&harness, cx);
+    assert_eq!(
+        harness.edits.submitted(),
+        vec![Mutation::CreateWorkspace {
+            name: String::new(),
+            directory: None,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
+        }],
+        "the launch creates one Workspace once"
+    );
+}
+
+/// The person's own creation while the landing waits replaces the creation the launch owed.
+#[gpui::test]
+fn a_creation_the_person_chose_replaces_the_one_a_cold_launch_owed(cx: &mut TestAppContext) {
+    let launch = ScriptedLaunch::default();
+    launch.answer(ready());
+    let edits = ScriptedEdits::new(Some(no_workspaces()));
+    edits.set_connected(false);
+    let (harness, cx) = foreground_harness_with(launch, edits, cx);
+    sync(&harness, cx);
+    harness.edits.set_connected(true);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.run_workspace_creation(
+                crate::ui::workspace_creation::WorkspaceCreation::Local,
+                window,
+                cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+    sync(&harness, cx);
+    sync(&harness, cx);
+    assert_eq!(
+        harness.edits.submitted().len(),
+        1,
+        "only the person's own creation is asked for"
+    );
+}
+
+#[gpui::test]
+fn a_reopened_window_with_nothing_attached_creates_nothing(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness_with(
+        vec![ready()],
+        ScriptedEdits::new(Some(no_workspaces())),
+        [],
+        cx,
+    );
+    sync(&harness, cx);
+    sync(&harness, cx);
+    assert!(harness.edits.submitted().is_empty());
+}
+
+#[gpui::test]
+fn the_persons_launch_opens_the_focused_pane_once(cx: &mut TestAppContext) {
+    let launch = ScriptedLaunch::default();
+    launch.answer(ready());
+    let (harness, cx) = foreground_harness(launch, cx);
+    sync(&harness, cx);
+    sync(&harness, cx);
+    assert_eq!(harness.panes.pane(PANE).selections(), 1);
+    assert!(harness.edits.submitted().is_empty(), "nothing is created");
+}
+
+#[gpui::test]
+fn the_persons_launch_starts_core_once_and_later_launches_keep_a_stop(cx: &mut TestAppContext) {
+    let launch = ScriptedLaunch::default();
+    // Another operation holds the service first, so the same launch runs again after the wait.
+    launch.answer(Ok(LaunchOutcome::ServiceBusy));
+    launch.answer(ready());
+    launch.answer(Ok(LaunchOutcome::Stopped));
+    let (harness, cx) = foreground_harness(launch, cx);
+    sync(&harness, cx);
+    assert_eq!(harness.rows(cx), 1);
+    assert_eq!(
+        harness.launch.intents(),
+        [
+            launch::LaunchIntent::Foreground,
+            launch::LaunchIntent::Foreground
+        ]
+    );
+
+    // A Stop chosen later stays in force when this window launches again.
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.run_local_launch(None, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        harness.launch.intents().last(),
+        Some(&launch::LaunchIntent::Passive)
+    );
+}
+
+#[gpui::test]
+fn a_reopened_window_launches_passively(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped)], cx);
+    cx.run_until_parked();
+    assert_eq!(harness.launch.intents(), [launch::LaunchIntent::Passive]);
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+}
+
+#[gpui::test]
+fn starting_core_shows_its_loader_at_once(cx: &mut TestAppContext) {
+    let launch = ScriptedLaunch::default();
+    // The run starts SpaceTerm Core and has not answered yet.
+    launch.start_core();
+    let (harness, cx) = foreground_harness(launch, cx);
+    cx.run_until_parked();
+    assert_eq!(harness.launch_title(cx), Some(launch::STARTING_TITLE));
+    assert!(
+        cx.debug_bounds(LAUNCH_SELECTOR).is_some(),
+        "starting SpaceTerm Core shows inside the quiet period"
+    );
+    assert!(cx.debug_bounds(LAUNCH_START_SELECTOR).is_none());
 }
 
 /// SpaceTerm Core is off in Login Items, so the service refuses launch's start. The window says so
@@ -1017,6 +1255,7 @@ fn too_old_core(
             spaceterm_core::protocol::version::Incompatible::ListenerTooOld,
         ),
         facts: Some(facts),
+        boot: None,
         capabilities: spaceterm_core::protocol::capability::Capabilities::fake(
             &spaceterm_core::protocol::capability::Capability::ALL,
         ),
@@ -1367,6 +1606,7 @@ fn a_second_launched_window_brings_the_presenting_one_forward(cx: &mut TestAppCo
             edits: Rc::clone(&harness.edits),
             panes: Rc::clone(&harness.panes),
         }),
+        intent: launch::LaunchIntent::Passive,
     };
     let second = cx.add_window(|window, cx| {
         WorkspaceManager::new_with_adapters(
@@ -2589,4 +2829,745 @@ fn a_reopened_window_keeps_the_keyboard_in_its_sidebar_through_launch(cx: &mut T
             .has_visible_focus(window)
     }));
     assert_eq!(harness.panes.pane(PANE).selections(), 0);
+}
+
+const WORK: [u8; 32] = [41; 32];
+const WORK_ROOT_TAB: [u8; 32] = [42; 32];
+const WORK_ROOT_PANE: [u8; 32] = [43; 32];
+const WORK_TAB: [u8; 32] = [44; 32];
+const WORK_TAB_ROOT: [u8; 32] = [45; 32];
+const WORK_SPLIT: [u8; 32] = [46; 32];
+
+fn server_pane(id: [u8; 32], source: Option<[u8; 32]>) -> Pane {
+    Pane {
+        id,
+        source,
+        side: Side::Right,
+        starting_directory: PathBuf::from("/server/home"),
+        current_directory: None,
+        repository_directory: None,
+        presentation: None,
+        observers: Default::default(),
+        confirmed_directory: None,
+        creator: None,
+    }
+}
+
+fn server_tab(id: [u8; 32], panes: Vec<Pane>) -> Tab {
+    Tab {
+        worktree: None,
+        worktree_membership: spaceterm_core::hierarchy::WorktreeMembership::Following,
+        worktree_repository: None,
+        id,
+        root_pane: panes[0].id,
+        panes,
+    }
+}
+
+/// The Default Workspace and a second Workspace, Work, whose second Tab is split in two.
+fn two_workspaces() -> Inventory {
+    let mut inventory = inventory();
+    inventory.workspaces.push(Workspace {
+        id: WORK,
+        name: "Work".to_owned(),
+        name_version: 0,
+        pin_version: 0,
+        pinned_directory: None,
+        root_tab: WORK_ROOT_TAB,
+        tabs: vec![
+            server_tab(WORK_ROOT_TAB, vec![server_pane(WORK_ROOT_PANE, None)]),
+            server_tab(
+                WORK_TAB,
+                vec![
+                    server_pane(WORK_TAB_ROOT, None),
+                    server_pane(WORK_SPLIT, Some(WORK_TAB_ROOT)),
+                ],
+            ),
+        ],
+    });
+    inventory
+}
+
+fn work_split() -> spaceterm_core::client_view::Selection {
+    spaceterm_core::client_view::Selection {
+        workspace: WORK,
+        tab: WORK_TAB,
+        pane: WORK_SPLIT,
+    }
+}
+
+/// The person's launch of SpaceTerm after an earlier run that left `attached` attached and
+/// `saved` as this computer's selection. `before` runs once the window is open and before this
+/// computer's Workspaces arrive.
+fn relaunch<'a>(
+    saved: Option<spaceterm_core::client_view::Selection>,
+    attached: &[[u8; 32]],
+    before: impl FnOnce(&mut WorkspaceManager, &mut Window, &mut Context<WorkspaceManager>),
+    cx: &'a mut TestAppContext,
+) -> (LaunchHarness, &'a mut VisualTestContext) {
+    let launch = ScriptedLaunch::default();
+    launch.answer(ready());
+    let (harness, cx) = foreground_harness_with(launch, ScriptedEdits::new(None), cx);
+    sync(&harness, cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            let binding = manager
+                .binding
+                .get_mut(MachineKey::LOCAL)
+                .expect("this computer's server is presented");
+            binding.attach_for_test(attached);
+            if let Some(saved) = saved {
+                binding.retain_selection_for_test(saved);
+            }
+            before(manager, window, cx);
+        });
+    });
+    harness.edits.set_inventory(two_workspaces());
+    sync(&harness, cx);
+    (harness, cx)
+}
+
+/// What the window presents of its Active Workspace, by server identity.
+fn presented_selection(
+    harness: &LaunchHarness,
+    cx: &mut VisualTestContext,
+) -> Option<spaceterm_core::client_view::Selection> {
+    harness.manager.read_with(cx, |manager, cx| {
+        manager.active_tab_manager()?.read(cx).selection(cx)
+    })
+}
+
+/// A full relaunch returns to the split Pane of a second Tab in a second Workspace, and starts
+/// only that Pane's shell for the person.
+#[gpui::test]
+fn the_persons_launch_reopens_the_saved_workspace_tab_and_split(cx: &mut TestAppContext) {
+    let (harness, cx) = relaunch(Some(work_split()), &[WORKSPACE, WORK], |_, _, _| {}, cx);
+
+    assert_eq!(harness.rows(cx), 2);
+    assert_eq!(presented_selection(&harness, cx), Some(work_split()));
+    assert_eq!(harness.panes.pane(WORK_SPLIT).selections(), 1);
+    for other in [PANE, WORK_ROOT_PANE, WORK_TAB_ROOT] {
+        assert_eq!(harness.panes.pane(other).selections(), 0);
+    }
+    assert!(harness.edits.submitted().is_empty(), "nothing is created");
+    sync(&harness, cx);
+    assert_eq!(
+        harness.panes.pane(WORK_SPLIT).selections(),
+        1,
+        "the launch opens the Pane once"
+    );
+}
+
+/// What the window presents from this computer becomes the next launch's selection, and another
+/// choice the person makes replaces it.
+#[gpui::test]
+fn the_presented_selection_is_retained_for_the_next_launch(cx: &mut TestAppContext) {
+    let (harness, cx) = relaunch(Some(work_split()), &[WORKSPACE, WORK], |_, _, _| {}, cx);
+    let saved = |harness: &LaunchHarness, cx: &mut VisualTestContext| {
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.binding.local()?.saved_selection())
+    };
+    assert_eq!(saved(&harness, cx), Some(work_split()));
+
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            let default = manager
+                .binding
+                .local()
+                .and_then(|binding| binding.local(WORKSPACE))
+                .expect("the Default Workspace is presented");
+            manager.activate_workspace(default, window, cx);
+            manager.save_arrangements(cx);
+        });
+    });
+    assert_eq!(
+        saved(&harness, cx),
+        Some(spaceterm_core::client_view::Selection {
+            workspace: WORKSPACE,
+            tab: TAB,
+            pane: PANE,
+        })
+    );
+}
+
+/// A saved Tab that is gone leaves its Workspace's Root Tab, and a saved Workspace this client
+/// detached, or none at all, leaves the window's own Active Workspace. Each opens one shell.
+#[gpui::test]
+fn a_saved_selection_that_is_gone_falls_back_without_attaching_anything(cx: &mut TestAppContext) {
+    let gone_tab = spaceterm_core::client_view::Selection {
+        tab: [99; 32],
+        ..work_split()
+    };
+    let (harness, cx) = relaunch(Some(gone_tab), &[WORKSPACE, WORK], |_, _, _| {}, cx);
+    assert_eq!(
+        presented_selection(&harness, cx),
+        Some(spaceterm_core::client_view::Selection {
+            workspace: WORK,
+            tab: WORK_ROOT_TAB,
+            pane: WORK_ROOT_PANE,
+        })
+    );
+    assert_eq!(harness.panes.pane(WORK_ROOT_PANE).selections(), 1);
+    assert_eq!(harness.panes.pane(WORK_SPLIT).selections(), 0);
+}
+
+#[gpui::test]
+fn a_saved_selection_in_a_detached_workspace_leaves_it_detached(cx: &mut TestAppContext) {
+    let (harness, cx) = relaunch(Some(work_split()), &[WORKSPACE], |_, _, _| {}, cx);
+    assert_eq!(harness.rows(cx), 1, "Work stays detached");
+    assert_eq!(harness.panes.pane(PANE).selections(), 1);
+    assert_eq!(harness.panes.opens(WORK_SPLIT), 0);
+}
+
+#[gpui::test]
+fn a_launch_without_a_saved_selection_opens_the_active_workspace(cx: &mut TestAppContext) {
+    let (harness, cx) = relaunch(None, &[WORKSPACE, WORK], |_, _, _| {}, cx);
+    assert_eq!(harness.rows(cx), 2);
+    assert_eq!(harness.panes.pane(PANE).selections(), 1);
+    assert_eq!(harness.panes.pane(WORK_SPLIT).selections(), 0);
+}
+
+/// The person's input while this computer's Workspaces are on the way is their choice, so the
+/// saved selection never takes the view or the keyboard from it.
+#[gpui::test]
+fn a_choice_before_the_workspaces_arrive_keeps_the_saved_selection_away(cx: &mut TestAppContext) {
+    let (harness, cx) = relaunch(
+        Some(work_split()),
+        &[WORKSPACE, WORK],
+        |manager, _, cx| manager.person_input(cx),
+        cx,
+    );
+    assert_eq!(
+        presented_selection(&harness, cx).map(|selection| selection.workspace),
+        Some(WORKSPACE)
+    );
+    assert_eq!(harness.panes.pane(WORK_SPLIT).selections(), 0);
+}
+
+/// A window that opens for anything but the person's own launch never opens a saved selection.
+#[gpui::test]
+fn a_passive_launch_leaves_the_saved_selection_unopened(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness_with(vec![ready()], ScriptedEdits::new(None), [], cx);
+    sync(&harness, cx);
+    cx.update(|_, cx| {
+        harness.manager.update(cx, |manager, _| {
+            let binding = manager
+                .binding
+                .get_mut(MachineKey::LOCAL)
+                .expect("this computer's server is presented");
+            binding.attach_for_test(&[WORKSPACE, WORK]);
+            binding.retain_selection_for_test(work_split());
+        });
+    });
+    harness.edits.set_inventory(two_workspaces());
+    sync(&harness, cx);
+    assert_eq!(harness.panes.pane(WORK_SPLIT).selections(), 0);
+    assert_ne!(
+        presented_selection(&harness, cx).map(|selection| selection.workspace),
+        Some(WORK)
+    );
+    // The default it presents is nobody's choice, so the next launch still opens the split.
+    sync(&harness, cx);
+    assert_eq!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.binding.local()?.saved_selection()),
+        Some(work_split())
+    );
+}
+
+/// Input before the Workspaces arrive that leaves the keyboard in the sidebar keeps it there:
+/// the late landing neither opens the saved selection nor takes the keyboard.
+#[gpui::test]
+fn a_late_landing_leaves_the_keyboard_where_early_input_put_it(cx: &mut TestAppContext) {
+    let (harness, cx) = relaunch(
+        Some(work_split()),
+        &[WORKSPACE, WORK],
+        |manager, window, cx| {
+            manager.sidebar.update(cx, |sidebar, cx| {
+                sidebar.take_keyboard(true, window, cx);
+            });
+            manager.person_input(cx);
+        },
+        cx,
+    );
+    assert_eq!(harness.panes.pane(WORK_SPLIT).selections(), 0);
+    assert!(
+        cx.update(|window, cx| harness.manager.read(cx).sidebar.read(cx).is_focused(window)),
+        "the sidebar keeps the keyboard"
+    );
+}
+
+/// A first launch on this computer, whose attachments the server's first inventory initializes
+/// with a Workspace the server already holds: input that leaves the keyboard in the sidebar
+/// before that inventory arrives keeps it there, and the first view opens no Pane.
+#[gpui::test]
+fn a_first_view_leaves_the_keyboard_where_early_input_put_it(cx: &mut TestAppContext) {
+    let launch = ScriptedLaunch::default();
+    launch.answer(ready());
+    let (harness, cx) = foreground_harness_with(launch, ScriptedEdits::new(None), cx);
+    sync(&harness, cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.sidebar.update(cx, |sidebar, cx| {
+                sidebar.take_keyboard(true, window, cx);
+            });
+            manager.person_input(cx);
+        });
+    });
+    harness.edits.set_inventory(two_workspaces());
+    sync(&harness, cx);
+    assert!(
+        cx.update(|window, cx| harness.manager.read(cx).sidebar.read(cx).is_focused(window)),
+        "the sidebar keeps the keyboard"
+    );
+    for pane in [PANE, WORK_ROOT_PANE, WORK_TAB_ROOT, WORK_SPLIT] {
+        assert!(
+            harness.panes.opens(pane) == 0 || harness.panes.pane(pane).selections() == 0,
+            "{pane:?} is not selected"
+        );
+    }
+    assert!(harness.edits.submitted().is_empty(), "nothing is created");
+    sync(&harness, cx);
+    assert!(
+        cx.update(|window, cx| harness.manager.read(cx).sidebar.read(cx).is_focused(window)),
+        "a later reading leaves it there too"
+    );
+}
+
+/// Without early input, the same first view opens the server's first Workspace and its Pane.
+#[gpui::test]
+fn a_first_view_without_early_input_opens_the_first_workspace(cx: &mut TestAppContext) {
+    let launch = ScriptedLaunch::default();
+    launch.answer(ready());
+    let (harness, cx) = foreground_harness_with(launch, ScriptedEdits::new(None), cx);
+    sync(&harness, cx);
+    harness.edits.set_inventory(two_workspaces());
+    sync(&harness, cx);
+    assert_eq!(harness.panes.pane(PANE).selections(), 1);
+    assert!(harness.edits.submitted().is_empty(), "nothing is created");
+}
+
+/// Runs the window's start queue for a while.
+fn run_start_queue(cx: &mut VisualTestContext) {
+    for _ in 0..20 {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(16));
+        cx.run_until_parked();
+    }
+}
+
+/// After a relaunch, SpaceTerm Core restarts. Every retained Pane, including the ones nobody
+/// opened in this run, has a worker that waits for a background start turn, and the window
+/// gives those turns at most three at once. Only the Pane the person opened is selected.
+#[gpui::test]
+fn retained_panes_nobody_opened_take_bounded_background_turns_after_a_restart(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = relaunch(Some(work_split()), &[WORKSPACE, WORK], |_, _, _| {}, cx);
+    run_start_queue(cx);
+    let panes = [PANE, WORK_ROOT_PANE, WORK_TAB_ROOT, WORK_SPLIT];
+    for pane in panes {
+        assert_eq!(harness.panes.opens(pane), 1, "{pane:?} has one worker");
+    }
+
+    // SpaceTerm Core restarts, and each worker sees its Pane restored without a shell.
+    for pane in panes {
+        let pane = harness.panes.pane(pane);
+        pane.admitted();
+        pane.await_turn();
+    }
+    let turns = |cx: &mut VisualTestContext| {
+        run_start_queue(cx);
+        panes
+            .into_iter()
+            .filter(|pane| harness.panes.pane(*pane).holds_turn())
+            .collect::<Vec<_>>()
+    };
+    let first = turns(cx);
+    assert_eq!(first.len(), 3, "three background starts run at once");
+    for pane in &first {
+        harness.panes.pane(*pane).finish_turn();
+    }
+    let rest = turns(cx);
+    assert_eq!(rest.len(), 1, "the last Pane gets the next turn");
+    assert!(!first.contains(&rest[0]));
+    assert_eq!(harness.panes.pane(WORK_SPLIT).selections(), 1);
+    for pane in [PANE, WORK_ROOT_PANE, WORK_TAB_ROOT] {
+        assert_eq!(harness.panes.pane(pane).selections(), 0);
+    }
+}
+
+/// This computer's Machine as Machine updates read it, with `link`.
+fn local_machine(
+    link: crate::updates::machines::MachineLink,
+) -> crate::updates::machines::MachineUpdate {
+    crate::updates::machines::MachineUpdate {
+        link,
+        ..too_old_core(|_| {})
+    }
+}
+
+/// Machine updates that follow this computer's Core, as the application installs them.
+fn following_local_core(
+    cx: &mut TestAppContext,
+) -> impl Fn(crate::updates::machines::MachineLink, &mut VisualTestContext) + use<> {
+    let machines = scripted_machines(cx);
+    cx.update(crate::ui::workspace_manager::follow_local_core_runs);
+    move |link, cx: &mut VisualTestContext| {
+        machines.emit(crate::updates::machines::MachineUpdatesEvent::Changed(
+            Box::new(local_machine(link)),
+        ));
+        cx.run_until_parked();
+    }
+}
+
+/// A window that opened while this computer's Core was deliberately stopped, as a replacement
+/// window does, opens its Workspaces once Machine updates confirm the Core answers again, as
+/// after a Start from the command line. Reading it stopped or unreachable keeps the Stop, and
+/// a later answer from the same run resumes nothing again.
+#[gpui::test]
+fn a_command_line_start_opens_a_window_that_opened_while_stopped(cx: &mut TestAppContext) {
+    use crate::updates::machines::MachineLink;
+    let read = following_local_core(cx);
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped), ready()], cx);
+    cx.run_until_parked();
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+
+    read(MachineLink::Stopped, cx);
+    read(MachineLink::Offline { since: 1 }, cx);
+    assert_eq!(
+        harness.launch.steps(),
+        ["run"],
+        "a stopped Core stays stopped"
+    );
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+
+    read(MachineLink::Connected, cx);
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "connect"],
+        "it only connects, with no Start of its own"
+    );
+    assert_eq!(harness.launch_title(cx), None);
+    assert_eq!(harness.rows(cx), 1);
+    assert!(harness.panes.was_opened(PANE), "its retained Pane opens");
+
+    read(MachineLink::Connected, cx);
+    assert_eq!(harness.launch.steps(), ["run", "connect"]);
+}
+
+/// This computer's Machine as Machine updates read it, with `link` and the facts of Core run
+/// `boot`.
+fn local_run(
+    link: crate::updates::machines::MachineLink,
+    boot: &str,
+) -> crate::updates::machines::MachineUpdate {
+    crate::updates::machines::MachineUpdate {
+        boot: Some(boot.into()),
+        ..local_machine(link)
+    }
+}
+
+/// Machine updates that follow this computer's Core, as the application installs them, and
+/// read Core run `boot` answering before any window opens.
+fn following_local_run(
+    boot: &str,
+    cx: &mut TestAppContext,
+) -> (
+    Rc<crate::updates::machines::testing::ScriptedMachines>,
+    impl Fn(crate::updates::machines::MachineUpdate, &mut VisualTestContext) + use<>,
+) {
+    use crate::updates::machines::{MachineLink, MachineUpdatesEvent};
+    let machines = scripted_machines(cx);
+    cx.update(crate::ui::workspace_manager::follow_local_core_runs);
+    machines.emit(MachineUpdatesEvent::Changed(Box::new(local_run(
+        MachineLink::Connected,
+        boot,
+    ))));
+    cx.run_until_parked();
+    let emitter = Rc::clone(&machines);
+    (machines, move |update, cx: &mut VisualTestContext| {
+        emitter.emit(MachineUpdatesEvent::Changed(Box::new(update)));
+        cx.run_until_parked();
+    })
+}
+
+/// A window that reopens while this computer's Core is deliberately stopped reads the Stop
+/// itself, even when Machine updates never read the Core stopped because a Start from the
+/// command line came first. The window waits past the Core run it saw answering, so another
+/// answer of that run resumes nothing, and the new run's first answer opens its retained Pane
+/// with one connection and no Start of its own.
+#[gpui::test]
+fn a_window_that_read_the_stop_itself_opens_when_a_new_core_run_answers(cx: &mut TestAppContext) {
+    use crate::updates::machines::MachineLink;
+    let (_machines, read) = following_local_run("before-stop", cx);
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped), ready()], cx);
+    cx.run_until_parked();
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+
+    read(local_run(MachineLink::Connected, "before-stop"), cx);
+    read(local_machine(MachineLink::Connected), cx);
+    assert_eq!(
+        harness.launch.steps(),
+        ["run"],
+        "the run it saw, or a reading of no run, keeps the Stop"
+    );
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+
+    read(local_run(MachineLink::Connected, "after-start"), cx);
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "connect"],
+        "it only connects, with no Start of its own"
+    );
+    assert_eq!(harness.launch.intents(), [launch::LaunchIntent::Passive]);
+    assert_eq!(harness.launch_title(cx), None);
+    assert_eq!(harness.rows(cx), 1);
+    assert!(harness.panes.was_opened(PANE), "its retained Pane opens");
+
+    read(local_run(MachineLink::Connected, "after-start"), cx);
+    read(
+        local_run(MachineLink::Offline { since: 1 }, "after-start"),
+        cx,
+    );
+    read(local_run(MachineLink::Connected, "after-start"), cx);
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "connect"],
+        "once per Core run"
+    );
+}
+
+/// A new Core run that Machine updates read while the window's launch was still reading the
+/// Stop resumes that window once, whether the reading arrives before the Stop applies, with no
+/// later reading, or after it. The iterations order the two both ways.
+#[gpui::test(iterations = 20)]
+fn a_core_run_read_while_the_launch_read_the_stop_resumes_at_once(cx: &mut TestAppContext) {
+    use crate::updates::machines::{MachineLink, MachineUpdatesEvent};
+    let (machines, read) = following_local_run("before-stop", cx);
+    let events = machines
+        .events()
+        .expect("the store follows the scripted Machines");
+    let launch = ScriptedLaunch::default();
+    launch.answer(Ok(LaunchOutcome::Stopped));
+    launch.answer(ready());
+    launch.during_next_run(move || {
+        let _ = events.try_send(MachineUpdatesEvent::Changed(Box::new(local_run(
+            MachineLink::Connected,
+            "after-start",
+        ))));
+    });
+    let (harness, cx) = scripted_harness(
+        launch,
+        ScriptedEdits::new(Some(inventory())),
+        [],
+        None,
+        launch::LaunchIntent::Passive,
+        cx,
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "connect"],
+        "it only connects, with no Start of its own"
+    );
+    assert_eq!(harness.launch_title(cx), None);
+    assert!(harness.panes.was_opened(PANE), "its retained Pane opens");
+
+    read(local_run(MachineLink::Connected, "after-start"), cx);
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "connect"],
+        "once per Core run"
+    );
+}
+
+/// A Core run that answers and then exits before the waiting window connects is never started
+/// or installed by that window: its connection only reads, and the window keeps saying the Core
+/// is stopped. Another answer of the gone run connects nothing again, so nothing spins. A later
+/// run that a Stop from the command line ends first leaves the window as it was too, and the
+/// next run that still runs opens its retained Pane, one connection per run.
+#[gpui::test]
+fn a_core_run_gone_before_the_window_connects_is_never_started(cx: &mut TestAppContext) {
+    use crate::updates::machines::MachineLink;
+    use spaceterm_core::protocol::version::Incompatible;
+    let (_machines, read) = following_local_run("before-stop", cx);
+    let (harness, cx) = launch_harness(
+        vec![
+            Ok(LaunchOutcome::Stopped),
+            Err(CoreError::NotRunning),
+            Ok(LaunchOutcome::Stopped),
+            ready(),
+        ],
+        cx,
+    );
+    cx.run_until_parked();
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+
+    read(local_run(MachineLink::Connected, "gone"), cx);
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "connect"],
+        "the gone run is never started"
+    );
+    assert_eq!(harness.launch.intents(), [launch::LaunchIntent::Passive]);
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+    assert!(!harness.panes.was_opened(PANE));
+
+    read(local_run(MachineLink::Connected, "gone"), cx);
+    read(
+        local_run(
+            MachineLink::Incompatible(Incompatible::ListenerTooOld),
+            "gone",
+        ),
+        cx,
+    );
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "connect"],
+        "the gone run connects once"
+    );
+
+    read(local_run(MachineLink::Connected, "stopped-again"), cx);
+    assert_eq!(harness.launch.steps(), ["run", "connect", "connect"]);
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+
+    read(local_run(MachineLink::Connected, "after-start"), cx);
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "connect", "connect", "connect"],
+        "only connections, with no Start of its own"
+    );
+    assert_eq!(harness.launch_title(cx), None);
+    assert!(harness.panes.was_opened(PANE), "its retained Pane opens");
+}
+
+/// A window whose connection finds the running Core refuses it says so, as launch does, and
+/// starts nothing.
+#[gpui::test]
+fn a_core_run_that_refuses_the_connection_says_it_is_incompatible(cx: &mut TestAppContext) {
+    use crate::updates::machines::MachineLink;
+    use spaceterm_core::protocol::version::Incompatible;
+    let (_machines, read) = following_local_run("before-stop", cx);
+    let (harness, cx) = launch_harness(
+        vec![
+            Ok(LaunchOutcome::Stopped),
+            Err(CoreError::IncompatibleProtocol(
+                Incompatible::ListenerTooOld,
+            )),
+        ],
+        cx,
+    );
+    cx.run_until_parked();
+
+    read(local_run(MachineLink::Connected, "after-start"), cx);
+    assert_eq!(harness.launch.steps(), ["run", "connect"]);
+    assert!(harness.manager.read_with(cx, |manager, _| matches!(
+        manager.launch.state,
+        launch::LaunchState::Incompatible(Incompatible::ListenerTooOld)
+    )));
+}
+
+/// A window that Machine updates resume after reading the Core stopped and answering again only
+/// connects, and a Core gone by then leaves it stopped, with nothing started. The next Start
+/// from the command line connects it.
+#[gpui::test]
+fn a_command_line_start_gone_before_an_open_window_connects_starts_nothing(
+    cx: &mut TestAppContext,
+) {
+    use crate::updates::machines::MachineLink;
+    let read = following_local_core(cx);
+    let (harness, cx) = launch_harness(
+        vec![
+            Ok(LaunchOutcome::Stopped),
+            Err(CoreError::NotRunning),
+            ready(),
+        ],
+        cx,
+    );
+    cx.run_until_parked();
+
+    read(MachineLink::Stopped, cx);
+    read(MachineLink::Connected, cx);
+    assert_eq!(harness.launch.steps(), ["run", "connect"]);
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+
+    read(MachineLink::Connected, cx);
+    assert_eq!(harness.launch.steps(), ["run", "connect"]);
+
+    read(MachineLink::Stopped, cx);
+    read(MachineLink::Connected, cx);
+    assert_eq!(harness.launch.steps(), ["run", "connect", "connect"]);
+    assert_eq!(harness.launch_title(cx), None);
+    assert!(harness.panes.was_opened(PANE), "its retained Pane opens");
+}
+
+/// A reading that names no Core run, as Machine updates list before the Core's first answer,
+/// resumes no launch, even after an unreachable reading.
+#[gpui::test]
+fn a_core_that_answers_again_without_a_stop_resumes_nothing(cx: &mut TestAppContext) {
+    use crate::updates::machines::MachineLink;
+    let read = following_local_core(cx);
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped), ready()], cx);
+    cx.run_until_parked();
+
+    read(MachineLink::Offline { since: 1 }, cx);
+    read(MachineLink::Connected, cx);
+    assert_eq!(harness.launch.steps(), ["run"]);
+}
+
+/// A window that stayed open through a Stop and a Start from the command line reconnects every
+/// Pane the Stop left waiting, in its Active Workspace and in a background attached Workspace,
+/// including Panes another client controlled. Nothing takes control, starts a shell or runs a
+/// Start, and nothing reconnects while the Core is still stopped or after it already answered.
+#[gpui::test]
+fn a_command_line_start_reconnects_the_stopped_panes_of_an_open_window(cx: &mut TestAppContext) {
+    use crate::terminal::core_session::CorePaneStatus;
+    use crate::updates::machines::MachineLink;
+    let read = following_local_core(cx);
+    let (harness, cx) = ready_harness(cx);
+    harness.edits.set_inventory(with_detached_workspace());
+    sync(&harness, cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.attach_detached_workspace(MachineKey::LOCAL, OTHER_WORKSPACE, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    let active = harness
+        .manager
+        .read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let panes = [harness.panes.pane(PANE), harness.panes.pane(OTHER_PANE)];
+    for pane in &panes {
+        pane.set(CorePaneStatus::TakeoverFailed(CoreError::Stopped));
+    }
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let counts = |panes: &[std::sync::Arc<crate::ui::workspaces::testing::ScriptedPane>; 2]| {
+        panes
+            .iter()
+            .map(|pane| (pane.retries(), pane.take_overs(), pane.restored_starts()))
+            .collect::<Vec<_>>()
+    };
+
+    read(MachineLink::Stopped, cx);
+    read(MachineLink::Offline { since: 1 }, cx);
+    assert_eq!(counts(&panes), [(0, 0, 0); 2], "the Core is still stopped");
+
+    read(MachineLink::Connected, cx);
+    assert_eq!(counts(&panes), [(1, 0, 0); 2]);
+    assert_eq!(harness.launch.steps(), ["run"], "no Start of its own");
+    assert_eq!(
+        harness.manager.read_with(cx, |manager, _| {
+            manager.workspaces.active_workspace_id()
+        }),
+        active,
+        "the Active Workspace stays"
+    );
+
+    read(MachineLink::Connected, cx);
+    assert_eq!(counts(&panes), [(1, 0, 0); 2], "once per Core run");
 }

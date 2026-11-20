@@ -133,6 +133,14 @@ struct Harness {
 
 impl Harness {
     fn new(pairing: Option<Pairing>) -> Self {
+        Self::selecting(pairing, crate::protocol::version::WORK)
+    }
+
+    /// A harness whose admission selected the work version `work`.
+    fn selecting(
+        pairing: Option<Pairing>,
+        work: crate::protocol::version::ProtocolVersion,
+    ) -> Self {
         let now = Instant::now();
         let (client, core) = Loopback::pair(4).unwrap();
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -147,7 +155,7 @@ impl Harness {
             connection: [8; 32],
             pairing,
         };
-        let outbox = Outbox::new(Arc::new(|| {}), crate::protocol::version::WORK);
+        let outbox = Outbox::new(Arc::new(|| {}), work);
         let recorded = Arc::new(Mutex::new(Recorded::default()));
         let mut service: Box<dyn PaneService> = Box::new(Toy(Arc::clone(&recorded)));
         service.admitted(&peer, "Build Mac".into(), outbox.clone());
@@ -613,6 +621,64 @@ fn a_claim_past_the_channel_bound_is_refused_and_the_connection_continues() {
     assert!(refused);
     assert!(!outbox.is_closing());
     drop(channels);
+}
+
+/// A background start that arrives on a connection whose admission selected work 1.3 is refused
+/// before its channel opens or the service sees it. The connection continues, and the same
+/// channel number stays available. Work 1.4 admits it.
+#[test]
+fn a_background_start_on_a_work_1_3_connection_is_refused_before_its_channel() {
+    use crate::protocol::frame::encode_client;
+    use crate::protocol::{Claim, ClientMessage, Request};
+    let prepare = |id: u32| {
+        let message = ClientMessage::Request(Box::new(Request {
+            id: RequestId(id),
+            operation: Operation::Claim(Claim {
+                channel: Channel(1),
+                attachment: attachment(),
+                pane: [2; 32],
+                claim: AttachmentClaim::Prepare { core: [7; 32] },
+                size: Some(size()),
+                style: None,
+            }),
+        }));
+        let frame = encode_client(&message).unwrap().frames.remove(0);
+        crate::protocol::RawFrame::parse(&frame).unwrap()
+    };
+    let replies = |harness: &Harness| {
+        let outbox = harness.connection.outbox().clone();
+        let mut assembler = crate::protocol::frame::Assembler::default();
+        let mut refused = Vec::new();
+        while let Some((frame, _)) = outbox.next_frame() {
+            if let Some(crate::protocol::CoreMessage::Reply(reply)) = assembler
+                .core(crate::protocol::RawFrame::parse(&frame).unwrap())
+                .unwrap()
+            {
+                refused.push((reply.id, matches!(reply.result, Err(Refusal::Unsupported))));
+            }
+        }
+        refused
+    };
+
+    let older = crate::protocol::version::ProtocolVersion { major: 1, minor: 3 };
+    let mut harness = Harness::selecting(None, older);
+    assert!(matches!(
+        harness.connection.receive(prepare(1), Instant::now()),
+        Ok(None)
+    ));
+    assert_eq!(replies(&harness), [(RequestId(1), true)]);
+    assert!(!harness.connection.outbox().is_closing());
+    // Channel 1 was never admitted, so a claim may still introduce it.
+    assert!(matches!(
+        harness.connection.receive(prepare(2), Instant::now()),
+        Ok(None)
+    ));
+
+    let mut harness = Harness::new(None);
+    assert!(matches!(
+        harness.connection.receive(prepare(3), Instant::now()),
+        Ok(Some(super::admitted::Inbound::Request(_)))
+    ));
 }
 
 /// Pane workers can open handles in one order and reach claim submission in another.

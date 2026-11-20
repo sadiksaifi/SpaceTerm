@@ -73,7 +73,9 @@ impl ClientEffects {
     ) -> Result<(), CoreError> {
         let hidden_input = line.mode.hidden_input();
         state.hidden_input.store(hidden_input, Ordering::Release);
-        let hidden_state = (state.epoch.load(Ordering::Acquire), hidden_input);
+        let epoch = state.epoch.load(Ordering::Acquire);
+        *state.line.lock().unwrap_or_else(|e| e.into_inner()) = Some((epoch, line.mode));
+        let hidden_state = (epoch, hidden_input);
         if self.hidden_input != Some(hidden_state) {
             events
                 .force_send(TerminalSessionEvent::Line(line))

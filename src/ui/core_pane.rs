@@ -895,7 +895,9 @@ pub(crate) fn with_tab_traversal(surface: Stateful<gpui::Div>) -> Stateful<gpui:
     })
 }
 
-pub(crate) use connection::{CorePaneScreen, CorePaneSync, CorePaneView, MachinePaneConnection};
+pub(crate) use connection::{
+    CLASSIFY_LIMIT, CorePaneScreen, CorePaneSync, CorePaneView, MachinePaneConnection,
+};
 
 mod connection {
     use std::sync::Arc;
@@ -926,6 +928,15 @@ mod connection {
                 return CoreRestart::of_detailed(&detailed);
             }
             CoreRestart::of(core.update_facts()?.as_ref())
+        }
+
+        /// Whether the Core announced a confirmed Stop in its update facts, so losing its
+        /// connection is the Stop rather than an interruption.
+        fn stop_announced(&self) -> bool {
+            use spaceterm_core::update::facts::Operation;
+            self.directory_core()
+                .and_then(|core| core.update_facts())
+                .is_some_and(|facts| matches!(facts.operation, Some(Operation::Stopping)))
         }
 
         /// The version the Core last failed to start into, as its update facts report it.
@@ -975,6 +986,46 @@ mod connection {
 
         /// Asks the server for this Pane, which starts or acquires only this Pane.
         fn select(&self);
+
+        /// Whether this Pane is the Focused Pane of the Tab and Workspace the person has open.
+        /// After SpaceTerm Core restarts, the Pane the person was using starts its fresh shell
+        /// at once; every other Pane waits.
+        fn set_foreground(&self, _foreground: bool) {}
+
+        /// Whether a background start of this Pane is on its way and unanswered.
+        fn preparing(&self) -> bool {
+            false
+        }
+
+        /// Whether this Pane's shell is starting and has not attached yet.
+        fn shell_starting(&self) -> bool {
+            false
+        }
+
+        /// Whether this Pane's Core starts retained shells in the background, so the window
+        /// opens a worker for the Pane even before the person shows it.
+        fn background_starts(&self) -> bool {
+            false
+        }
+
+        /// Whether this Pane waits for a turn to start its shell in the background.
+        fn awaiting_turn(&self) -> bool {
+            false
+        }
+
+        /// Whether this Pane holds a background start turn or uses one now.
+        fn starting_in_background(&self) -> bool {
+            self.preparing()
+        }
+
+        /// Gives this Pane its turn to start its shell in the background.
+        fn grant_turn(&self) {}
+
+        /// Asks this Pane's worker, which stopped reconnecting, to connect once more in the
+        /// current Core run. Returns whether it asked.
+        fn rearm_background(&self) -> bool {
+            false
+        }
 
         /// Leaves this client's view of the Pane for the next window that presents it.
         fn retain_view(&self) {}
@@ -1055,6 +1106,38 @@ mod connection {
 
         fn select(&self) {
             Self::select(self);
+        }
+
+        fn set_foreground(&self, foreground: bool) {
+            Self::set_foreground(self, foreground);
+        }
+
+        fn preparing(&self) -> bool {
+            Self::preparing(self)
+        }
+
+        fn shell_starting(&self) -> bool {
+            Self::shell_starting(self)
+        }
+
+        fn background_starts(&self) -> bool {
+            Self::prepares(self)
+        }
+
+        fn awaiting_turn(&self) -> bool {
+            Self::awaiting_turn(self)
+        }
+
+        fn starting_in_background(&self) -> bool {
+            Self::starting_in_background(self)
+        }
+
+        fn grant_turn(&self) {
+            Self::grant_turn(self);
+        }
+
+        fn rearm_background(&self) -> bool {
+            Self::rearm_background(self)
         }
 
         fn retain_view(&self) {
@@ -1155,6 +1238,22 @@ mod connection {
         start_failure: Option<spaceterm_core::update::facts::Version>,
         /// The announced restart, until its deadline passes.
         restart: Option<CoreRestart>,
+        /// The Core announced a confirmed Stop, so its lost connection reads as that Stop.
+        stopping: bool,
+        /// The Pane lost its connection, and nothing has explained the loss yet.
+        lost: bool,
+        /// Counts the Pane's connection losses, so a classification names the exact one.
+        losses: u64,
+        /// The connection generation the current loss began on. A connection that reached the
+        /// Terminal Session again changes it, so a recovery and a new loss that one reading
+        /// coalesces still count as a new loss.
+        loss_generation: Option<u64>,
+        /// The person selected this restored Pane, so its ordinary shell start is on the way and
+        /// the Pane stays blank instead of showing the restored screen.
+        selecting: bool,
+        /// The loss outlasted [`CLASSIFY_LIMIT`] without an explanation, so it is an
+        /// interruption the Pane says it reconnects from.
+        interrupted: bool,
         /// When this Pane first read the restart the Core announces now.
         restart_since: Option<std::time::Instant>,
         /// The last restart the Core announced since this Pane's Terminal Session ran.
@@ -1194,6 +1293,10 @@ mod connection {
 
     /// Hints `hint` once an announced restart's deadline passes. Without the thread, the deadline
     /// still passes at the next reading.
+    /// How long a lost connection stays unclassified, with input paused and no notice, while
+    /// SpaceTerm reads whether SpaceTerm Core stopped on purpose.
+    pub(crate) const CLASSIFY_LIMIT: std::time::Duration = std::time::Duration::from_secs(1);
+
     fn wake_at_deadline(hint: async_channel::Sender<()>, since: std::time::Instant) {
         let deadline = since + crate::terminal::core_session::restart::RECONNECT_LIMIT;
         let _ = std::thread::Builder::new()
@@ -1212,6 +1315,12 @@ mod connection {
                 running_version: connection.running_version(),
                 start_failure: connection.start_failure(),
                 restart: None,
+                stopping: false,
+                lost: false,
+                losses: 0,
+                loss_generation: None,
+                selecting: false,
+                interrupted: false,
                 restart_since: None,
                 announced: None,
                 session_ran: None,
@@ -1274,15 +1383,69 @@ mod connection {
                     None
                 }
             };
-            let changed = restart != self.restart;
+            let stopping = self.connection.stop_announced();
+            let changed = restart != self.restart || stopping != self.stopping;
             self.restart = restart;
+            self.stopping = stopping;
             changed
+        }
+
+        /// Follows whether the Pane's connection is lost. Input pauses at once; the notice
+        /// waits for [`Self::classify`], which its Tab calls [`CLASSIFY_LIMIT`] after the loss,
+        /// so a Stop or Restart SpaceTerm Core announces meanwhile never reads as one.
+        fn read_interruption(&mut self, status: CorePaneStatus) -> bool {
+            let lost = matches!(
+                status,
+                CorePaneStatus::Reconnecting | CorePaneStatus::TakeoverReconnecting
+            );
+            // The connection's own generation says whether it recovered in between, which a
+            // reading that missed the recovery can't see in the status alone.
+            let generation = self.connection.connection_generation();
+            let new_loss = lost && (!self.lost || self.loss_generation != Some(generation));
+            if !new_loss && lost == self.lost {
+                return false;
+            }
+            self.lost = lost;
+            if new_loss {
+                self.losses = self.losses.wrapping_add(1);
+                self.loss_generation = Some(generation);
+            }
+            std::mem::take(&mut self.interrupted)
+        }
+
+        /// The loss the Pane waits to classify with [`Self::classify`], if any.
+        pub(crate) fn classifying(&self) -> Option<u64> {
+            (self.lost && !self.interrupted).then_some(self.losses)
+        }
+
+        /// Calls `loss`, which nothing explained within [`CLASSIFY_LIMIT`], an interruption. A
+        /// loss that ended, or one that a later loss replaced, is left alone.
+        pub(crate) fn classify(&mut self, loss: u64) -> CorePaneSync {
+            if self.classifying() != Some(loss) {
+                return CorePaneSync::default();
+            }
+            self.interrupted = true;
+            // Only the notice changes. Input stays paused while the connection is lost.
+            CorePaneSync {
+                changed: true,
+                interrupted: self.status != CorePaneStatus::Connected,
+                ..CorePaneSync::default()
+            }
         }
 
         /// Asks the server for this Pane, which starts or acquires only this Pane. Only an
         /// explicit Pane selection or Tab opening calls it; rendering and reconciliation never do.
-        pub(crate) fn select(&self) {
+        pub(crate) fn select(&mut self) {
+            self.selecting = self.status == CorePaneStatus::Restored
+                && self.session_end.is_none()
+                && !self.start_unconfirmed;
             self.connection.select();
+        }
+
+        /// Says whether this Pane is the Focused Pane of the Tab and Workspace the person has
+        /// open. It asks the server for nothing by itself.
+        pub(crate) fn set_foreground(&self, foreground: bool) {
+            self.connection.set_foreground(foreground);
         }
 
         /// Leaves this client's view of the Pane for the next window that presents it.
@@ -1295,7 +1458,7 @@ mod connection {
             // Status first, because a connection publishes its generation before it reports
             // Connected.
             let status = self.connection.status();
-            let restart_changed = self.read_restart();
+            let restart_changed = self.read_restart() | self.read_interruption(status);
             let version = self.connection.running_version();
             let version_changed = version.is_some() && version != self.running_version;
             if version_changed {
@@ -1312,6 +1475,10 @@ mod connection {
             let controller = self.connection.controller();
             let session_end = self.connection.session_end();
             let start_unknown = self.connection.start_unconfirmed();
+            // A selection waits only while the Pane stays restored on the same connection.
+            if status != CorePaneStatus::Restored || generation_changed {
+                self.selecting = false;
+            }
             if status == self.status
                 && !version_changed
                 && !restart_changed
@@ -1557,6 +1724,17 @@ mod connection {
                             || self.start_in_flight(),
                         offered: self.can_start_shell(),
                     },
+                    // An ordinary shell start keeps the Pane blank and steady until its prompt
+                    // arrives. Only an ended Session or an unconfirmed start explains itself.
+                    Dormant::Restored
+                        if !(self.start_unconfirmed && self.restart.is_none())
+                            && (self.selecting
+                                || self.starting_shell()
+                                || self.start_in_flight()
+                                || self.connection.start_waiting()) =>
+                    {
+                        return None;
+                    }
                     Dormant::Restored | Dormant::Ended(_) => CorePaneScreen::Restored {
                         starting: self.starting_shell()
                             || self.start_in_flight()
@@ -1661,6 +1839,13 @@ mod connection {
                 return None;
             }
             match self.status {
+                // A confirmed Stop ends the connection on purpose. Input stays paused and nothing
+                // says reconnecting; the stopped state follows once the Core is gone.
+                CorePaneStatus::Reconnecting | CorePaneStatus::TakeoverReconnecting
+                    if self.stopping || !self.interrupted =>
+                {
+                    None
+                }
                 CorePaneStatus::Reconnecting | CorePaneStatus::TakeoverReconnecting => Some((
                     SharedString::new_static("Reconnecting…"),
                     // The screen explains the unconfirmed start and offers its check, so the notice

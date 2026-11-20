@@ -95,6 +95,17 @@ pub(crate) const STATE: Registry = Registry {
                 kind: DataKind::View,
                 current: true,
             },
+            // The Workspace, Tab and Pane a client last presented only guide its next
+            // presentation, which validates them first. Its store reads an unreadable copy as
+            // none, and a reset of the client's view takes it along.
+            ArtifactRule {
+                matches: |path| {
+                    path.starts_with("core/")
+                        && path.rsplit('/').next() == Some(spaceterm_core::client_view::SELECTION)
+                },
+                kind: DataKind::View,
+                current: true,
+            },
         ],
     },
     generations: generations::DESKTOP_STATE,

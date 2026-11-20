@@ -88,6 +88,20 @@ pub(crate) mod unix_desktop_channel;
 #[cfg(all(unix, feature = "desktop"))]
 pub(crate) mod unix_quit_signal;
 
+/// Whether the operating system opened SpaceTerm at login rather than the person opening it.
+/// Only macOS reports how it opened an application, so this is always false on Linux.
+#[cfg(feature = "desktop")]
+pub(crate) fn launched_at_login() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos_application::launched_at_login()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
 /// The watch sets a server's Git facts reader uses: kqueue on macOS, which needs no FSEvents, and
 /// inotify through `notify` on Linux.
 pub(crate) fn core_watch_sets() -> std::sync::Arc<dyn crate::repository_status::WatchSets> {

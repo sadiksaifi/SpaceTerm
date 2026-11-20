@@ -17,7 +17,8 @@ pub struct ProtocolVersion {
 /// [`crate::worktree::MINOR_CHANGED_AFTER_CLOSING`]. Work 1.2 adds the
 /// [`super::Kind::DetailedUpdateFacts`] message of
 /// [`crate::update::facts::MINOR_DETAILED_FACTS`]. Work 1.3 adds the restarting input refusal.
-pub const WORK: ProtocolVersion = ProtocolVersion { major: 1, minor: 3 };
+/// Work 1.4 adds the background start of [`crate::pane::MINOR_PREPARE`].
+pub const WORK: ProtocolVersion = ProtocolVersion { major: 1, minor: 4 };
 // The build document's major is the work major.
 const _: () = assert!(super::MAJOR == WORK.major);
 

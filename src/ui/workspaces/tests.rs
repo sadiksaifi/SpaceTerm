@@ -15,6 +15,7 @@ use spaceterm_core::hierarchy::{
     Axis, CloseInventory, ConfirmedPane, Id, Inventory, Mutation, Outcome, Pane, Tab, Workspace,
 };
 
+use super::core_workspaces::CloseConsent;
 use super::core_workspaces::testing::{ScriptedEdits, ScriptedPanes};
 use super::core_workspaces::{
     WorkspaceDraft, WorkspaceEditSource, WorkspaceEditability, WorkspaceEdits, WorkspaceFacts,
@@ -716,6 +717,10 @@ fn another_clients_ended_pane_should_show_session_ended_without_starting_one(
 
     pane.set(CorePaneStatus::TakeoverReconnecting);
     settle(&harness, cx);
+    // Nothing explains the loss within its wait, so the Pane says it reconnects.
+    cx.executor()
+        .advance_clock(crate::ui::core_pane::CLASSIFY_LIMIT);
+    settle(&harness, cx);
     assert_eq!(
         A11yTree::read(cx).node("Reconnecting…")["aria"]["description"],
         "Start Session waits for SpaceTerm Core to reconnect."
@@ -799,6 +804,33 @@ fn start_session_on_another_clients_ended_pane_should_take_it_over(cx: &mut Test
     assert!(cx.debug_bounds("pane-session-ended-1").is_none());
 }
 
+/// A loss that recovers and comes back inside the classification wait waits its own time, so an
+/// earlier loss's timer never says Reconnecting for the later one.
+#[gpui::test]
+fn a_second_loss_waits_its_own_time_before_saying_reconnecting(cx: &mut TestAppContext) {
+    use std::time::Duration;
+    let (harness, cx) = tab_manager(cx);
+    let pane = harness.panes.pane(ROOT_PANE);
+    pane.set(CorePaneStatus::Reconnecting);
+    settle(&harness, cx);
+    cx.executor().advance_clock(Duration::from_millis(600));
+    settle(&harness, cx);
+    pane.reconnect();
+    settle(&harness, cx);
+    pane.set(CorePaneStatus::Reconnecting);
+    settle(&harness, cx);
+    // The first loss's wait would end now.
+    cx.executor().advance_clock(Duration::from_millis(500));
+    settle(&harness, cx);
+    assert!(
+        cx.debug_bounds("pane-notice-1").is_none(),
+        "the second loss is still being read"
+    );
+    cx.executor().advance_clock(Duration::from_millis(500));
+    settle(&harness, cx);
+    assert!(cx.debug_bounds("pane-notice-1").is_some());
+}
+
 #[gpui::test]
 fn an_interrupted_pane_should_offer_retry_until_its_screen_returns(cx: &mut TestAppContext) {
     let (harness, cx) = tab_manager(cx);
@@ -806,6 +838,13 @@ fn an_interrupted_pane_should_offer_retry_until_its_screen_returns(cx: &mut Test
         .panes
         .pane(ROOT_PANE)
         .set(CorePaneStatus::Reconnecting);
+    settle(&harness, cx);
+    assert!(
+        cx.debug_bounds("pane-notice-1").is_none(),
+        "SpaceTerm first reads whether the loss was a Stop or a restart"
+    );
+    cx.executor()
+        .advance_clock(crate::ui::core_pane::CLASSIFY_LIMIT);
     settle(&harness, cx);
 
     assert!(
@@ -2282,7 +2321,7 @@ mod close {
             .expect("the published Tab can be reviewed");
         assert_eq!(binding.close_state(&approval), WorkspaceCloseState::Current);
         assert_eq!(
-            binding.close(approval, local_tab()),
+            binding.close(approval, local_tab(), CloseConsent::Confirmed),
             WorkspaceSubmission::Submitted
         );
 
@@ -2351,7 +2390,7 @@ mod close {
         };
         let (mut initial, initial_edits) = self::binding(split_beside_second_tab());
         assert_eq!(
-            initial.close(approval.clone(), local_pane),
+            initial.close(approval.clone(), local_pane, CloseConsent::Confirmed),
             WorkspaceSubmission::Submitted
         );
         assert!(matches!(
@@ -2390,7 +2429,7 @@ mod close {
         assert_eq!(fresh.detail(), None, "the Workspace keeps its second Tab");
         assert!(edits.submitted().is_empty());
         assert_eq!(
-            binding.close(fresh, local_pane),
+            binding.close(fresh, local_pane, CloseConsent::Confirmed),
             WorkspaceSubmission::Submitted
         );
         assert!(matches!(
@@ -2461,7 +2500,7 @@ mod close {
         let approval = asked
             .close_approval(ROOT_TAB_TARGET)
             .expect("the published Tab can be reviewed");
-        asked.close(approval, local_tab());
+        asked.close(approval, local_tab(), CloseConsent::Confirmed);
         edits.answer(Outcome::StaleConfirmation);
         asked.poll();
 

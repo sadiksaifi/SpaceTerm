@@ -196,6 +196,9 @@ impl WorkspaceManager {
         if !manager.read(cx).presents_target(tab, pane, cx) {
             return Err(Refusal::NotShown);
         }
+        // The request is the person's choice of what the window shows, which nothing a previous
+        // launch left replaces.
+        self.person_input(cx);
         if self.workspaces.active_workspace_id() != Some(workspace_id)
             && !self.activate_workspace_focusing(workspace_id, true, window, cx)
         {

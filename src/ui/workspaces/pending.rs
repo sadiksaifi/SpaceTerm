@@ -1,5 +1,7 @@
 //! The client's bounded connected intent, separate from the transport's durable Original Operation.
-use super::core_workspaces::{WorkspaceAcceptance, WorkspaceCloseIntent, WorkspaceRefusalReason};
+use super::core_workspaces::{
+    CloseKeyboard, WorkspaceAcceptance, WorkspaceCloseIntent, WorkspaceRefusalReason,
+};
 use crate::terminal::core_session::restart::RECONNECT_LIMIT;
 use crate::terminal::workspace_client::WorkspaceSnapshot;
 use spaceterm_core::hierarchy::{
@@ -218,11 +220,17 @@ impl PendingEdits {
         &mut self,
         intent: WorkspaceCloseIntent,
     ) -> Result<(), WorkspaceRefusalReason> {
-        if self
+        if let Some(pending) = self
             .close_intents
-            .iter()
-            .any(|pending| pending.core == intent.core)
+            .iter_mut()
+            .find(|pending| pending.core == intent.core)
         {
+            // A Review of a queued close keeps asking when the close resumes. The first
+            // request that knew where the keyboard was keeps its answer.
+            pending.review |= intent.review;
+            if pending.keyboard == CloseKeyboard::Unknown {
+                pending.keyboard = intent.keyboard;
+            }
             return Ok(());
         }
         if self.full() {
@@ -230,6 +238,26 @@ impl PendingEdits {
         }
         self.close_intents.push_back(intent);
         Ok(())
+    }
+
+    /// Takes the queued close of exactly `core` and `local`, unless it still waits for a
+    /// creation it names.
+    pub fn take_close_intent_for(
+        &mut self,
+        core: CloseTarget,
+        local: crate::close_confirmation::CloseTarget,
+    ) -> Option<WorkspaceCloseIntent> {
+        let index = self
+            .close_intents
+            .iter()
+            .position(|intent| intent.core == core && intent.local == local)?;
+        if close_references(core)
+            .iter()
+            .any(|id| self.provisional(*id))
+        {
+            return None;
+        }
+        self.close_intents.remove(index)
     }
 
     pub fn take_close_intent(&mut self) -> Option<WorkspaceCloseIntent> {

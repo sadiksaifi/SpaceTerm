@@ -120,7 +120,7 @@ fn dispatch(
     mutation: Mutation,
     deadline: Instant,
 ) -> Result<RetainedOutcome, Failure> {
-    let journal = writer.journal(connection)?;
+    let journal = writer.journal(connection, deadline)?;
     // Settlement ran first, so a pending edit here is one the server could not resolve yet.
     if journal.pending().is_some() {
         return Err(Failure::new(Code::OutcomeUnconfirmed));
@@ -308,7 +308,7 @@ pub fn settle(
         let Ok(handle) = connect(name) else {
             continue;
         };
-        let Ok(other_link) = handle.link() else {
+        let Ok(other_link) = handle.link_by(deadline) else {
             continue;
         };
         let items = settle_identity(
@@ -352,7 +352,7 @@ fn settle_identity(
 ) -> Result<Vec<RecoveredOperation>, Failure> {
     let mut recovered = Vec::new();
     if let Some(writer) = writer {
-        let journal = writer.journal(connection)?;
+        let journal = writer.journal(connection, deadline)?;
         if let Some(item) = settle_journal(journal, link, deadline)? {
             recovered.push(RecoveredOperation {
                 identity: identity.clone(),

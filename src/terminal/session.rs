@@ -10,6 +10,7 @@ pub(crate) use scrollback::ScrollbackReply;
 mod publication;
 pub(crate) use publication::DEFAULT_FRAME_RATE;
 mod activity;
+pub(crate) use activity::{PromptProgress, ShellZone};
 mod subscriptions;
 pub use clipboard::ClipboardCompletion;
 pub use clipboard::{ClientEffectGrant, ClientEffectRequest, ClipboardRequest};
@@ -500,6 +501,12 @@ pub trait TerminalSessionHandle {
         None
     }
 
+    /// Whether a program other than the shell owns this Terminal Session's foreground, from the
+    /// Line Mode its host last read for this exact Session. `None` when no reading describes it.
+    fn foreground_job(&self) -> Option<bool> {
+        None
+    }
+
     fn key(&self, input: KeyInput);
 
     /// Accepts the entire commit as one ordered unit, or refuses before consuming its text.
@@ -679,6 +686,9 @@ impl TerminalRuntime {
                 command,
                 Command::Focus(_) | Command::Resize | Command::ClearScreenAndScrollback
             );
+        if command.submits_line() {
+            self.event_publisher.note_submitted();
+        }
         let command = if records_input {
             let Ok(receipt) = self
                 .event_publisher
@@ -1149,6 +1159,26 @@ impl Command {
     }
 
     /// The Terminal Diagnostics kind of this command.
+    /// Whether this input submits a line to the program reading it, as Enter or a Run does.
+    fn submits_line(&self) -> bool {
+        match self {
+            Self::Received(command, _) => command.submits_line(),
+            Self::Run(..) => true,
+            Self::Key(key) => {
+                key.action != crate::terminal::key::KeyAction::Release
+                    && (matches!(
+                        key.physical_key,
+                        crate::terminal::key::PhysicalKey::Enter
+                            | crate::terminal::key::PhysicalKey::NumpadEnter
+                    ) || key
+                        .text
+                        .as_deref()
+                        .is_some_and(|text| text.contains(['\r', '\n'])))
+            }
+            _ => false,
+        }
+    }
+
     fn kind(&self) -> PaneWorkerCommand {
         match self {
             Self::Received(command, _) => command.kind(),
@@ -1442,7 +1472,7 @@ impl TerminalWorker {
         });
 
         events.set_probe(native_pty.session_probe());
-        events.note_activity(Instant::now(), false);
+        events.note_activity(Instant::now(), false, 0);
         let mut worker = Self {
             metadata_state,
             native_pty,
@@ -1653,6 +1683,40 @@ impl TerminalWorker {
     }
 
     fn process_command(&mut self, command: Command) -> bool {
+        // The worker processes each submitted line once, in the order input accepted it. The
+        // line counts as written once the PTY accepted all of its bytes.
+        if !matches!(command, Command::Received(..)) && command.submits_line() {
+            let enqueued = self.input.enqueued();
+            let result = self.process_command_once(command);
+            // A submission that put no bytes in the PTY's queue, such as a Run the shell's
+            // prompt refused, submitted nothing, so no close waits for it.
+            if self.input.enqueued() == enqueued {
+                self.events.retract_submitted();
+            } else {
+                self.input.note_line();
+                self.note_lines_written();
+            }
+            return result;
+        }
+        self.process_command_once(command)
+    }
+
+    /// Records each submitted line whose bytes the PTY has now accepted whole.
+    fn note_lines_written(&mut self) {
+        let lines = self.input.take_written_lines();
+        if lines == 0 {
+            return;
+        }
+        // Whether the program holding the PTY after the write, as before it, reads keys itself
+        // decides who reads each line.
+        let canonical = self.native_pty.line_mode().ok().map(|mode| mode.canonical);
+        for _ in 0..lines {
+            self.events
+                .note_written(self.emulator.prompt_progress(), canonical);
+        }
+    }
+
+    fn process_command_once(&mut self, command: Command) -> bool {
         match command {
             Command::Received(command, _receipt) => {
                 let result = self.process_command(*command);
@@ -2033,6 +2097,7 @@ impl TerminalWorker {
             return false;
         }
         self.note_activity();
+        self.events.note_output();
 
         if let Some(read_error) = reader_stopped {
             if self.clipboard.pending() {
@@ -2448,11 +2513,21 @@ impl TerminalWorker {
             self.emulator.at_empty_prompt()
                 && self.input.deadline().is_none()
                 && !self.clipboard.pending(),
+            self.emulator.prompt_progress().fresh,
         );
     }
 
     fn flush_input(&mut self) -> bool {
-        if let Err(error) = self.input.drain(&mut self.native_pty) {
+        // Who holds the PTY as a write that may complete a submitted line begins decides, with
+        // who holds it after, who reads that line. A program the line itself starts can take
+        // the foreground before the worker reads it after the write.
+        if self.events.awaits_written_line() {
+            let canonical = self.native_pty.line_mode().ok().map(|mode| mode.canonical);
+            self.events.note_write_start(canonical);
+        }
+        let drained = self.input.drain(&mut self.native_pty);
+        self.note_lines_written();
+        if let Err(error) = drained {
             let _ = self.send_runtime_failure(
                 TerminalFailure::pty("write-shell-input")
                     .with_reason(FailureReason::Io(error.kind())),

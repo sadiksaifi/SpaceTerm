@@ -13,14 +13,14 @@ use spaceterm_core::service::lane::{LaneAction, LaneReply, LaneRequest, WAIT_FAC
 use spaceterm_core::service::{Service, ServiceStatus};
 
 use super::{
-    Changed, Known, LaneChange, Machine, MachineLane, Observed, Reach, Sources, Watching,
-    failure_of_code,
+    Changed, ExecuteReport, Known, LaneChange, Machine, MachineLane, Observed, Reach, Sources,
+    Watching, failure_of_code,
 };
 use crate::direct_connections::{
     DirectConnections, DirectRouteId, DirectRouteStatus, RefusalReason,
 };
 use crate::machine_connection::{CoreError, MachineConnection};
-use crate::updates::machines::{ActionFailure, MachineId, MachineUpdatesError};
+use crate::updates::machines::{ActionFailure, MachineId, MachineUpdatesError, ServiceOperation};
 use crate::updates::push::{self, EmbeddedCore};
 
 /// How long `WaitFacts` may take beyond the Core's own limit before the lane gives up.
@@ -37,6 +37,8 @@ pub(crate) struct DesktopSources {
     /// The account Core's service and its lane handle. None when the identity has no service
     /// paths.
     local: Option<(Controller, MachineConnection)>,
+    /// The desktop build's identity, whose ledger confirms a local Stop once its lane closed.
+    identity: String,
     direct: DirectConnections,
 }
 
@@ -48,7 +50,11 @@ impl DesktopSources {
             .ok()
             .zip(MachineConnection::for_identity(identity).ok())
             .map(|(service, core)| (Controller::new(service), core));
-        Self { local, direct }
+        Self {
+            local,
+            identity: identity.to_owned(),
+            direct,
+        }
     }
 }
 
@@ -59,14 +65,16 @@ impl Sources for DesktopSources {
             let installed = controller.status().is_ok_and(|status| status.installed);
             if installed && let Ok(id) = core.machine_id() {
                 let core = core.clone();
+                let identity = self.identity.clone();
                 known.push(Known {
                     id,
                     name: THIS_MACHINE.into(),
                     local: true,
                     machine: Arc::new(LocalMachine {
+                        ledger: Some(identity.clone()),
                         service: Arc::new(controller.clone()),
                         connect: Arc::new(move || {
-                            let lane = CoreLane::new(core.clone());
+                            let lane = CoreLane::local(core.clone(), identity.clone());
                             let work = lane.work()?;
                             Ok((Arc::new(lane) as Arc<dyn MachineLane>, work))
                         }),
@@ -198,6 +206,9 @@ type Connect = Arc<
 pub(crate) struct LocalMachine {
     pub(crate) service: Arc<dyn LocalService>,
     pub(crate) connect: Connect,
+    /// The desktop build's identity, whose ledger records a Stop's outcome after its Core
+    /// exited.
+    pub(crate) ledger: Option<String>,
 }
 
 impl Machine for LocalMachine {
@@ -238,6 +249,29 @@ impl Machine for LocalMachine {
     fn connecting(&self) -> bool {
         false
     }
+
+    fn resolve_offline(&self, operation: &str) -> Option<Result<(), ActionFailure>> {
+        let identity = self.ledger.as_deref()?;
+        Some(ledger_outcome(identity, operation))
+    }
+}
+
+/// What the ledger of the build `identity` records about `operation` now. `Unconfirmed` while it
+/// has not settled, or the ledger is unreadable or busy.
+fn ledger_outcome(identity: &str, operation: &str) -> Result<(), ActionFailure> {
+    use spaceterm_core::service::operations::{Ledger, OperationId, State};
+    let id = OperationId::parse(operation).ok_or(ActionFailure::Unconfirmed)?;
+    let state = Ledger::open(identity)
+        .and_then(|ledger| ledger.resolve_now(&id))
+        .ok()
+        .flatten()
+        .map(|record| record.state);
+    match state {
+        Some(State::Done) => Ok(()),
+        Some(State::Failed { code }) => Err(failure_of_code(&code)),
+        Some(State::NotPerformed(_)) => Err(ActionFailure::Failed),
+        _ => Err(ActionFailure::Unconfirmed),
+    }
 }
 
 /// What the route registry reports about one Saved Connection.
@@ -250,6 +284,10 @@ pub(crate) trait Routes: Send + Sync {
     fn retry_now(&self, route: &DirectRouteId);
     /// Connects the saved route, marking it active, as the person's Connect does.
     fn connect(&self, route: &DirectRouteId);
+    /// The outcome of `operation` the route's own Client Identity kept when any surface of this
+    /// desktop acknowledged its receipt, read from this computer without connecting. None when
+    /// it kept none or its record can't be read.
+    fn kept(&self, route: &DirectRouteId, operation: &str) -> Option<Result<(), ActionFailure>>;
 }
 
 /// A route's service lane, and the work version its Core offered at admission.
@@ -265,7 +303,15 @@ impl Routes for RegistryRoutes {
     }
 
     fn lane(&self, route: &DirectRouteId) -> Option<Arc<dyn RouteLane>> {
-        Some(Arc::new(CoreLane::new(self.0.service(route)?)))
+        Some(Arc::new(CoreLane::paired(self.0.service(route)?, *route)))
+    }
+
+    fn kept(&self, route: &DirectRouteId, operation: &str) -> Option<Result<(), ActionFailure>> {
+        let pending = self.0.storage(route)?.service_operations().ok()?;
+        let receipt = pending
+            .kept_by(operation, Instant::now() + admin::REQUEST_LIMIT)
+            .ok()??;
+        Some(receipt_outcome(&receipt))
     }
 
     fn retry_now(&self, route: &DirectRouteId) {
@@ -358,6 +404,23 @@ impl Machine for PairedMachine {
         }
     }
 
+    /// Only the route that admitted `operation` answers for it: first from the outcome its
+    /// Client Identity kept, which needs no connection, then from the Core over that route
+    /// alone. Another route to the same Core is another Client Identity, so its answer is never
+    /// taken for this one.
+    fn resolve(&self, operation: &ServiceOperation) -> Result<(), ActionFailure> {
+        let Some(route) = operation.route().filter(|route| self.ids.contains(route)) else {
+            return Err(ActionFailure::Unconfirmed);
+        };
+        if let Some(outcome) = self.routes.kept(route, operation.id()) {
+            return outcome;
+        }
+        match self.routes.lane(route) {
+            Some(lane) => lane.resolve(operation.id()),
+            None => Err(ActionFailure::Unconfirmed),
+        }
+    }
+
     fn connecting(&self) -> bool {
         self.ids.iter().any(|route| {
             matches!(
@@ -386,13 +449,56 @@ struct CoreLane {
     core: MachineConnection,
     /// The connection the latest read answered on, reused by the next `WaitFacts`.
     session: Mutex<Option<Session>>,
+    /// The identity of this computer's own Core, whose ledger records a Stop's outcome once the
+    /// Core closed the lane. None for a paired Machine, which never stops over its lane.
+    ledger: Option<String>,
+    /// The paired route the lane reaches the Core through. None for the account-local lane.
+    route: Option<DirectRouteId>,
 }
+
+/// How often a local Stop reads its ledger record while it waits for the outcome.
+const LEDGER_POLL: Duration = Duration::from_millis(250);
 
 impl CoreLane {
     fn new(core: MachineConnection) -> Self {
         Self {
             core,
             session: Mutex::new(None),
+            ledger: None,
+            route: None,
+        }
+    }
+
+    /// A paired Core reached through `route`.
+    fn paired(core: MachineConnection, route: DirectRouteId) -> Self {
+        Self {
+            route: Some(route),
+            ..Self::new(core)
+        }
+    }
+
+    /// This computer's own Core, of the build `identity`.
+    fn local(core: MachineConnection, identity: String) -> Self {
+        Self {
+            ledger: Some(identity),
+            ..Self::new(core)
+        }
+    }
+
+    /// The outcome of the Stop `operation`, once SpaceTerm Core closed its lane: the helper
+    /// records it in the ledger after the Core exited. A closed lane alone proves nothing about
+    /// native cleanup, so without a terminal record by `deadline` the outcome stays unconfirmed.
+    fn confirm_stop(&self, operation: &str, deadline: Instant) -> Result<(), ActionFailure> {
+        let Some(identity) = &self.ledger else {
+            return Err(ActionFailure::Unconfirmed);
+        };
+        loop {
+            match ledger_outcome(identity, operation) {
+                Err(ActionFailure::Unconfirmed) if Instant::now() + LEDGER_POLL < deadline => {
+                    std::thread::sleep(LEDGER_POLL);
+                }
+                outcome => return outcome,
+            }
         }
     }
 
@@ -539,47 +645,133 @@ impl MachineLane for CoreLane {
         }
     }
 
-    fn preview(&self, change: LaneChange) -> Result<admin::Preview, ActionFailure> {
+    fn preview(
+        &self,
+        change: LaneChange,
+        waiting: &(dyn Fn(bool) + Sync),
+    ) -> Result<admin::Preview, ActionFailure> {
         let action = match change {
             LaneChange::Restart => LaneAction::Restart,
             LaneChange::Stop => LaneAction::Stop,
         };
-        let mut session = self.open()?;
-        admin::preview(&mut session, action).map_err(lane_failure)
-    }
-
-    fn execute(&self, preview: admin::Preview) -> Result<(), ActionFailure> {
         let lane = self
             .core
             .service_lane()
             .map_err(|error| core_failure(&error))?;
+        let session = lane.session().map_err(|error| core_failure(&error))?;
+        // Another operation, such as an update check, may hold SpaceTerm Core for a while. The
+        // preview waits for it quietly rather than refusing at once.
+        admin::preview_when_ready(
+            &lane,
+            session,
+            action,
+            Instant::now() + admin::BUSY_WAIT,
+            &|| None,
+            &mut |began| waiting(began),
+        )
+        .map(|(_, preview)| preview)
+        .map_err(lane_failure)
+    }
+
+    /// Check Status reads the outcome any surface of this desktop kept for this Machine's route
+    /// when it acknowledged the receipt, including Settings, before it asks the Core.
+    fn route(&self) -> Option<DirectRouteId> {
+        self.route
+    }
+
+    fn resolve(&self, operation: &str) -> Result<(), ActionFailure> {
+        let Some(id) = spaceterm_core::service::operations::OperationId::parse(operation) else {
+            return Err(ActionFailure::Unconfirmed);
+        };
+        let lane = self
+            .core
+            .service_lane()
+            .map_err(|_| ActionFailure::Unconfirmed)?;
         let pending = self
             .core
             .service_operations()
-            .map_err(|error| core_failure(&error))?;
-        let (session, _) = admin::open(&lane, &pending).map_err(lane_failure)?;
+            .map_err(|_| ActionFailure::Unconfirmed)?;
+        match admin::check(&lane, &pending, &id, Instant::now() + admin::REQUEST_LIMIT) {
+            Ok(lane_client::Leftover::Settled(receipt)) => receipt_outcome(&receipt),
+            _ => Err(ActionFailure::Unconfirmed),
+        }
+    }
+
+    fn execute(
+        &self,
+        preview: admin::Preview,
+        report: &mut ExecuteReport,
+        waiting: &(dyn Fn(bool) + Sync),
+    ) -> Result<(), ActionFailure> {
         let wait = admin::wait(&preview.action);
-        let outcome = admin::execute(
+        // One absolute deadline covers the wait for another operation, the action's settlement
+        // and, for a Stop, confirming its native cleanup afterwards.
+        let deadline = Instant::now() + admin::BUSY_WAIT + wait;
+        let lane = self.core.service_lane_by(deadline).map_err(lane_failure)?;
+        let pending = self
+            .core
+            .service_operations_by(deadline)
+            .map_err(lane_failure)?;
+        // Opening acknowledged these receipts, so their outcomes go to the surfaces that ask, even
+        // when the connection failed after acknowledging them.
+        let opened = admin::open(&lane, &pending, deadline);
+        let settled = match &opened {
+            Ok((_, settled)) => settled.as_slice(),
+            Err(unopened) => unopened.settled.as_slice(),
+        };
+        report.settled = settled
+            .iter()
+            .map(|receipt| (receipt.operation.clone(), receipt_outcome(receipt)))
+            .collect();
+        let (session, _) = opened.map_err(|unopened| lane_failure(unopened.error))?;
+        // The flow finishes on its own thread whatever the desktop does meanwhile, including
+        // closing the window that asked. It waits for another operation that holds SpaceTerm
+        // Core under the same approval, which SpaceTerm Core refuses as changed when what it
+        // affects changed meanwhile.
+        let outcome = admin::execute_approved(
             &lane,
             session,
             preview.action,
             preview.token,
+            deadline,
             wait,
             &pending,
             &mut admin::Unshared,
             &mut || Ok(()),
-            // The flow finishes on its own thread whatever the desktop does meanwhile.
             &|| None,
+            &mut |began| waiting(began),
         )
         .map_err(lane_failure)?;
-        match admin::verdict(&outcome) {
-            admin::Verdict::Done | admin::Verdict::Shutdown => Ok(()),
-            admin::Verdict::Failed(Some(code)) => Err(failure_of_code(&code)),
-            admin::Verdict::Failed(None) | admin::Verdict::NotPerformed => {
+        report.operation = Some(match &outcome {
+            lane_client::Outcome::Shutdown { operation, .. }
+            | lane_client::Outcome::Unconfirmed { operation, .. } => operation.clone(),
+            lane_client::Outcome::Settled { receipt, .. } => receipt.operation.clone(),
+        });
+        match (admin::verdict(&outcome), outcome) {
+            (admin::Verdict::Done, _) => Ok(()),
+            (admin::Verdict::Shutdown, lane_client::Outcome::Shutdown { operation, .. }) => {
+                self.confirm_stop(&operation, deadline)
+            }
+            (admin::Verdict::Failed(Some(code)), _) => Err(failure_of_code(&code)),
+            (admin::Verdict::Failed(None) | admin::Verdict::NotPerformed, _) => {
                 Err(ActionFailure::Failed)
             }
-            admin::Verdict::Uncertain => Err(ActionFailure::Unreachable),
+            (admin::Verdict::Shutdown | admin::Verdict::Uncertain, _) => {
+                Err(ActionFailure::Unconfirmed)
+            }
         }
+    }
+}
+
+/// What a settled receipt says about its operation.
+fn receipt_outcome(
+    receipt: &spaceterm_core::service::lane::LaneReceipt,
+) -> Result<(), ActionFailure> {
+    match admin::receipt_verdict(receipt) {
+        admin::Verdict::Done => Ok(()),
+        admin::Verdict::Failed(Some(code)) => Err(failure_of_code(&code)),
+        admin::Verdict::Failed(None) | admin::Verdict::NotPerformed => Err(ActionFailure::Failed),
+        admin::Verdict::Uncertain | admin::Verdict::Shutdown => Err(ActionFailure::Unconfirmed),
     }
 }
 
@@ -605,7 +797,9 @@ fn lane_failure(error: LaneError) -> ActionFailure {
         // The Machine's facts changed since the push was offered.
         LaneError::BelowFloor(_) => ActionFailure::Changed,
         LaneError::Core(error) => core_failure(&error),
-        LaneError::Interrupted => ActionFailure::Failed,
+        // Neither was sent: the desktop sets no interrupt, and a deadline that passed first
+        // dispatched nothing.
+        LaneError::Interrupted | LaneError::Deadline => ActionFailure::Failed,
     }
 }
 
@@ -631,6 +825,9 @@ mod tests {
     /// A lane that answers nothing and whose Core offered work major `major`.
     struct Lane {
         major: u16,
+        /// The route the lane reaches its Core through, and each route whose Core Check Status
+        /// asked, in order.
+        route: Option<(DirectRouteId, Arc<Mutex<Vec<DirectRouteId>>>)>,
     }
 
     impl MachineLane for Lane {
@@ -654,11 +851,29 @@ mod tests {
         ) -> Result<spaceterm_core::update::facts::UpdateFacts, ActionFailure> {
             Err(ActionFailure::Unreachable)
         }
-        fn preview(&self, _: LaneChange) -> Result<admin::Preview, ActionFailure> {
+        fn preview(
+            &self,
+            _: LaneChange,
+            _: &(dyn Fn(bool) + Sync),
+        ) -> Result<admin::Preview, ActionFailure> {
             Err(ActionFailure::Unreachable)
         }
-        fn execute(&self, _: admin::Preview) -> Result<(), ActionFailure> {
+        fn execute(
+            &self,
+            _: admin::Preview,
+            _: &mut ExecuteReport,
+            _: &(dyn Fn(bool) + Sync),
+        ) -> Result<(), ActionFailure> {
             Ok(())
+        }
+        /// The Core answers that the operation was done.
+        fn resolve(&self, _: &str) -> Result<(), ActionFailure> {
+            let (route, asked) = self.route.as_ref().ok_or(ActionFailure::Unconfirmed)?;
+            asked.lock().unwrap().push(*route);
+            Ok(())
+        }
+        fn route(&self) -> Option<DirectRouteId> {
+            self.route.as_ref().map(|(route, _)| *route)
         }
     }
 
@@ -674,10 +889,17 @@ mod tests {
     fn local(status: ServiceStatus, dialed: &Arc<AtomicUsize>) -> LocalMachine {
         let dialed = Arc::clone(dialed);
         LocalMachine {
+            ledger: None,
             service: Arc::new(Service(status)),
             connect: Arc::new(move || {
                 dialed.fetch_add(1, Ordering::SeqCst);
-                Ok((Arc::new(Lane { major: 1 }) as Arc<dyn MachineLane>, Ok(())))
+                Ok((
+                    Arc::new(Lane {
+                        major: 1,
+                        route: None,
+                    }) as Arc<dyn MachineLane>,
+                    Ok(()),
+                ))
             }),
         }
     }
@@ -743,6 +965,7 @@ mod tests {
             ),
         ] {
             let machine = LocalMachine {
+                ledger: None,
                 service: Arc::new(Service(ServiceStatus {
                     installed: true,
                     enabled: true,
@@ -777,6 +1000,7 @@ mod tests {
     #[test]
     fn a_start_refused_by_login_items_stays_that_failure() {
         let machine = LocalMachine {
+            ledger: None,
             service: Arc::new(OffInLoginItems),
             connect: Arc::new(|| Err(ActionFailure::Unreachable)),
         };
@@ -820,6 +1044,10 @@ mod tests {
         retried: Mutex<Vec<DirectRouteId>>,
         /// Each route `connect` was called for, in order.
         connected: Mutex<Vec<DirectRouteId>>,
+        /// The outcome each route's own Client Identity kept, by operation.
+        kept: Vec<(DirectRouteId, &'static str, Result<(), ActionFailure>)>,
+        /// Each route whose Core Check Status asked, in order.
+        asked: Arc<Mutex<Vec<DirectRouteId>>>,
     }
 
     impl Routes for FakeRoutes {
@@ -831,8 +1059,26 @@ mod tests {
         }
 
         fn lane(&self, route: &DirectRouteId) -> Option<Arc<dyn RouteLane>> {
-            let (_, _, major) = self.routes.iter().find(|(id, ..)| id == route)?;
-            Some(Arc::new(Lane { major: (*major)? }))
+            let (_, status, major) = self.routes.iter().find(|(id, ..)| id == route)?;
+            // A disconnected route holds no handle to its Core.
+            if *status == DirectRouteStatus::Disconnected {
+                return None;
+            }
+            Some(Arc::new(Lane {
+                major: (*major)?,
+                route: Some((*route, Arc::clone(&self.asked))),
+            }))
+        }
+
+        fn kept(
+            &self,
+            route: &DirectRouteId,
+            operation: &str,
+        ) -> Option<Result<(), ActionFailure>> {
+            self.kept
+                .iter()
+                .find(|(id, kept, _)| id == route && *kept == operation)
+                .map(|(.., outcome)| *outcome)
         }
 
         fn retry_now(&self, route: &DirectRouteId) {
@@ -901,6 +1147,72 @@ mod tests {
         assert_eq!(*routes.retried.lock().unwrap(), [[4; 32]]);
         assert!(machine.connecting());
         assert!(!paired(vec![([1; 32], DirectRouteStatus::Disconnected, Some(1))]).connecting());
+    }
+
+    /// Route A admitted a Restart whose outcome nothing confirmed, and Settings, checking through
+    /// A, kept its receipt before the Core forgot it. A then disconnects while route B to the same
+    /// Core still answers. Check Status reads the outcome A's own Client Identity kept, without
+    /// asking B's Core, which knows only B's Client Identity.
+    #[test]
+    fn check_status_after_failover_reads_the_admitting_routes_kept_outcome() {
+        let (a, b) = ([1; 32], [2; 32]);
+        let routes = Arc::new(FakeRoutes {
+            routes: vec![
+                (a, DirectRouteStatus::Disconnected, Some(1)),
+                (b, DirectRouteStatus::Connected, Some(1)),
+            ],
+            kept: vec![(a, "restart-a", Err(ActionFailure::Failed))],
+            ..FakeRoutes::default()
+        });
+        let machine = paired_with(Arc::clone(&routes));
+        assert!(
+            matches!(machine.reach(), Reach::Lane { lane, .. } if lane.route() == Some(b)),
+            "B reaches the Core now"
+        );
+        assert_eq!(
+            machine.resolve(&ServiceOperation::admitted("restart-a", Some(a))),
+            Err(ActionFailure::Failed),
+            "A's kept outcome"
+        );
+        // An operation A admitted that A kept nothing for stays unconfirmed while A is down,
+        // and nothing B's Core says answers for it.
+        assert_eq!(
+            machine.resolve(&ServiceOperation::admitted("restart-other", Some(a))),
+            Err(ActionFailure::Unconfirmed)
+        );
+        // An operation of no known route of this Machine is nobody's to answer.
+        assert_eq!(
+            machine.resolve(&ServiceOperation::admitted("restart-a", Some([9; 32]))),
+            Err(ActionFailure::Unconfirmed)
+        );
+        assert_eq!(
+            machine.resolve(&ServiceOperation::new("restart-a")),
+            Err(ActionFailure::Unconfirmed)
+        );
+        assert!(
+            routes.asked.lock().unwrap().is_empty(),
+            "B's Core was never asked"
+        );
+    }
+
+    /// Once the admitting route connects again, Check Status asks the Core over that route
+    /// alone, even while another route to the same Core is connected too.
+    #[test]
+    fn check_status_asks_the_core_only_over_the_admitting_route() {
+        let (a, b) = ([1; 32], [2; 32]);
+        let routes = Arc::new(FakeRoutes {
+            routes: vec![
+                (b, DirectRouteStatus::Connected, Some(1)),
+                (a, DirectRouteStatus::Connected, Some(1)),
+            ],
+            ..FakeRoutes::default()
+        });
+        let machine = paired_with(Arc::clone(&routes));
+        assert_eq!(
+            machine.resolve(&ServiceOperation::admitted("restart-a", Some(a))),
+            Ok(())
+        );
+        assert_eq!(*routes.asked.lock().unwrap(), [a]);
     }
 
     const INCOMPATIBLE: DirectRouteStatus = DirectRouteStatus::Refused(RefusalReason::Incompatible);

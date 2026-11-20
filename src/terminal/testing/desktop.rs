@@ -153,9 +153,18 @@ pub(crate) struct TestTerminalSessionRecords {
         Rc<RefCell<BTreeMap<usize, crate::terminal::core_session::unsent::UnsentChange>>>,
     dropped_session_ids: Rc<RefCell<Vec<usize>>>,
     commands: Rc<RefCell<Vec<RecordedCall>>>,
+    /// What every Terminal Session reports about a program other than its shell owning the
+    /// foreground.
+    foreground_job: Rc<std::cell::Cell<Option<bool>>>,
 }
 
 impl TestTerminalSessionRecords {
+    /// Every Terminal Session reports `job` as whether a program other than its shell owns the
+    /// foreground, as SpaceTerm Core's Line Mode says.
+    pub(crate) fn set_foreground_job(&self, job: Option<bool>) {
+        self.foreground_job.set(job);
+    }
+
     /// The Terminal Session reattached after `input` was refused or went unconfirmed.
     pub(crate) fn keep_unsent_input(
         &self,
@@ -498,6 +507,9 @@ impl Drop for TestTerminalSessionHandle {
 impl TerminalSessionHandle for TestTerminalSessionHandle {
     fn reading_available(&self) -> bool {
         self.reading_available
+    }
+    fn foreground_job(&self) -> Option<bool> {
+        self.records.foreground_job.get()
     }
     fn take_unsent_input(&self) -> crate::terminal::core_session::unsent::UnsentChange {
         self.records

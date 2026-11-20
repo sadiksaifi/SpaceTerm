@@ -11,6 +11,7 @@ use crate::contract::{
     UpdateFailureStage, UpdateFailureStatus, UpdateOperation, UpdateOperationKind, Version,
 };
 use crate::state::{CliState, RouteKey};
+use spaceterm_core::service::lane::admin;
 use spaceterm_core::service::lane::{
     LaneActivation, LaneReply, LaneRequest, LaneStatus, LaneVersion, Offline,
 };
@@ -45,13 +46,54 @@ pub fn run(context: &Context<'_>) -> Reply {
     {
         return over_lane(context, &Ok(connection), core, RouteKey::Local);
     }
+    // A Stop's outcome stays readable in this machine's own ledger after SpaceTerm Core exited,
+    // also when its service can't be read, as while its cleanup is unresolved.
+    let receipts = super::offline_receipts(context);
     let status = Offline::new(context.identity)
         .and_then(|offline| offline.admin().status(None))
         .map_err(contract::from_core_error);
     match status {
-        Ok(status) => report(context, core, &status, None, &RouteKey::Local, Vec::new()),
-        Err(failure) => Reply::failure(COMMAND, Some(core), failure),
+        Ok(status) => report(context, core, &status, None, &RouteKey::Local, receipts),
+        Err(failure) => {
+            let text = recovered_text(&receipts);
+            Reply::new(
+                &super::with_recovered(
+                    Envelope::error(COMMAND, Some(core), failure, contract::Empty {}),
+                    receipts,
+                ),
+                text,
+            )
+        }
     }
+}
+
+/// One line for each earlier operation SpaceTerm settled or read first, with its outcome.
+pub(crate) fn recovered_text(recovered: &[crate::contract::RecoveredOperation]) -> String {
+    use crate::contract::RecoveredState;
+    recovered
+        .iter()
+        .map(
+            |operation| match (operation.outcome.state, operation.outcome.code) {
+                (RecoveredState::Applied, _) => format!(
+                    "An earlier SpaceTerm Core operation finished: {}\n",
+                    operation.operation
+                ),
+                (RecoveredState::Refused, Some(code)) => format!(
+                    "An earlier SpaceTerm Core operation didn't finish ({}): {}\n",
+                    code.as_str(),
+                    operation.operation
+                ),
+                (RecoveredState::Refused, None) => format!(
+                    "An earlier SpaceTerm Core operation didn't finish: {}\n",
+                    operation.operation
+                ),
+                (RecoveredState::Unknown, _) => format!(
+                    "An earlier SpaceTerm Core operation hasn't finished yet: {}\n",
+                    operation.operation
+                ),
+            },
+        )
+        .collect()
 }
 
 fn over_lane(
@@ -61,18 +103,32 @@ fn over_lane(
     route: RouteKey,
 ) -> Reply {
     let opened = Pending::open(context, &route)
-        .and_then(|pending| super::open_lane(context, connection, &route, &pending));
+        .map_err(super::Unopened::from)
+        .and_then(|pending| {
+            super::open_lane(
+                context,
+                connection,
+                &route,
+                &pending,
+                Instant::now() + admin::REQUEST_LIMIT,
+            )
+        });
     let Opened {
         mut session,
         recovered,
         ..
     } = match opened {
         Ok(opened) => opened,
-        Err(failure) if failure.code == Code::Unreachable || failure.code == Code::NotRunning => {
+        Err(super::Unopened { failure, recovered })
+            if failure.code == Code::Unreachable || failure.code == Code::NotRunning =>
+        {
             let last = super::last_connected(context, &route);
-            return Reply::new(&unreachable_envelope(core, failure, last), String::new());
+            return Reply::new(
+                &super::with_recovered(unreachable_envelope(core, failure, last), recovered),
+                String::new(),
+            );
         }
-        Err(failure) => return Reply::failure(COMMAND, Some(core), failure),
+        Err(unopened) => return Reply::unopened(COMMAND, Some(core), unopened),
     };
     let reply = session.request(
         &LaneRequest::Status,
@@ -382,7 +438,8 @@ pub(crate) fn envelope(
             )
         })
         .map(crate::notice::Finish::sentences);
-    let text = text(&core, &data, commands, finish.as_deref());
+    let mut text = text(&core, &data, commands, finish.as_deref());
+    text.push_str(&recovered_text(&recovered));
     (
         super::with_recovered(Envelope::ok(COMMAND, Some(core), data), recovered),
         text,

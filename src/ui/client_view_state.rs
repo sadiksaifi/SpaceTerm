@@ -1,5 +1,5 @@
 //! Background persistence for this client's arrangements of Workspaces, outside Settings.
-use spaceterm_core::client_view::{ClientView, PaneRestart, RetainedInventory};
+use spaceterm_core::client_view::{ClientView, PaneRestart, RetainedInventory, Selection};
 use spaceterm_core::{CoreError, MachineConnection};
 use std::sync::{Arc, Mutex};
 
@@ -10,6 +10,10 @@ struct State {
     pending: Option<ClientView>,
     pane_restarts: Option<Vec<PaneRestart>>,
     pending_restarts: Option<Vec<PaneRestart>>,
+    /// The Workspace, Tab and Focused Pane this client last presented, once read.
+    selection: Option<Selection>,
+    /// The next selection to write. Losing one only leaves an older selection.
+    pending_selection: Option<Selection>,
     error: Option<CoreError>,
     closed: bool,
     /// The Workspaces and Tabs this client last presented from the server, as read.
@@ -70,6 +74,7 @@ impl RetainedClientViews {
                         .as_ref()
                         .ok()
                         .map(|store| store.pane_restarts().to_vec());
+                    state.selection = opened.as_ref().ok().and_then(|store| store.selection());
                     state.retained = opened
                         .as_ref()
                         .ok()
@@ -82,12 +87,13 @@ impl RetainedClientViews {
                 };
                 let mut discarded = false;
                 loop {
-                    let (pending, inventory, restarts, discard, closed) = {
+                    let (pending, inventory, restarts, selection, discard, closed) = {
                         let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
                         (
                             state.pending.take(),
                             state.pending_inventory.take(),
                             state.pending_restarts.take(),
+                            state.pending_selection.take(),
                             state.discarded,
                             state.closed,
                         )
@@ -107,6 +113,11 @@ impl RetainedClientViews {
                         // The facts only explain presentation, so a failed write keeps the
                         // previous ones and blocks no arrangement write.
                         let _ = store.save_pane_restarts(restarts);
+                    }
+                    if let Some(selection) = selection {
+                        // The selection only guides the next launch's presentation, so a failed
+                        // write keeps the previous one and blocks no arrangement write.
+                        let _ = store.save_selection(selection);
                     }
                     if let Some(view) = pending
                         && let Err(error) = store.save(view)
@@ -183,6 +194,24 @@ impl RetainedClientViews {
         }
         state.pane_restarts = Some(panes.clone());
         state.pending_restarts = Some(panes);
+        drop(state);
+        let _ = self.wake.try_send(());
+    }
+    /// The Workspace, Tab and Focused Pane this client last presented, once read.
+    pub(super) fn selection(&self) -> Option<Selection> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .selection
+    }
+    /// Retains `selection` as what this client presents now.
+    pub(super) fn save_selection(&self, selection: Selection) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.error.is_some() || state.selection == Some(selection) {
+            return;
+        }
+        state.selection = Some(selection);
+        state.pending_selection = Some(selection);
         drop(state);
         let _ = self.wake.try_send(());
     }

@@ -262,6 +262,18 @@ pub(crate) struct MachineRow {
     pub(crate) asked_check: Option<AskedCheck>,
     /// Why that check failed, when it did.
     pub(crate) check_failed: Option<CheckFailed>,
+    /// A Stop or Restart a person approved on this desktop that has not finished, which every
+    /// surface shows in place of the row's own state and actions.
+    pub(crate) approved: Option<Approved>,
+}
+
+/// An approved Stop or Restart on its way: waiting for another SpaceTerm Core operation, or
+/// admitted and running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Approved {
+    pub(crate) action: crate::updates::machines::Checked,
+    /// It waits for another SpaceTerm Core operation to settle before it runs.
+    pub(crate) waiting: bool,
 }
 
 /// A protocol mismatch: a hard stop above the ladder.
@@ -319,6 +331,8 @@ pub(crate) enum MachineStage {
     NotConfirmed {
         version: Version,
         here: bool,
+        /// The restart's own operation, which Check Status reads.
+        operation: Option<crate::updates::machines::ServiceOperation>,
     },
     CantCheck,
     /// The Core runs below the Update Floor of this desktop's embedded build, so it must first
@@ -512,6 +526,8 @@ pub(crate) struct Marks<'a> {
     pub(crate) pushes_held: bool,
     /// How the last check a person asked for here ended, by Machine.
     pub(crate) checked: &'a HashMap<MachineId, Checked>,
+    /// Each Machine's approved Stop or Restart that has not finished.
+    pub(crate) approved: &'a [(MachineId, Approved)],
 }
 
 impl UpdateView {
@@ -916,6 +932,11 @@ impl MachineRow {
             last_check,
             asked_check,
             check_failed,
+            approved: marks
+                .approved
+                .iter()
+                .find(|(machine, _)| *machine == update.machine)
+                .map(|(_, approved)| *approved),
         }
     }
 
@@ -980,11 +1001,16 @@ fn machine_stage(
     match &update.link {
         MachineLink::Offline { .. } => return (MachineStage::Offline, None),
         MachineLink::Stopped => return (MachineStage::Stopped, None),
-        MachineLink::Unconfirmed { expected, .. } => {
+        MachineLink::Unconfirmed {
+            expected,
+            operation,
+            ..
+        } => {
             return (
                 MachineStage::NotConfirmed {
                     version: expected.clone(),
                     here: here(Asked::Restart),
+                    operation: operation.clone(),
                 },
                 None,
             );
@@ -1264,11 +1290,13 @@ pub(crate) fn current(cx: &App) -> UpdateView {
     match MachineUpdates::global(cx) {
         Some(store) => {
             let store = store.read(cx);
+            let approved = store.approved();
             let marks = Marks {
                 dismissed: store.dismissed(),
                 deferred: store.deferred(),
                 pushes_held: store.holds_pushes(cx),
                 checked: store.checked(),
+                approved: &approved,
             };
             UpdateView::new(app, store.machines(), marks, now)
         }
@@ -1280,6 +1308,7 @@ pub(crate) fn current(cx: &App) -> UpdateView {
                 deferred: &none,
                 pushes_held: false,
                 checked: &unchecked,
+                approved: &[],
             },
             now,
         ),

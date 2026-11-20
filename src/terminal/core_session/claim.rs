@@ -139,7 +139,9 @@ fn bookkept(
     exchange: impl FnOnce(&Request) -> Result<Reply, CoreError>,
 ) -> Result<Reply, CoreError> {
     let start = match request {
-        Request::StartRestored { core, .. } => Some(Some(*core)),
+        Request::StartRestored { core, .. } | Request::PrepareRestored { core, .. } => {
+            Some(Some(*core))
+        }
         Request::RepairDirectory { target, .. } => Some(Some(target.boot)),
         Request::SelectPane { explicit: true, .. } => Some(None),
         Request::TakeOver { target, .. }
@@ -154,7 +156,7 @@ fn bookkept(
             .connection_recovery
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .begin_start(boot)?;
+            .begin_start(boot, matches!(request, Request::PrepareRestored { .. }))?;
         state.directory_busy.store(true, Ordering::Release);
         state.admission(Admission::Pending);
     }
@@ -177,11 +179,31 @@ fn bookkept(
         }
     }
     let reply = result?;
+    let unconfirmed = state.start_unconfirmed();
     state
         .connection_recovery
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .observed(&reply)?;
+    // A background start whose reply was lost keeps its place until what Core shows settles it.
+    if unconfirmed && !state.start_unconfirmed() {
+        match &reply {
+            Reply::Takeover {
+                target,
+                session_ended: None,
+                ..
+            } if target.session != pane_id => state.settled_background(target.session),
+            Reply::Takeover {
+                session_ended: Some(_),
+                ..
+            }
+            | Reply::Restored {
+                session_ended: Some(_),
+                ..
+            } => state.end_background(),
+            _ => {}
+        }
+    }
     if !state.start_unconfirmed() {
         state
             .directory_note
@@ -214,6 +236,10 @@ impl ClaimWorker<'_> {
         if state.restart_expired() {
             return Err(CoreError::Protocol);
         }
+        // This client presented the Pane's live Session before the connection was lost. If the
+        // Core comes back restarted and the person still has this Pane open, its fresh shell
+        // starts at once, as though they had selected it again.
+        let mut was_attached = *attached_session;
         let mut grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
         let grant_update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let mut grant_appearance = Some(grant_update.generation);
@@ -296,11 +322,34 @@ impl ClaimWorker<'_> {
                 unavailable |= directory_unavailable;
                 state.set_session_end(session_ended);
                 state.admission(Admission::Waiting);
+                // A shell about to start for a first use stays an ordinary start: the Pane keeps
+                // its blank surface rather than flashing the restored screen.
+                // A background start waits for its turn, so only a granted one is starting.
+                let eligible = !unavailable
+                    && session_ended.is_none()
+                    && !state.start_unconfirmed()
+                    && state.will_prepare(boot);
+                let prepares = state.prepares();
+                let background = eligible && prepares;
+                // While the route's live work connection returns, a Core that offered work 1.4,
+                // or one whose offer no admission read yet, does not show that version, so the
+                // wait below looks again shortly. A Core that offered an older version never
+                // starts Panes in the background, and nothing polls it.
+                let recheck = eligible && !prepares && state.offers_prepare();
+                let starting = session_ended.is_none()
+                    && (created_start
+                        || state.start_restored.load(Ordering::Acquire)
+                        || state.selected.load(Ordering::Acquire)
+                        || (was_attached && state.foreground())
+                        || (background && state.turn_granted()));
+                if !unavailable && (fresh || starting) {
+                    state.starting_shell();
+                }
                 state.set(if unavailable {
                     CorePaneStatus::Failed(CoreError::DirectoryUnavailable)
                 } else if let Some(end) = session_ended {
                     CorePaneStatus::SessionEnded(end)
-                } else if fresh {
+                } else if fresh || starting {
                     CorePaneStatus::Connecting
                 } else {
                     CorePaneStatus::Restored
@@ -323,8 +372,9 @@ impl ClaimWorker<'_> {
                 }
                 let start_restored = state.start_restored.swap(false, Ordering::AcqRel);
                 // Selection never starts a Session that ended in this server run.
-                let selected =
-                    state.selected.swap(false, Ordering::AcqRel) && session_ended.is_none();
+                let resumed = std::mem::take(&mut was_attached) && state.foreground();
+                let selected = (state.selected.swap(false, Ordering::AcqRel) || resumed)
+                    && session_ended.is_none();
                 if created || repair.is_some() || start_restored || selected {
                     grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
                     let update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -379,10 +429,77 @@ impl ClaimWorker<'_> {
                         }
                         Ok(reply) => reply,
                     };
+                } else if background && state.take_turn() && state.take_prepare(boot) {
+                    // Nobody asked for this Pane yet. Its shell starts in the background with no
+                    // client in control, once per Core boot, when the window's start queue gives
+                    // it a turn, so it is ready when the person opens it.
+                    grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
+                    let update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    grant_appearance = None;
+                    let sent = std::time::Instant::now();
+                    let prepared = exchange(&Request::PrepareRestored {
+                        core: boot,
+                        pane,
+                        size: grant_size,
+                        style: Some(encode_style(&update)),
+                    });
+                    state.changed();
+                    reply = match prepared {
+                        Err(CoreError::DirectoryUnavailable) => {
+                            state.end_background();
+                            unavailable = true;
+                            state.invalidate();
+                            reply
+                        }
+                        // A Core that selected an older minor cannot start it in the background.
+                        Err(CoreError::Unsupported) => {
+                            state.end_background();
+                            reply
+                        }
+                        // The reply was lost, and Core may be starting the shell now, so the Pane
+                        // keeps its place until what Core shows settles the start or its time runs
+                        // out. Core starts a Pane at most once per boot: a repeated Prepare for a
+                        // Pane that has or had a Session only observes it, so a later turn may ask
+                        // again.
+                        Err(error) if state.start_unconfirmed() => {
+                            state.unconfirmed_background(sent + BACKGROUND_READY_LIMIT);
+                            state.release_prepare(boot);
+                            return Err(error);
+                        }
+                        // SpaceTerm Core admitted nothing, so the Pane asks again on a later turn.
+                        Err(error) => {
+                            state.end_background();
+                            state.release_prepare(boot);
+                            return Err(error);
+                        }
+                        // The shell SpaceTerm Core started keeps the Pane's place in the queue
+                        // until it shows it is ready. Any other answer started nothing here.
+                        Ok(reply) => {
+                            match &reply {
+                                Reply::Takeover { target, .. } => {
+                                    state.prepared(target.session, std::time::Instant::now());
+                                }
+                                _ => state.end_background(),
+                            }
+                            reply
+                        }
+                    };
                 } else {
+                    if background {
+                        // The window's start queue wakes this wait with the Pane's turn.
+                        state.want_turn();
+                    }
                     // Start, selection, repair and dismissal wake this wait, and so does
-                    // anything `ControlWatch` sees that can change the server's answer.
-                    state.wake.wait(None);
+                    // anything `ControlWatch` sees that can change the server's answer. A place
+                    // a lost start still holds looks again when its time runs out.
+                    let recheck = recheck
+                        .then(|| std::time::Instant::now() + std::time::Duration::from_millis(250));
+                    state.wake.wait(
+                        [recheck, state.background_deadline()]
+                            .into_iter()
+                            .flatten()
+                            .min(),
+                    );
                     let size = *size.lock().unwrap_or_else(|e| e.into_inner());
                     grant_size = size;
                     grant_appearance = None;
@@ -449,8 +566,13 @@ impl ClaimWorker<'_> {
                     })?;
                 } else {
                     // Take Over, selection and dismissal wake this wait, and so does anything
-                    // `ControlWatch` sees that can change the server's answer.
-                    state.wake.wait(None);
+                    // `ControlWatch` sees that can change the server's answer. A shell this Pane
+                    // started in the background ends its place in the start queue once it shows
+                    // it is ready, or when its time runs out.
+                    if !state.settle_background(pane_id, std::time::Instant::now()) {
+                        state.wake.wait(state.background_deadline());
+                        state.settle_background(pane_id, std::time::Instant::now());
+                    }
                     let size = *size.lock().unwrap_or_else(|e| e.into_inner());
                     grant_size = size;
                     grant_appearance = None;
@@ -1306,6 +1428,181 @@ mod tests {
                 assert_eq!(granted.lease.connection, [1; 32]);
                 host.shutdown().unwrap();
             }
+        }
+    }
+
+    /// A worker whose previous run presented this client's live Session, as after SpaceTerm
+    /// Core restarted.
+    fn run_claim_after_attachment(
+        state: &CorePaneState,
+        mut core: impl FnMut(&Request) -> Result<Reply, CoreError>,
+    ) -> Result<Option<Granted>, CoreError> {
+        ClaimWorker {
+            state,
+            pane_id: [2; 32],
+            alive: &AtomicBool::new(true),
+            attachment: &None,
+            size: &Mutex::new(PaneSize {
+                columns: 80,
+                rows: 24,
+                cell_width: 8,
+                cell_height: 16,
+            }),
+            appearance: &Mutex::new(TerminalAppearanceUpdate::builtin().unwrap()),
+            attached_session: &mut true,
+            takeover: &mut false,
+            paste_unconfirmed: &mut false,
+        }
+        .run(
+            |request| exchange(state, [2; 32], request, &mut core),
+            || {},
+        )
+    }
+
+    /// A background start holds one place in the window's start queue from its turn until the
+    /// shell it started shows it is ready, its time runs out, or it fails: never only until
+    /// SpaceTerm Core answers, which comes before the native shell opens.
+    #[test]
+    fn a_background_start_holds_its_place_until_its_shell_is_ready() {
+        use crate::terminal::core_session::BACKGROUND_READY_LIMIT;
+        let state = CorePaneState::new();
+        state.set(CorePaneStatus::Restored);
+        state.want_turn();
+        assert!(state.awaiting_turn());
+        assert!(!state.starting_in_background());
+        state.grant_turn();
+        assert!(state.starting_in_background());
+        assert!(state.take_turn());
+        assert!(
+            state.starting_in_background() && state.preparing(),
+            "no moment passes between the turn and the start"
+        );
+        let answered = std::time::Instant::now();
+        state.prepared([3; 32], answered);
+        state.offered_take_over(spaceterm_core::pane::control::Controller::Nobody, None);
+        assert!(!state.preparing());
+        assert!(
+            state.starting_in_background(),
+            "the answer alone frees no place"
+        );
+        assert!(!state.settle_background([2; 32], answered));
+        assert!(state.starting_in_background());
+        assert!(state.settle_background([2; 32], answered + BACKGROUND_READY_LIMIT));
+        assert!(!state.starting_in_background());
+
+        // A start that admitted nothing frees its place at once.
+        state.set(CorePaneStatus::Restored);
+        state.want_turn();
+        state.grant_turn();
+        assert!(state.take_turn());
+        state.end_background();
+        assert!(!state.starting_in_background());
+    }
+
+    /// A background start whose reply was lost keeps its place until what Core shows settles
+    /// it or its time runs out. A Session another client acquired before the worker reconnected
+    /// settles it as well: the Pane offers Take Over as for any other client's shell, and the
+    /// place lasts until that shell is ready or its time runs out.
+    #[test]
+    fn a_lost_background_start_settles_on_a_shell_another_client_took() {
+        use crate::terminal::core_session::BACKGROUND_READY_LIMIT;
+        let state = CorePaneState::new();
+        state.set(CorePaneStatus::Restored);
+        state.want_turn();
+        state.grant_turn();
+        assert!(state.take_turn());
+        {
+            let mut recovery = state.connection_recovery.lock().unwrap();
+            recovery.begin_start(Some([9; 32]), true).unwrap();
+            recovery.started(&Err(CoreError::Direct(DirectError::Transport)));
+        }
+        let sent = std::time::Instant::now();
+        state.unconfirmed_background(sent + BACKGROUND_READY_LIMIT);
+        assert!(state.starting_in_background(), "the place stays held");
+        state.want_turn();
+        assert!(!state.awaiting_turn(), "a held place wants no other turn");
+
+        let mut observations = 0;
+        let result = run_claim(&state, |request| match request {
+            Request::SelectPane {
+                explicit: false, ..
+            } => {
+                observations += 1;
+                if observations > 1 {
+                    return Err(CoreError::Stopped);
+                }
+                state.wake.notify();
+                Ok(Reply::Takeover {
+                    target: pane::PaneTarget {
+                        core: [9; 32],
+                        session: [5; 32],
+                    },
+                    controller: pane::control::Controller::Client {
+                        name: "Other".into(),
+                        this_client: false,
+                    },
+                    session_ended: None,
+                })
+            }
+            other => panic!("nothing else is asked: {other:?}"),
+        });
+        assert_eq!(result.err(), Some(CoreError::Stopped));
+        assert!(
+            !state.start_unconfirmed(),
+            "the other client's Session settles it"
+        );
+        assert_eq!(state.status(), CorePaneStatus::Takeover);
+        assert!(
+            state.starting_in_background(),
+            "its place lasts until readiness"
+        );
+        assert!(state.settle_background([2; 32], sent + BACKGROUND_READY_LIMIT));
+        assert!(!state.starting_in_background());
+    }
+
+    /// A place a lost start held lets the queue go on once its time runs out, and the Pane then
+    /// waits for a new turn.
+    #[test]
+    fn a_lapsed_place_of_a_lost_start_waits_for_a_new_turn() {
+        let state = CorePaneState::new();
+        state.set(CorePaneStatus::Restored);
+        state.want_turn();
+        state.grant_turn();
+        assert!(state.take_turn());
+        state.unconfirmed_background(std::time::Instant::now());
+        assert!(!state.starting_in_background());
+        state.want_turn();
+        assert!(state.awaiting_turn());
+    }
+
+    #[test]
+    fn a_restarted_core_starts_only_the_open_pane_the_person_was_using() {
+        for foreground in [true, false] {
+            let state = CorePaneState::new();
+            state.set_foreground(foreground);
+            // The wait for another intent ends at once, so the worker asks again.
+            state.wake.notify();
+            let mut starts = 0;
+            let mut observations = 0;
+            let _ = run_claim_after_attachment(&state, |request| match request {
+                Request::SelectPane {
+                    explicit: false, ..
+                } => {
+                    observations += 1;
+                    if observations == 1 {
+                        Ok(restored(9))
+                    } else {
+                        Err(CoreError::Stopped)
+                    }
+                }
+                Request::StartRestored { core, .. } => {
+                    assert_eq!(*core, [9; 32], "the start names the restarted boot");
+                    starts += 1;
+                    Err(CoreError::Protocol)
+                }
+                other => panic!("a restart starts nothing else: {other:?}"),
+            });
+            assert_eq!(starts, usize::from(foreground), "foreground {foreground}");
         }
     }
 

@@ -1389,6 +1389,7 @@ fn a_service_lane_hello_reaches_the_lane_as_its_agent() {
                 },
                 &machine_id,
                 &identity,
+                Instant::now() + Duration::from_secs(5),
             )
             .unwrap();
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -1523,7 +1524,8 @@ fn the_lane_answers_until_the_peer_closes_and_refuses_malformed_requests() {
 mod flow {
     //! The client flow against a served lane whose server goes away and comes back.
     use super::*;
-    use crate::service::lane::client::{self, Connector, Leftover, Outcome, Session};
+    use crate::service::lane::admin;
+    use crate::service::lane::client::{self, Connector, LaneError, Leftover, Outcome, Session};
     use std::os::unix::net::UnixStream;
 
     /// Connects to whichever run of the server is up. `None` means no server runs.
@@ -1663,6 +1665,7 @@ mod flow {
                 session,
                 LaneAction::Restart,
                 token,
+                OperationId::random().unwrap(),
                 Duration::from_secs(20),
                 &mut |op| {
                     admitted.push(*op);
@@ -1690,6 +1693,7 @@ mod flow {
             session,
             LaneAction::Uninstall,
             token,
+            OperationId::random().unwrap(),
             Duration::from_secs(20),
             &mut |_| Ok(()),
             &|| None,
@@ -1762,6 +1766,183 @@ mod flow {
         });
     }
 
+    /// Another client's admitted Restart, which holds SpaceTerm Core until `settle` runs.
+    fn another_clients_restart(lane: &Lane) -> impl FnOnce() + Send + 'static {
+        let (token, _) = preview(&lane.lane, LaneAction::Restart);
+        assert!(matches!(
+            execute(&lane.lane, LaneAction::Restart, &token, 1),
+            LaneReply::Accepted { .. }
+        ));
+        let core = lane.lane.clone();
+        move || {
+            let id = OperationId([1; 16]);
+            let _helper = helper_lock(&core);
+            let mut ledger = core.ledger().unwrap();
+            ledger.claim(&id).unwrap();
+            ledger.mark(&id, State::Done).unwrap();
+        }
+    }
+
+    /// The person's approved Stop, previewed before another client's Restart admitted.
+    fn approved_stop(lane: &Lane) -> (client::Lane, Session, admin::Preview) {
+        let switch = Arc::new(Switch::default());
+        switch.up(lane.lane.clone());
+        let client = client::Lane::over(switch);
+        let mut session = client.session().unwrap();
+        let approved = admin::preview(&mut session, LaneAction::Stop).unwrap();
+        (client, session, approved)
+    }
+
+    fn pending(lane: &Lane) -> admin::PendingOperations {
+        admin::PendingOperations::new(
+            Directory::open(&lane.service.paths.data.with_extension("pending"), true).unwrap(),
+        )
+    }
+
+    #[test]
+    fn an_approved_stop_waits_for_another_operation_then_runs_once() {
+        with_lane(|lane| {
+            lane.host.sessions.lock().unwrap().push([3; 32]);
+            let (client, session, approved) = approved_stop(&lane);
+            let settle = another_clients_restart(&lane);
+            let settled = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(1500));
+                settle();
+            });
+            let mut said = Vec::new();
+            let outcome = admin::execute_approved(
+                &client,
+                session,
+                LaneAction::Stop,
+                approved.token,
+                Instant::now() + admin::BUSY_WAIT,
+                Duration::from_secs(2),
+                &pending(&lane),
+                &mut admin::Unshared,
+                &mut || Ok(()),
+                &|| None,
+                &mut |began| said.push((began, Instant::now())),
+            )
+            .unwrap();
+            let returned = Instant::now();
+            settled.join().unwrap();
+            // No helper runs here, so the admitted Stop is followed until the wait ends.
+            assert!(
+                matches!(outcome, Outcome::Unconfirmed { .. }),
+                "{outcome:?}"
+            );
+            let said_began: Vec<_> = said.iter().map(|(began, _)| *began).collect();
+            assert_eq!(
+                said_began,
+                [true, false],
+                "the wait is said once and ends once"
+            );
+            // The wait ends when the Core admits the Stop, not when its follow ends.
+            assert!(returned - said[1].1 >= Duration::from_millis(900));
+            assert_eq!(
+                lane.launches.load(Ordering::SeqCst),
+                2,
+                "the Restart and then the Stop each launched once"
+            );
+        });
+    }
+
+    #[test]
+    fn an_approved_stop_is_refused_as_changed_when_its_sessions_change_while_it_waits() {
+        with_lane(|lane| {
+            lane.host.sessions.lock().unwrap().push([3; 32]);
+            let (client, session, approved) = approved_stop(&lane);
+            let settle = another_clients_restart(&lane);
+            let host = lane.host.clone();
+            let settled = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(1500));
+                // A new shell starts once the other operation ends.
+                host.sessions.lock().unwrap().push([4; 32]);
+                settle();
+            });
+            let outcome = admin::execute_approved(
+                &client,
+                session,
+                LaneAction::Stop,
+                approved.token,
+                Instant::now() + admin::BUSY_WAIT,
+                Duration::from_secs(2),
+                &pending(&lane),
+                &mut admin::Unshared,
+                &mut || Ok(()),
+                &|| None,
+                &mut |_| {},
+            );
+            settled.join().unwrap();
+            assert_eq!(outcome, Err(LaneError::Code("changed".into())));
+            assert_eq!(
+                lane.launches.load(Ordering::SeqCst),
+                1,
+                "the changed Stop dispatched nothing"
+            );
+        });
+    }
+
+    /// The caller's deadline bounds the whole wait, as `--timeout` does for the CLI, and a
+    /// refusal that outlasts it admits nothing.
+    #[test]
+    fn an_approval_waits_no_longer_than_its_deadline() {
+        with_lane(|lane| {
+            let (client, session, approved) = approved_stop(&lane);
+            let _settle = another_clients_restart(&lane);
+            let began = Instant::now();
+            let outcome = admin::execute_approved(
+                &client,
+                session,
+                LaneAction::Stop,
+                approved.token,
+                began + Duration::from_millis(2500),
+                Duration::from_secs(90),
+                &pending(&lane),
+                &mut admin::Unshared,
+                &mut || Ok(()),
+                &|| None,
+                &mut |_| {},
+            );
+            assert_eq!(outcome, Err(LaneError::Code("service_busy".into())));
+            assert!(
+                began.elapsed() < Duration::from_secs(4),
+                "{:?}",
+                began.elapsed()
+            );
+            assert_eq!(lane.launches.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn an_interrupted_approval_stops_waiting_and_reports_busy() {
+        with_lane(|lane| {
+            let (client, session, approved) = approved_stop(&lane);
+            let _settle = another_clients_restart(&lane);
+            // The person interrupts once the wait began.
+            let interrupted = std::cell::Cell::new(None);
+            let outcome = admin::execute_approved(
+                &client,
+                session,
+                LaneAction::Stop,
+                approved.token,
+                Instant::now() + admin::BUSY_WAIT,
+                Duration::from_secs(2),
+                &pending(&lane),
+                &mut admin::Unshared,
+                &mut || Ok(()),
+                &|| interrupted.get(),
+                &mut |began| {
+                    if began {
+                        interrupted.set(Some(Instant::now()));
+                    }
+                },
+            );
+            assert_eq!(outcome, Err(LaneError::Code("service_busy".into())));
+            assert_eq!(lane.launches.load(Ordering::SeqCst), 1);
+        });
+    }
+
     #[test]
     fn a_stop_reports_shutdown_and_a_later_connection_settles_it() {
         with_lane(|lane| {
@@ -1785,6 +1966,7 @@ mod flow {
                 session,
                 LaneAction::Stop,
                 token,
+                OperationId::random().unwrap(),
                 Duration::from_secs(20),
                 &mut |op| {
                     admitted = Some(*op);
@@ -1794,19 +1976,20 @@ mod flow {
             )
             .unwrap();
             assert!(matches!(outcome, Outcome::Shutdown { .. }), "{outcome:?}");
-            // A local Start brings the server back, and the next lane connection settles it.
+            // A local Start brings the server back, and Check Status settles it.
             switch.up(lane.restarted());
-            let mut session =
-                Session::open(switch.as_ref(), Instant::now() + Duration::from_secs(5)).unwrap();
-            let leftover = client::settle_leftover(&mut session, &admitted.unwrap()).unwrap();
-            let Leftover::Settled(receipt) = leftover else {
+            let route = client::Lane::over(switch.clone());
+            let pending = pending(&lane);
+            let id = admitted.unwrap();
+            let check = || admin::check(&route, &pending, &id, Instant::now() + REQUEST_LIMIT);
+            let leftover = check().unwrap();
+            let Leftover::Settled(receipt) = leftover.clone() else {
                 panic!("expected a settled stop, got {leftover:?}");
             };
             assert_eq!(receipt.state, LaneOperationState::Done);
-            assert_eq!(
-                client::settle_leftover(&mut session, &admitted.unwrap()).unwrap(),
-                Leftover::Gone
-            );
+            assert_eq!(lane.lane.ledger().unwrap().resolve(&id).unwrap(), None);
+            // SpaceTerm Core forgot the acknowledged receipt; the kept outcome still answers.
+            assert_eq!(check().unwrap(), leftover);
         });
     }
 
@@ -1839,6 +2022,7 @@ mod flow {
                 session,
                 LaneAction::Restart,
                 token,
+                OperationId::random().unwrap(),
                 Duration::from_secs(20),
                 &mut |_| Ok(()),
                 &|| None,
@@ -1859,6 +2043,8 @@ mod flow {
     struct Lossy {
         lane: Mutex<Option<Arc<LaneCore>>>,
         lose: Arc<AtomicBool>,
+        /// Drops the next `Execute` unread instead, as a request lost on its way.
+        drop: Arc<AtomicBool>,
     }
     impl Connector for Lossy {
         fn connect(&self, _: Instant) -> Result<client::Connected, CoreError> {
@@ -1870,6 +2056,7 @@ mod flow {
                 .ok_or(CoreError::NotRunning)?;
             let (client, mut core) = UnixStream::pair().map_err(|_| CoreError::Protocol)?;
             let lose = self.lose.clone();
+            let drop = self.drop.clone();
             std::thread::spawn(move || {
                 loop {
                     let deadline = Instant::now() + Duration::from_secs(5);
@@ -1878,6 +2065,10 @@ mod flow {
                     };
                     let request: LaneRequest = serde_json::from_slice(&bytes).unwrap();
                     let execute = matches!(request, LaneRequest::Execute { .. });
+                    if execute && drop.swap(false, Ordering::SeqCst) {
+                        let _ = core.shutdown(std::net::Shutdown::Both);
+                        return;
+                    }
                     let reply = lane.answer(request, &LOCAL);
                     if execute && lose.swap(false, Ordering::SeqCst) {
                         let _ = core.shutdown(std::net::Shutdown::Both);
@@ -1938,6 +2129,7 @@ mod flow {
                 session,
                 LaneAction::Restart,
                 token,
+                OperationId::random().unwrap(),
                 Duration::from_secs(20),
                 &mut |op| {
                     admitted = Some(*op);
@@ -1956,6 +2148,59 @@ mod flow {
         });
     }
 
+    /// The first `Execute` never reached the Core, and another operation holds it when the flow
+    /// asks again. Busy then proves nothing about the first request, so the flow keeps the same
+    /// operation and admits it, once, after the other operation settles.
+    #[test]
+    fn a_busy_replay_after_a_lost_execute_keeps_the_same_operation() {
+        with_lane(|lane| {
+            lane.host.sessions.lock().unwrap().push([3; 32]);
+            let lossy = Lossy::up(&lane);
+            let (session, token) = lossy.previewed(LaneAction::Stop);
+            lossy.lose.store(false, Ordering::SeqCst);
+            lossy.drop.store(true, Ordering::SeqCst);
+            // The other client's Restart holds the Core until `settle`; only this Stop's helper
+            // settles at once.
+            let hook = lane.hook.lock().unwrap().take();
+            let settle = another_clients_restart(&lane);
+            *lane.hook.lock().unwrap() = hook;
+            let settled = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(2500));
+                settle();
+            });
+            let id = OperationId::random().unwrap();
+            let mut admitted = Vec::new();
+            let outcome = client::perform(
+                &(lossy.clone() as Arc<dyn Connector>),
+                session,
+                LaneAction::Stop,
+                token,
+                id,
+                Duration::from_secs(20),
+                &mut |op| {
+                    admitted.push(*op);
+                    Ok(())
+                },
+                &|| None,
+            );
+            settled.join().unwrap();
+            let operation = match outcome {
+                Ok(
+                    Outcome::Shutdown { operation, .. } | Outcome::Unconfirmed { operation, .. },
+                ) => operation,
+                Ok(Outcome::Settled { receipt, .. }) => receipt.operation,
+                Err(error) => panic!("a lost Execute is never refused as busy: {error:?}"),
+            };
+            assert_eq!(operation, id.to_string());
+            assert_eq!(admitted, [id]);
+            assert_eq!(
+                lane.launches.load(Ordering::SeqCst),
+                2,
+                "the other Restart and this Stop each launched once"
+            );
+        });
+    }
+
     #[test]
     fn an_interrupted_flow_resolves_a_lost_accepted_reply_without_sending_execute_again() {
         with_lane(|lane| {
@@ -1968,6 +2213,7 @@ mod flow {
                 session,
                 LaneAction::Restart,
                 token,
+                OperationId::random().unwrap(),
                 Duration::from_secs(60),
                 &mut |_| Ok(()),
                 &|| Some(interrupted),
@@ -2018,6 +2264,34 @@ mod flow {
         }
     }
 
+    /// A preview that a stalled Core never answers ends at the caller's deadline, not at the
+    /// lane's own request limit.
+    #[test]
+    fn a_stalled_preview_ends_at_the_callers_deadline() {
+        with_lane(|lane| {
+            let stalling = Arc::new(Stalling::default());
+            *stalling.lane.lock().unwrap() = Some(lane.lane.clone());
+            stalling.stalled.store(true, Ordering::SeqCst);
+            let client = client::Lane::over(stalling.clone());
+            let session = client.session().unwrap();
+            let began = Instant::now();
+            let previewed = admin::preview_when_ready(
+                &client,
+                session,
+                LaneAction::Restart,
+                began + Duration::from_millis(1500),
+                &|| None,
+                &mut |_| {},
+            );
+            assert!(previewed.is_err());
+            assert!(
+                began.elapsed() < Duration::from_secs(4),
+                "{:?}",
+                began.elapsed()
+            );
+        });
+    }
+
     #[test]
     fn an_interrupt_ends_a_request_a_stalled_core_holds_within_the_grace() {
         with_lane(|lane| {
@@ -2044,6 +2318,7 @@ mod flow {
                 session,
                 LaneAction::Restart,
                 token,
+                OperationId::random().unwrap(),
                 Duration::from_secs(60),
                 &mut |_| Ok(()),
                 &|| (Instant::now() >= at).then_some(at + Duration::from_secs(5)),
@@ -2077,6 +2352,7 @@ mod flow {
                 session,
                 LaneAction::Stop,
                 token,
+                OperationId::random().unwrap(),
                 Duration::from_secs(20),
                 &mut |_| Ok(()),
                 &|| None,
@@ -2103,9 +2379,19 @@ mod flow {
         fn release(&mut self) {
             self.lock = None;
         }
-        fn resume(&mut self) -> bool {
-            self.lock = Some(self.directory.lock_shared("state.lock").unwrap());
-            true
+        fn resume(&mut self, deadline: Instant) -> bool {
+            let limit = deadline.saturating_duration_since(Instant::now());
+            match self
+                .directory
+                .wait_lock_shared("state.lock", limit)
+                .unwrap()
+            {
+                crate::storage::LockWait::Locked(lock) => {
+                    self.lock = Some(lock);
+                    true
+                }
+                _ => false,
+            }
         }
     }
 
@@ -2140,7 +2426,8 @@ mod flow {
             };
             let pending = pending_record(&lane);
             let route = client::Lane::over(switch.clone());
-            let (mut session, _) = admin::open(&route, &pending).unwrap();
+            let (mut session, _) =
+                admin::open(&route, &pending, Instant::now() + REQUEST_LIMIT).unwrap();
             let preview = admin::preview(&mut session, LaneAction::Restart).unwrap();
             admin::execute(
                 &route,
@@ -2182,7 +2469,8 @@ mod flow {
             }));
             let pending = pending_record(&lane);
             let route = client::Lane::over(switch.clone());
-            let (mut session, _) = admin::open(&route, &pending).unwrap();
+            let (mut session, _) =
+                admin::open(&route, &pending, Instant::now() + REQUEST_LIMIT).unwrap();
             let preview = admin::preview(&mut session, LaneAction::Restart).unwrap();
             let outcome = admin::execute(
                 &route,
@@ -2205,7 +2493,8 @@ mod flow {
             assert_eq!(recorded.len(), 1, "the operation stays pending");
 
             switch.up(lane.restarted());
-            let (_, settled) = admin::open(&route, &pending).unwrap();
+            let (_, settled) =
+                admin::open(&route, &pending, Instant::now() + REQUEST_LIMIT).unwrap();
             assert_eq!(settled.len(), 1);
             assert_eq!(settled[0].operation, recorded[0]);
             // Start-up can't prove a Restart whose helper ended without recording an outcome,
@@ -2214,6 +2503,811 @@ mod flow {
             assert_eq!(admin::receipt_verdict(&settled[0]), Verdict::Uncertain);
             assert!(pending.list().unwrap().is_empty(), "settling removes it");
             assert!(lane.lane.ledger().unwrap().records().unwrap().is_empty());
+        });
+    }
+
+    /// A server whose admission stalls for `stall`, as a stopped Core holds an accepted
+    /// connection, and that answers every request once it resumes.
+    struct Paused {
+        lane: Arc<LaneCore>,
+        stall: Duration,
+    }
+    impl Connector for Paused {
+        fn connect(&self, _: Instant) -> Result<client::Connected, CoreError> {
+            std::thread::sleep(self.stall);
+            let switch = Switch::default();
+            switch.up(self.lane.clone());
+            let connected = switch.connect(Instant::now() + Duration::from_secs(5));
+            // The serving thread owns its own end, so the switch may go.
+            std::mem::forget(switch);
+            connected
+        }
+    }
+
+    /// A confirmed Stop whose lane stalls past its deadline while it opens never sends
+    /// `Execute`, even once the Core resumes and would admit it.
+    #[test]
+    fn a_lane_that_stalls_past_the_deadline_at_admission_dispatches_nothing() {
+        with_lane(|lane| {
+            lane.host.sessions.lock().unwrap().push([3; 32]);
+            let pending = pending(&lane);
+            let paused = client::Lane::over(Arc::new(Paused {
+                lane: lane.lane.clone(),
+                stall: Duration::from_millis(1500),
+            }));
+            let began = Instant::now();
+            let opened = admin::open(&paused, &pending, began + Duration::from_millis(500));
+            assert_eq!(
+                opened.err().map(|unopened| unopened.error),
+                Some(LaneError::Deadline)
+            );
+            assert!(
+                began.elapsed() < Duration::from_secs(1),
+                "{:?}",
+                began.elapsed()
+            );
+            // The Core resumes; nothing it receives admits the Stop.
+            std::thread::sleep(Duration::from_millis(1500));
+            assert_eq!(lane.launches.load(Ordering::SeqCst), 0);
+            assert!(lane.lane.ledger().unwrap().records().unwrap().is_empty());
+            assert!(pending.list().unwrap().is_empty());
+        });
+    }
+
+    /// An approval whose deadline already passed records and sends nothing, and a flow with no
+    /// time left never runs its dispatch step.
+    #[test]
+    fn an_approval_with_no_time_left_records_and_sends_nothing() {
+        with_lane(|lane| {
+            lane.host.sessions.lock().unwrap().push([3; 32]);
+            let (client, session, approved) = approved_stop(&lane);
+            let pending = pending(&lane);
+            let mut dispatched = 0;
+            let outcome = admin::execute_approved(
+                &client,
+                session,
+                LaneAction::Stop,
+                approved.token.clone(),
+                Instant::now(),
+                Duration::from_secs(90),
+                &pending,
+                &mut admin::Unshared,
+                &mut || {
+                    dispatched += 1;
+                    Ok(())
+                },
+                &|| None,
+                &mut |_| {},
+            );
+            assert_eq!(outcome, Err(LaneError::Deadline));
+            assert_eq!(dispatched, 0);
+            let session = client.session().unwrap();
+            let mut admitted = 0;
+            let outcome = client::perform(
+                &(Arc::new({
+                    let switch = Switch::default();
+                    switch.up(lane.lane.clone());
+                    switch
+                }) as Arc<dyn Connector>),
+                session,
+                LaneAction::Stop,
+                approved.token,
+                OperationId::random().unwrap(),
+                Duration::ZERO,
+                &mut |_| {
+                    admitted += 1;
+                    Ok(())
+                },
+                &|| None,
+            );
+            assert_eq!(outcome, Err(LaneError::Deadline));
+            assert_eq!(admitted, 0);
+            std::thread::sleep(Duration::from_millis(300));
+            assert_eq!(lane.launches.load(Ordering::SeqCst), 0);
+            assert!(lane.lane.ledger().unwrap().records().unwrap().is_empty());
+            assert!(pending.list().unwrap().is_empty());
+        });
+    }
+
+    /// Another caller of the same route and identity that holds the operation record past the
+    /// deadline ends the recovery and the approval by it. The approval sends no `Execute`.
+    #[test]
+    fn a_record_another_caller_holds_past_the_deadline_dispatches_nothing() {
+        with_lane(|lane| {
+            let (client, session, approved) = approved_stop(&lane);
+            let pending = pending(&lane);
+            let record =
+                Directory::open(&lane.service.paths.data.with_extension("pending"), false).unwrap();
+            let held = record.lock("service-operations.lock", false).unwrap();
+
+            let began = Instant::now();
+            let opened = admin::open(&client, &pending, began + Duration::from_millis(500));
+            assert_eq!(
+                opened.err().map(|unopened| unopened.error),
+                Some(LaneError::Deadline)
+            );
+            assert!(
+                began.elapsed() < Duration::from_millis(1500),
+                "{:?}",
+                began.elapsed()
+            );
+
+            let began = Instant::now();
+            let outcome = admin::execute_approved(
+                &client,
+                session,
+                LaneAction::Stop,
+                approved.token,
+                began + Duration::from_secs(1),
+                Duration::from_secs(90),
+                &pending,
+                &mut admin::Unshared,
+                &mut || Ok(()),
+                &|| None,
+                &mut |_| {},
+            );
+            assert_eq!(outcome, Err(LaneError::Deadline));
+            assert!(
+                began.elapsed() < Duration::from_secs(2),
+                "{:?}",
+                began.elapsed()
+            );
+            std::thread::sleep(Duration::from_millis(300));
+            assert_eq!(lane.launches.load(Ordering::SeqCst), 0);
+            assert!(lane.lane.ledger().unwrap().records().unwrap().is_empty());
+            drop(held);
+            assert!(pending.list().unwrap().is_empty());
+        });
+    }
+
+    /// A starting SpaceTerm Core's migration that takes the client's state alone while an
+    /// approval waits for another operation, and keeps it past the deadline, never extends the
+    /// approval: it ends by its deadline with the refusal that admitted nothing.
+    #[test]
+    fn a_migration_that_holds_the_state_past_the_deadline_ends_the_approval_by_it() {
+        with_lane(|lane| {
+            let (client, session, approved) = approved_stop(&lane);
+            let _settle = another_clients_restart(&lane);
+            let state = lane.service.paths.data.join("client-state");
+            let directory = Directory::open(&state, true).unwrap();
+            let mut share = Shared {
+                lock: Some(directory.lock_shared("state.lock").unwrap()),
+                directory,
+            };
+            let migrating = Directory::open(&state, false).unwrap();
+            let (taken, took) = std::sync::mpsc::channel();
+            let (end, ended) = std::sync::mpsc::channel::<()>();
+            let migration = std::thread::spawn(move || {
+                let lock = loop {
+                    if let Some(lock) = migrating.try_lock("state.lock").unwrap() {
+                        break lock;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                };
+                taken.send(()).unwrap();
+                let _ = ended.recv_timeout(Duration::from_secs(10));
+                drop(lock);
+            });
+            let began = Instant::now();
+            let outcome = admin::execute_approved(
+                &client,
+                session,
+                LaneAction::Stop,
+                approved.token,
+                began + Duration::from_secs(2),
+                Duration::from_secs(90),
+                &pending(&lane),
+                &mut share,
+                &mut || Ok(()),
+                &|| None,
+                &mut |_| {},
+            );
+            assert_eq!(outcome, Err(LaneError::Code("service_busy".into())));
+            assert!(
+                began.elapsed() < Duration::from_millis(3500),
+                "{:?}",
+                began.elapsed()
+            );
+            assert!(took.try_recv().is_ok(), "the migration took the state");
+            assert!(share.lock.is_none());
+            // Only the other client's Restart launched.
+            assert_eq!(lane.launches.load(Ordering::SeqCst), 1);
+            end.send(()).unwrap();
+            migration.join().unwrap();
+        });
+    }
+
+    /// A transport whose write of every frame stops at its deadline, after a byte of the frame
+    /// left when `written`.
+    struct Expiring {
+        written: bool,
+    }
+    impl crate::protocol::Preamble for Expiring {
+        fn send_frame(
+            &mut self,
+            _: &[u8],
+            deadline: Instant,
+        ) -> Result<(), crate::protocol::Unsent> {
+            std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+            Err(crate::protocol::Unsent {
+                error: CoreError::Protocol,
+                written: self.written,
+            })
+        }
+        fn receive(&mut self, _: usize, _: Instant) -> Result<Vec<u8>, CoreError> {
+            Err(CoreError::Protocol)
+        }
+    }
+
+    /// One [`Expiring`] connection; every later dial finds no server.
+    struct OneDial {
+        written: bool,
+        dials: AtomicUsize,
+    }
+    impl Connector for OneDial {
+        fn connect(&self, _: Instant) -> Result<client::Connected, CoreError> {
+            if self.dials.fetch_add(1, Ordering::SeqCst) > 0 {
+                return Err(CoreError::NotRunning);
+            }
+            Ok((
+                Box::new(Expiring {
+                    written: self.written,
+                }),
+                crate::protocol::version::SERVICE,
+                crate::protocol::version::SERVICE,
+            ))
+        }
+    }
+
+    /// An `Execute` whose write stops at the deadline dispatched nothing when no byte of it left,
+    /// and stays an unconfirmed outcome of its operation when one did.
+    #[test]
+    fn an_execute_whose_write_expires_is_unsent_only_when_no_byte_left() {
+        for written in [false, true] {
+            let connector: Arc<dyn Connector> = Arc::new(OneDial {
+                written,
+                dials: AtomicUsize::new(0),
+            });
+            let session =
+                Session::open(connector.as_ref(), Instant::now() + Duration::from_secs(5)).unwrap();
+            let id = OperationId::random().unwrap();
+            let outcome = client::perform(
+                &connector,
+                session,
+                LaneAction::Restart,
+                "c1-00".into(),
+                id,
+                Duration::from_millis(1500),
+                &mut |_| Ok(()),
+                &|| None,
+            );
+            if written {
+                assert_eq!(
+                    outcome,
+                    Ok(Outcome::Unconfirmed {
+                        operation: id.to_string(),
+                        boot: String::new(),
+                        last: None,
+                    })
+                );
+            } else {
+                assert_eq!(outcome, Err(LaneError::Deadline));
+            }
+        }
+    }
+
+    /// Which requests [`Cutting`] counts, and at which of them it cuts the connection.
+    type Cut = Arc<Mutex<Option<(fn(&LaneRequest) -> bool, usize)>>>;
+
+    /// A server that answers like the lane and cuts its connection at the `nth` request that
+    /// `cut` matches: before the lane handles it, or once the lane handled it and before its
+    /// reply leaves when `answered`.
+    struct Cutting {
+        lane: Arc<LaneCore>,
+        cut: Cut,
+        answered: bool,
+    }
+    impl Connector for Cutting {
+        fn connect(&self, _: Instant) -> Result<client::Connected, CoreError> {
+            let lane = self.lane.clone();
+            let cut = self.cut.clone();
+            let answered = self.answered;
+            let (client, mut core) = UnixStream::pair().map_err(|_| CoreError::Protocol)?;
+            std::thread::spawn(move || {
+                loop {
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    let Ok(bytes) = core.receive(MAX_FRAME, deadline) else {
+                        return;
+                    };
+                    let request: LaneRequest = serde_json::from_slice(&bytes).unwrap();
+                    let cutting = {
+                        let mut cut = cut.lock().unwrap();
+                        let mut cutting = false;
+                        if let Some((matches, nth)) = cut.as_mut()
+                            && matches(&request)
+                        {
+                            *nth -= 1;
+                            if *nth == 0 {
+                                *cut = None;
+                                cutting = true;
+                            }
+                        }
+                        cutting
+                    };
+                    if cutting {
+                        if answered {
+                            let _ = lane.answer(request, &LOCAL);
+                        }
+                        let _ = core.shutdown(std::net::Shutdown::Both);
+                        return;
+                    }
+                    let reply = lane.answer(request, &LOCAL);
+                    let _ = core.send(&serde_json::to_vec(&reply).unwrap(), deadline);
+                }
+            });
+            Ok((
+                Box::new(client),
+                crate::protocol::version::SERVICE,
+                crate::protocol::version::SERVICE,
+            ))
+        }
+    }
+
+    /// Records a Restart this client admitted earlier and the server settled as done, as a
+    /// later lane connection finds it.
+    fn settled_leftover(lane: &Lane, pending: &admin::PendingOperations) -> OperationId {
+        settled_leftover_as(lane, pending, State::Done)
+    }
+
+    /// [`settled_leftover`] that the server settled as `state`.
+    fn settled_leftover_as(
+        lane: &Lane,
+        pending: &admin::PendingOperations,
+        state: State,
+    ) -> OperationId {
+        let id = OperationId::random().unwrap();
+        let mut ledger = lane.lane.ledger().unwrap();
+        ledger
+            .admit(Record {
+                id,
+                actor: LOCAL,
+                core: lane.lane.core,
+                boot: lane.lane.boot,
+                action: Action::Restart,
+                observation_digest: [0; 32],
+                candidate: None,
+                state: State::Admitted,
+                updated_at: 0,
+                orphaned: false,
+            })
+            .unwrap();
+        ledger.mark(&id, state).unwrap();
+        pending.add(&id).unwrap();
+        id
+    }
+
+    fn resolve(request: &LaneRequest) -> bool {
+        matches!(request, LaneRequest::Resolve { .. })
+    }
+
+    fn acknowledge(request: &LaneRequest) -> bool {
+        matches!(request, LaneRequest::Acknowledge { .. })
+    }
+
+    /// A connection that fails while it reads leftovers acknowledges none, and one that fails
+    /// while it acknowledges them returns every outcome it already acknowledged.
+    #[test]
+    fn a_partly_failed_recovery_keeps_every_outcome_it_read() {
+        with_lane(|lane| {
+            let pending = pending(&lane);
+            let first = settled_leftover(&lane, &pending);
+            let second = settled_leftover(&lane, &pending);
+            let cut = Arc::new(Mutex::new(None));
+            let route = client::Lane::over(Arc::new(Cutting {
+                lane: lane.lane.clone(),
+                cut: cut.clone(),
+                answered: false,
+            }));
+            let open = || admin::open(&route, &pending, Instant::now() + REQUEST_LIMIT);
+
+            *cut.lock().unwrap() = Some((resolve as fn(&LaneRequest) -> bool, 2));
+            let unopened = open().err().unwrap();
+            assert!(unopened.settled.is_empty());
+            assert_eq!(lane.lane.ledger().unwrap().records().unwrap().len(), 2);
+            assert_eq!(pending.list().unwrap().len(), 2);
+
+            *cut.lock().unwrap() = Some((acknowledge as fn(&LaneRequest) -> bool, 2));
+            let unopened = open().err().unwrap();
+            let operations: Vec<_> = unopened
+                .settled
+                .iter()
+                .map(|v| v.operation.clone())
+                .collect();
+            assert_eq!(operations, vec![first.to_string()]);
+            assert_eq!(unopened.settled[0].state, LaneOperationState::Done);
+            assert_eq!(pending.list().unwrap(), vec![second.to_string()]);
+
+            let (_, settled) = open().unwrap();
+            let operations: Vec<_> = settled.iter().map(|v| v.operation.clone()).collect();
+            assert_eq!(operations, vec![second.to_string()]);
+            assert!(pending.list().unwrap().is_empty());
+            assert!(lane.lane.ledger().unwrap().records().unwrap().is_empty());
+        });
+    }
+
+    fn cutting(lane: &Lane, answered: bool) -> (client::Lane, Cut) {
+        let cut = Arc::new(Mutex::new(None));
+        let route = client::Lane::over(Arc::new(Cutting {
+            lane: lane.lane.clone(),
+            cut: cut.clone(),
+            answered,
+        }));
+        (route, cut)
+    }
+
+    fn settled_receipt(leftover: Leftover) -> LaneReceipt {
+        match leftover {
+            Leftover::Settled(receipt) => receipt,
+            other => panic!("expected a settled receipt, got {other:?}"),
+        }
+    }
+
+    /// SpaceTerm Core forgets a receipt before its `Acknowledged` reply leaves. A reply lost after
+    /// that, on a recovering connection or on Check Status, still leaves the exact outcome for
+    /// the next Check Status and the next recovering connection.
+    #[test]
+    fn an_acknowledgement_lost_after_the_core_forgot_the_receipt_keeps_its_outcome() {
+        with_lane(|lane| {
+            let pending = pending(&lane);
+            let failed = State::Failed {
+                code: "startup_failed".into(),
+            };
+            let recovered = settled_leftover_as(&lane, &pending, failed.clone());
+            let (route, cut) = cutting(&lane, true);
+            let check = |id: &OperationId| {
+                admin::check(&route, &pending, id, Instant::now() + REQUEST_LIMIT)
+                    .map(settled_receipt)
+                    .unwrap()
+            };
+            let expected = |id: &OperationId| LaneReceipt {
+                operation: id.to_string(),
+                action: LaneAction::Restart,
+                state: LaneOperationState::Failed,
+                code: Some("startup_failed".into()),
+                boot: hex(&lane.lane.boot),
+            };
+
+            // A recovering connection's first acknowledgement reaches the Core, which forgets
+            // the receipt, and its reply is lost.
+            *cut.lock().unwrap() = Some((acknowledge as fn(&LaneRequest) -> bool, 1));
+            let unopened = admin::open(&route, &pending, Instant::now() + REQUEST_LIMIT)
+                .err()
+                .unwrap();
+            assert!(unopened.settled.is_empty());
+            assert_eq!(
+                lane.lane.ledger().unwrap().resolve(&recovered).unwrap(),
+                None
+            );
+            assert!(pending.list().unwrap().contains(&recovered.to_string()));
+            assert_eq!(check(&recovered), expected(&recovered));
+
+            // Check Status's own acknowledgement reaches the Core, and its reply is lost.
+            let checked = settled_leftover_as(&lane, &pending, failed);
+            *cut.lock().unwrap() = Some((acknowledge as fn(&LaneRequest) -> bool, 1));
+            assert_eq!(check(&checked), expected(&checked));
+            assert_eq!(lane.lane.ledger().unwrap().resolve(&checked).unwrap(), None);
+            assert_eq!(check(&checked), expected(&checked));
+
+            // The next recovering connection reports both from what this identity kept.
+            let (_, settled) =
+                admin::open(&route, &pending, Instant::now() + REQUEST_LIMIT).unwrap();
+            let mut operations: Vec<_> = settled.iter().map(|v| v.operation.clone()).collect();
+            operations.sort();
+            let mut both = vec![recovered.to_string(), checked.to_string()];
+            both.sort();
+            assert_eq!(operations, both);
+            assert!(
+                settled
+                    .iter()
+                    .all(|receipt| receipt.code.as_deref() == Some("startup_failed"))
+            );
+            assert!(pending.list().unwrap().is_empty());
+            assert_eq!(check(&recovered), expected(&recovered));
+        });
+    }
+
+    /// A flow that follows its own Restart keeps the receipt's outcome before it acknowledges the
+    /// receipt, and forgets the operation only once SpaceTerm Core confirmed the
+    /// acknowledgement. An acknowledgement cut before the Core handled it leaves the receipt with
+    /// the Core and the operation recorded, so the next connection acknowledges it. One cut after
+    /// the Core forgot the receipt leaves the operation recorded too, and the kept outcome
+    /// answers the next connection.
+    #[test]
+    fn a_followed_receipt_is_kept_before_its_acknowledgement_and_forgotten_once_confirmed() {
+        for answered in [false, true] {
+            with_lane(|lane| {
+                let pending = pending(&lane);
+                let ledger_lane = lane.lane.clone();
+                *lane.hook.lock().unwrap() = Some(Box::new(move |op: &OperationId| {
+                    let (old, op) = (ledger_lane.clone(), *op);
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(300));
+                        let _helper = helper_lock(&old);
+                        let mut ledger = old.ledger().unwrap();
+                        ledger.claim(&op).unwrap();
+                        ledger.mark(&op, State::Done).unwrap();
+                    });
+                }));
+                let (route, cut) = cutting(&lane, answered);
+                let (mut session, _) =
+                    admin::open(&route, &pending, Instant::now() + REQUEST_LIMIT).unwrap();
+                let preview = admin::preview(&mut session, LaneAction::Restart).unwrap();
+                *cut.lock().unwrap() = Some((acknowledge as fn(&LaneRequest) -> bool, 1));
+                let outcome = admin::execute_approved(
+                    &route,
+                    session,
+                    LaneAction::Restart,
+                    preview.token,
+                    Instant::now() + Duration::from_secs(20),
+                    Duration::from_secs(20),
+                    &pending,
+                    &mut admin::Unshared,
+                    &mut || Ok(()),
+                    &|| None,
+                    &mut |_| {},
+                )
+                .unwrap();
+                let Outcome::Settled { receipt, .. } = outcome else {
+                    panic!("answered={answered}: expected a settled receipt, got {outcome:?}");
+                };
+                assert_eq!(receipt.state, LaneOperationState::Done);
+                let id = OperationId::parse(&receipt.operation).unwrap();
+                assert_eq!(
+                    pending.list().unwrap(),
+                    vec![receipt.operation.clone()],
+                    "answered={answered}: an unconfirmed acknowledgement forgets nothing"
+                );
+                assert_eq!(
+                    pending
+                        .kept_by(&receipt.operation, Instant::now() + REQUEST_LIMIT)
+                        .unwrap()
+                        .as_ref(),
+                    Some(&receipt),
+                    "answered={answered}: the outcome was kept before the acknowledgement"
+                );
+                assert_eq!(
+                    lane.lane.ledger().unwrap().resolve(&id).unwrap().is_some(),
+                    !answered,
+                    "answered={answered}"
+                );
+
+                let (_, settled) =
+                    admin::open(&route, &pending, Instant::now() + REQUEST_LIMIT).unwrap();
+                assert_eq!(settled, vec![receipt], "answered={answered}");
+                assert!(pending.list().unwrap().is_empty(), "answered={answered}");
+                assert_eq!(lane.lane.ledger().unwrap().resolve(&id).unwrap(), None);
+            });
+        }
+    }
+
+    fn executes(request: &LaneRequest) -> bool {
+        matches!(request, LaneRequest::Execute { .. })
+    }
+
+    /// An approval's one absolute deadline holds across every handoff before `Execute`. A step
+    /// that runs past it, as a slow journal or a process suspended between steps would, sends
+    /// no byte of `Execute`, admits nothing and leaves no record.
+    #[test]
+    fn no_execute_byte_leaves_after_the_approvals_deadline() {
+        with_lane(|lane| {
+            let pending = pending(&lane);
+            let (route, cut) = cutting(&lane, false);
+            let (mut session, _) =
+                admin::open(&route, &pending, Instant::now() + REQUEST_LIMIT).unwrap();
+            let preview = admin::preview(&mut session, LaneAction::Restart).unwrap();
+            *cut.lock().unwrap() = Some((executes as fn(&LaneRequest) -> bool, 1));
+            let deadline = Instant::now() + Duration::from_millis(300);
+            let outcome = admin::execute_approved(
+                &route,
+                session,
+                LaneAction::Restart,
+                preview.token,
+                deadline,
+                Duration::from_secs(20),
+                &pending,
+                &mut admin::Unshared,
+                &mut || {
+                    std::thread::sleep(
+                        deadline.saturating_duration_since(Instant::now())
+                            + Duration::from_millis(50),
+                    );
+                    Ok(())
+                },
+                &|| None,
+                &mut |_| {},
+            );
+            assert_eq!(outcome, Err(LaneError::Deadline));
+            assert!(cut.lock().unwrap().is_some(), "no Execute reached the Core");
+            assert!(pending.list().unwrap().is_empty());
+            assert!(lane.lane.ledger().unwrap().records().unwrap().is_empty());
+        });
+    }
+
+    /// Settings' Check Now on a paired Machine opens the lane as the original surface's identity
+    /// and acknowledges its leftovers, whole or in part. The original surface's Check Status for
+    /// each operation then reads the same outcome.
+    #[test]
+    fn check_now_recovery_leaves_the_outcome_for_the_original_check_status() {
+        with_lane(|lane| {
+            let pending = pending(&lane);
+            let (route, cut) = cutting(&lane, false);
+            let check = |id: &OperationId| {
+                admin::check(&route, &pending, id, Instant::now() + REQUEST_LIMIT)
+                    .map(settled_receipt)
+                    .unwrap()
+            };
+
+            let done = settled_leftover(&lane, &pending);
+            let refused = settled_leftover_as(
+                &lane,
+                &pending,
+                State::Failed {
+                    code: "address_unavailable".into(),
+                },
+            );
+            let (_, settled) =
+                admin::open(&route, &pending, Instant::now() + REQUEST_LIMIT).unwrap();
+            assert_eq!(settled.len(), 2);
+            assert!(lane.lane.ledger().unwrap().records().unwrap().is_empty());
+            for receipt in &settled {
+                let id = OperationId::parse(&receipt.operation).unwrap();
+                assert_eq!(&check(&id), receipt);
+            }
+            assert_eq!(check(&done).state, LaneOperationState::Done);
+            assert_eq!(check(&refused).code.as_deref(), Some("address_unavailable"));
+
+            // A recovery that fails before its second acknowledgement reaches the Core.
+            let first = settled_leftover(&lane, &pending);
+            let second = settled_leftover(&lane, &pending);
+            *cut.lock().unwrap() = Some((acknowledge as fn(&LaneRequest) -> bool, 2));
+            let unopened = admin::open(&route, &pending, Instant::now() + REQUEST_LIMIT)
+                .err()
+                .unwrap();
+            assert_eq!(unopened.settled.len(), 1);
+            let acknowledged = &unopened.settled[0];
+            let id = OperationId::parse(&acknowledged.operation).unwrap();
+            assert!([first, second].contains(&id));
+            assert_eq!(&check(&id), acknowledged);
+            let other = if id == first { second } else { first };
+            assert_eq!(check(&other).state, LaneOperationState::Done);
+        });
+    }
+
+    /// Check Status for an operation a flow of the same identity still follows reads its
+    /// outcome and leaves the receipt for that flow, which still settles on its own receipt.
+    #[test]
+    fn check_status_never_acknowledges_a_receipt_a_running_flow_of_its_identity_follows() {
+        with_lane(|lane| {
+            let switch = Arc::new(Switch::default());
+            switch.up(lane.lane.clone());
+            let route = client::Lane::over(switch.clone());
+            let pending = Arc::new(pending(&lane));
+            let ledger_lane = lane.lane.clone();
+            *lane.hook.lock().unwrap() = Some(Box::new(move |op: &OperationId| {
+                let (old, op) = (ledger_lane.clone(), *op);
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(1500));
+                    let _helper = helper_lock(&old);
+                    let mut ledger = old.ledger().unwrap();
+                    ledger.claim(&op).unwrap();
+                    ledger.mark(&op, State::Done).unwrap();
+                });
+            }));
+            let (mut session, _) =
+                admin::open(&route, &pending, Instant::now() + REQUEST_LIMIT).unwrap();
+            let preview = admin::preview(&mut session, LaneAction::Restart).unwrap();
+            let (follow_route, follow_pending) = (route.clone(), pending.clone());
+            let follower = std::thread::spawn(move || {
+                admin::execute_approved(
+                    &follow_route,
+                    session,
+                    LaneAction::Restart,
+                    preview.token,
+                    Instant::now() + Duration::from_secs(20),
+                    Duration::from_secs(20),
+                    &follow_pending,
+                    &mut admin::Unshared,
+                    &mut || Ok(()),
+                    &|| None,
+                    &mut |_| {},
+                )
+            });
+            let began = Instant::now();
+            let followed = loop {
+                if let Some(operation) = pending.list().unwrap().first() {
+                    break OperationId::parse(operation).unwrap();
+                }
+                assert!(began.elapsed() < Duration::from_secs(5), "never journaled");
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            // The Restart settles at 1.5 s, and the follower reads it at its next poll.
+            std::thread::sleep(Duration::from_millis(1700));
+            let checked = settled_receipt(
+                admin::check(&route, &pending, &followed, Instant::now() + REQUEST_LIMIT).unwrap(),
+            );
+            assert_eq!(checked.state, LaneOperationState::Done);
+            let outcome = follower.join().unwrap().unwrap();
+            let Outcome::Settled { receipt, .. } = outcome else {
+                panic!("expected the follower's own settled receipt, got {outcome:?}");
+            };
+            assert_eq!(receipt, checked);
+            assert!(pending.list().unwrap().is_empty());
+        });
+    }
+
+    /// Another command of the same identity that opens the lane while a Restart is followed
+    /// leaves every leftover for later, so the Restart reads its own receipt.
+    #[test]
+    fn a_concurrent_connection_never_settles_a_receipt_a_running_flow_follows() {
+        with_lane(|lane| {
+            let switch = Arc::new(Switch::default());
+            switch.up(lane.lane.clone());
+            let route = client::Lane::over(switch.clone());
+            let pending = Arc::new(pending(&lane));
+            // An earlier command's settled Restart, recorded after the follower opened.
+            let earlier = settled_leftover(&lane, &pending);
+            pending.remove(&earlier.to_string()).unwrap();
+            let ledger_lane = lane.lane.clone();
+            *lane.hook.lock().unwrap() = Some(Box::new(move |op: &OperationId| {
+                let (old, op) = (ledger_lane.clone(), *op);
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(1500));
+                    let _helper = helper_lock(&old);
+                    let mut ledger = old.ledger().unwrap();
+                    ledger.claim(&op).unwrap();
+                    ledger.mark(&op, State::Done).unwrap();
+                });
+            }));
+            let (mut session, _) =
+                admin::open(&route, &pending, Instant::now() + REQUEST_LIMIT).unwrap();
+            let preview = admin::preview(&mut session, LaneAction::Restart).unwrap();
+            let (follow_route, follow_pending) = (route.clone(), pending.clone());
+            let follower = std::thread::spawn(move || {
+                admin::execute_approved(
+                    &follow_route,
+                    session,
+                    LaneAction::Restart,
+                    preview.token,
+                    Instant::now() + Duration::from_secs(20),
+                    Duration::from_secs(20),
+                    &follow_pending,
+                    &mut admin::Unshared,
+                    &mut || Ok(()),
+                    &|| None,
+                    &mut |_| {},
+                )
+            });
+            pending.add(&earlier).unwrap();
+            let began = Instant::now();
+            while pending.list().unwrap().len() < 2 {
+                assert!(began.elapsed() < Duration::from_secs(5), "never journaled");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            // The Restart settles while this connection is open, as `status` would find it.
+            std::thread::sleep(Duration::from_millis(1700));
+            let (_, settled) =
+                admin::open(&route, &pending, Instant::now() + REQUEST_LIMIT).unwrap();
+            assert!(settled.is_empty(), "{settled:?}");
+            let outcome = follower.join().unwrap().unwrap();
+            let Outcome::Settled { receipt, .. } = outcome else {
+                panic!("expected the follower's own settled receipt, got {outcome:?}");
+            };
+            assert_eq!(receipt.state, LaneOperationState::Done);
+            let (_, settled) =
+                admin::open(&route, &pending, Instant::now() + REQUEST_LIMIT).unwrap();
+            let operations: Vec<_> = settled.iter().map(|v| v.operation.clone()).collect();
+            assert_eq!(operations, vec![earlier.to_string()]);
+            assert!(pending.list().unwrap().is_empty());
         });
     }
 

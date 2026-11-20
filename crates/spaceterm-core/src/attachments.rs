@@ -363,6 +363,22 @@ impl AttachmentPermit {
             Request::StartRestored {
                 core, size, style, ..
             } => (AttachmentClaim::Start { core: *core }, *size, style.clone()),
+            // A Core that selected an older work minor cannot read the claim, so nothing about
+            // the channel or its attachment changes before the refusal.
+            Request::PrepareRestored { .. }
+                if link
+                    .work()
+                    .is_none_or(|work| work.minor < crate::pane::MINOR_PREPARE) =>
+            {
+                return Err(CoreError::Unsupported);
+            }
+            Request::PrepareRestored {
+                core, size, style, ..
+            } => (
+                AttachmentClaim::Prepare { core: *core },
+                *size,
+                style.clone(),
+            ),
             Request::TakeOver {
                 target,
                 size,
@@ -477,6 +493,47 @@ mod tests {
                 }],
             }],
         }
+    }
+    /// A background start is a work 1.4 claim. A link whose admission selected work 1.3 refuses
+    /// it before the claim releases or binds anything, and one that selected 1.4 makes it.
+    #[cfg(feature = "client")]
+    #[test]
+    fn a_background_start_reaches_only_a_core_that_selected_work_1_4() {
+        use crate::connection::link::CoreLink;
+        use crate::pane::{AttachmentClaim, PaneSize, Request};
+        let attachments = Attachments::memory();
+        attachments.initialize(&inventory(), Some([1; 32])).unwrap();
+        let permit = attachments.permit([3; 32]).expect("the Pane is attached");
+        let request = Request::PrepareRestored {
+            core: [9; 32],
+            pane: [3; 32],
+            size: PaneSize {
+                columns: 80,
+                rows: 24,
+                cell_width: 8,
+                cell_height: 16,
+            },
+            style: None,
+        };
+        let link = CoreLink::new(
+            std::sync::Arc::new(|_| {}),
+            std::sync::Arc::new(|| {}),
+            std::time::Instant::now(),
+        );
+        assert!(matches!(
+            permit.claim(&link, &request),
+            Err(CoreError::Unsupported)
+        ));
+        link.select_work(crate::protocol::version::ProtocolVersion { major: 1, minor: 3 });
+        assert!(matches!(
+            permit.claim(&link, &request),
+            Err(CoreError::Unsupported)
+        ));
+        link.select_work(crate::protocol::version::WORK);
+        let Ok(Some(claim)) = permit.claim(&link, &request) else {
+            panic!("work 1.4 makes the background start");
+        };
+        assert!(matches!(claim.claim, AttachmentClaim::Prepare { core } if core == [9; 32]));
     }
     #[test]
     fn reconciliation_attaches_nothing_until_one_explicit_initial_choice() {

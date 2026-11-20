@@ -297,6 +297,9 @@ impl MenuItem {
     }
 }
 
+/// The Server row's progress while an approved Stop or Restart waits for another operation.
+const WAITING_FOR_OPERATION: &str = "Waiting for another SpaceTerm Core operation\u{2026}";
+
 impl SettingsWindow {
     /// How `choice` reads now, from what SpaceTerm already knows about it.
     pub(in crate::ui::settings_window) fn core_state(&self, choice: &MachineChoice) -> CoreState {
@@ -971,8 +974,8 @@ impl SettingsWindow {
     }
 
     /// The Server row's steps: at most one button, and every other step in the ⋯ menu. The
-    /// button is Update when one is offered, otherwise
-    /// Start SpaceTerm Core for a stopped server.
+    /// button is Update when one is offered, otherwise Open Login Items for a server that is off
+    /// there. Start SpaceTerm Core stays in the ⋯ menu.
     fn machine_row_view(&self, cx: &App) -> Option<MachineRowView> {
         let choice = self.selected_machine()?;
         let version = self.version_view(cx);
@@ -1062,6 +1065,44 @@ impl SettingsWindow {
     /// The operation underway on `choice` that changes it, as the Server row names it under its
     /// label. A read isn't one: the state says Checking instead.
     fn core_progress(&self, choice: &MachineChoice, cx: &App) -> Option<SharedString> {
+        // An approved Stop or Restart says it waits for another SpaceTerm Core operation until
+        // it runs, then that it runs until it finishes, as the title-bar list and the status
+        // menu say. A preview waiting for another operation says so too.
+        if let Some(update) = self.machine_update(choice, cx)
+            && let Some(store) = crate::updates::machines::store::MachineUpdates::global(cx)
+        {
+            let store = store.read(cx);
+            let approved = store
+                .approved()
+                .into_iter()
+                .find(|(machine, _)| *machine == update.machine)
+                .map(|(_, approved)| approved);
+            match approved {
+                Some(approved) if !approved.waiting => {
+                    return Some(SharedString::new_static(service_progress(
+                        match approved.action {
+                            crate::updates::machines::Checked::Stop => ServiceAction::Stop,
+                            crate::updates::machines::Checked::Restart => ServiceAction::Restart,
+                        },
+                    )));
+                }
+                Some(_) => return Some(SharedString::new_static(WAITING_FOR_OPERATION)),
+                None if store.waiting(update.machine).is_some() => {
+                    return Some(SharedString::new_static(WAITING_FOR_OPERATION));
+                }
+                None => {}
+            }
+            // Another client's Stop that SpaceTerm Core admitted is underway too.
+            if update
+                .facts
+                .as_ref()
+                .is_some_and(|facts| facts.operation == Some(Operation::Stopping))
+            {
+                return Some(SharedString::new_static(service_progress(
+                    ServiceAction::Stop,
+                )));
+            }
+        }
         if let Some(update) = self.machine_update(choice, cx)
             && matches!(
                 update
@@ -1319,7 +1360,7 @@ impl SettingsWindow {
                 _ => SharedString::new_static(status_step_label(&step)),
             };
             // Steps that replace each other share a slot, so keyboard focus stays on it when,
-            // say, Start SpaceTerm Core gives way to Update.
+            // say, Open Login Items gives way to Update.
             let slot = status_step_slot(&step).unwrap_or_else(|| status_step_selector(&step));
             let description = if matches!(step, StatusStep::Shared(_)) {
                 row.map(|row| row.accessibility)
@@ -1548,7 +1589,8 @@ fn status_step_primary(step: &StatusStep) -> bool {
 fn button_rank(step: &StatusStep) -> Option<u8> {
     match step {
         StatusStep::Shared(_) => Some(1),
-        StatusStep::Local(ServiceAction::Start | ServiceAction::OpenLoginItems) => Some(2),
+        // Start SpaceTerm Core lives in the ⋯ menu with Restart and Stop.
+        StatusStep::Local(ServiceAction::OpenLoginItems) => Some(2),
         _ => None,
     }
 }

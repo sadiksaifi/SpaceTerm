@@ -70,6 +70,19 @@ impl Tokens {
         actor: &Actor,
         now: Instant,
     ) -> Result<[u8; 32], CoreError> {
+        self.take(token, action, actor, now)
+            .map(|redeemed| redeemed.0.observation)
+    }
+
+    /// Consumes a token as [`Self::redeem`] does, keeping what [`Self::restore`] needs to give
+    /// it back.
+    pub fn take(
+        &self,
+        token: &str,
+        action: &[u8],
+        actor: &Actor,
+        now: Instant,
+    ) -> Result<Redeemed, CoreError> {
         let token = parse(token).ok_or(CoreError::Changed)?;
         let mut entries = self.entries.lock().map_err(|_| CoreError::Protocol)?;
         entries.retain(|v| v.expires > now);
@@ -80,7 +93,29 @@ impl Tokens {
         if entries[index].actor != *actor || entries[index].action != action {
             return Err(CoreError::Changed);
         }
-        Ok(entries.remove(index).observation)
+        Ok(Redeemed(entries.remove(index)))
+    }
+
+    /// Gives back a token whose action was refused before anything was admitted, so the same
+    /// approval can confirm it again until its original expiry.
+    pub fn restore(&self, redeemed: Redeemed) {
+        let Ok(mut entries) = self.entries.lock() else {
+            return;
+        };
+        if entries.len() >= MAX_TOKENS {
+            entries.remove(0);
+        }
+        entries.push(redeemed.0);
+    }
+}
+
+/// A consumed token, which [`Tokens::restore`] can give back.
+pub struct Redeemed(Entry);
+
+impl Redeemed {
+    /// The observation the token was issued for.
+    pub fn observation(&self) -> [u8; 32] {
+        self.0.observation
     }
 }
 
@@ -112,6 +147,25 @@ mod tests {
         pairing: None,
         client: [1; 32],
     };
+
+    #[test]
+    fn a_restored_token_confirms_again_until_its_original_expiry() {
+        let tokens = Tokens::default();
+        let now = Instant::now();
+        let issued = tokens.issue(b"stop", [5; 32], ACTOR, now).unwrap();
+        let taken = tokens.take(&issued.token, b"stop", &ACTOR, now).unwrap();
+        tokens.restore(taken);
+        assert_eq!(
+            tokens.redeem(&issued.token, b"stop", &ACTOR, now + LIFETIME / 2),
+            Ok([5; 32])
+        );
+        let issued = tokens.issue(b"stop", [6; 32], ACTOR, now).unwrap();
+        tokens.restore(tokens.take(&issued.token, b"stop", &ACTOR, now).unwrap());
+        assert_eq!(
+            tokens.redeem(&issued.token, b"stop", &ACTOR, now + LIFETIME),
+            Err(CoreError::Changed)
+        );
+    }
 
     #[test]
     fn a_token_confirms_once_for_its_own_action_actor_and_lifetime() {

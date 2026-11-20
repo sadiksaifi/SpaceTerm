@@ -211,14 +211,11 @@ impl StatusMenu {
             // where the person turns it on. Nothing starts by itself: once the item is on, the
             // menu still offers Start, and the person chooses it.
             Err(ActionFailure::LoginItemOff) => self.host.open_login_items(),
+            // The alert offers Check Status for an outcome nothing confirms, and Try Again for
+            // one that failed, from the menu itself while no window is open.
             Err(_) => {
-                if let Some((title, message)) = notice.unasked_alert() {
-                    let alert = Alert {
-                        title: title.to_string(),
-                        message: message.to_string(),
-                        buttons: AlertButtons::Ok,
-                    };
-                    self.host.alert(alert, None, Box::new(|_| {}), cx);
+                if let Some(explanation) = notice.unasked_alert() {
+                    self.run(state::Command::Explain(explanation), None, cx);
                 }
             }
         }
@@ -227,6 +224,10 @@ impl StatusMenu {
     /// A Start, Stop or Restart of this computer's Core reaches every Workspace Window still
     /// waiting on it, as the same change made in Settings does.
     fn succeeded(&self, local: bool, action: &MachineAction, cx: &mut App) {
+        let action = match action {
+            MachineAction::CheckStatus(checked, _) => &checked.action(),
+            action => action,
+        };
         let running = match action {
             MachineAction::Start | MachineAction::Restart => true,
             MachineAction::Stop => false,

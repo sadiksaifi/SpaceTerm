@@ -7281,6 +7281,8 @@ fn cancelling_a_tab_close_pressed_by_assistive_technology_returns_focus_to_its_b
 
     let (manager, records, cx) = workspace_manager_with_terminal_nodes(cx);
     local_core(cx).edits.run_shells();
+    // A command runs in the Tab, so closing it asks first.
+    records.set_foreground_job(Some(true));
     cx.simulate_keystrokes("cmd-t");
     cx.run_until_parked();
     let tree = A11yTree::read(cx);
@@ -7310,9 +7312,11 @@ fn close_confirmation_publishes_text_before_actions_and_contains_accessibility(
 ) {
     use spaceterm_ui::a11y_testing::A11yTree;
 
-    let (_manager, _records, cx) = workspace_manager(cx);
+    let (_manager, records, cx) = workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
     local_core(cx).edits.run_shells();
+    // A command runs in the Tab, so closing it asks first.
+    records.set_foreground_job(Some(true));
     cx.simulate_keystrokes("cmd-t");
     cx.run_until_parked();
     A11yTree::read(cx);
@@ -8789,6 +8793,7 @@ fn a_blocked_pane_follows_the_cores_download_and_restarts_only_after_approval(
             skipped: None,
             last_failure: None,
         }),
+        boot: None,
         capabilities: spaceterm_core::protocol::capability::Capabilities::fake(
             &spaceterm_core::protocol::capability::Capability::ALL,
         ),
@@ -9026,6 +9031,14 @@ fn close_published() -> spaceterm_core::hierarchy::Inventory {
 /// Opens the Workspace so its Root Pane holds the keyboard, with the server's other
 /// Workspace attached beside it.
 fn close_harness(cx: &mut TestAppContext) -> (WorkspaceCloseHarness, &mut VisualTestContext) {
+    close_harness_recording(TestTerminalSessionRecords::default(), cx)
+}
+
+/// [`close_harness`], whose Panes' Terminal Sessions report through `records`.
+fn close_harness_recording(
+    records: TestTerminalSessionRecords,
+    cx: &mut TestAppContext,
+) -> (WorkspaceCloseHarness, &mut VisualTestContext) {
     use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
     use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions};
 
@@ -9033,7 +9046,9 @@ fn close_harness(cx: &mut TestAppContext) -> (WorkspaceCloseHarness, &mut Visual
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     let edits = Rc::new(ScriptedEdits::new(Some(close_published())));
-    let panes = ScriptedPanes::new(core_session_factory());
+    let panes = ScriptedPanes::new(WorkspaceTerminalSessionFactory::new_core(Rc::new(
+        core_sessions(records),
+    )));
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
             manager.present_workspaces(
@@ -9608,6 +9623,140 @@ fn close_pane_shortcut_should_confirm_and_escape_should_cancel(cx: &mut TestAppC
     assert!(
         close_terminal_is_focused(&harness, cx),
         "the keyboard returns to the Pane"
+    );
+}
+
+/// The published inventory in which this client controls the Root Pane's live Session.
+fn close_published_controlling_root() -> (
+    spaceterm_core::hierarchy::Inventory,
+    spaceterm_core::hierarchy::ConfirmedControl,
+) {
+    let mut inventory = close_published();
+    let control = spaceterm_core::hierarchy::ConfirmedControl {
+        pane: CLOSE_ROOT_PANE,
+        session: Some([31; 32]),
+        owner: [1; 32],
+        epoch: 7,
+    };
+    inventory.close.as_mut().unwrap().controls = vec![control.clone()];
+    (inventory, control)
+}
+
+/// A fresh shell has a Terminal Session and no prompt yet. Nothing verifies a running command in
+/// it, so Close Pane ends it without asking.
+#[gpui::test]
+fn close_pane_should_end_an_own_idle_session_without_asking(cx: &mut TestAppContext) {
+    let records = TestTerminalSessionRecords::default();
+    let (harness, cx) = close_harness_recording(records.clone(), cx);
+    let (inventory, control) = close_published_controlling_root();
+    harness.publish(inventory, cx);
+    settle_panes(cx);
+    assert!(close_terminal_is_focused(&harness, cx));
+
+    cx.simulate_keystrokes("cmd-w");
+    redraw(cx);
+    assert!(cx.debug_bounds("modal-action-close-confirm").is_none());
+    assert!(matches!(harness.closes().as_slice(),
+        [spaceterm_core::hierarchy::Mutation::Close { confirmation, .. }]
+            if confirmation.own_controls.as_deref() == Some(&[control][..])
+    ));
+}
+
+/// SpaceTerm Core says a program other than the shell owns the Session's foreground, so Close
+/// Pane asks first.
+#[gpui::test]
+fn close_pane_should_ask_when_core_verifies_a_running_command(cx: &mut TestAppContext) {
+    let records = TestTerminalSessionRecords::default();
+    let (harness, cx) = close_harness_recording(records.clone(), cx);
+    let (inventory, _) = close_published_controlling_root();
+    harness.publish(inventory, cx);
+    records.set_foreground_job(Some(true));
+    settle_panes(cx);
+
+    cx.simulate_keystrokes("cmd-w");
+    redraw(cx);
+    assert!(cx.debug_bounds("modal-action-close-confirm").is_some());
+    assert!(harness.closes().is_empty());
+}
+
+/// A shell that is starting shows one waiting presentation in its Tab and its Pane Caption, for
+/// as long as it starts. Neither says Terminal first and then its real name.
+#[gpui::test]
+fn a_starting_shell_waits_for_its_name_in_its_tab_and_caption(cx: &mut TestAppContext) {
+    let (harness, cx) = close_harness(cx);
+    let (tab, pane) = harness.manager.read_with(cx, |manager, cx| {
+        manager
+            .active_tab_manager()
+            .expect("an active Workspace")
+            .read(cx)
+            .active_terminal_identity(cx)
+    });
+    let tab_pending: &'static str = format!("tab-name-pending-{}", tab.get()).leak();
+    let caption_pending: &'static str = format!("pane-caption-name-pending-{}", pane.get()).leak();
+    harness.panes.pane(CLOSE_ROOT_PANE).start_shell();
+    settle_panes(cx);
+    assert!(cx.debug_bounds(caption_pending).is_some());
+    assert!(cx.debug_bounds(tab_pending).is_some());
+
+    // A slow start never falls back to Terminal while it is still starting.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    settle_panes(cx);
+    assert!(cx.debug_bounds(caption_pending).is_some());
+    assert!(cx.debug_bounds(tab_pending).is_some());
+
+    // The shell attached with a blank first screen and no name yet. Both keep waiting.
+    harness.panes.pane(CLOSE_ROOT_PANE).reconnect();
+    settle_panes(cx);
+    assert!(
+        cx.debug_bounds(caption_pending).is_some(),
+        "a blank first screen is no name"
+    );
+    assert!(cx.debug_bounds(tab_pending).is_some());
+    spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Pane Caption, Starting shell");
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    settle_panes(cx);
+    assert!(
+        cx.debug_bounds(caption_pending).is_none() && cx.debug_bounds(tab_pending).is_none(),
+        "a started shell that never names itself says Terminal on both once its wait ends"
+    );
+}
+
+/// A shell whose Connecting state the view never read, because it attached in one reading,
+/// still waits for its name from the Session's own startup evidence, however long its startup
+/// takes, and resolves only once the Session leaves startup.
+#[gpui::test]
+fn a_shell_that_attached_in_one_reading_still_waits_for_its_name(cx: &mut TestAppContext) {
+    let (harness, cx) = close_harness(cx);
+    let (tab, pane) = harness.manager.read_with(cx, |manager, cx| {
+        manager
+            .active_tab_manager()
+            .expect("an active Workspace")
+            .read(cx)
+            .active_terminal_identity(cx)
+    });
+    let tab_pending: &'static str = format!("tab-name-pending-{}", tab.get()).leak();
+    let caption_pending: &'static str = format!("pane-caption-name-pending-{}", pane.get()).leak();
+    harness.panes.pane(CLOSE_ROOT_PANE).attach_quietly();
+    settle_panes(cx);
+    assert!(cx.debug_bounds(caption_pending).is_some());
+    assert!(cx.debug_bounds(tab_pending).is_some());
+    // A startup longer than the name wait still waits.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(6));
+    settle_panes(cx);
+    assert!(cx.debug_bounds(caption_pending).is_some());
+    assert!(cx.debug_bounds(tab_pending).is_some());
+
+    harness.panes.pane(CLOSE_ROOT_PANE).end_startup();
+    settle_panes(cx);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    settle_panes(cx);
+    assert!(
+        cx.debug_bounds(caption_pending).is_none() && cx.debug_bounds(tab_pending).is_none(),
+        "a shell past startup that never named itself says Terminal once its wait ends"
     );
 }
 

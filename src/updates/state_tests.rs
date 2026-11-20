@@ -62,6 +62,7 @@ pub(crate) fn machine(
         local,
         link: MachineLink::Connected,
         facts,
+        boot: None,
         detailed: None,
         capabilities: Capabilities::fake(&Capability::ALL),
         push: None,
@@ -124,6 +125,7 @@ impl Desk {
             deferred: &self.deferred,
             pushes_held: false,
             checked: &self.checked,
+            approved: &[],
         }
     }
 
@@ -230,6 +232,7 @@ pub(crate) fn machine_variants(id: MachineId, name: &str) -> Vec<MachineUpdate> 
             unconfirmed.link = MachineLink::Unconfirmed {
                 expected: version("0.11.5"),
                 since: NOW,
+                operation: None,
             };
             all.push(unconfirmed);
         }
@@ -1106,6 +1109,7 @@ fn store_view(cx: &mut gpui::TestAppContext, app: &AppFacts<'_>) -> (UpdateView,
             deferred: store.deferred(),
             pushes_held: false,
             checked: store.checked(),
+            approved: &[],
         };
         let view = UpdateView::new(*app, store.machines(), marks, NOW);
         let rows = view.machine_rows().len();
@@ -1226,6 +1230,8 @@ fn r5_only_a_restart_approved_here_shows_restart_progress(cx: &mut gpui::TestApp
         machine: LOCAL,
         action: MachineAction::Restart,
         outcome: Ok(()),
+        operation: None,
+        request: None,
     });
     adapter.emit(MachineUpdatesEvent::Changed(Box::new(restarting)));
     cx.run_until_parked();
@@ -1313,11 +1319,14 @@ fn a_restart_approved_here_is_not_confirmed_after_the_deadline(cx: &mut gpui::Te
             machine: LOCAL,
             action: MachineAction::Restart,
             outcome: Err(ActionFailure::Unreachable),
+            operation: None,
+            request: None,
         };
         let unconfirmed = MachineUpdatesEvent::Changed(Box::new(MachineUpdate {
             link: MachineLink::Unconfirmed {
                 expected: version("0.11.4"),
                 since: NOW,
+                operation: None,
             },
             ..restarting(&this_mac)
         }));
@@ -1346,7 +1355,7 @@ fn a_restart_approved_here_is_not_confirmed_after_the_deadline(cx: &mut gpui::Te
         let Command::Explain(alert) = pill.main else {
             panic!("D4 opens from the main area");
         };
-        assert_eq!(alert.proceed.as_deref(), Some("Check Again"));
+        assert_eq!(alert.proceed.as_deref(), Some("Check Status"));
 
         // The Core answers again on the new version: the restart settled.
         adapter.emit(MachineUpdatesEvent::Changed(Box::new(returned())));
@@ -1383,6 +1392,8 @@ fn a_restart_settles_when_the_core_returns_whatever_the_order(cx: &mut gpui::Tes
             machine: LOCAL,
             action: MachineAction::Restart,
             outcome: Ok(()),
+            operation: None,
+            request: None,
         });
         cx.run_until_parked();
         assert_eq!(step_now(cx), None);
@@ -1574,6 +1585,8 @@ fn a_failed_stepping_stone_fetch_shows_once_and_keeps_the_download(cx: &mut gpui
             machine: PENGUIN,
             action: MachineAction::Install,
             outcome: Err(ActionFailure::NeedsFloor(Floor::parse("0.12.0").unwrap())),
+            operation: None,
+            request: None,
         });
         cx.run_until_parked();
     };
@@ -1628,6 +1641,8 @@ fn a_stepping_stone_the_core_has_settles_its_failed_fetch(cx: &mut gpui::TestApp
         machine: PENGUIN,
         action: MachineAction::Install,
         outcome: Err(ActionFailure::NeedsFloor(Floor::parse("0.12.0").unwrap())),
+        operation: None,
+        request: None,
     });
     cx.run_until_parked();
     assert_eq!(step_now(cx), Some(Step::Failed(Target::Machine(PENGUIN))));
@@ -1686,6 +1701,8 @@ fn intermediate_stepping_stones_retire_fetch_failures_and_offer_each_restart(
             machine: PENGUIN,
             action: MachineAction::Install,
             outcome: Err(ActionFailure::NeedsFloor(floor)),
+            operation: None,
+            request: None,
         });
         cx.run_until_parked();
         assert_eq!(step_now(cx), Some(Step::Failed(Target::Machine(PENGUIN))));
@@ -1940,6 +1957,7 @@ fn checkable_stages() -> Vec<(&'static str, MachineUpdate, bool)> {
     unconfirmed.link = MachineLink::Unconfirmed {
         expected: version("0.11.4"),
         since: NOW,
+        operation: None,
     };
     let mut too_old = machine(PENGUIN, "penguin", false, Some(facts("0.11.3", 0)));
     too_old.link = MachineLink::Incompatible(Incompatible::ListenerTooOld);
@@ -2074,6 +2092,8 @@ fn a_refused_check_never_borrows_an_earlier_checks_reason(cx: &mut gpui::TestApp
         machine: PENGUIN,
         action: MachineAction::CheckAgain,
         outcome: Err(ActionFailure::Busy),
+        operation: None,
+        request: None,
     });
     cx.run_until_parked();
     let refused = failed_check_details(cx);

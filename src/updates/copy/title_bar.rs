@@ -297,7 +297,7 @@ fn machine_failed(row: &MachineRow) -> String {
                 DownloadCause::DiskFull => format!("{name} is out of disk space."),
                 DownloadCause::Unreachable => format!("{name} stopped answering."),
                 DownloadCause::Busy => {
-                    format!("SpaceTerm Core on {name} is busy with another update.")
+                    format!("SpaceTerm Core on {name} is busy with another operation.")
                 }
                 DownloadCause::RelaunchRequired => {
                     "SpaceTerm was replaced on disk while it was running.".to_owned()
@@ -328,6 +328,7 @@ mod tests {
             deferred: &HashMap::new(),
             pushes_held: false,
             checked: &HashMap::new(),
+            approved: &[],
         };
         let pill = UpdateView::new(facts, &[], marks, NOW)
             .pill()
@@ -392,6 +393,7 @@ mod tests {
                 deferred: &HashMap::new(),
                 pushes_held: false,
                 checked: &HashMap::new(),
+                approved: &[],
             };
             let pill = UpdateView::new(facts, &[], marks, NOW)
                 .pill()

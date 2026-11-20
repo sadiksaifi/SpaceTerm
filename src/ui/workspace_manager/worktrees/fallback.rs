@@ -6,6 +6,13 @@ use spaceterm_ui::{Alert, AlertIntent, ModalAction, ModalActionRole, ModalId};
 
 use super::*;
 use crate::close_confirmation::CloseTarget;
+use crate::ui::workspace_manager::CloseRequest;
+
+/// A fallback Tab creation, and the close request it resumes once the Tab exists.
+pub(in crate::ui::workspace_manager) struct PendingFallback {
+    mutation: Mutation,
+    request: CloseRequest,
+}
 
 impl WorkspaceManager {
     /// Fallback creation must not use the ordinary accepted-creation activation path.
@@ -16,26 +23,31 @@ impl WorkspaceManager {
         self.sidebar_worktrees
             .close_fallbacks
             .values()
-            .any(|pending| pending == mutation)
+            .any(|pending| pending.mutation == *mutation)
     }
 
     /// Returns true only when the all-Tabs close is handled here, before any approval exists.
+    /// The close resumes as `request` once the fallback Tab exists, so a Review still opens a
+    /// fresh confirmation then.
     pub(in crate::ui::workspace_manager) fn request_worktree_close_fallback(
         &mut self,
         target: CloseTarget,
         machine_target: MachineCloseTarget,
+        request: CloseRequest,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         let CloseTarget::Worktree { workspace_id, .. } = target else {
             return false;
         };
-        // Repeated requests share the one unresolved original for this Workspace.
-        if self
+        // Repeated requests share the one unresolved original for this Workspace, and a Review
+        // among them makes it resume as a Review.
+        if let Some(pending) = self
             .sidebar_worktrees
             .close_fallbacks
-            .contains_key(&workspace_id)
+            .get_mut(&workspace_id)
         {
+            pending.request = pending.request.join(request);
             return true;
         }
         let MachineCloseTarget::Worktree { workspace, tab } = machine_target else {
@@ -119,7 +131,7 @@ impl WorkspaceManager {
         };
         self.sidebar_worktrees
             .close_fallbacks
-            .insert(workspace_id, mutation);
+            .insert(workspace_id, PendingFallback { mutation, request });
         cx.spawn(async move |_, cx| {
             let result = completion.recv().await;
             let _ = handle.update(cx, |manager, window, cx| {
@@ -127,10 +139,11 @@ impl WorkspaceManager {
                 if let Some(owner) = manager.binding.owner(workspace_id) {
                     manager.sync_workspaces(owner, window, cx);
                 }
-                manager
+                let request = manager
                     .sidebar_worktrees
                     .close_fallbacks
-                    .remove(&workspace_id);
+                    .remove(&workspace_id)
+                    .map_or_else(CloseRequest::default, |pending| pending.request);
                 let Ok(Ok(outcome)) = result else {
                     Self::worktree_fallback_failed(
                         "SpaceTerm couldn\u{2019}t open a Tab outside this Worktree.",
@@ -184,7 +197,7 @@ impl WorkspaceManager {
                     })
                 }) {
                     // Capture current exact targets and fresh consent through the original path.
-                    manager.request_core_close(target, window, cx);
+                    manager.resume_close(target, request, window, cx);
                 }
             });
         })

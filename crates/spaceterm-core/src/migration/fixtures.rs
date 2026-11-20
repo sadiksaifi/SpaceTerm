@@ -179,8 +179,21 @@ pub fn write_client_records(directory: &Path) {
             },
         )
         .unwrap();
-    crate::service::lane::admin::PendingOperations::new(open())
+    let pending = crate::service::lane::admin::PendingOperations::new(open());
+    pending
         .add(&crate::service::operations::OperationId([1; 16]))
+        .unwrap();
+    pending
+        .keep_by(
+            &[crate::service::lane::LaneReceipt {
+                operation: crate::service::operations::OperationId([2; 16]).to_string(),
+                action: crate::service::lane::LaneAction::Restart,
+                state: crate::service::lane::LaneOperationState::Failed,
+                code: Some("startup_failed".into()),
+                boot: "09".repeat(32),
+            }],
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        )
         .unwrap();
     let directory = open();
     directory

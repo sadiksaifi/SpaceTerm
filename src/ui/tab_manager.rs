@@ -454,6 +454,13 @@ pub(crate) struct TabManager {
         TabId,
         crate::domain::tab_collection::ParkedTab<Entity<TabView>>,
     >,
+    /// The parked Tabs that held the keyboard as their close parked them, which a refusal
+    /// returns it to while it still rests in the Tab parking opened in their place.
+    parked_keyboard: std::collections::BTreeSet<TabId>,
+    /// The Tab a refusal returned the selection to while a modal, such as another Machine's
+    /// confirmation, held the keyboard its close had moved. The refusal's review returns the
+    /// keyboard to it. Choosing a Tab clears it.
+    returned_keyboard: Option<TabId>,
     /// The Active Tab this client's just-submitted shared close ends, when the keyboard rested
     /// in this strip as the person asked for it. The next reconciliation takes it.
     close_keyboard: Option<TabId>,
@@ -550,6 +557,8 @@ impl TabManager {
             close_workspace_requested: false,
             binding,
             parked_tabs: std::collections::BTreeMap::new(),
+            parked_keyboard: std::collections::BTreeSet::new(),
+            returned_keyboard: None,
             close_keyboard: None,
             pane_strip_drop: None,
             tab_picture: None,
@@ -625,6 +634,13 @@ impl TabManager {
                 TabViewEvent::RevealRequested { .. } => {}
                 TabViewEvent::PaneDropped { tab_id, pane_id } => {
                     manager.drop_pane(*tab_id, *pane_id, window, cx);
+                }
+                // A press in the Active Tab's Pane chooses that Tab, so a refused close no longer
+                // returns the selection or keyboard it moved.
+                TabViewEvent::PanePressed { tab_id } => {
+                    if manager.tabs.active_tab_id() == *tab_id {
+                        manager.tabs.claim_active_tab();
+                    }
                 }
             },
         )
@@ -1457,6 +1473,13 @@ impl TabManager {
     fn wait_for_tab_names(&mut self, cx: &mut Context<Self>) {
         let now = super::drag_and_drop::now(cx);
         self.presented = true;
+        // A Tab whose shell is still starting keeps waiting for its first name, and its wait for
+        // a name starts over once the shell has started, so it never says Terminal meanwhile.
+        for (tab_id, view) in self.tabs.iter() {
+            if view.read(cx).tab_identity().pending {
+                self.unnamed_since.insert(tab_id, now);
+            }
+        }
         let tabs = &self.tabs;
         self.unnamed_since.retain(|tab_id, since| {
             now.saturating_duration_since(*since) < TAB_NAME_WAIT
@@ -1557,8 +1580,14 @@ impl TabManager {
         counts
     }
 
+    /// Opens `tab_id` for a person. Choosing a Tab, even the Active Tab, is an explicit
+    /// selection, which a refused close's return of the selection no longer overrides.
     fn activate_tab(&mut self, tab_id: TabId, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        self.activate_tab_focusing(tab_id, true, window, cx)
+        let activated = self.activate_tab_focusing(tab_id, true, window, cx);
+        if activated {
+            self.tabs.claim_active_tab();
+        }
+        activated
     }
 
     fn activate_tab_focusing(
@@ -1572,6 +1601,7 @@ impl TabManager {
             eprintln!("cannot activate unknown Tab {tab_id}");
             return false;
         };
+        self.returned_keyboard = None;
         let previous_tab_id = self.tabs.active_tab_id();
         let previous_tab = self.tabs.active_tab().clone();
         if let Err(error) = self.tabs.activate_tab(tab_id) {
@@ -2006,8 +2036,10 @@ impl TabManager {
         let reveal = TabReveal::new(motion, close_button_size, close_clearance, appearance);
         // A Tab that arrived says nothing until its Terminal Session names it, however fast it
         // grows in, so its first words are its real name. One that never gets a name says
-        // Terminal once its wait ends.
-        let named = identity.is_named() || !self.unnamed_since.contains_key(&tab_id);
+        // Terminal once its wait ends. While its Focused Pane's shell starts, any name it has is
+        // provisional, such as the shell's executable, so the Tab still says nothing.
+        let named =
+            !identity.pending && (identity.is_named() || !self.unnamed_since.contains_key(&tab_id));
         // A Tab growing in offers its close control once the control shows whole, so no part of
         // it cut off by the Tab's slot takes a press or reaches assistive technology.
         let close_control = if role != TabItemRole::InBar || reveal.close <= 0.0 {
@@ -2475,7 +2507,9 @@ impl TabManager {
             previous_inactive_tab = (!active).then_some(tab_id);
             let identity = view.read(cx).tab_identity();
             let tab_focus = view.read(cx).tab_focus().clone();
-            let title = if identity.activity.is_empty() {
+            let title = if identity.pending {
+                super::tab_view::STARTING_NAME
+            } else if identity.activity.is_empty() {
                 "Terminal"
             } else {
                 identity.activity.as_ref()
@@ -3541,6 +3575,45 @@ impl TabManager {
         self.restore_active_tab(remembered, window, cx);
     }
 
+    /// What this client presents of this Workspace now, by server identity, for the next launch:
+    /// the Workspace, its Active Tab and that Tab's Focused Pane. A Tab or Pane without a server
+    /// identity yet has none.
+    pub(crate) fn selection(&self, cx: &App) -> Option<spaceterm_core::client_view::Selection> {
+        let tab_id = self.tabs.active_tab_id();
+        let tab = self.tabs.tab(tab_id)?.read(cx);
+        Some(spaceterm_core::client_view::Selection {
+            workspace: self.binding.workspace(),
+            tab: self.binding.core_tab(tab_id)?,
+            pane: tab.core_pane(tab.focused_pane_id())?,
+        })
+    }
+
+    /// Selects the Active Tab and Focused Pane a previous launch left, without selecting a Pane
+    /// for the server. A Tab or Pane that is gone leaves the Root Tab or Root Pane.
+    pub(crate) fn restore_saved_selection(
+        &mut self,
+        saved: spaceterm_core::client_view::Selection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::ui::remembered_view::{RememberedTab, RememberedWorkspace};
+        let remembered = RememberedWorkspace {
+            active_tab: Some(saved.tab),
+            tabs: std::iter::once((
+                saved.tab,
+                RememberedTab {
+                    history: Vec::new(),
+                    focused: saved.pane,
+                    zoomed: false,
+                    panes: std::collections::HashMap::new(),
+                },
+            ))
+            .collect(),
+            worktrees_expanded: None,
+        };
+        self.restore_selection(&remembered, window, cx);
+    }
+
     /// Restores which Tab is active and each Tab's focus another window left. A Tab or Pane
     /// that is gone leaves the Root Tab or Root Pane, which nothing selects.
     pub(crate) fn restore_selection(
@@ -3618,7 +3691,18 @@ impl TabManager {
             .collect::<Vec<_>>();
         for id in restoring {
             if let Some(parked) = self.parked_tabs.remove(&id) {
-                self.tabs.restore_parked_tab(parked);
+                // A refused close returns the selection it moved, and the keyboard it moved with
+                // it, unless the person chose a Tab, even the one parking selected, or moved the
+                // keyboard since.
+                let held_keyboard = self.parked_keyboard.remove(&id);
+                if self.tabs.restore_parked_tab(parked) {
+                    let focus =
+                        held_keyboard && self.tabs.active_tab().read(cx).holds_keyboard(window, cx);
+                    self.activate_tab_focusing(id, focus, window, cx);
+                    if held_keyboard && !focus && spaceterm_ui::window_modal_is_open(window, cx) {
+                        self.returned_keyboard = Some(id);
+                    }
+                }
                 changed = true;
             }
         }
@@ -3647,6 +3731,7 @@ impl TabManager {
             .collect::<Vec<_>>();
         for id in retired {
             if let Some(parked) = self.parked_tabs.remove(&id) {
+                self.parked_keyboard.remove(&id);
                 self.tabs
                     .discard_parked_tab(parked)
                     .update(cx, |view, cx| view.close_all(cx));
@@ -3745,6 +3830,9 @@ impl TabManager {
                         }
                     });
                     self.parked_tabs.insert(tab_id, parked);
+                    if was_active && held_keyboard {
+                        self.parked_keyboard.insert(tab_id);
+                    }
                     if was_active && self.active {
                         self.tabs
                             .active_tab()
@@ -4266,6 +4354,42 @@ impl TabManager {
 
     fn forget_tab(&mut self, tab_id: TabId) {
         self.binding.forget(tab_id);
+    }
+
+    /// Whether a refusal returned `tab_id`, or its Pane `pane_id`, the selection while something
+    /// else held the keyboard its close had moved, which the keyboard now owes it. Asking clears
+    /// both records.
+    pub(crate) fn take_returned_keyboard(
+        &mut self,
+        tab_id: TabId,
+        pane_id: Option<PaneId>,
+        cx: &mut App,
+    ) -> bool {
+        let tab = self
+            .returned_keyboard
+            .take_if(|returned| *returned == tab_id)
+            .is_some();
+        let pane = pane_id.is_some_and(|pane_id| {
+            self.tabs
+                .tab(tab_id)
+                .is_some_and(|view| view.update(cx, |view, _| view.take_returned_keyboard(pane_id)))
+        });
+        tab || pane
+    }
+
+    /// Whether closing Tab `tab_id`, or only its Pane `pane_id`, removes the control `focus`.
+    pub(crate) fn close_removes_focus(
+        &self,
+        tab_id: TabId,
+        pane_id: Option<PaneId>,
+        focus: &gpui::FocusHandle,
+        window: &Window,
+        cx: &App,
+    ) -> bool {
+        self.tabs.tab(tab_id).is_some_and(|view| {
+            view.read(cx)
+                .close_removes_focus(pane_id, focus, window, cx)
+        })
     }
 
     /// Whether the keyboard rests in one of this strip's Tabs or their Panes.
@@ -6961,7 +7085,9 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         use crate::terminal::metadata::TitleProvenance;
-        let (manager, _records, cx) = tab_manager(cx);
+        let (manager, records, cx) = tab_manager(cx);
+        // A command runs in each Pane, so closing one asks first.
+        records.set_foreground_job(Some(true));
         let tab_title = |cx: &mut VisualTestContext| {
             manager.read_with(cx, |manager, cx| {
                 manager.tabs.active_tab().read(cx).tab_title()
@@ -9245,6 +9371,66 @@ mod tests {
             (None, true, true, true, true),
             "the first Tab says what it is at once; a new Tab says nothing until it is named, \
              and says Terminal once its wait ends without a name"
+        );
+    }
+
+    /// A new Tab whose shell is starting has a provisional name, the shell's executable and the
+    /// directory it reported before its first prompt. The Tab says nothing, and its accessible
+    /// name says the shell is starting, until the Session's startup ends, and then says the name.
+    #[gpui::test]
+    fn a_starting_shells_provisional_name_stays_off_its_tab_until_startup_ends(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::terminal::metadata::TitleProvenance;
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        let core = cx.update(|_, cx| {
+            cx.global::<crate::ui::workspace_manager::tests::LocalCore>()
+                .clone()
+        });
+        let pane = core.panes.pane(core.panes.opened_at(1));
+        pane.attach_quietly();
+        cx.run_until_parked();
+        for (generation, provenance) in [
+            (1, TitleProvenance::Fallback),
+            (2, TitleProvenance::WorkingDirectory),
+        ] {
+            report_metadata(cx, 2, generation, |metadata| {
+                metadata.directory.path = Arc::from("/srv/app");
+                metadata.title.value = Arc::from("zsh");
+                metadata.title.provenance = provenance;
+            });
+            // A slow start outlasts the Tab's own wait for a name.
+            cx.executor().advance_clock(TAB_NAME_WAIT * 2);
+            cx.run_until_parked();
+            assert!(
+                cx.debug_bounds("tab-name-pending-2").is_some(),
+                "a provisional name stays off the Tab while the shell starts"
+            );
+            let identity = manager.read_with(cx, |manager, cx| {
+                manager.tabs.active_tab().read(cx).tab_identity()
+            });
+            assert!(identity.pending, "the Tab's identity waits for the shell");
+            assert!(
+                identity.is_named(),
+                "the Tab holds a provisional name: {:?}",
+                identity.one_line()
+            );
+            spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Starting shell");
+        }
+
+        pane.end_startup();
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("tab-name-pending-2").is_none(),
+            "the Tab says its name once the shell's startup ends"
+        );
+        let identity = manager.read_with(cx, |manager, cx| {
+            manager.tabs.active_tab().read(cx).tab_identity()
+        });
+        assert_eq!(
+            (identity.pending, identity.one_line().to_string()),
+            (false, "Terminal \u{b7} app".to_owned())
         );
     }
 

@@ -113,8 +113,11 @@ impl Menu {
         let machines = ordered
             .into_iter()
             .filter_map(|update| {
+                let approved = view
+                    .machine(update.machine)
+                    .is_some_and(|row| row.approved.is_some());
                 view.machine_row(update.machine)
-                    .map(|row| machine_row(update, row))
+                    .map(|row| machine_row(update, row, approved))
             })
             .collect();
         Self {
@@ -200,7 +203,9 @@ impl Menu {
     }
 }
 
-fn machine_row(update: &MachineUpdate, row: RowView) -> MachineRow {
+/// `approved` says an approved Stop or Restart of this Machine has not finished, so the row
+/// offers neither Stop nor Start meanwhile.
+fn machine_row(update: &MachineUpdate, row: RowView, approved: bool) -> MachineRow {
     let sessions = update.facts.as_ref().map_or(0, |facts| facts.sessions);
     // A settled Machine's versions say everything, so the extra shows its Terminal Sessions
     // after them.
@@ -220,7 +225,7 @@ fn machine_row(update: &MachineUpdate, row: RowView) -> MachineRow {
         })
         .into_iter()
         .collect();
-    if update.local {
+    if update.local && !approved {
         match update.link {
             MachineLink::Stopped => items.push(Item {
                 title: copy::START_CORE.into(),

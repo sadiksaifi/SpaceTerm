@@ -14,6 +14,7 @@ struct Connection {
     start_failure: Mutex<Option<spaceterm_core::update::facts::Version>>,
     /// The announced restart is one the Core began because nothing was running.
     idle_restart: AtomicBool,
+    stopping: AtomicBool,
     now: Mutex<std::time::Instant>,
     session_end: Mutex<Option<SessionEnd>>,
     start_unconfirmed: AtomicBool,
@@ -32,6 +33,7 @@ impl Connection {
             restart: Mutex::default(),
             start_failure: Mutex::default(),
             idle_restart: AtomicBool::new(false),
+            stopping: AtomicBool::new(false),
             now: Mutex::new(std::time::Instant::now()),
             session_end: Mutex::default(),
             start_unconfirmed: AtomicBool::new(false),
@@ -76,6 +78,9 @@ fn version_of(text: &str) -> spaceterm_core::update::facts::Version {
 }
 
 impl MachinePaneConnection for Connection {
+    fn stop_announced(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
+    }
     fn unsent_input(&self) -> Option<crate::terminal::core_session::unsent::UnsentInput> {
         self.unsent.lock().unwrap().clone()
     }
@@ -150,6 +155,9 @@ fn lost_start() -> (Arc<Connection>, CorePaneView) {
     view.start_shell();
     connection.set(CorePaneStatus::Reconnecting);
     view.sync();
+    // Nothing explained the loss in time, so it is an interruption.
+    let loss = view.classifying().expect("the loss waits");
+    view.classify(loss);
     (connection, view)
 }
 
@@ -362,20 +370,46 @@ fn a_first_selection_whose_answer_was_lost_shows_the_unconfirmed_start() {
     assert!(view.can_retry());
 }
 
+/// An ordinary shell start keeps the surface blank and steady until the prompt arrives.
 #[test]
-fn a_restored_pane_whose_start_is_in_flight_shows_it_starting() {
+fn a_restored_pane_whose_start_is_in_flight_stays_blank() {
     let connection = Connection::new(CorePaneStatus::Restored);
     connection.set_start_unconfirmed(true);
     let view = CorePaneView::new(connection);
 
+    assert_eq!(view.screen(), None);
+}
+
+#[test]
+fn selecting_or_starting_a_restored_pane_blanks_it_at_once() {
+    let connection = Connection::new(CorePaneStatus::Restored);
+    let mut view = CorePaneView::new(connection.clone());
+    assert!(matches!(
+        view.screen(),
+        Some(CorePaneScreen::Restored { .. })
+    ));
+    view.select();
     assert_eq!(
         view.screen(),
-        Some(CorePaneScreen::Restored {
-            starting: true,
-            unconfirmed: false,
-            offered: false,
-            ended: None,
-        })
+        None,
+        "the selected Pane waits for its prompt"
+    );
+
+    // Another client took the Pane meanwhile, so the selection ends.
+    connection.set(CorePaneStatus::Takeover);
+    view.sync();
+    connection.set(CorePaneStatus::Restored);
+    view.sync();
+    assert!(matches!(
+        view.screen(),
+        Some(CorePaneScreen::Restored { .. })
+    ));
+
+    view.start_shell();
+    assert_eq!(
+        view.screen(),
+        None,
+        "Start Session waits for the prompt too"
     );
 }
 
@@ -709,6 +743,9 @@ fn an_announced_restart_keeps_one_deadline_through_failed_statuses() {
         connection.advance(std::time::Duration::from_secs(60));
         connection.answer(CorePaneStatus::Reconnecting);
         view.sync();
+        // The Tab classifies the loss while the restart's deadline still hides it.
+        let loss = view.classifying().expect("the loss waits");
+        view.classify(loss);
         assert_eq!(notice(&view), None);
         connection.advance(RECONNECT_LIMIT - std::time::Duration::from_secs(120));
         view.sync();
@@ -718,6 +755,105 @@ fn an_announced_restart_keeps_one_deadline_through_failed_statuses() {
             "the deadline counts from the first reading, not from the last failure"
         );
     }
+}
+
+/// A classification meant for an earlier loss never reaches a later one, which waits its own
+/// time for an explanation.
+#[test]
+fn a_classification_names_the_exact_loss_it_waited_for() {
+    let connection = Connection::new(CorePaneStatus::Connected);
+    let mut view = CorePaneView::new(connection.clone());
+    view.sync();
+    connection.set(CorePaneStatus::Reconnecting);
+    view.sync();
+    let first = view.classifying().expect("the first loss waits");
+    connection.set(CorePaneStatus::Connected);
+    view.sync();
+    connection.set(CorePaneStatus::Reconnecting);
+    view.sync();
+    let second = view.classifying().expect("the second loss waits");
+    assert_ne!(first, second);
+    assert!(
+        !view.classify(first).changed,
+        "the earlier timer finds its loss gone"
+    );
+    assert_eq!(notice(&view), None);
+    assert!(view.classify(second).changed);
+    assert_eq!(
+        notice(&view).map(|(title, _)| title),
+        Some("Reconnecting…".to_owned())
+    );
+}
+
+/// A recovery and a second loss that one reading coalesces are still a new loss, which waits
+/// its own time: the first loss's timer finds nothing to classify.
+#[test]
+fn a_recovery_the_reading_missed_still_starts_a_new_loss() {
+    let connection = Connection::new(CorePaneStatus::Connected);
+    let mut view = CorePaneView::new(connection.clone());
+    view.sync();
+    connection.set(CorePaneStatus::Reconnecting);
+    view.sync();
+    let first = view.classifying().expect("the first loss waits");
+    // A new connection reached the Session and was lost again before the Pane read it.
+    connection.answer(CorePaneStatus::Reconnecting);
+    view.sync();
+    let second = view.classifying().expect("the second loss waits");
+    assert_ne!(first, second);
+    assert!(!view.classify(first).changed);
+    assert_eq!(notice(&view), None);
+}
+
+/// Classifying a loss changes only its notice: input stays paused while the connection is still
+/// lost, so the Pane takes no keyboard back.
+#[test]
+fn a_classified_loss_keeps_input_paused() {
+    let connection = Connection::new(CorePaneStatus::Connected);
+    let mut view = CorePaneView::new(connection.clone());
+    view.sync();
+    connection.set(CorePaneStatus::Reconnecting);
+    assert!(view.sync().interrupted);
+    let loss = view.classifying().expect("the loss waits");
+    let sync = view.classify(loss);
+    assert!(sync.changed);
+    assert!(sync.interrupted, "the frozen Pane accepts no input");
+}
+
+#[test]
+fn a_confirmed_stop_never_says_reconnecting_and_ends_in_its_stopped_state() {
+    let connection = Connection::new(CorePaneStatus::Connected);
+    let mut view = CorePaneView::new(connection.clone());
+    view.sync();
+    connection.stopping.store(true, Ordering::SeqCst);
+    connection.set(CorePaneStatus::Reconnecting);
+    view.sync();
+    assert_eq!(notice(&view), None, "a known Stop is no interruption");
+
+    connection.answer(CorePaneStatus::Failed(CoreError::Stopped));
+    view.sync();
+    assert_eq!(
+        notice(&view).map(|(title, _)| title),
+        Some("SpaceTerm Core Stopped".to_owned())
+    );
+}
+
+#[test]
+fn an_unexplained_loss_says_reconnecting_once_nothing_explains_it() {
+    let connection = Connection::new(CorePaneStatus::Connected);
+    let mut view = CorePaneView::new(connection.clone());
+    view.sync();
+    connection.set(CorePaneStatus::Reconnecting);
+    view.sync();
+    assert_eq!(notice(&view), None, "SpaceTerm reads why first");
+    let loss = view.classifying().expect("the loss waits");
+    assert!(
+        view.classify(loss).changed,
+        "the classification repaints the Pane"
+    );
+    assert_eq!(
+        notice(&view).map(|(title, _)| title),
+        Some("Reconnecting…".to_owned())
+    );
 }
 
 #[test]

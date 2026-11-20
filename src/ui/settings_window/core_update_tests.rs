@@ -1,7 +1,7 @@
 //! Settings uses the application Machine store's preview and current update state.
 
 use super::super::machine_card::MENU_SELECTOR;
-use super::super::machines::testing::{ScriptedCore, ScriptedService, connected, running};
+use super::super::machines::testing::{ScriptedCore, ScriptedService, connected, running, stopped};
 use super::super::machines::{CoreServiceControl, LocalCoreControl, OfferedMachine, ServiceAction};
 use super::super::{SettingsSectionId, SettingsWindow};
 use super::{UPDATE_CANCEL_SELECTOR, UPDATE_CONFIRM_SELECTOR, UPDATE_SELECTOR};
@@ -50,6 +50,7 @@ fn machine(pending: Option<&str>, sessions: u32) -> MachineUpdate {
             skipped: None,
             last_failure: None,
         }),
+        boot: None,
     }
 }
 
@@ -61,12 +62,33 @@ fn open<'a>(
     Rc<ScriptedMachines>,
     &'a mut VisualTestContext,
 ) {
+    let (settings, adapter, _, visual) = open_with(
+        cx,
+        machine(pending, 3),
+        ScriptedCore::new(Ok(connected(1))),
+        ScriptedService::new(Ok(running())),
+    );
+    (settings, adapter, visual)
+}
+
+/// Settings for This Mac as `update` describes it, whose connection `core` checks and whose
+/// service `service` reads.
+fn open_with(
+    cx: &mut TestAppContext,
+    update: MachineUpdate,
+    core: Arc<ScriptedCore>,
+    service: Arc<ScriptedService>,
+) -> (
+    Entity<SettingsWindow>,
+    Rc<ScriptedMachines>,
+    Arc<ScriptedService>,
+    &mut VisualTestContext,
+) {
     let adapter = Rc::new(ScriptedMachines::default());
     cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
-    adapter.emit(MachineUpdatesEvent::Machines(vec![machine(pending, 3)]));
+    adapter.emit(MachineUpdatesEvent::Machines(vec![update]));
     cx.run_until_parked();
-    let core = ScriptedCore::new(Ok(connected(1)));
-    let service = ScriptedService::new(Ok(running()));
+    let scripted = Arc::clone(&service);
     let offered = OfferedMachine {
         connection: Ok(core as Arc<dyn LocalCoreControl>),
         service: Some(Ok(service as Arc<dyn CoreServiceControl>)),
@@ -100,7 +122,7 @@ fn open<'a>(
         });
     });
     visual.run_until_parked();
-    (settings, adapter, visual)
+    (settings, adapter, scripted, visual)
 }
 
 fn click(selector: &'static str, cx: &mut VisualTestContext) {
@@ -249,6 +271,50 @@ fn settings_tracks_the_shared_install_and_restart_without_starting_another(
     assert!(adapter.executed().is_empty());
 }
 
+/// Settings stops a running SpaceTerm Core through the Core's own preview of the exact Terminal
+/// Sessions that end, as the menu bar does, never through the service manager directly. The
+/// Stop runs only once confirmed, and a confirmed Stop reads the service again.
+#[gpui::test]
+fn a_settings_stop_runs_on_the_cores_session_bound_preview(cx: &mut TestAppContext) {
+    let (settings, adapter, cx) = open(cx, None);
+    cx.update(|window, cx| {
+        settings.update(cx, |settings, cx| {
+            settings.request_core_service(ServiceAction::Stop, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(adapter.asked(), [(MACHINE, MachineAction::Stop)]);
+    assert!(adapter.executed().is_empty(), "Stop waits for confirmation");
+    answer(UPDATE_CONFIRM_SELECTOR, cx);
+    assert_eq!(adapter.executed_actions(), [(MACHINE, MachineAction::Stop)]);
+    // Another operation holds SpaceTerm Core, so the approved Stop waits and Settings says so.
+    adapter.emit(MachineUpdatesEvent::Waiting {
+        machine: MACHINE,
+        action: MachineAction::Stop,
+        request: adapter.last_request(),
+        waiting: true,
+    });
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    assert_eq!(
+        settings
+            .read_with(cx, |settings, cx| settings.core_subtitle(cx))
+            .as_ref(),
+        "Waiting for another SpaceTerm Core operation\u{2026}"
+    );
+    adapter.emit(MachineUpdatesEvent::Finished {
+        machine: MACHINE,
+        action: MachineAction::Stop,
+        outcome: Ok(()),
+        operation: None,
+        request: None,
+    });
+    cx.run_until_parked();
+    assert_eq!(adapter.executed_actions().len(), 1, "nothing stops twice");
+}
+
 #[gpui::test]
 fn a_failed_settings_preview_explains_the_failure(cx: &mut TestAppContext) {
     let (_, adapter, cx) = open(cx, Some("1.6.0"));
@@ -256,12 +322,46 @@ fn a_failed_settings_preview_explains_the_failure(cx: &mut TestAppContext) {
     click(UPDATE_SELECTOR, cx);
     adapter.answer_preview(|_, _| Err(crate::updates::machines::ActionFailure::Unreachable));
     cx.run_until_parked();
+    // Nothing ran, so the explanation offers Try Again.
     assert!(
-        cx.debug_bounds("modal-action-settings-update-explanation-ok")
+        cx.debug_bounds("modal-action-settings-update-explanation-proceed")
             .is_some(),
         "the failure is explained"
     );
     assert!(adapter.executed().is_empty());
+}
+
+/// An approved restart whose answer was lost offers Check Status, never Try Again, so nothing
+/// can run it twice.
+#[gpui::test]
+fn an_unconfirmed_settings_restart_offers_check_status(cx: &mut TestAppContext) {
+    let (_, adapter, cx) = open(cx, Some("1.6.0"));
+    click(UPDATE_SELECTOR, cx);
+    answer(UPDATE_CONFIRM_SELECTOR, cx);
+    assert_eq!(adapter.executed().len(), 1);
+    // The restart was executed, and nothing confirmed what became of it.
+    adapter.emit(MachineUpdatesEvent::Finished {
+        machine: MACHINE,
+        action: MachineAction::Restart,
+        outcome: Err(crate::updates::machines::ActionFailure::Unconfirmed),
+        operation: Some(crate::updates::machines::ServiceOperation::new("restart-1")),
+        request: None,
+    });
+    cx.run_until_parked();
+    A11yTree::read(cx).text("SpaceTerm Can\u{2019}t Confirm the Restart on This Mac");
+    answer("settings-update-explanation-proceed", cx);
+    assert_eq!(adapter.executed().len(), 1, "checking runs no restart");
+    assert_eq!(
+        adapter.performed(),
+        [(
+            MACHINE,
+            MachineAction::CheckStatus(
+                crate::updates::machines::Checked::Restart,
+                crate::updates::machines::ServiceOperation::new("restart-1"),
+            )
+        )],
+        "Check Status reads the original restart's receipt"
+    );
 }
 
 /// An approved restart the Core refuses without running it opens D5 at once, because the
@@ -276,10 +376,12 @@ fn a_refused_approved_settings_restart_opens_d5(cx: &mut TestAppContext) {
         machine: MACHINE,
         action: MachineAction::Restart,
         outcome: Err(crate::updates::machines::ActionFailure::Busy),
+        operation: None,
+        request: None,
     });
     cx.run_until_parked();
     A11yTree::read(cx).text(
-        "SpaceTerm Core on This Mac is busy with another update. Try again when it finishes.",
+        "SpaceTerm Core on This Mac is busy with another operation. Try again when it finishes.",
     );
     assert_eq!(adapter.executed().len(), 1, "no restart runs again");
 }
@@ -366,4 +468,114 @@ fn the_cards_check_now_asks_its_core_to_check(cx: &mut TestAppContext) {
     perform(cx, tree.node("Check Now"), Action::Click);
     cx.run_until_parked();
     assert_eq!(adapter.performed(), [(MACHINE, MachineAction::CheckAgain)]);
+}
+
+/// SpaceTerm Core was started outside every SpaceTerm surface, as by the CLI, while Settings
+/// stayed open on a stopped This Mac. Once this client's link to the Core comes back, the same
+/// Settings window reads the service again and shows This Mac running.
+#[gpui::test]
+fn a_start_outside_spaceterm_reaches_open_settings_when_the_link_returns(cx: &mut TestAppContext) {
+    let mut down = machine(None, 0);
+    down.link = MachineLink::Stopped;
+    let (settings, adapter, service, cx) = open_with(
+        cx,
+        down,
+        ScriptedCore::new(Ok(connected(1))),
+        ScriptedService::new(Ok(stopped())),
+    );
+    assert_eq!(local_state(&settings, cx), "Stopped");
+
+    service.report(Ok(running()));
+    adapter.emit(MachineUpdatesEvent::Machines(vec![machine(None, 2)]));
+    cx.run_until_parked();
+
+    assert_eq!(local_state(&settings, cx), "Running");
+}
+
+/// How This Mac's Server row reads now.
+fn local_state(settings: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> String {
+    settings.read_with(cx, |settings, _| {
+        settings
+            .core_state(&super::super::machine_list::MachineChoice::Local)
+            .state
+            .to_string()
+    })
+}
+
+/// SpaceTerm Core was stopped outside every SpaceTerm surface, as by the CLI, while Settings
+/// stayed open on a running This Mac. Once this client's link to the Core goes down, the same
+/// Settings window reads the service and the connection again and shows This Mac stopped.
+#[gpui::test]
+fn a_stop_outside_spaceterm_reaches_open_settings_when_the_link_goes_down(cx: &mut TestAppContext) {
+    let core = ScriptedCore::new(Ok(connected(1)));
+    let (settings, adapter, service, cx) = open_with(
+        cx,
+        machine(None, 44),
+        core.clone(),
+        ScriptedService::new(Ok(running())),
+    );
+    assert_eq!(local_state(&settings, cx), "Running");
+    let checks = core.refreshes();
+
+    service.report(Ok(stopped()));
+    core.answer_refresh(Err(crate::machine_connection::CoreError::Stopped));
+    let mut down = machine(None, 44);
+    down.link = MachineLink::Stopped;
+    down.facts = None;
+    adapter.emit(MachineUpdatesEvent::Machines(vec![down]));
+    cx.run_until_parked();
+
+    assert_eq!(local_state(&settings, cx), "Stopped");
+    assert_eq!(
+        core.refreshes(),
+        checks + 1,
+        "the connection is checked again"
+    );
+}
+
+/// Settings showed This Mac stopped, and SpaceTerm Core was started outside every SpaceTerm
+/// surface, as by the CLI. A connection check that began while the Core was still starting
+/// answers that it is stopped only after the link returned, so Settings sets that answer aside
+/// and checks again, and the same window shows This Mac running and live.
+#[gpui::test]
+fn a_connection_check_from_before_the_link_returned_is_checked_again(cx: &mut TestAppContext) {
+    use crate::machine_connection::CoreError;
+    let core = ScriptedCore::new(Err(CoreError::Stopped));
+    let mut down = machine(None, 0);
+    down.link = MachineLink::Stopped;
+    down.facts = None;
+    let (settings, adapter, service, cx) =
+        open_with(cx, down, core.clone(), ScriptedService::new(Ok(stopped())));
+    assert_eq!(local_state(&settings, cx), "Stopped");
+    let checks = core.refreshes();
+
+    // The CLI starts the Core. Its service reads running before its lane answers.
+    let held = core.hold_refresh();
+    service.report(Ok(running()));
+    let mut starting = machine(None, 0);
+    starting.link = MachineLink::Offline { since: 1 };
+    starting.facts = None;
+    adapter.emit(MachineUpdatesEvent::Machines(vec![starting]));
+    cx.run_until_parked();
+    assert_eq!(core.refreshes(), checks + 1);
+
+    // The link returns while that check still waits, then the check answers from before.
+    core.answer_refresh(Ok(connected(1)));
+    adapter.emit(MachineUpdatesEvent::Machines(vec![machine(None, 1)]));
+    cx.run_until_parked();
+    held.release(Err(CoreError::Stopped));
+    cx.run_until_parked();
+
+    assert_eq!(
+        core.refreshes(),
+        checks + 2,
+        "the connection is checked again"
+    );
+    assert_eq!(local_state(&settings, cx), "Running");
+    assert!(
+        settings.read_with(cx, |settings, _| settings
+            .core_state(&super::super::machine_list::MachineChoice::Local)
+            .live),
+        "This Mac's rows are live again"
+    );
 }

@@ -3,7 +3,7 @@
 //! Start and Stop run only on this machine; Restart also reaches a paired machine. Start calls
 //! the service directly. Stop and Restart preview their effects, take a confirmation, then run
 //! through the service lane's operation flow, which survives SpaceTerm Core's own stop.
-use super::{Context, Opened, Pending, Reply, Routed};
+use super::{Context, Opened, Pending, Reply, Routed, Unopened};
 use crate::contract::{
     self, Code, Confirmation, ConfirmationData, CoreStart, Details, Envelope, Failure, MachineRef,
     Observed, Receipt, ReceiptState, RecoveredOperation, RestartTarget, ServiceAction,
@@ -84,6 +84,8 @@ pub fn start(context: &Context<'_>) -> Reply {
 }
 
 pub fn stop_or_restart(context: &Context<'_>, kind: Kind, token: Option<&str>) -> Reply {
+    // A confirmed command's `--timeout` covers everything it does from here.
+    let started = Instant::now();
     let command = kind.command();
     // A stopped SpaceTerm Core can't be started from a paired machine, so Stop runs only here.
     if kind == Kind::Stop
@@ -99,35 +101,80 @@ pub fn stop_or_restart(context: &Context<'_>, kind: Kind, token: Option<&str>) -
         Ok(pending) => pending,
         Err(failure) => return Reply::failure(command, Some(routed.machine), failure),
     };
-    let opened = match super::open_lane(context, &routed.connection, &routed.route, &pending) {
+    // A confirmed command's one absolute deadline also bounds opening the lane and settling
+    // earlier operations, so none of that can carry its `Execute` past `--timeout`. A preview
+    // waits its own budget once the lane is open.
+    let deadline = match token {
+        Some(_) => started + context.timeout(admin::BUSY_WAIT + kind.wait()),
+        None => Instant::now() + admin::REQUEST_LIMIT,
+    };
+    let opened = match super::open_lane(
+        context,
+        &routed.connection,
+        &routed.route,
+        &pending,
+        deadline,
+    ) {
         Ok(opened) => opened,
-        Err(failure) => return not_running(context, &routed, command, failure),
+        Err(unopened) => return not_running(context, &routed, command, unopened, deadline),
     };
     match token {
-        Some(token) => execute(context, kind, routed, opened, &pending, token.to_owned()),
+        Some(token) => execute(
+            context,
+            kind,
+            routed,
+            opened,
+            &pending,
+            token.to_owned(),
+            deadline,
+        ),
         None => preview(context, kind, routed, opened, &pending),
     }
 }
 
-/// A lane that does not answer: a stopped SpaceTerm Core says so, and Stop of a stopped one
-/// changes nothing.
-fn not_running(context: &Context<'_>, routed: &Routed, command: &str, failure: Failure) -> Reply {
-    if routed.local
-        && let Ok(Some(_)) = context.unshared(|| {
-            Service::for_identity(context.identity).and_then(|service| service.stop_if_stopped())
+/// A lane that does not answer by `deadline`: a stopped SpaceTerm Core says so, and Stop of a
+/// stopped one changes nothing. A lane that settled earlier operations before it failed still
+/// reports them.
+fn not_running(
+    context: &Context<'_>,
+    routed: &Routed,
+    command: &str,
+    unopened: Unopened,
+    deadline: Instant,
+) -> Reply {
+    let Unopened { failure, recovered } = unopened;
+    let failure = if failure.code == Code::Timeout {
+        failure
+    } else if routed.local
+        && let Ok(Some(_)) = context.unshared_by(deadline, || {
+            Service::for_identity(context.identity)
+                .and_then(|service| service.stop_if_stopped_by(deadline))
         })
     {
-        return Reply::failure(
-            command,
-            Some(routed.machine.clone()),
-            Failure::new(Code::Stopped),
-        );
-    }
-    let failure = match failure.code {
-        Code::Unreachable if routed.local => Failure::new(Code::NotRunning),
-        _ => failure,
+        Failure::new(Code::Stopped)
+    } else if Instant::now() >= deadline {
+        Failure::new(Code::Timeout)
+    } else if failure.code == Code::Unreachable && routed.local {
+        Failure::new(Code::NotRunning)
+    } else {
+        failure
     };
-    Reply::failure(command, Some(routed.machine.clone()), failure)
+    Reply::unopened(
+        command,
+        Some(routed.machine.clone()),
+        Unopened { failure, recovered },
+    )
+}
+
+/// Says once, to a person at the terminal, that the command waits for another SpaceTerm Core
+/// operation to finish before it goes on.
+fn say_waiting(context: &Context<'_>) -> impl FnMut(bool) + use<> {
+    let mut interactive = context.interactive();
+    move |began| {
+        if began && std::mem::take(&mut interactive) {
+            eprintln!("Waiting for another SpaceTerm Core operation to finish\u{2026}");
+        }
+    }
 }
 
 fn preview(
@@ -138,22 +185,40 @@ fn preview(
     pending: &Pending,
 ) -> Reply {
     let command = kind.command();
+    // One deadline covers reading the facts and the preview with its wait for another
+    // operation.
+    let deadline = Instant::now() + context.timeout(admin::BUSY_WAIT);
     // A Core that reports no facts still previews; its restart then names no breaking change.
     let facts = match kind {
-        Kind::Restart => admin::facts(&mut opened.session)
+        Kind::Restart => admin::facts_by(&mut opened.session, crate::interrupt::limit(deadline))
             .ok()
             .map(|(_, facts)| facts),
         Kind::Stop => None,
     };
-    let previewed = admin::preview(&mut opened.session, kind.action());
+    // Another operation, such as an update check, may hold SpaceTerm Core for a while. The
+    // preview waits for it rather than refusing at once.
+    let previewed = admin::preview_when_ready(
+        &opened.lane,
+        opened.session,
+        kind.action(),
+        crate::interrupt::limit(deadline),
+        &crate::interrupt::settle_by,
+        &mut say_waiting(context),
+    );
     let admin::Preview {
         token,
         expires_at,
         effects,
         ..
     } = match previewed {
-        Ok(preview) => preview,
+        Ok((session, preview)) => {
+            opened.session = session;
+            preview
+        }
         Err(error) => {
+            if let Err(failure) = crate::interrupt::dispatch() {
+                return Reply::failure(command, Some(routed.machine), failure);
+            }
             return Reply::failure(command, Some(routed.machine), super::lane_failure(error));
         }
     };
@@ -167,7 +232,9 @@ fn preview(
         contract::write_warnings(&warnings, &mut std::io::stderr().lock());
         eprint!("{summary}");
         if super::confirm(kind.confirm_label()) {
-            return execute(context, kind, routed, opened, pending, token);
+            // The person's answer starts the confirmed action's own budget.
+            let deadline = Instant::now() + context.timeout(admin::BUSY_WAIT + kind.wait());
+            return execute(context, kind, routed, opened, pending, token, deadline);
         }
         return Reply::failure(
             command,
@@ -334,6 +401,7 @@ fn execute(
     opened: Opened,
     pending: &Pending,
     token: String,
+    deadline: Instant,
 ) -> Reply {
     let command = kind.command();
     let Opened {
@@ -341,26 +409,36 @@ fn execute(
         mut session,
         mut recovered,
     } = opened;
+    // One absolute deadline, from when the command started or the person confirmed, covers
+    // opening the lane, reading the facts, the wait for another operation, the action's
+    // settlement and, for a local Stop, reading its outcome afterwards. `--timeout` sets the
+    // whole of it.
     // A restart moves into the Pending Version when one waits, so its outcome names it.
     let before = match kind {
-        Kind::Restart => admin::facts(&mut session).ok().map(|(_, facts)| facts),
+        Kind::Restart => admin::facts_by(&mut session, crate::interrupt::limit(deadline))
+            .ok()
+            .map(|(_, facts)| facts),
         Kind::Stop => None,
     };
     let target = before
         .as_ref()
         .and_then(|facts| facts.pending.as_ref())
         .map(|pending| pending.version.to_string());
-    let deadline = Instant::now() + context.timeout(kind.wait());
-    let outcome = admin::execute(
+    // An approved Stop or Restart waits for another operation that holds SpaceTerm Core, then
+    // runs under the same approval. SpaceTerm Core refuses it as changed when what it affects
+    // changed meanwhile.
+    let outcome = admin::execute_approved(
         &lane,
         session,
         kind.action(),
         token,
-        context.timeout(kind.wait()),
+        deadline,
+        kind.wait(),
         pending.operations(),
         &mut *context.state.borrow_mut(),
         &mut super::dispatch,
         &crate::interrupt::settle_by,
+        &mut say_waiting(context),
     );
     let outcome = match outcome {
         Ok(outcome) => outcome,
@@ -394,14 +472,26 @@ fn execute(
             .as_ref()
             .is_some_and(|failure| failure.code == Code::StartupFailed)
     {
-        // SpaceTerm Core returned to the version it ran before. Its update facts say why.
-        let after = super::open_lane(context, &routed.connection, &routed.route, pending)
-            .ok()
-            .and_then(|mut opened| {
+        // SpaceTerm Core returned to the version it ran before. Its update facts say why, when
+        // they arrive within the command's one deadline; this read starts no budget of its own.
+        let deadline = crate::interrupt::limit(deadline);
+        let after = match super::open_lane(
+            context,
+            &routed.connection,
+            &routed.route,
+            pending,
+            deadline,
+        ) {
+            Ok(mut opened) => {
                 recovered.append(&mut opened.recovered);
-                admin::facts(&mut opened.session).ok()
-            })
-            .map(|(_, facts)| facts);
+                admin::facts_by(&mut opened.session, deadline).ok()
+            }
+            Err(mut unopened) => {
+                recovered.append(&mut unopened.recovered);
+                None
+            }
+        }
+        .map(|(_, facts)| facts);
         let failure = update_failure(version, before.as_ref(), after.as_ref());
         settled.receipt.code = Some(failure.code);
         settled.failure = Some(failure);

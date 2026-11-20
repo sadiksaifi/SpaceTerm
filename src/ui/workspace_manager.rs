@@ -24,6 +24,7 @@ use super::directory_picker::{
 };
 use super::terminal_focus::{TerminalFocusBlocker, TerminalFocusCoordinator, WorkspaceFocusOwners};
 use super::workspace_creation::WorkspaceCreation;
+use super::workspaces::CloseConsent;
 use super::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
     ActivateTab7, ActivateTab8, ActivateTab9, ActivateWorkspace1, ActivateWorkspace2,
@@ -214,6 +215,13 @@ struct NavigationMark {
     within: Option<(u64, crate::domain::TabId, u64)>,
 }
 
+/// The review a refusal of this client's own direct close asks for: the refusal's notice, if
+/// any, and what the refusal proved the close would end, from the reading that carried it.
+struct RefusedCloseReview {
+    notice: Option<super::workspaces::OutcomeNotice>,
+    observed: spaceterm_core::hierarchy::CloseConfirmation,
+}
+
 /// One question to the owning server about the directory a person chose in Open Remote
 /// Directory: which attached Workspace there, if any, is already pinned to it.
 struct CoreDirectoryMatch {
@@ -295,6 +303,13 @@ pub(crate) struct WorkspaceManager {
     /// A close waiting for a shell its target is still starting, and the close a wait that ran
     /// out lets through to review.
     close_start: CloseStartWait,
+    /// Reviews waiting for the open confirmation to close.
+    close_reviews: WaitingReviews,
+    /// Set while a request follows the server's refusal of this client's own direct close for
+    /// work in its unchanged Panes. The request asks for confirmation instead of closing
+    /// directly, and the confirmation presents the refusal's notice, if any. The confirmation
+    /// presents the refusal only while it ends exactly what the refusal proved.
+    close_review: Option<RefusedCloseReview>,
     /// Reads every server again once the window's modal closes, while a reading waits on it.
     modal_reread: Option<gpui::Subscription>,
     sidebar_worktrees: worktrees::SidebarWorktrees,
@@ -405,6 +420,13 @@ impl WorkspaceManager {
         })
         .detach();
 
+        // The person's own launch opens the selection a previous launch left, unless they choose
+        // something in this window first.
+        let restoration = if local_core.intent == launch::LaunchIntent::Foreground {
+            crate::ui::remembered_view::Restoration::landing()
+        } else {
+            crate::ui::remembered_view::Restoration::none()
+        };
         let mut manager = Self {
             window_appearance,
             window_traffic_lights,
@@ -437,6 +459,8 @@ impl WorkspaceManager {
             close_confirmation: CloseConfirmation::default(),
             close_keyboard: WorkspaceCloseKeyboard::default(),
             close_start: CloseStartWait::default(),
+            close_reviews: WaitingReviews::default(),
+            close_review: None,
             modal_reread: None,
             sidebar_worktrees: worktrees::SidebarWorktrees::default(),
             workspace_repositories: workspace_repositories::WorkspaceRepositories::default(),
@@ -452,9 +476,10 @@ impl WorkspaceManager {
                     .this_computer,
             ),
             display_order: display_order::DisplayOrder::default(),
-            restoration: crate::ui::remembered_view::Restoration::none(),
+            restoration,
             person_keys: None,
         };
+        manager.follow_person_input(window, cx);
         manager.follow_display_order(window, cx);
         manager.run_local_launch(None, window, cx);
         manager.follow_direct_machines(window, cx);
@@ -1553,6 +1578,96 @@ impl WorkspaceManager {
         }
     }
 
+    /// Opens the Active Workspace's Active Tab and Focused Pane for the person who launched
+    /// SpaceTerm, starting that Pane's shell. The Workspace, Tab and Pane this client last
+    /// presented from this computer come first while this window still presents them and the
+    /// person has chosen nothing in it since it opened. With no Workspace to present, it creates
+    /// one Local Workspace, whose Root Pane opens once SpaceTerm Core publishes it. Workspaces
+    /// the person detached stay detached.
+    /// Lands the person's own launch in a shell, and returns whether it is done. It waits, and
+    /// returns `false`, while this computer's server cannot take what landing asks of it: a
+    /// retained copy stands in for the server, or the server cannot accept a creation yet.
+    fn land(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        use super::workspaces::{
+            WorkspaceEditability, WorkspaceRefusalReason, WorkspaceSubmission,
+        };
+
+        let Some(binding) = self.binding.local() else {
+            return false;
+        };
+        // A Pane of a retained copy starts no shell, and its selection may name a Tab or Pane
+        // the server no longer has.
+        let editability = binding.editability();
+        if binding.presents_retained_copy() || editability == WorkspaceEditability::Offline {
+            return false;
+        }
+        let creates = self.workspaces.iter().next().is_none();
+        if creates && editability != WorkspaceEditability::Available {
+            return false;
+        }
+        // Input before the Workspaces arrived chose what the window shows, so the saved
+        // selection stays away and the keyboard stays where the person put it.
+        let person_chose = !self.restoration.take_landing();
+        let saved = if person_chose {
+            None
+        } else {
+            self.restore_saved_selection(window, cx)
+        };
+        self.follow_person_input(window, cx);
+        if let Some(workspace_id) = saved.or_else(|| self.workspaces.active_workspace_id()) {
+            if person_chose && !self.content_holds_keyboard(window, cx) {
+                return true;
+            }
+            if self.activate_workspace(workspace_id, window, cx) {
+                self.focus(window, cx);
+            }
+            return true;
+        }
+        if !creates {
+            return true;
+        }
+        let Some(binding) = self.binding.local_mut() else {
+            return false;
+        };
+        match binding.create_workspace(String::new(), None) {
+            WorkspaceSubmission::Submitted => {
+                self.launch.finish_landing();
+                self.sync_workspaces(MachineKey::LOCAL, window, cx);
+                cx.notify();
+                true
+            }
+            // The server's state changed since this reading, so the next reading asks again.
+            WorkspaceSubmission::Refused(
+                WorkspaceRefusalReason::Offline | WorkspaceRefusalReason::Pending,
+            ) => false,
+            WorkspaceSubmission::Refused(reason) => {
+                Self::show_refusal("create a Workspace", reason, window, cx);
+                true
+            }
+        }
+    }
+
+    /// Selects the Tab and Focused Pane a previous launch left in the Workspace it left, and
+    /// returns that Workspace, when this window presents it from this computer's own inventory.
+    /// A Tab or Pane that is gone leaves the Root Tab or Root Pane.
+    fn restore_saved_selection(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<WorkspaceId> {
+        let binding = self.binding.get(MachineKey::LOCAL)?;
+        if binding.presents_retained_copy() {
+            return None;
+        }
+        let saved = binding.saved_selection()?;
+        let workspace_id = binding.local(saved.workspace)?;
+        let manager = self.workspaces.workspace(workspace_id)?.payload().clone();
+        manager.update(cx, |manager, cx| {
+            manager.restore_saved_selection(saved, window, cx);
+        });
+        Some(workspace_id)
+    }
+
     fn activate_workspace(
         &mut self,
         workspace_id: WorkspaceId,
@@ -1990,6 +2105,8 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The person's own creation replaces whatever their launch still owed them.
+        self.launch.finish_landing();
         match creation {
             // The account server owns local work, so a new local Workspace is the server's.
             WorkspaceCreation::Local => {
@@ -2817,6 +2934,7 @@ impl WorkspaceManager {
         } else {
             super::workspaces::WorkspaceRemoval::Published
         };
+        let inventory_applied = poll.inventory.is_some();
         if let Some(inventory) = poll.inventory {
             self.apply_inventory(key, &inventory, removal, window, cx);
             self.settle_remembered_view(key, window, cx);
@@ -2824,13 +2942,36 @@ impl WorkspaceManager {
         // A new client's first view is the person opening SpaceTerm to work, so it opens the
         // Active Tab and its Focused Pane's shell. Later launches restore views passively, and
         // so does a window reopened with the view the last one left, which nobody chose here.
-        if let Some(workspace_id) = poll
+        let initial = poll
             .initial
             .filter(|_| !self.restores_remembered_view())
-            .and_then(|core| self.binding.get(key)?.local(core))
-            && self.activate_workspace(workspace_id, window, cx)
-        {
+            .and_then(|core| self.binding.get(key)?.local(core));
+        // Input before the Workspaces arrived chose what the window shows. Unless the keyboard
+        // stayed with the content, the first view neither moves the view nor takes it.
+        let person_chose = self.launch.landing_owed() && !self.restoration.landing_pending();
+        let landed = initial.is_some_and(|workspace_id| {
+            (!person_chose || self.content_holds_keyboard(window, cx))
+                && self.activate_workspace(workspace_id, window, cx)
+        });
+        if landed {
             self.focus(window, cx);
+        }
+        // The person's own launch of SpaceTerm lands in a shell once this computer's server
+        // presents its own Workspaces and this client's attachments are known. A landing that
+        // waits for the server to accept its creation runs again at each later reading.
+        if key == MachineKey::LOCAL
+            && (inventory_applied || self.launch.landing_presented())
+            && self.launch.landing_owed()
+        {
+            if landed {
+                self.launch.finish_landing();
+                self.restoration.take_landing();
+                self.follow_person_input(window, cx);
+            } else if self.land(window, cx) {
+                self.launch.finish_landing();
+            } else {
+                self.launch.landing_waits();
+            }
         }
         // The client that asked for a creation opens it, once, after the server published it.
         if let Some(accepted) = poll.accepted {
@@ -2867,11 +3008,11 @@ impl WorkspaceManager {
         {
             let _ = binding.take_forgotten();
         }
-        while let Some((machine_target, local, notice)) = self
+        while let Some((machine_target, local, notice, working)) = self
             .binding
             .get(key)
             .and_then(super::workspaces::Workspaces::next_stale_close)
-            && self.present_stale_close(machine_target, local, Some(&notice), window, cx)
+            && self.present_stale_close(machine_target, local, Some(&notice), working, window, cx)
             && let Some(binding) = self.binding.get_mut(key)
         {
             let _ = binding.take_stale_close();
@@ -2883,12 +3024,45 @@ impl WorkspaceManager {
             // The local presentation must still name the exact creation this intent followed.
             && self.close_target(intent.local, cx) == Some(intent.core)
         {
-            let held_keyboard = intent.keyboard.is_some()
-                && intent.keyboard == keyboard_before_reconciliation
-                && self.close_target_is_active(intent.local, cx);
-            self.close_keyboard.reviewed = Some(held_keyboard);
-            self.request_core_close(intent.local, window, cx);
-            self.close_keyboard.reviewed = None;
+            // Navigation since the person asked wins over the keyboard intent the close kept.
+            // A close that recorded no keyboard owner, as a retry after a Core restart, takes
+            // the keyboard only when its target is the active Pane and its Workspace holds the
+            // keyboard now.
+            let held_keyboard = self.close_target_is_active(intent.local, cx)
+                && match &intent.keyboard {
+                    super::workspaces::CloseKeyboard::Unknown => self
+                        .workspaces
+                        .workspace(close_target_workspace(intent.local))
+                        .is_some_and(|entry| entry.payload().read(cx).holds_keyboard(window, cx)),
+                    super::workspaces::CloseKeyboard::Elsewhere => false,
+                    super::workspaces::CloseKeyboard::Held(handle) => {
+                        keyboard_before_reconciliation.as_ref() == Some(handle)
+                    }
+                };
+            self.request_core_close_as(
+                intent.local,
+                CloseRequest {
+                    review: intent.review,
+                    keyboard: Some(held_keyboard),
+                },
+                window,
+                cx,
+            );
+        }
+        // A Review that waited for another confirmation asks about what its close ends now.
+        if !spaceterm_ui::window_modal_is_open(window, cx)
+            && self.close_confirmation.pending().is_none()
+            && let Some((target, keyboard)) = self.close_reviews.next()
+        {
+            self.resume_close(
+                target,
+                CloseRequest {
+                    review: true,
+                    keyboard,
+                },
+                window,
+                cx,
+            );
         }
         // Each server's reading may present the Worktree it created or change the one under
         // review; both look up their own Workspace's server.
@@ -3003,6 +3177,24 @@ impl WorkspaceManager {
             if let Some(binding) = self.binding.get_mut(key) {
                 binding.save_arrangements(spaceterm_core::client_view::ClientView { workspaces });
             }
+        }
+        // Only the person's launch reads a selection, and it opens this computer's. Another
+        // Machine's Active Workspace leaves this computer's last selection as it was, and so
+        // does a view nobody chose: a passive launch's default, or a landing still owed.
+        if let Some(active) = self.workspaces.active_workspace_id()
+            && self.binding.owner(active) == Some(MachineKey::LOCAL)
+            && !self.launch.landing_owed()
+            && self
+                .binding
+                .local()
+                .is_some_and(super::workspaces::Workspaces::selected_explicitly)
+            && let Some(selection) = self
+                .workspaces
+                .workspace(active)
+                .and_then(|entry| entry.payload().read(cx).selection(cx))
+            && let Some(binding) = self.binding.get_mut(MachineKey::LOCAL)
+        {
+            binding.save_selection(selection);
         }
     }
 
@@ -3438,6 +3630,20 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.request_core_close_as(target, CloseRequest::default(), window, cx)
+    }
+
+    /// Asks to close `target` as `request` says. Every path that waits keeps the request whole:
+    /// a Core restart or a pending creation, a starting shell, a Worktree's fallback Tab and an
+    /// open confirmation each resume it later. A Review never closes directly; it opens a fresh
+    /// confirmation of what the close ends when it resumes, or reports why it cannot.
+    fn request_core_close_as(
+        &mut self,
+        target: CloseTarget,
+        request: CloseRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         use super::workspaces::{
             WorkspaceCloseIntent, WorkspaceCloseReview, WorkspaceCloseUnavailable,
         };
@@ -3446,19 +3652,35 @@ impl WorkspaceManager {
         if !self.has_workspace(workspace_id) {
             return false;
         }
+        // One confirmation holds the window at a time. A Review waits for it to close, then asks
+        // about what its close ends at that moment, never with that confirmation's approval.
         if self.close_confirmation.pending().is_some() {
+            if request.review {
+                self.close_reviews.hold(target, request.keyboard);
+                self.reread_after_modal(window, cx);
+            }
             return true;
         }
         let Some(machine_target) = self.close_target(target, cx) else {
             // A target this window can no longer name closes nothing.
             return true;
         };
-        if self.request_worktree_close_fallback(target, machine_target, window, cx) {
+        // A close of this target that still waits is the person's same request. It answers
+        // before anything reads whether a shell started or whether the close could be direct.
+        match self.join_waiting_close(target, machine_target, request, window, cx) {
+            WaitingClose::None => {}
+            WaitingClose::Waits => return true,
+            WaitingClose::Resumes(joined) => {
+                self.resume_close(target, joined, window, cx);
+                return true;
+            }
+        }
+        if self.request_worktree_close_fallback(target, machine_target, request, window, cx) {
             return true;
         }
         // A Review hands over what the person's first request held; any other request reads it
         // now, before a confirmation takes the keyboard.
-        let held_keyboard = self.close_keyboard.reviewed.take().unwrap_or_else(|| {
+        let held_keyboard = request.keyboard.unwrap_or_else(|| {
             self.workspaces
                 .workspace(workspace_id)
                 .is_some_and(|entry| entry.payload().read(cx).holds_keyboard(window, cx))
@@ -3469,7 +3691,13 @@ impl WorkspaceManager {
         match binding.defer_close(WorkspaceCloseIntent {
             core: machine_target,
             local: target,
-            keyboard: held_keyboard.then(|| window.focused(cx)).flatten(),
+            keyboard: held_keyboard
+                .then(|| window.focused(cx))
+                .flatten()
+                .map_or(super::workspaces::CloseKeyboard::Elsewhere, |handle| {
+                    super::workspaces::CloseKeyboard::Held(handle)
+                }),
+            review: request.review,
         }) {
             Ok(true) => return true,
             Ok(false) => {}
@@ -3503,6 +3731,26 @@ impl WorkspaceManager {
                 return true;
             }
         };
+        // A refusal's review covers only what the refusal proved the close would end. A new
+        // Terminal Session in the same Pane, a Pane that joined, or a changed removal is work
+        // the person never asked to close, so the refusal ends as a stale close whose Review
+        // asks again from the person's own request.
+        if let Some(review) = self
+            .close_review
+            .take_if(|review| !approval.ends_exactly(&review.observed))
+        {
+            // The refusal's own scope changed, perhaps by this client, so the notice names no
+            // other client.
+            self.present_close_changed(
+                approval.scope_changed_title(),
+                Some(target),
+                held_keyboard,
+                review.notice.as_ref(),
+                window,
+                cx,
+            );
+            return true;
+        }
         // A Pane whose shell is still starting has no Terminal Session to review yet, and will
         // have one in a moment, which would make any review stale before the person answers.
         // The close waits for the shell to start, fail or end, and then reviews what it ends.
@@ -3512,19 +3760,25 @@ impl WorkspaceManager {
                 .is_some_and(|entry| entry.payload().read(cx).pane_shell_starting(pane, cx))
         });
         if starting && self.close_start.waits(target) {
-            self.wait_for_starting_shell(target, window, cx);
+            self.wait_for_starting_shell(target, request, window, cx);
             return true;
         }
-        let direct = approval.direct_close(|pane, live_session| {
-            self.workspaces
-                .workspace(workspace_id)
-                .is_some_and(|entry| {
-                    entry
-                        .payload()
-                        .read(cx)
-                        .pane_closes_directly(pane, live_session, cx)
+        // A close the server refused for work in this client's own Panes asks the person, and so
+        // does a Review.
+        let direct = (self.close_review.is_none() && !request.review)
+            .then(|| {
+                approval.direct_close(|pane, live_session| {
+                    self.workspaces
+                        .workspace(workspace_id)
+                        .is_some_and(|entry| {
+                            entry
+                                .payload()
+                                .read(cx)
+                                .pane_closes_directly(pane, live_session, cx)
+                        })
                 })
-        });
+            })
+            .flatten();
         if let Some(approval) = direct {
             use super::workspaces::WorkspaceSubmission;
 
@@ -3532,7 +3786,7 @@ impl WorkspaceManager {
             let submission = self
                 .binding
                 .owning_mut(workspace_id)
-                .map(|binding| binding.close(approval, target));
+                .map(|binding| binding.close(approval, target, CloseConsent::Direct));
             if let Some(WorkspaceSubmission::Refused(reason)) = submission {
                 Self::show_refusal(Self::close_operation(target), reason, window, cx);
             }
@@ -3555,7 +3809,11 @@ impl WorkspaceManager {
         let Some(generation) = self.close_confirmation.begin(target) else {
             return true;
         };
-        self.close_keyboard.pending = Some((generation, held_keyboard));
+        self.close_keyboard.pending = Some((
+            generation,
+            held_keyboard,
+            held_keyboard.then(|| window.focused(cx)).flatten(),
+        ));
         let mut alert = Alert::new(
             ModalId::new("close-confirmation"),
             approval.title(),
@@ -3582,6 +3840,12 @@ impl WorkspaceManager {
         if let Some(detail) = approval.detail() {
             alert = alert.detail(detail);
         }
+        // The refused close's outcome counts as seen once the person answers this confirmation,
+        // or the notice that replaces it.
+        let notice = self.close_review.take().and_then(|review| review.notice);
+        let lifecycle = notice
+            .as_ref()
+            .map(super::workspaces::OutcomeNotice::lifecycle);
         // A Review opens this beneath the notice's held sidebar rename, which it keeps holding.
         let presented = self.present_keeping_sidebar_rename(
             alert,
@@ -3597,7 +3861,11 @@ impl WorkspaceManager {
                     manager.settle_close(generation, target, confirmed, window, cx);
                 });
             },
-            |_, _| {},
+            move |event, cx| {
+                if let Some(lifecycle) = &lifecycle {
+                    lifecycle(event, cx);
+                }
+            },
             window,
             cx,
         );
@@ -3609,6 +3877,7 @@ impl WorkspaceManager {
                         target,
                         approval,
                         presentation: Some(presentation),
+                        notice,
                     });
                 }
             }
@@ -3646,6 +3915,32 @@ impl WorkspaceManager {
             } => active == (tab_id, pane_id),
             _ => true,
         }
+    }
+
+    /// Whether closing `target` removes the control `focus` names: one of the closing Tab's
+    /// controls, or the closing Pane, or the strip item of the Tab whose last Pane it is.
+    fn close_removes_focus(
+        &self,
+        target: CloseTarget,
+        focus: &gpui::FocusHandle,
+        window: &Window,
+        cx: &App,
+    ) -> bool {
+        let (tab_id, pane_id) = match target {
+            CloseTarget::Tab { tab_id, .. } => (tab_id, None),
+            CloseTarget::Pane {
+                tab_id, pane_id, ..
+            } => (tab_id, Some(pane_id)),
+            CloseTarget::KillWorkspace(_) | CloseTarget::Worktree { .. } => return false,
+        };
+        self.workspaces
+            .workspace(close_target_workspace(target))
+            .is_some_and(|entry| {
+                entry
+                    .payload()
+                    .read(cx)
+                    .close_removes_focus(tab_id, pane_id, focus, window, cx)
+            })
     }
 
     /// What a refused shared close says it did not do.
@@ -3732,7 +4027,17 @@ impl WorkspaceManager {
     ) {
         use super::workspaces::{WorkspaceCloseState, WorkspaceSubmission};
 
-        let held_keyboard = self.close_keyboard.take(generation);
+        // Navigation since the confirmation opened wins over the keyboard intent it kept, unless
+        // the close removes the control the confirmation took the keyboard from, as an inactive
+        // Tab's strip item. The confirmation could return the keyboard to nothing else.
+        let held_keyboard = self
+            .close_keyboard
+            .take_owner(generation)
+            .is_some_and(|owner| {
+                self.close_target_is_active(target, cx)
+                    || owner
+                        .is_some_and(|owner| self.close_removes_focus(target, &owner, window, cx))
+            });
 
         // The review lives with the server that owns what it would close.
         let review = self.binding.keys().into_iter().find_map(|key| {
@@ -3754,7 +4059,8 @@ impl WorkspaceManager {
         match binding.close_state(&review.approval) {
             WorkspaceCloseState::Current => {
                 let renaming = self.sidebar.read(cx).is_renaming();
-                let submission = binding.close(review.approval, review.target);
+                let submission =
+                    binding.close(review.approval, review.target, CloseConsent::Confirmed);
                 if let WorkspaceSubmission::Refused(reason) = submission {
                     Self::show_refusal(Self::close_operation(target), reason, window, cx);
                 }
@@ -3769,17 +4075,11 @@ impl WorkspaceManager {
                 }
             }
             WorkspaceCloseState::Changed => {
-                self.present_close_changed(
-                    review.approval.changed_title(),
-                    Some(target),
-                    held_keyboard,
-                    None,
-                    window,
-                    cx,
-                );
+                let title = binding.changed_close_title(&review.approval);
+                self.present_close_changed(title, Some(target), held_keyboard, None, window, cx);
             }
             WorkspaceCloseState::Missing => {
-                self.present_close_missing(&review.approval, window, cx);
+                self.present_close_missing(&review.approval, None, window, cx);
             }
         }
         cx.notify();
@@ -3803,6 +4103,14 @@ impl WorkspaceManager {
         let Some(review) = binding.end_review(generation) else {
             return;
         };
+        let title = binding.changed_close_title(&review.approval);
+        // The notice that replaces this confirmation presents the refused close's outcome, so
+        // the person's answer to it records that outcome as seen. Dismissing the confirmation
+        // leaves the outcome alone, so no later reading presents it again as another notice.
+        let notice = review
+            .notice
+            .as_ref()
+            .map(super::workspaces::OutcomeNotice::hand_over);
         // The pending confirmation ends here, so its own deferred answer settles nothing.
         self.close_confirmation.presentation_failed(generation);
         let held_keyboard = self.close_keyboard.take(generation);
@@ -3811,14 +4119,14 @@ impl WorkspaceManager {
         }
         match state {
             WorkspaceCloseState::Missing => {
-                self.present_close_missing(&review.approval, window, cx);
+                self.present_close_missing(&review.approval, notice.as_ref(), window, cx);
             }
             _ => {
                 self.present_close_changed(
-                    review.approval.changed_title(),
+                    title,
                     Some(review.target),
                     held_keyboard,
-                    None,
+                    notice.as_ref(),
                     window,
                     cx,
                 );
@@ -3890,9 +4198,12 @@ impl WorkspaceManager {
                 };
                 let _ = window_handle.update(cx, |_, window, cx| {
                     let _ = manager.update(cx, |manager, cx| {
-                        manager.close_keyboard.reviewed = Some(held_keyboard);
-                        manager.request_close(target, window, cx);
-                        manager.close_keyboard.reviewed = None;
+                        manager.request_core_close_as(
+                            target,
+                            CloseRequest::review(held_keyboard),
+                            window,
+                            cx,
+                        );
                     });
                 });
             },
@@ -3960,31 +4271,84 @@ impl WorkspaceManager {
         machine_target: spaceterm_core::hierarchy::CloseTarget,
         local: Option<CloseTarget>,
         notice: Option<&super::workspaces::OutcomeNotice>,
+        working: Option<spaceterm_core::hierarchy::CloseConfirmation>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         let local = local.filter(|local| self.close_target(*local, cx) == Some(machine_target));
-        // The refused close already moved the keyboard, so a Review keeps what holds it now.
-        let held_keyboard = local
-            .and_then(|local| self.workspaces.workspace(close_target_workspace(local)))
-            .is_some_and(|entry| entry.payload().read(cx).holds_keyboard(window, cx));
-        self.present_close_changed(
-            super::workspaces::close_changed_title(machine_target),
-            local,
-            held_keyboard,
-            notice,
-            window,
-            cx,
-        )
+        // The server found work in this client's own unchanged Panes, which is not another
+        // client's change. It may be a command it verified running, or a submitted line nothing
+        // proved finished, as a shell without shell integration leaves every line. The client
+        // cannot tell which, so it claims neither and asks the neutral confirmation, which
+        // presents this outcome's notice. While another confirmation, perhaps another
+        // Machine's, holds the window, the refusal stays queued with its exact target, and the
+        // reading that follows that modal's close reviews it.
+        if working.is_some()
+            && local.is_some()
+            && (self.close_confirmation.pending().is_some()
+                || spaceterm_ui::window_modal_is_open(window, cx))
+        {
+            return false;
+        }
+        // A modal that held the keyboard as the refusal returned its Tab or Pane still owes the
+        // keyboard to that Tab or Pane.
+        let returned = local.is_some_and(|local| {
+            let (tab_id, pane_id) = match local {
+                CloseTarget::Tab { tab_id, .. } => (tab_id, None),
+                CloseTarget::Pane {
+                    tab_id, pane_id, ..
+                } => (tab_id, Some(pane_id)),
+                _ => return false,
+            };
+            self.workspaces
+                .workspace(close_target_workspace(local))
+                .is_some_and(|entry| {
+                    entry.payload().update(cx, |manager, cx| {
+                        manager.take_returned_keyboard(tab_id, pane_id, cx)
+                    })
+                })
+        });
+        // The refused close returns the keyboard with its Tab or Pane, so a Review keeps what
+        // holds it now.
+        let held_keyboard = returned
+            || local
+                .and_then(|local| self.workspaces.workspace(close_target_workspace(local)))
+                .is_some_and(|entry| entry.payload().read(cx).holds_keyboard(window, cx));
+        if let Some(observed) = working
+            && let Some(local) = local
+        {
+            // The review opens over the Pane the person asked to close, so its Cancel returns
+            // the keyboard there rather than where a modal opened meanwhile left it.
+            if held_keyboard && self.close_target_is_active(local, cx) {
+                self.focus(window, cx);
+            }
+            self.close_review = Some(RefusedCloseReview {
+                notice: notice.cloned(),
+                observed,
+            });
+            // A review the request defers or holds for a starting shell outlives this refusal's
+            // record, and still asks rather than closing directly when it resumes.
+            self.request_core_close_as(local, CloseRequest::review(held_keyboard), window, cx);
+            // A request that opened no confirmation leaves the outcome unseen.
+            if let Some(notice) = self.close_review.take().and_then(|review| review.notice) {
+                notice.release();
+            }
+            return true;
+        }
+        let title = super::workspaces::close_changed_title(machine_target);
+        self.present_close_changed(title, local, held_keyboard, notice, window, cx)
     }
 
     /// Explains that another client already removed what a close confirmation named.
+    /// `notice` records the presentation of an unseen outcome.
     fn present_close_missing(
         &mut self,
         approval: &super::workspaces::WorkspaceCloseApproval,
+        notice: Option<&super::workspaces::OutcomeNotice>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let lifecycle = notice.map(super::workspaces::OutcomeNotice::lifecycle);
         let alert = Alert::new(
             ModalId::new("close-missing"),
             approval.missing_title(),
@@ -3998,7 +4362,17 @@ impl WorkspaceManager {
             )],
         )
         .intent(AlertIntent::Informational);
-        let _ = self.present_keeping_sidebar_rename(alert, |_, _| {}, |_, _| {}, window, cx);
+        let _ = self.present_keeping_sidebar_rename(
+            alert,
+            |_, _| {},
+            move |event, cx| {
+                if let Some(lifecycle) = &lifecycle {
+                    lifecycle(event, cx);
+                }
+            },
+            window,
+            cx,
+        );
     }
 
     /// Presents a refused same-field edit: the server's value, the draft it rejected, and the
@@ -5204,10 +5578,87 @@ const CLOSE_START_LIMIT: std::time::Duration = std::time::Duration::from_secs(2)
 /// A close that waits for a shell its target is still starting.
 #[derive(Default)]
 struct CloseStartWait {
-    /// The waiting close and what looks again.
-    waiting: Option<(CloseTarget, gpui::Task<()>)>,
+    /// The waiting close.
+    waiting: Option<StartingShellClose>,
     /// A close whose wait ran out, which reviews without waiting again.
     expired: Option<CloseTarget>,
+}
+
+/// A close that waits for a starting shell, and what looks again.
+struct StartingShellClose {
+    target: CloseTarget,
+    /// The request that resumes.
+    request: CloseRequest,
+    _task: gpui::Task<()>,
+}
+
+/// What a close request carries from the person's earlier answer.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CloseRequest {
+    /// The request follows a Review. Only a fresh confirmation of what the close ends when it
+    /// is captured answers it, so it never closes directly.
+    review: bool,
+    /// Whether the closing Workspace held the keyboard when the person first asked. `None`
+    /// reads it when the request captures its approval.
+    keyboard: Option<bool>,
+}
+
+impl CloseRequest {
+    /// The request a Review makes, keeping what the person's first request held.
+    const fn review(keyboard: bool) -> Self {
+        Self {
+            review: true,
+            keyboard: Some(keyboard),
+        }
+    }
+
+    /// One request standing for both, as a second request for the same close while the first
+    /// waits does. A Review in either keeps asking; the first request's keyboard answer wins.
+    const fn join(self, other: Self) -> Self {
+        Self {
+            review: self.review || other.review,
+            keyboard: match self.keyboard {
+                Some(keyboard) => Some(keyboard),
+                None => other.keyboard,
+            },
+        }
+    }
+}
+
+/// Reviews waiting for the open confirmation to close, oldest first, one per target, each with
+/// whether its Workspace held the keyboard when the person first asked.
+#[derive(Default)]
+struct WaitingReviews(std::collections::VecDeque<(CloseTarget, Option<bool>)>);
+
+impl WaitingReviews {
+    /// Keeps a Review of `target` until the window's confirmation closes. A Review of a target
+    /// that already waits joins it.
+    fn hold(&mut self, target: CloseTarget, keyboard: Option<bool>) {
+        match self.0.iter_mut().find(|(waiting, _)| *waiting == target) {
+            Some((_, held)) => *held = held.or(keyboard),
+            None => self.0.push_back((target, keyboard)),
+        }
+    }
+
+    fn next(&mut self) -> Option<(CloseTarget, Option<bool>)> {
+        self.0.pop_front()
+    }
+
+    /// Takes the Review of `target` that waits, with its keyboard answer.
+    fn take(&mut self, target: CloseTarget) -> Option<Option<bool>> {
+        let index = self.0.iter().position(|(waiting, _)| *waiting == target)?;
+        self.0.remove(index).map(|(_, keyboard)| keyboard)
+    }
+}
+
+/// What a request for a close finds waiting for the same target.
+enum WaitingClose {
+    /// Nothing waits.
+    None,
+    /// A close still waits for its starting shell and now stands for the request too.
+    Waits,
+    /// The request and the close that waited resume together as this one request.
+    Resumes(CloseRequest),
 }
 
 impl CloseStartWait {
@@ -5221,19 +5672,21 @@ impl CloseStartWait {
 impl WorkspaceManager {
     /// Holds the close of `target` until the shells it would end have started, failed or ended,
     /// or [`CLOSE_START_LIMIT`] passed, then asks for it again. Asking again while it waits
-    /// changes nothing.
+    /// changes nothing, except that a Review makes the resumed request a Review.
     fn wait_for_starting_shell(
         &mut self,
         target: CloseTarget,
+        request: CloseRequest,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self
+        if let Some(waiting) = self
             .close_start
             .waiting
-            .as_ref()
-            .is_some_and(|(waiting, _)| *waiting == target)
+            .as_mut()
+            .filter(|waiting| waiting.target == target)
         {
+            waiting.request = waiting.request.join(request);
             return;
         }
         let task = cx.spawn_in(window, async move |manager, cx| {
@@ -5246,11 +5699,16 @@ impl WorkspaceManager {
                     if starting && waited < CLOSE_START_LIMIT {
                         return false;
                     }
-                    manager.close_start.waiting = None;
+                    let request = manager
+                        .close_start
+                        .waiting
+                        .take()
+                        .map(|waiting| waiting.request)
+                        .unwrap_or_default();
                     if starting {
                         manager.close_start.expired = Some(target);
                     }
-                    manager.request_close(target, window, cx);
+                    manager.resume_close(target, request, window, cx);
                     true
                 });
                 if !matches!(settled, Ok(false)) {
@@ -5258,7 +5716,103 @@ impl WorkspaceManager {
                 }
             }
         });
-        self.close_start.waiting = Some((target, task));
+        self.close_start.waiting = Some(StartingShellClose {
+            target,
+            request,
+            _task: task,
+        });
+    }
+
+    /// Asks again for a close that waited. Navigation since the person asked wins over the
+    /// keyboard intent the request kept. A Review whose Workspace held the keyboard opens over
+    /// the Pane the person asked to close, so its Cancel returns the keyboard there rather than
+    /// where a modal that closed meanwhile left it.
+    fn resume_close(
+        &mut self,
+        target: CloseTarget,
+        request: CloseRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let active = self.close_target_is_active(target, cx);
+        let keyboard = request.keyboard.map(|held| held && active);
+        let window_free = !spaceterm_ui::window_modal_is_open(window, cx);
+        if request.review && keyboard == Some(true) && window_free {
+            self.focus(window, cx);
+        }
+        self.request_core_close_as(
+            target,
+            CloseRequest {
+                keyboard,
+                ..request
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Joins `request` to the close of `target` that still waits: a Review held for an open
+    /// confirmation, a close waiting for a starting shell, or an unapproved close its server
+    /// queued. That close owns the person's intent, so a repeat request never asks or closes
+    /// apart from it. A close whose shell still starts keeps waiting with the joined request;
+    /// any other resumes once, now, and leaves nothing waiting to resume again.
+    fn join_waiting_close(
+        &mut self,
+        target: CloseTarget,
+        machine_target: spaceterm_core::hierarchy::CloseTarget,
+        request: CloseRequest,
+        window: &Window,
+        cx: &App,
+    ) -> WaitingClose {
+        use super::workspaces::CloseKeyboard;
+
+        // The earliest request's keyboard answer wins as each joins.
+        let mut waiting = self
+            .close_reviews
+            .take(target)
+            .map(|keyboard| CloseRequest {
+                review: true,
+                keyboard,
+            });
+        if self
+            .close_start
+            .waiting
+            .as_ref()
+            .is_some_and(|starting| starting.target == target)
+        {
+            let shell_starting = self.close_shell_starting(target, cx);
+            if let Some(starting) = self.close_start.waiting.as_mut()
+                && shell_starting
+            {
+                if let Some(held) = waiting {
+                    starting.request = starting.request.join(held);
+                }
+                starting.request = starting.request.join(request);
+                return WaitingClose::Waits;
+            }
+            if let Some(starting) = self.close_start.waiting.take() {
+                waiting =
+                    Some(waiting.map_or(starting.request, |held| held.join(starting.request)));
+            }
+        }
+        if let Some(intent) = self
+            .binding
+            .owning(close_target_workspace(target))
+            .and_then(|binding| binding.take_close_intent_for(machine_target, target))
+        {
+            let queued = CloseRequest {
+                review: intent.review,
+                keyboard: match intent.keyboard {
+                    CloseKeyboard::Unknown => None,
+                    CloseKeyboard::Elsewhere => Some(false),
+                    CloseKeyboard::Held(handle) => Some(window.focused(cx) == Some(handle)),
+                },
+            };
+            waiting = Some(waiting.map_or(queued, |held| held.join(queued)));
+        }
+        waiting.map_or(WaitingClose::None, |waiting| {
+            WaitingClose::Resumes(waiting.join(request))
+        })
     }
 
     /// Whether a Pane the close of `target` would end is still starting its shell.
@@ -5282,21 +5836,26 @@ impl WorkspaceManager {
 /// Whether a shared close's Workspace held the keyboard when the person asked for the close.
 #[derive(Default)]
 struct WorkspaceCloseKeyboard {
-    /// The open confirmation's generation and its answer.
-    pending: Option<(u64, bool)>,
-    /// The answer a Review hands to the fresh request it makes.
-    reviewed: Option<bool>,
+    /// The open confirmation's generation, its answer, and the focus the confirmation took the
+    /// keyboard from.
+    pending: Option<(u64, bool, Option<gpui::FocusHandle>)>,
 }
 
 impl WorkspaceCloseKeyboard {
     /// Takes the answer for confirmation `generation`. Another generation's answer is false.
     fn take(&mut self, generation: u64) -> bool {
-        match self.pending {
-            Some((pending, held)) if pending == generation => {
-                self.pending = None;
-                held
-            }
-            _ => false,
+        self.take_owner(generation).is_some()
+    }
+
+    /// Takes the answer for confirmation `generation` with the focus it took the keyboard from.
+    /// `None` when the close held no keyboard, or for another generation.
+    fn take_owner(&mut self, generation: u64) -> Option<Option<gpui::FocusHandle>> {
+        match self
+            .pending
+            .take_if(|(pending, _, _)| *pending == generation)
+        {
+            Some((_, true, owner)) => Some(owner),
+            _ => None,
         }
     }
 }
@@ -5359,7 +5918,10 @@ mod empty;
 mod launch;
 #[cfg(test)]
 pub(crate) use launch::testing as launch_testing;
-pub(crate) use launch::{LocalCoreAdapters, resume_waiting_launches, start_local_core};
+pub(crate) use launch::{
+    LaunchIntent, LocalCoreAdapters, follow_local_core_runs, resume_waiting_launches,
+    start_local_core,
+};
 mod core_bindings;
 use core_bindings::CoreBindings;
 pub(crate) use core_bindings::{MachineKey, MachineOrigin};

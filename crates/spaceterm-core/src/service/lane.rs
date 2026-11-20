@@ -1214,7 +1214,32 @@ impl LaneCore {
             };
         }
         let key = action_key(action)?;
-        let expected = self.tokens.redeem(token, &key, actor, Instant::now())?;
+        let redeemed = self.tokens.take(token, &key, actor, Instant::now())?;
+        let expected = redeemed.observation();
+        match self.admit(action, id, expected, actor) {
+            // Another operation holds SpaceTerm Core and nothing was admitted, so the same
+            // approval may confirm this action once that operation settles.
+            Err(CoreError::ServiceBusy) => {
+                self.tokens.restore(redeemed);
+                Err(CoreError::ServiceBusy)
+            }
+            Ok(admitted) => {
+                let launch = matches!(admitted, Some(Admission::New(_))).then_some(id);
+                Ok((accepted, launch))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Admits the confirmed `action` as operation `id`, while what it affects still matches the
+    /// `expected` observation its token was issued for.
+    fn admit(
+        self: &Arc<Self>,
+        action: &LaneAction,
+        id: OperationId,
+        expected: [u8; 32],
+        actor: &Actor,
+    ) -> Result<Option<Admission>, CoreError> {
         let prepared = self.admin().prepare(action, &self.core, &self.boot)?;
         let record = Record {
             id,
@@ -1254,12 +1279,10 @@ impl LaneCore {
                 candidate: prepared.candidate,
             },
         };
-        let admitted = match self.updates() {
-            Ok(updates) => updates.confirm(change, admit)?,
-            Err(_) => admit()?,
-        };
-        let launch = matches!(admitted, Some(Admission::New(_))).then_some(id);
-        Ok((accepted, launch))
+        match self.updates() {
+            Ok(updates) => updates.confirm(change, admit),
+            Err(_) => admit(),
+        }
     }
 
     /// Starts what `Execute` admitted.

@@ -855,7 +855,7 @@ fn only_actions_that_end_sessions_or_remove_the_service_ask_first() {
         assert_eq!(confirmation.message.as_ref(), question);
         let kept = match action {
             ServiceAction::Stop => {
-                "Workspaces are kept, and SpaceTerm Core stays stopped until you start it again."
+                "Workspaces are kept, and SpaceTerm Core stays stopped until you start it again or open SpaceTerm."
             }
             ServiceAction::Restart => {
                 "Workspaces are kept, and each Pane starts a new shell when you use it."
@@ -1124,6 +1124,40 @@ fn a_start_from_the_status_item_shows_the_machine_running_in_open_settings(
     assert_eq!(status(&window, cx), "Running");
 }
 
+/// The person stops SpaceTerm Core in Settings and leaves that window open, then starts it from
+/// the Workspace Window. The same Settings window reads the service again: it shows the Machine
+/// running, offers Stop and no longer offers Start.
+#[gpui::test]
+fn a_workspace_window_start_after_a_settings_stop_reaches_the_same_open_settings(
+    cx: &mut TestAppContext,
+) {
+    let (window, core, service, cx) = open_machines_with_service(Ok(running()), cx);
+    core.answer_refresh(Err(CoreError::Stopped));
+    choose(STOP_SELECTOR, cx);
+    click_modal(STOP_CONFIRM_SELECTOR, cx);
+    assert_eq!(status(&window, cx), "Stopped");
+    assert!(row_offers(START_SERVICE_SELECTOR, cx));
+
+    // The Workspace Window's Start runs the service outside Settings, and its launch reaches the
+    // running Core.
+    service.report(Ok(running()));
+    core.answer_refresh(Ok(connected(1)));
+    cx.update(|_, cx| {
+        crate::ui::settings_window::local_operations::LocalCoreOperations::launched_elsewhere(cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(status(&window, cx), "Running");
+    assert!(!row_offers(START_SERVICE_SELECTOR, cx));
+    click(MENU_SELECTOR, cx);
+    assert_ne!(
+        spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Stop SpaceTerm Core\u{2026}")["aria"]
+            ["disabled"],
+        true,
+        "Stop is available again"
+    );
+}
+
 /// A read Settings began before the status item started the server answers what it saw then.
 /// Settings sets that answer aside and reads again, so it shows the server running rather than
 /// stopped.
@@ -1174,7 +1208,11 @@ fn a_confirmed_stop_stays_stopped_and_offers_start(cx: &mut TestAppContext) {
 
     assert_eq!(service.changes(), vec![ServiceCall::Stop]);
     assert_eq!(status(&window, cx), "Stopped");
-    assert!(rendered(START_SERVICE_SELECTOR, cx));
+    assert!(
+        !rendered(START_SERVICE_SELECTOR, cx),
+        "Start SpaceTerm Core is no button beside the state"
+    );
+    assert!(row_offers(START_SERVICE_SELECTOR, cx));
     let presented = service_presentation(&window, cx);
     assert_eq!(
         presented.actions,
@@ -1211,7 +1249,7 @@ fn start_restores_a_stopped_core_without_asking(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_start_refused_for_login_items_never_runs_by_itself(cx: &mut TestAppContext) {
     let (window, _core, service, cx) = open_machines_with_service(Ok(not_running()), cx);
-    assert!(rendered(START_SERVICE_SELECTOR, cx));
+    assert!(row_offers(START_SERVICE_SELECTOR, cx));
 
     service.turn_off_in_login_items(true);
     click(START_SERVICE_SELECTOR, cx);
@@ -1224,7 +1262,7 @@ fn a_start_refused_for_login_items_never_runs_by_itself(cx: &mut TestAppContext)
         presented.actions,
         vec![ServiceAction::OpenLoginItems, ServiceAction::Uninstall]
     );
-    assert!(!rendered(START_SERVICE_SELECTOR, cx));
+    assert!(!row_offers(START_SERVICE_SELECTOR, cx));
 
     click(OPEN_LOGIN_ITEMS_SELECTOR, cx);
     assert_eq!(service.calls().last(), Some(&ServiceCall::OpenLoginItems));
@@ -1237,7 +1275,7 @@ fn a_start_refused_for_login_items_never_runs_by_itself(cx: &mut TestAppContext)
     cx.run_until_parked();
 
     assert_eq!(status(&window, cx), "Not running");
-    assert!(rendered(START_SERVICE_SELECTOR, cx));
+    assert!(row_offers(START_SERVICE_SELECTOR, cx));
     assert_eq!(
         service.changes(),
         vec![ServiceCall::Start],
@@ -1526,7 +1564,15 @@ fn boot_wording_names_boot_and_logout_and_keeps_lingering_after_uninstall() {
         })
         .explanation
     };
-    for status in [not_installed(), running(), stopped()] {
+    // A stopped server reads the same short line either way: its Stopped state already says
+    // it doesn't run.
+    for startup in [ServiceStartup::AtBoot, ServiceStartup::AtLogin] {
+        assert_eq!(
+            presented(startup, stopped()).as_ref(),
+            "Opening SpaceTerm starts it again."
+        );
+    }
+    for status in [not_installed(), running()] {
         let linux = presented(ServiceStartup::AtBoot, status);
         let macos = presented(ServiceStartup::AtLogin, status);
         assert!(
@@ -1566,7 +1612,7 @@ fn boot_wording_names_boot_and_logout_and_keeps_lingering_after_uninstall() {
     assert_eq!(
         stop.detail.as_ref(),
         "All Terminal Sessions on it end for every client. Workspaces are kept, and SpaceTerm Core \
-         stays stopped until you start it again."
+         stays stopped until you start it again or open SpaceTerm."
     );
     let uninstall =
         ServiceConfirmation::for_action(ServiceAction::Uninstall, false, boot).expect("uninstall");
@@ -1698,11 +1744,7 @@ fn cancelling_the_operating_systems_prompt_changes_nothing_and_keeps_the_stop(
         presented.actions,
         vec![ServiceAction::Start, ServiceAction::Uninstall]
     );
-    assert!(
-        presented
-            .explanation
-            .contains("even after the computer restarts")
-    );
+    assert_eq!(presented.explanation, "Opening SpaceTerm starts it again.");
 }
 
 #[gpui::test]

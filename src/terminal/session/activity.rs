@@ -16,6 +16,174 @@ pub(super) struct ActivityState {
     /// The owning shell waited at its own empty prompt after `last`.
     empty_prompt: bool,
     probe: Option<Arc<dyn SessionProbe>>,
+    /// Lines submitted, such as by Enter, counted where input is accepted and before the worker
+    /// writes them, so a close the host admits after that input sees it.
+    submitted: Submissions,
+}
+
+/// The ordered evidence that answers each submitted line. Input reaches the worker in the order
+/// it was accepted, so the `n`th line the PTY accepts whole is the `n`th one accepted. Only
+/// evidence the worker observes after the PTY accepted a line answers it. A line the owning shell
+/// reads is answered only by the fresh prompt that follows the prompt it is read at, since each
+/// fresh prompt follows exactly one line the shell read. A program's return to the shell answers
+/// none of them: the line that started the program, or a line typed ahead of it, may go on in the
+/// shell, as `sleep 3; read answer` does. That return answers only the lines the program read
+/// itself. Output alone answers nothing, since the shell itself echoes and ends the line before
+/// the program it runs takes the foreground.
+#[derive(Default)]
+struct Submissions {
+    accepted: u64,
+    written: u64,
+    answered: u64,
+    /// Each written line nothing answered yet, oldest first.
+    awaiting: std::collections::VecDeque<Line>,
+    /// A program other than the shell owned the foreground after the last written line.
+    started: bool,
+    /// Who held the PTY just before the worker's latest write while a submitted line waited to
+    /// be written. None before any such write, and where nothing could be read.
+    before_write: Option<Holder>,
+}
+
+/// Who held the PTY at one moment: whether a program other than the owning shell owned its
+/// foreground, and its ICANON mode when it could be read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Holder {
+    pub(crate) program: bool,
+    pub(crate) canonical: Option<bool>,
+}
+
+/// Who reads a written line, by who held the PTY when the PTY accepted it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Reader {
+    /// The owning shell, at a prompt or once it finishes what it runs.
+    Shell,
+    /// A program that reads keys itself, such as an editor, a pager or SSH. Its return to the
+    /// shell answers the line.
+    Program,
+    /// A program the kernel collects whole lines for, such as `sleep` or `cat`. It may never read
+    /// the line, and then the shell reads and runs it after the program ends, so the program's
+    /// return answers nothing.
+    LineProgram,
+}
+
+impl Reader {
+    /// Who reads a line, from who held the PTY just before the write that completed it and just
+    /// after. A program reads keys itself only when it held the foreground with ICANON off on
+    /// both sides of that write. A program that took the foreground during the write, as one the
+    /// line itself starts can before the worker reads it, read none of the line, and a program
+    /// that gave the foreground back during it left the line to the shell. A program that held
+    /// the foreground across the write in any other mode is one the kernel collects lines for.
+    /// A side nothing could read leaves the line to the shell, whose own prompt must answer it.
+    pub(crate) fn at_write(before: Option<Holder>, after: Holder) -> Self {
+        match before {
+            Some(before) if before.program && after.program => {
+                if before.canonical == Some(false) && after.canonical == Some(false) {
+                    Self::Program
+                } else {
+                    Self::LineProgram
+                }
+            }
+            _ => Self::Shell,
+        }
+    }
+}
+
+struct Line {
+    /// The count of fresh prompts the owning shell must have drawn before one answers it. Only a
+    /// line the shell may read has one.
+    needs: Option<u64>,
+}
+
+impl Line {
+    /// The program holding the foreground reads this line itself.
+    const fn program(&self) -> bool {
+        self.needs.is_none()
+    }
+}
+
+impl Submissions {
+    const fn pending(&self) -> bool {
+        self.accepted > self.answered
+    }
+
+    /// The PTY accepted the next line whole while the owning shell was as `progress` says, and
+    /// `reader` was to read it.
+    fn written(&mut self, progress: PromptProgress, reader: Reader) {
+        self.written = (self.written + 1).min(self.accepted);
+        // A line typed at a prompt is read there and answered by the next fresh prompt. A line
+        // written while the shell runs a command, starts, or runs a program that may leave the
+        // line unread is read at a prompt yet to come, which may already wait unread, so only the
+        // fresh prompt after that one answers it. A program that reads keys answers its lines
+        // itself by giving the foreground back.
+        let reads_at = match reader {
+            Reader::Program => {
+                self.started = true;
+                self.awaiting.push_back(Line { needs: None });
+                return;
+            }
+            Reader::LineProgram => {
+                self.started = true;
+                progress.fresh + 1
+            }
+            Reader::Shell => match progress.zone {
+                ShellZone::AtPrompt => progress.fresh,
+                ShellZone::Running | ShellZone::Starting => progress.fresh + 1,
+            },
+        };
+        // Each line the shell reads is read at the prompt that answers the one before it, at the
+        // earliest.
+        let needs = self
+            .awaiting
+            .iter()
+            .rev()
+            .find_map(|before| before.needs)
+            .map_or(reads_at + 1, |before| (reads_at + 1).max(before + 1));
+        self.awaiting.push_back(Line { needs: Some(needs) });
+    }
+
+    /// Removes the awaiting lines `answers` says are answered.
+    fn answer(&mut self, answers: impl Fn(&Line) -> bool) {
+        let before = self.awaiting.len();
+        self.awaiting.retain(|line| !answers(line));
+        let answered = (before - self.awaiting.len()) as u64;
+        self.answered = (self.answered + answered).min(self.written);
+    }
+
+    /// The owning shell has drawn `fresh` fresh prompts. Each answers at most one line it read.
+    fn prompted(&mut self, fresh: u64) {
+        self.answer(|line| line.needs.is_some_and(|needs| needs <= fresh));
+    }
+
+    /// A program other than the shell owns the foreground.
+    fn program_running(&mut self) {
+        self.started = true;
+    }
+
+    /// The program gave the foreground back to the shell. It answers the lines it read itself.
+    /// A line the kernel held for a program that never read it is the shell's to read now, and
+    /// it already waits for the shell's fresh prompt.
+    fn returned(&mut self) {
+        self.started = false;
+        self.answer(Line::program);
+    }
+}
+
+/// Where the owning shell is, as its own prompt markers say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShellZone {
+    /// No prompt of its own yet.
+    Starting,
+    /// At its prompt, with or without input.
+    AtPrompt,
+    /// Running a command line, or finishing one before its next prompt.
+    Running,
+}
+
+/// The owning shell's fresh prompts, ever, and where it is now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PromptProgress {
+    pub(crate) fresh: u64,
+    pub(crate) zone: ShellZone,
 }
 
 impl Default for ActivityState {
@@ -25,6 +193,7 @@ impl Default for ActivityState {
             last: None,
             empty_prompt: false,
             probe: None,
+            submitted: Submissions::default(),
         }
     }
 }
@@ -35,10 +204,11 @@ impl ActivityState {
     }
 
     /// Input or output arrived at `now`, after which the owning shell `empty_prompt` waits at
-    /// its own empty prompt or not.
-    pub(super) fn note(&mut self, now: Instant, empty_prompt: bool) {
+    /// its own empty prompt or not, having drawn `fresh` fresh prompts.
+    pub(super) fn note(&mut self, now: Instant, empty_prompt: bool, fresh: u64) {
         self.last = Some(now);
         self.empty_prompt = empty_prompt;
+        self.submitted.prompted(fresh);
     }
 }
 
@@ -69,6 +239,12 @@ impl TerminalRuntime {
         state.activity.probe.as_ref()?.activity()?;
         drop(state);
         Some(Arc::new(self.event_publisher.clone()))
+    }
+
+    /// Whether current facts verify work that a direct close of this Terminal Session would end.
+    /// See [`TerminalEventPublisher::running_work`].
+    pub(crate) fn running_work(&self) -> bool {
+        self.event_publisher.running_work()
     }
 
     /// Whether this Terminal Session has work going on at `now`, by [`work_going_on`]. A
@@ -127,9 +303,107 @@ impl TerminalEventPublisher {
         state.activity.set_probe(probe);
     }
 
-    pub(super) fn note_activity(&self, now: Instant, empty_prompt: bool) {
+    pub(super) fn note_activity(&self, now: Instant, empty_prompt: bool, fresh: u64) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        state.activity.note(now, empty_prompt);
+        state.activity.note(now, empty_prompt, fresh);
+    }
+
+    /// Records that accepted input submits a line, before the worker writes it.
+    pub(super) fn note_submitted(&self) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        state.activity.submitted.accepted += 1;
+    }
+
+    /// The worker put none of an accepted submission's bytes in the PTY's queue, as for a Run the
+    /// shell's prompt refused, so it submitted no line.
+    pub(super) fn retract_submitted(&self) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let submitted = &mut state.activity.submitted;
+        submitted.accepted = submitted.accepted.saturating_sub(1).max(submitted.written);
+    }
+
+    /// Whether an accepted submitted line waits for the PTY to accept it, so the next write may
+    /// complete it.
+    pub(super) fn awaits_written_line(&self) -> bool {
+        let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let submitted = &state.activity.submitted;
+        submitted.accepted > submitted.written
+    }
+
+    /// The worker is about to write while a submitted line waits, and the PTY's ICANON mode is
+    /// `canonical`. Who holds the PTY now is who held it as the write began.
+    pub(super) fn note_write_start(&self, canonical: Option<bool>) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let activity = &mut state.activity;
+        activity.submitted.before_write = Some(Holder {
+            program: Self::program_holds(activity.probe.as_deref()),
+            canonical,
+        });
+    }
+
+    /// Whether a fresh read finds a program other than the owning shell holding the foreground.
+    fn program_holds(probe: Option<&dyn SessionProbe>) -> bool {
+        probe.is_some_and(|probe| matches!(probe.shell_foreground(), Ok(false)))
+    }
+
+    /// The PTY accepted the next submitted line whole, in the order it was accepted, while the
+    /// owning shell was as `progress` says. `canonical` is the PTY's ICANON mode now. Who reads
+    /// the line is who held the PTY on both sides of the write that completed it, by
+    /// [`Reader::at_write`].
+    pub(super) fn note_written(&self, progress: PromptProgress, canonical: Option<bool>) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let activity = &mut state.activity;
+        let after = Holder {
+            program: Self::program_holds(activity.probe.as_deref()),
+            canonical,
+        };
+        let reader = Reader::at_write(activity.submitted.before_write, after);
+        activity.submitted.written(progress, reader);
+    }
+
+    /// The worker read output after its writes. A program that took the foreground after a
+    /// written line and gave it back to the shell answers the lines it ran or read.
+    pub(super) fn note_output(&self) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let activity = &mut state.activity;
+        if activity.submitted.written == activity.submitted.answered {
+            return;
+        }
+        match activity
+            .probe
+            .as_ref()
+            .map(|probe| probe.shell_foreground())
+        {
+            Some(Ok(false)) => activity.submitted.program_running(),
+            Some(Ok(true)) if activity.submitted.started => {
+                activity.submitted.returned();
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether current facts verify work in this Terminal Session that a direct close would end:
+    /// a fresh read finds a program other than the shell owning the foreground or other processes
+    /// in its terminal session, or a submitted line that nothing answered yet. Facts it cannot
+    /// read verify nothing, so a shell that is starting or waits at its prompt closes directly.
+    pub(super) fn running_work(&self) -> bool {
+        let (probe, submitted, stopped) = {
+            let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                state.activity.probe.clone(),
+                state.activity.submitted.pending(),
+                state.stopped,
+            )
+        };
+        if stopped {
+            return false;
+        }
+        if submitted {
+            return true;
+        }
+        probe.is_some_and(|probe| {
+            matches!(probe.shell_foreground(), Ok(false)) || matches!(probe.others(), Ok(true))
+        })
     }
 }
 
@@ -223,6 +497,36 @@ mod tests {
         assert!(work_going_on(HOUR, true, true, || Err(io::Error::other(
             "unreadable"
         ))));
+    }
+
+    #[test]
+    fn only_a_raw_reader_on_both_sides_of_the_write_reads_the_line_itself() {
+        let shell = Holder {
+            program: false,
+            canonical: Some(false),
+        };
+        let raw = Holder {
+            program: true,
+            canonical: Some(false),
+        };
+        let lines = Holder {
+            program: true,
+            canonical: Some(true),
+        };
+        let unread = Holder {
+            program: true,
+            canonical: None,
+        };
+        assert_eq!(Reader::at_write(Some(raw), raw), Reader::Program);
+        // A program the line itself started, which took the foreground during the write.
+        assert_eq!(Reader::at_write(Some(shell), raw), Reader::Shell);
+        // A program that gave the foreground back during the write.
+        assert_eq!(Reader::at_write(Some(raw), shell), Reader::Shell);
+        assert_eq!(Reader::at_write(None, raw), Reader::Shell);
+        assert_eq!(Reader::at_write(Some(lines), lines), Reader::LineProgram);
+        assert_eq!(Reader::at_write(Some(raw), lines), Reader::LineProgram);
+        assert_eq!(Reader::at_write(Some(raw), unread), Reader::LineProgram);
+        assert_eq!(Reader::at_write(Some(unread), raw), Reader::LineProgram);
     }
 
     #[test]

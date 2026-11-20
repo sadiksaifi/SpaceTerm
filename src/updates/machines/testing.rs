@@ -9,7 +9,7 @@ use spaceterm_core::update::facts::Version;
 
 use super::{
     ActionFailure, MachineAction, MachineId, MachinePreview, MachineUpdatesAdapter,
-    MachineUpdatesError, MachineUpdatesEvent, PreviewAnswer,
+    MachineUpdatesError, MachineUpdatesEvent, PreviewAnswer, Request,
 };
 
 #[derive(Default)]
@@ -22,6 +22,8 @@ pub(crate) struct ScriptedMachines {
     previews: RefCell<Vec<(MachineId, MachineAction, PreviewSender)>>,
     asked: RefCell<Vec<(MachineId, MachineAction)>>,
     executed: RefCell<Vec<MachinePreview>>,
+    /// The store's request of each execution and each preview, in order.
+    requests: RefCell<Vec<(MachineId, MachineAction, Request)>>,
 }
 
 type PreviewSender = async_channel::Sender<Result<MachinePreview, ActionFailure>>;
@@ -39,9 +41,17 @@ impl MachineUpdatesAdapter for ScriptedMachines {
         self.performed.borrow_mut().push((machine, action));
     }
 
-    fn preview(&self, machine: MachineId, action: MachineAction) -> PreviewAnswer {
+    fn preview(
+        &self,
+        machine: MachineId,
+        action: MachineAction,
+        request: Request,
+    ) -> PreviewAnswer {
         let (answer, answered) = async_channel::bounded(1);
         self.asked.borrow_mut().push((machine, action.clone()));
+        self.requests
+            .borrow_mut()
+            .push((machine, action.clone(), request));
         if self.hold.get() {
             self.previews.borrow_mut().push((machine, action, answer));
         } else {
@@ -60,7 +70,10 @@ impl MachineUpdatesAdapter for ScriptedMachines {
         answered
     }
 
-    fn execute(&self, preview: MachinePreview) {
+    fn execute(&self, preview: MachinePreview, request: Request) {
+        self.requests
+            .borrow_mut()
+            .push((preview.machine, preview.action.clone(), request));
         self.executed.borrow_mut().push(preview);
     }
 }
@@ -78,12 +91,20 @@ pub(crate) fn preview(machine: MachineId, action: MachineAction, sessions: u32) 
 }
 
 impl ScriptedMachines {
+    /// The store's event channel, for an event sent off the test's thread, as the adapter's
+    /// followers send them. It records nothing the scripted previews read.
+    pub(crate) fn events(&self) -> Option<async_channel::Sender<MachineUpdatesEvent>> {
+        self.events.borrow().clone()
+    }
+
     /// Sends `event` as the adapter. Panics before `start`.
     pub(crate) fn emit(&self, event: MachineUpdatesEvent) {
         let reported = match &event {
             MachineUpdatesEvent::Machines(machines) => machines.iter().collect(),
             MachineUpdatesEvent::Changed(update) => vec![update.as_ref()],
-            MachineUpdatesEvent::Finished { .. } => Vec::new(),
+            MachineUpdatesEvent::Finished { .. } | MachineUpdatesEvent::Waiting { .. } => {
+                Vec::new()
+            }
         };
         for update in reported {
             let facts = update.facts.as_ref();
@@ -101,6 +122,12 @@ impl ScriptedMachines {
             .expect("the adapter started")
             .try_send(event)
             .expect("the events channel is open");
+    }
+
+    /// The store's request of the latest preview or execution, which the test names in the
+    /// events it emits for it. Panics when there is none.
+    pub(crate) fn last_request(&self) -> Request {
+        self.requests.borrow().last().expect("a request").2
     }
 
     /// Every action performed so far, in order.

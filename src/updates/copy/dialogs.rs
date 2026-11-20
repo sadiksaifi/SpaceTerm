@@ -6,7 +6,9 @@ use spaceterm_core::update::facts::{CheckFailure, StartFailure};
 use super::{Platform, list_and, this_ends};
 use crate::updates::UpdateError;
 use crate::updates::confirm::{Explanation, Previewed};
-use crate::updates::machines::{ActionFailure, MachineAction, MachineId};
+use crate::updates::machines::{
+    ActionFailure, Checked, MachineAction, MachineId, ServiceOperation,
+};
 use crate::updates::state::{
     AppRow, AppStage, CheckFailed, Command, DesktopAction, DownloadCause, MachineRow, MachineStage,
     PUSH_FAILURE, STEPPING_STONE,
@@ -31,6 +33,8 @@ pub(crate) const CANCEL: &str = "Cancel";
 pub(crate) const REMIND_ME_TOMORROW: &str = "Remind Me Tomorrow";
 pub(crate) const TRY_AGAIN: &str = "Try Again";
 pub(crate) const CHECK_AGAIN: &str = "Check Again";
+/// The follow-up of an action whose outcome is unconfirmed: it reads what happened.
+pub(crate) const CHECK_STATUS: &str = "Check Status";
 
 /// D1, or D2 for a same-version restart: one Machine per confirmation.
 pub(crate) fn restart(described: &[Previewed]) -> (SharedString, SharedString, SharedString) {
@@ -93,7 +97,7 @@ pub(crate) fn stop(described: &[Previewed]) -> (SharedString, SharedString, Shar
     (
         format!("Stop SpaceTerm Core on {name}?").into(),
         format!(
-            "{} SpaceTerm Core stays stopped until you start it again.",
+            "{} SpaceTerm Core stays stopped until you start it again or open SpaceTerm.",
             this_ends(sessions)
         )
         .into(),
@@ -217,7 +221,7 @@ pub(crate) fn machine_failure(row: &MachineRow) -> Option<Explanation> {
             let first = match cause {
                 DownloadCause::DiskFull => format!("{name} is out of disk space. "),
                 DownloadCause::Unreachable => format!("{name} stopped answering. "),
-                DownloadCause::Busy => format!("SpaceTerm Core on {name} is busy with another update. "),
+                DownloadCause::Busy => format!("SpaceTerm Core on {name} is busy with another operation. "),
                 DownloadCause::RelaunchRequired | DownloadCause::Failed => String::new(),
             };
             Explanation {
@@ -383,11 +387,19 @@ pub(crate) fn not_confirmed(row: &MachineRow) -> Explanation {
             "{name} stopped responding while SpaceTerm Core restarted into {version}."
         )
         .into(),
+        // Check Status reads the restart's own receipt, and never restarts again. Without its
+        // operation, it asks the Machine to answer again.
         then: Some(Box::new(Command::Machine(
             row.id,
-            MachineAction::CheckAgain,
+            match &row.stage {
+                MachineStage::NotConfirmed {
+                    operation: Some(operation),
+                    ..
+                } => MachineAction::CheckStatus(Checked::Restart, operation.clone()),
+                _ => MachineAction::CheckAgain,
+            },
         ))),
-        proceed: Some(CHECK_AGAIN.into()),
+        proceed: Some(CHECK_STATUS.into()),
         dismiss: None,
     }
 }
@@ -406,11 +418,17 @@ pub(crate) fn action_failure(
             format!("Couldn\u{2019}t Check for Updates on {name}")
         }
         MachineAction::Start => format!("Couldn\u{2019}t Start SpaceTerm Core on {name}"),
-        MachineAction::Stop => format!("Couldn\u{2019}t Stop SpaceTerm Core on {name}"),
+        MachineAction::Stop | MachineAction::CheckStatus(Checked::Stop, _) => {
+            format!("Couldn\u{2019}t Stop SpaceTerm Core on {name}")
+        }
+        MachineAction::CheckStatus(Checked::Restart, _) => {
+            format!("Couldn\u{2019}t Restart SpaceTerm Core on {name}")
+        }
         MachineAction::DismissFailure(_) => return None,
     };
     let message = match failure {
         ActionFailure::Changed | ActionFailure::LoginItemOff => return None,
+        ActionFailure::Unconfirmed => return Some(unconfirmed(name, action)),
         ActionFailure::Unavailable(Unavailable::CoreTooOld) => {
             format!("SpaceTerm Core on {name} is too old for this SpaceTerm.")
         }
@@ -421,7 +439,7 @@ pub(crate) fn action_failure(
             format!("SpaceTerm can\u{2019}t reach {name}. Try again when it\u{2019}s connected.")
         }
         ActionFailure::Busy => format!(
-            "SpaceTerm Core on {name} is busy with another update. Try again when it finishes."
+            "SpaceTerm Core on {name} is busy with another operation. Try again when it finishes."
         ),
         ActionFailure::DiskFull => format!("{name} is out of disk space. Free some space, then try again."),
         ActionFailure::RelaunchRequired => "SpaceTerm was replaced on disk while it was running. Relaunch SpaceTerm, then try again.".to_owned(),
@@ -431,4 +449,83 @@ pub(crate) fn action_failure(
         ActionFailure::Failed => format!("SpaceTerm Core on {name} didn\u{2019}t finish. Try again."),
     };
     Some((title.into(), message.into()))
+}
+
+/// The title and message for an action SpaceTerm Core admitted whose outcome nothing confirms.
+fn unconfirmed(name: &str, action: &MachineAction) -> (SharedString, SharedString) {
+    let (what, did) = match action {
+        MachineAction::Stop | MachineAction::CheckStatus(Checked::Stop, _) => ("Stop", "stopped"),
+        MachineAction::Start => ("Start", "started"),
+        _ => ("Restart", "restarted"),
+    };
+    (
+        format!("SpaceTerm Can\u{2019}t Confirm the {what} on {name}").into(),
+        format!(
+            "SpaceTerm lost touch with SpaceTerm Core on {name} before it confirmed that it {did}. \
+             Check Status reads what happened."
+        )
+        .into(),
+    )
+}
+
+/// [`action_failure`] as an alert with its follow-up. An unconfirmed outcome offers Check
+/// Status, which reads what happened and never repeats the action. A Start, Stop or Restart
+/// that failed or was refused before it ran offers Try Again, which asks first again wherever
+/// something ends.
+pub(crate) fn action_failure_alert(
+    name: &str,
+    machine: MachineId,
+    action: &MachineAction,
+    failure: ActionFailure,
+    operation: Option<&ServiceOperation>,
+) -> Option<Explanation> {
+    let (title, message) = action_failure(name, action, failure)?;
+    // Check Status follows the original operation; Try Again asks for the action again.
+    let checked = match action {
+        MachineAction::Stop => Some(Checked::Stop),
+        MachineAction::Restart => Some(Checked::Restart),
+        MachineAction::CheckStatus(checked, _) => Some(*checked),
+        _ => None,
+    };
+    let (then, proceed) = match (failure, action, checked.zip(operation)) {
+        (ActionFailure::Unconfirmed, _, Some((checked, operation))) => (
+            Some(Command::Machine(
+                machine,
+                MachineAction::CheckStatus(checked, operation.clone()),
+            )),
+            Some(CHECK_STATUS),
+        ),
+        (ActionFailure::Unconfirmed, _, None) => (
+            Some(Command::Machine(machine, MachineAction::CheckAgain)),
+            Some(CHECK_STATUS),
+        ),
+        (
+            ActionFailure::Busy
+            | ActionFailure::Unreachable
+            | ActionFailure::DiskFull
+            | ActionFailure::Failed,
+            MachineAction::Start | MachineAction::Stop | MachineAction::Restart,
+            _,
+        ) => (
+            Some(Command::Machine(machine, action.clone())),
+            Some(TRY_AGAIN),
+        ),
+        (
+            ActionFailure::Busy
+            | ActionFailure::Unreachable
+            | ActionFailure::DiskFull
+            | ActionFailure::Failed,
+            MachineAction::CheckStatus(checked, _),
+            _,
+        ) => (
+            Some(Command::Machine(machine, checked.action())),
+            Some(TRY_AGAIN),
+        ),
+        _ => (None, None),
+    };
+    Some(Explanation {
+        then: then.map(Box::new),
+        proceed: proceed.map(SharedString::new_static),
+        ..Explanation::ok(title, message)
+    })
 }

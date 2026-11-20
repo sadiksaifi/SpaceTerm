@@ -1815,12 +1815,29 @@ impl QuicStream {
     }
 
     /// Writes `bytes` on L0 and sends them before `deadline`.
-    pub fn send_bytes(&mut self, mut bytes: &[u8], deadline: Instant) -> Result<(), QuicError> {
+    pub fn send_bytes(&mut self, bytes: &[u8], deadline: Instant) -> Result<(), QuicError> {
+        self.send_bytes_before(bytes, deadline, &mut 0)
+    }
+
+    /// [`Self::send_bytes`] that writes nothing once `deadline` has passed, reading the clock
+    /// again before each write, and counts in `written` the bytes the stream took.
+    fn send_bytes_before(
+        &mut self,
+        mut bytes: &[u8],
+        deadline: Instant,
+        written: &mut usize,
+    ) -> Result<(), QuicError> {
         let id = self.l0()?;
         loop {
             self.check_severed()?;
+            if Instant::now() >= deadline {
+                return Err(QuicError::TimedOut);
+            }
             match self.driver.connection.send_stream(id).write(bytes) {
-                Ok(count) => bytes = &bytes[count..],
+                Ok(count) => {
+                    *written += count;
+                    bytes = &bytes[count..];
+                }
                 Err(noq_proto::WriteError::Blocked) => {}
                 Err(_) => return Err(QuicError::Transport),
             }
@@ -1916,9 +1933,18 @@ fn read_stream(
 }
 
 impl crate::protocol::Preamble for QuicStream {
-    fn send(&mut self, frame: &[u8], deadline: Instant) -> Result<(), crate::CoreError> {
-        self.send_bytes(&crate::protocol::prefixed(frame), deadline)
-            .map_err(|_| crate::CoreError::Protocol)
+    fn send_frame(
+        &mut self,
+        frame: &[u8],
+        deadline: Instant,
+    ) -> Result<(), crate::protocol::Unsent> {
+        let frame = crate::protocol::prefixed(frame);
+        let mut written = 0;
+        self.send_bytes_before(&frame, deadline, &mut written)
+            .map_err(|_| crate::protocol::Unsent {
+                error: crate::CoreError::Protocol,
+                written: written > 0,
+            })
     }
 
     fn receive(&mut self, max: usize, deadline: Instant) -> Result<Vec<u8>, crate::CoreError> {
@@ -2660,6 +2686,78 @@ mod tests {
         assert_eq!(listener.demux.shared.sockets().udp.len(), 2);
         drop(waiting.join().unwrap());
         // The client waits for bytes on L0 that never come.
+        let _ = client.join();
+    }
+
+    /// The paired transport reads the clock before each write on L0: a frame whose deadline
+    /// passed writes nothing, and one whose deadline passes while its peer reads nothing says
+    /// that part of it left.
+    #[test]
+    fn a_quic_frame_writes_nothing_after_its_deadline_and_says_when_part_of_it_left() {
+        use crate::protocol::{Preamble, Unsent};
+        let config = server_config_for_tests();
+        let listener =
+            QuicListener::bind("127.0.0.1:0".parse().unwrap(), Arc::clone(&config)).unwrap();
+        let address = listener.address();
+        let client_config = {
+            let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AnyCore))
+            .with_no_client_auth();
+            tls.alpn_protocols = vec![ALPN.to_vec()];
+            client_config(tls).unwrap()
+        };
+        let client = std::thread::spawn(move || {
+            QuicStream::connect(
+                client_config,
+                &[address],
+                Instant::now() + Duration::from_secs(5),
+                &AtomicBool::new(false),
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut stream = loop {
+            if let Some(stream) = listener.accept() {
+                break stream;
+            }
+            assert!(Instant::now() < deadline, "no connection arrived");
+            let mut bell = libc::pollfd {
+                fd: listener.demux.shared.sockets().udp[0].fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: `bell` is a live, writable `pollfd` for the whole call.
+            unsafe { libc::poll(&mut bell, 1, 10) };
+        };
+        stream.handshake(deadline).unwrap();
+        assert_eq!(
+            stream.send_frame(b"{\"request\":\"execute\"}", Instant::now()),
+            Err(Unsent {
+                error: crate::CoreError::Protocol,
+                written: false,
+            })
+        );
+        // The client takes L0 only once its first byte arrives, and no STREAM frame left.
+        stream.driver.pump();
+        assert_eq!(stream.driver.connection.stats().frame_tx.stream, 0);
+        assert!(!client.is_finished());
+        // Far more than the client's receive window, which nobody reads.
+        let frame = vec![0; 512 * 1024];
+        let began = Instant::now();
+        let unsent = stream
+            .send_frame(&frame, began + Duration::from_millis(300))
+            .unwrap_err();
+        assert!(unsent.written);
+        assert!(
+            began.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            began.elapsed()
+        );
+        drop(stream);
         let _ = client.join();
     }
 

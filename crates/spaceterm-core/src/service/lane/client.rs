@@ -24,6 +24,8 @@ const STALE: Duration = Duration::from_secs(20);
 const CHECK: Duration = Duration::from_millis(100);
 /// The thread name of lane I/O that [`within`] runs.
 const LANE_IO: &str = "spaceterm-lane-io";
+/// The lane code of a refusal because another service operation holds SpaceTerm Core.
+pub(crate) const BUSY: &str = "service_busy";
 
 /// An admitted service-lane connection, the lane version its admission selected, and the
 /// service version the Core offered.
@@ -46,6 +48,9 @@ pub enum LaneError {
     Core(CoreError),
     /// The caller was interrupted before `Execute` was sent, so nothing was dispatched.
     Interrupted,
+    /// The caller's deadline passed before the request completed. When it was an `Execute`,
+    /// it passed before `Execute` was sent, so nothing was dispatched.
+    Deadline,
 }
 
 impl From<CoreError> for LaneError {
@@ -140,6 +145,20 @@ impl Session {
         })
     }
 
+    /// Like [`Self::call`], but stops waiting as soon as `deadline()` passes. A request
+    /// abandoned that way ends this session.
+    pub fn call_within(
+        &mut self,
+        request: &LaneRequest,
+        deadline: &dyn Fn() -> Instant,
+    ) -> Result<LaneReply, LaneError> {
+        match self.request_within(request, deadline)? {
+            LaneReply::Error { code } => Err(LaneError::Code(code)),
+            LaneReply::BelowFloor { floor } => Err(LaneError::BelowFloor(floor)),
+            reply => Ok(reply),
+        }
+    }
+
     /// Like [`Self::request`], but stops waiting as soon as `deadline()` passes. A request
     /// abandoned that way ends this session.
     fn request_within(
@@ -147,19 +166,63 @@ impl Session {
         request: &LaneRequest,
         deadline: &dyn Fn() -> Instant,
     ) -> Result<LaneReply, CoreError> {
-        let bytes = self.frame(request)?;
-        let mut stream = self.stream.take().ok_or(CoreError::Protocol)?;
-        self.used = Instant::now();
+        self.send_within(request, deadline).0
+    }
+
+    /// [`Self::request_within`] that also says whether any byte of `request` may have reached
+    /// the transport. Nothing is written once the deadline fixed when it starts has passed,
+    /// even by I/O the caller stopped waiting for.
+    fn send_within(
+        &mut self,
+        request: &LaneRequest,
+        deadline: &dyn Fn() -> Instant,
+    ) -> (Result<LaneReply, CoreError>, bool) {
+        let bytes = match self.frame(request) {
+            Ok(bytes) => bytes,
+            Err(error) => return (Err(error), false),
+        };
         let fixed = deadline();
-        let (stream, reply) = within(LANE_IO, &|| Some(deadline()), move || {
-            let reply = stream
-                .send(&bytes, fixed)
-                .and_then(|()| stream.receive(MAX_FRAME, fixed));
-            (stream, reply)
-        })
-        .ok_or(CoreError::Protocol)?;
+        if Instant::now() >= fixed {
+            return (Err(CoreError::Protocol), false);
+        }
+        let Some(mut stream) = self.stream.take() else {
+            return (Err(CoreError::Protocol), false);
+        };
+        self.used = Instant::now();
+        let progress = Arc::new(Progress::default());
+        let sending = Arc::clone(&progress);
+        let finished = within(LANE_IO, &|| Some(deadline()), move || {
+            // Marked before the clock is read, so a caller that saw the deadline pass and then
+            // found this unmarked knows the check below refuses to write.
+            sending.mark(Progress::STARTED);
+            if Instant::now() >= fixed {
+                sending.mark(Progress::UNSENT);
+                return (stream, Err(CoreError::Protocol), false);
+            }
+            // The transport checks the deadline again before each write, and says whether any
+            // byte left before it passed.
+            match stream.send_frame(&bytes, fixed) {
+                Ok(()) => {
+                    sending.mark(Progress::SENT);
+                    let reply = stream.receive(MAX_FRAME, fixed);
+                    (stream, reply, true)
+                }
+                Err(unsent) if !unsent.written => {
+                    sending.mark(Progress::UNSENT);
+                    (stream, Err(unsent.error), false)
+                }
+                Err(unsent) => {
+                    sending.mark(Progress::SENT);
+                    (stream, Err(unsent.error), true)
+                }
+            }
+        });
+        let Some((stream, reply, wrote)) = finished else {
+            // The caller stopped waiting while the I/O may still run.
+            return (Err(CoreError::Protocol), progress.may_have_written(fixed));
+        };
         self.stream = Some(stream);
-        self.decode(&reply?)
+        (reply.and_then(|reply| self.decode(&reply)), wrote)
     }
 
     /// Sends one request and turns a lane `Error` into [`LaneError::Code`], and a `BelowFloor`
@@ -174,6 +237,60 @@ impl Session {
             LaneReply::BelowFloor { floor } => Err(LaneError::BelowFloor(floor)),
             reply => Ok(reply),
         }
+    }
+}
+
+/// How far lane I/O that [`Session::send_within`] runs got with its request's bytes.
+#[derive(Default)]
+struct Progress(std::sync::atomic::AtomicU8);
+
+impl Progress {
+    const STARTED: u8 = 1;
+    /// It ended without writing a byte, and writes none later.
+    const UNSENT: u8 = 2;
+    /// A byte may have left.
+    const SENT: u8 = 3;
+
+    fn mark(&self, phase: u8) {
+        self.0.store(phase, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn phase(&self) -> u8 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Whether a byte may have left, said by a caller that stopped waiting. I/O that had not
+    /// started by the deadline `fixed` never writes. I/O that was sending then stops at `fixed`
+    /// too, before its next write, so the caller waits [`SEND_GRACE`] at most for it to say
+    /// whether any byte left before that.
+    fn may_have_written(&self, fixed: Instant) -> bool {
+        if Instant::now() < fixed {
+            // An interrupt ended the wait early: the I/O may still write until `fixed`.
+            return self.phase() != Progress::UNSENT;
+        }
+        let grace = Instant::now() + SEND_GRACE;
+        loop {
+            match self.phase() {
+                0 => return false,
+                Progress::UNSENT => return false,
+                Progress::SENT => return true,
+                _ if Instant::now() >= grace => return true,
+                _ => std::thread::sleep(Duration::from_millis(2)),
+            }
+        }
+    }
+}
+
+/// How long a caller past its deadline waits for lane I/O that was sending to say whether any
+/// byte left. The transport stops at the same deadline, so this covers only scheduling.
+const SEND_GRACE: Duration = Duration::from_millis(250);
+
+/// `error`, or [`LaneError::Deadline`] when it ended a wait that `deadline` bounded.
+pub(crate) fn past(error: CoreError, deadline: Instant) -> LaneError {
+    if Instant::now() >= deadline {
+        LaneError::Deadline
+    } else {
+        LaneError::Core(error)
     }
 }
 
@@ -241,21 +358,79 @@ pub enum Outcome {
 /// interrupted. From then on the flow only resolves: it never sends `Execute` again. Every
 /// connection and request reads it again while it waits, so a stalled server cannot hold the
 /// flow past that instant.
+///
+/// `id` names the operation. The caller may execute the same approval again under the same ID
+/// after a definite refusal, so a reply lost on an earlier attempt still settles there.
+#[cfg(test)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one execution's parts, used once"
+)]
 pub(crate) fn perform(
     connector: &Arc<dyn Connector>,
     session: Session,
     action: LaneAction,
     token: String,
+    id: OperationId,
     wait: Duration,
     admitted: &mut dyn FnMut(&OperationId) -> Result<(), LaneError>,
     interrupted: &dyn Fn() -> Option<Instant>,
 ) -> Result<Outcome, LaneError> {
+    perform_following(
+        connector,
+        session,
+        (action, token, id),
+        Instant::now() + wait,
+        admitted,
+        &mut || {},
+        &mut acknowledge_only,
+        interrupted,
+    )
+}
+
+/// Acknowledges a settled receipt on `session` for a caller that keeps no record of its
+/// operations.
+fn acknowledge_only(session: &mut Session, id: &OperationId, _: &LaneReceipt, by: Instant) {
+    let _ = acknowledge(session, id, by);
+}
+
+/// What a flow does with its operation's settled receipt on the session that read it, by the
+/// instant it passes. A caller that records its operations keeps the outcome before it
+/// acknowledges the receipt.
+pub type Settle<'a> = dyn FnMut(&mut Session, &OperationId, &LaneReceipt, Instant) + 'a;
+
+/// [`perform`] that runs `accepted` once, as soon as the server is known to have admitted the
+/// operation: its `Accepted` reply, or a receipt for it, and hands its settled receipt to
+/// `settle` on the session that read it.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one execution's parts, used once"
+)]
+fn perform_following(
+    connector: &Arc<dyn Connector>,
+    session: Session,
+    (action, token, id): (LaneAction, String, OperationId),
+    until: Instant,
+    admitted: &mut dyn FnMut(&OperationId) -> Result<(), LaneError>,
+    accepted: &mut dyn FnMut(),
+    settle: &mut Settle<'_>,
+    interrupted: &dyn Fn() -> Option<Instant>,
+) -> Result<Outcome, LaneError> {
+    // The caller's absolute instant, never recomputed from a remaining duration, so time spent
+    // before this flow runs can't move it later.
+    let deadline = || interrupted().into_iter().fold(until, Instant::min);
+    // Fixed per request from when it is sent, and moved closer by an interrupt.
+    let request_deadline = |sent: Instant| move || deadline().min(sent + REQUEST_LIMIT);
+    // A caller whose deadline passed before `Execute` dispatches nothing.
     let mut session = if session.used.elapsed() >= STALE {
-        Session::open(connector.as_ref(), Instant::now() + REQUEST_LIMIT)?
+        Session::open_within(connector, &request_deadline(Instant::now()))
+            .map_err(|error| past(error, deadline()))?
     } else {
         session
     };
-    let id = OperationId::random()?;
+    if Instant::now() >= deadline() {
+        return Err(LaneError::Deadline);
+    }
     admitted(&id)?;
     let operation = id.to_string();
     // Stop and Uninstall end the Core that answers the lane, so the flow does not reconnect once
@@ -267,17 +442,18 @@ pub(crate) fn perform(
         token,
         operation: operation.clone(),
     };
-    let started = Instant::now();
-    let deadline = || interrupted().into_iter().fold(started + wait, Instant::min);
-    // Fixed per request from when it is sent, and moved closer by an interrupt.
-    let request_deadline = |sent: Instant| move || deadline().min(sent + REQUEST_LIMIT);
     let (mut boot, mut current) =
-        match session.request_within(&execute, &request_deadline(Instant::now())) {
-            Ok(LaneReply::Accepted { boot, .. }) => (Some(boot), Some(session)),
+        match session.send_within(&execute, &request_deadline(Instant::now())) {
+            (Ok(LaneReply::Accepted { boot, .. }), _) => {
+                accepted();
+                (Some(boot), Some(session))
+            }
             // A refused Execute admitted nothing.
-            Ok(LaneReply::Error { code }) => return Err(LaneError::Code(code)),
+            (Ok(LaneReply::Error { code }), _) => return Err(LaneError::Code(code)),
+            // No byte of Execute was written, so nothing was dispatched.
+            (Err(error), false) => return Err(past(error, deadline())),
             // Execute was sent, so the operation may be durable: follow the same operation ID.
-            Ok(_) | Err(_) => (None, None),
+            (Ok(_) | Err(_), _) => (None, None),
         };
     let mut last = None;
     loop {
@@ -294,12 +470,22 @@ pub(crate) fn perform(
             Some(session) if boot.is_none() && interrupted().is_none() => {
                 match session.request_within(&execute, &request_deadline(Instant::now())) {
                     Ok(LaneReply::Accepted { boot: admitted, .. }) => {
+                        accepted();
                         boot = Some(admitted);
                         continue;
                     }
                     Ok(LaneReply::Error { code }) => {
                         match resolve(session, &operation, &request_deadline(Instant::now())) {
-                            Ok(LaneReply::Receipt(receipt)) => boot = Some(receipt.boot),
+                            Ok(LaneReply::Receipt(receipt)) => {
+                                accepted();
+                                boot = Some(receipt.boot);
+                            }
+                            // Another operation holds the Core, and the first Execute may still
+                            // wait behind it on the lost connection, where it can admit this
+                            // same operation once that settles. Nothing proves it never will,
+                            // so the flow asks again under the same ID.
+                            Ok(LaneReply::Error { code: missing })
+                                if missing == "not_found" && code == BUSY => {}
                             // Executes are serialized, so no record means none was admitted.
                             Ok(LaneReply::Error { code: missing }) if missing == "not_found" => {
                                 return Err(LaneError::Code(code));
@@ -313,17 +499,15 @@ pub(crate) fn perform(
             Some(session) => {
                 match resolve(session, &operation, &request_deadline(Instant::now())) {
                     Ok(LaneReply::Receipt(receipt)) if settled(&receipt) => {
-                        let _ = session.request_within(
-                            &LaneRequest::Acknowledge {
-                                operation: operation.clone(),
-                            },
-                            &request_deadline(Instant::now()),
-                        );
+                        settle(session, &id, &receipt, request_deadline(Instant::now())());
                         let boot = boot.unwrap_or_else(|| receipt.boot.clone());
                         return Ok(Outcome::Settled { receipt, boot });
                     }
                     Ok(LaneReply::Receipt(receipt)) => {
-                        boot.get_or_insert_with(|| receipt.boot.clone());
+                        if boot.is_none() {
+                            accepted();
+                            boot = Some(receipt.boot.clone());
+                        }
                         last = Some(receipt);
                     }
                     // The operation may still arrive on the lost connection, so this proves nothing.
@@ -396,7 +580,7 @@ pub fn settled(receipt: &LaneReceipt) -> bool {
 /// What became of an operation an earlier command admitted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Leftover {
-    /// It settled, and this call acknowledged it.
+    /// It settled.
     Settled(LaneReceipt),
     /// It has not settled yet. A later command asks again.
     Pending,
@@ -404,33 +588,48 @@ pub enum Leftover {
     Gone,
 }
 
-/// Resolves an operation an earlier command admitted, and acknowledges it once settled.
-pub fn settle_leftover(
+/// What became of an operation an earlier command admitted, read by `deadline` without
+/// acknowledging it.
+pub(crate) fn leftover(
     session: &mut Session,
     operation: &OperationId,
+    deadline: Instant,
 ) -> Result<Leftover, LaneError> {
-    let deadline = Instant::now() + REQUEST_LIMIT;
-    let reply = session.request(
-        &LaneRequest::Resolve {
-            operation: operation.to_string(),
-        },
-        deadline,
-    )?;
+    let reply = session
+        .request_within(
+            &LaneRequest::Resolve {
+                operation: operation.to_string(),
+            },
+            &|| deadline,
+        )
+        .map_err(|error| past(error, deadline))?;
     match reply {
-        LaneReply::Receipt(receipt) if settled(&receipt) => {
-            session.call(
-                &LaneRequest::Acknowledge {
-                    operation: operation.to_string(),
-                },
-                deadline,
-            )?;
-            Ok(Leftover::Settled(receipt))
-        }
+        LaneReply::Receipt(receipt) if settled(&receipt) => Ok(Leftover::Settled(receipt)),
         LaneReply::Receipt(_) => Ok(Leftover::Pending),
         LaneReply::Error { code } if code == "not_found" => Ok(Leftover::Gone),
         LaneReply::Error { code } => Err(LaneError::Code(code)),
         _ => Err(LaneError::Core(CoreError::Protocol)),
     }
+}
+
+/// Acknowledges a settled operation by `deadline`, which lets the server forget it.
+pub(crate) fn acknowledge(
+    session: &mut Session,
+    operation: &OperationId,
+    deadline: Instant,
+) -> Result<(), LaneError> {
+    session
+        .call_within(
+            &LaneRequest::Acknowledge {
+                operation: operation.to_string(),
+            },
+            &|| deadline,
+        )
+        .map(drop)
+        .map_err(|error| match error {
+            LaneError::Core(error) => past(error, deadline),
+            error => error,
+        })
 }
 
 /// The service lane of this account's own server, over account IPC.
@@ -458,6 +657,7 @@ impl Connector for Local {
             },
             &self.core,
             &self.paths.identity,
+            deadline,
         );
         record(&self.admissions, &admitted);
         let admitted = admitted?;
@@ -490,15 +690,20 @@ impl Connector for Paired {
         if Instant::now() >= deadline {
             return Err(crate::direct::DirectError::Transport.into());
         }
-        let connection = self.connector.connect()?;
+        // Each dial follows the deadline of the lane request that needs it, never one the
+        // connector fixed before the caller's approval began.
+        let connection = self.connector.connect_by(deadline)?;
         if connection.paired() != &self.paired {
             return Err(CoreError::AuthenticationRefused);
         }
-        let admitted = connection.admit_service_lane(crate::protocol::Caller {
-            client: &self.paired.client,
-            name: &self.name,
-            agent: self.agent.as_ref(),
-        });
+        let admitted = connection.admit_service_lane_by(
+            crate::protocol::Caller {
+                client: &self.paired.client,
+                name: &self.name,
+                agent: self.agent.as_ref(),
+            },
+            deadline,
+        );
         record(
             &self.admissions,
             &admitted
@@ -512,6 +717,7 @@ impl Connector for Paired {
 }
 
 /// A route to one server's service lane. Opening it never starts a server.
+#[derive(Clone)]
 pub struct Lane {
     connector: Arc<dyn Connector>,
 }
@@ -569,7 +775,15 @@ impl Lane {
         Session::open(self.connector.as_ref(), Instant::now() + REQUEST_LIMIT)
     }
 
-    /// Executes a previewed action and follows it. See [`perform`].
+    /// Opens and admits one connection by `deadline`, and stops waiting for a stalled server
+    /// once it passes. A deadline that passed first is [`LaneError::Deadline`].
+    pub fn session_by(&self, deadline: Instant) -> Result<Session, LaneError> {
+        let opened = Instant::now();
+        let by = || deadline.min(opened + REQUEST_LIMIT);
+        Session::open_within(&self.connector, &by).map_err(|error| past(error, deadline))
+    }
+
+    /// Executes a previewed action as a new operation and follows it. See [`perform`].
     pub fn perform(
         &self,
         session: Session,
@@ -579,13 +793,38 @@ impl Lane {
         admitted: &mut dyn FnMut(&OperationId) -> Result<(), LaneError>,
         interrupted: &dyn Fn() -> Option<Instant>,
     ) -> Result<Outcome, LaneError> {
-        perform(
+        let id = OperationId::random()?;
+        self.perform_as(
+            session,
+            (action, token, id),
+            Instant::now() + wait,
+            admitted,
+            (&mut || {}, &mut acknowledge_only),
+            interrupted,
+        )
+    }
+
+    /// Executes a previewed action as operation `id` and follows it until the absolute instant
+    /// `until`. See [`perform`]. `accepted` runs once, as soon as the server is known to have
+    /// admitted the operation, and `settle` takes its settled receipt on the session that read
+    /// it.
+    pub fn perform_as(
+        &self,
+        session: Session,
+        (action, token, id): (LaneAction, String, OperationId),
+        until: Instant,
+        admitted: &mut dyn FnMut(&OperationId) -> Result<(), LaneError>,
+        (accepted, settle): (&mut dyn FnMut(), &mut Settle<'_>),
+        interrupted: &dyn Fn() -> Option<Instant>,
+    ) -> Result<Outcome, LaneError> {
+        perform_following(
             &self.connector,
             session,
-            action,
-            token,
-            wait,
+            (action, token, id),
+            until,
             admitted,
+            accepted,
+            settle,
             interrupted,
         )
     }

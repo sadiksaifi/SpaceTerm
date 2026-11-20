@@ -113,7 +113,10 @@ pub(super) trait CoreServiceControl: Send + Sync {
     /// runtime the service already uses.
     fn install(&self, installation: &Path) -> Result<ServiceStatus, CoreError>;
     fn start(&self) -> CoreAnswer<'_, ServiceStatus>;
-    /// Stops the server, ends its Terminal Sessions, and keeps it stopped until an explicit Start.
+    /// Stops a server that no Stop preview covers, and keeps it stopped until an explicit Start,
+    /// only where that ends no Terminal Session: it finishes the native cleanup of a published
+    /// Stop, or stops a service whose server does not run, checked under the service lock. A
+    /// running server refuses with [`CoreError::Changed`]; it stops through its own preview.
     fn stop(&self) -> Result<ServiceStatus, CoreError>;
     /// Stops and removes the service. Workspaces and installations are kept.
     fn uninstall(&self) -> Result<ServiceStatus, CoreError>;
@@ -157,7 +160,7 @@ impl CoreServiceControl for Service {
     }
 
     fn stop(&self) -> Result<ServiceStatus, CoreError> {
-        Service::stop(self)
+        Service::stop_offline(self)
     }
 
     fn uninstall(&self) -> Result<ServiceStatus, CoreError> {
@@ -282,6 +285,9 @@ pub(super) struct LocalMachineRow {
     status: LocalCoreStatus,
     /// A check awaits its result.
     checking: bool,
+    /// The Core changed after the running check began, so its answer is set aside and the
+    /// connection is checked again once it ends.
+    check_outdated: bool,
     /// Returns the background result to GPUI. Dropping the window drops it, and a late result then
     /// has nowhere to land.
     _operation: Option<Task<()>>,
@@ -299,6 +305,7 @@ impl LocalMachineRow {
             control,
             status: LocalCoreStatus::NotChecked,
             checking: false,
+            check_outdated: false,
             _operation: None,
         }
     }
@@ -568,9 +575,9 @@ pub(crate) const INCOMPATIBLE_PROTOCOL: &str =
     "SpaceTerm and this SpaceTerm Core are incompatible.";
 
 /// The connection row's guidance once the person has stopped the server. A stopped server stays
-/// stopped through account login and computer startup alike.
-const STOPPED_GUIDANCE: &str = "You stopped SpaceTerm Core. It stays stopped, even after you \
-                                restart the computer, until you start it.";
+/// stopped through account login and computer startup alike, until an explicit Start or the
+/// person's own launch of SpaceTerm.
+const STOPPED_GUIDANCE: &str = "Opening SpaceTerm starts it again.";
 
 pub(super) const SERVICE_CHECK_SELECTOR: &str = "settings-server-service-check";
 pub(super) const INSTALL_SELECTOR: &str = "settings-server-service-install";
@@ -1119,13 +1126,7 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
                 ServicePhase::Stopped => (
                     "Stopped",
                     "settings-server-service-state-stopped",
-                    guidance(if at_boot {
-                        "You stopped SpaceTerm Core. It stays stopped, even after the computer \
-                         restarts or you open SpaceTerm, until you start it."
-                    } else {
-                        "You stopped SpaceTerm Core. It stays stopped, even after you log in again \
-                         or open SpaceTerm, until you start it."
-                    }),
+                    guidance(STOPPED_GUIDANCE),
                 ),
                 // Turning SpaceTerm Core off was the person's choice, so nothing warns.
                 ServicePhase::TurnedOff => (
@@ -1464,6 +1465,12 @@ impl SettingsWindow {
             let _ = settings.update(cx, |settings, cx| {
                 if let Some(row) = &mut settings.local_core {
                     row.checking = false;
+                    // An answer from before the Core changed describes nothing current.
+                    if std::mem::take(&mut row.check_outdated) {
+                        settings.check_local_core(cx);
+                        cx.notify();
+                        return;
+                    }
                     row.status = match result {
                         Ok(connection) => LocalCoreStatus::Connected(connection),
                         Err(error) => LocalCoreStatus::Failed(error),
@@ -1530,6 +1537,19 @@ impl SettingsWindow {
             .is_some_and(MachineServiceRow::changing)
     }
 
+    /// Checks the connection after the Core changed outside Settings. A check already running may
+    /// have reached it before the change, so its answer is set aside and the connection is
+    /// checked again once it ends.
+    pub(super) fn recheck_local_core(&mut self, cx: &mut Context<Self>) {
+        if let Some(row) = &mut self.local_core
+            && row.checking
+        {
+            row.check_outdated = true;
+            return;
+        }
+        self.check_local_core(cx);
+    }
+
     /// Whether the connection row has an action running.
     pub(super) fn local_core_working(&self) -> bool {
         self.local_core.as_ref().is_some_and(|row| row.checking)
@@ -1575,6 +1595,37 @@ impl SettingsWindow {
         if action == ServiceAction::Restart {
             self.request_machine_restart(
                 &super::machine_list::MachineChoice::Local,
+                window.window_handle(),
+                cx,
+            );
+            return;
+        }
+        // A SpaceTerm Core that may run stops through its own preview of the exact Terminal
+        // Sessions that end, with its receipt, its Stopping announcement and its wait through
+        // another operation, as the menu bar and the CLI stop it. That includes a Core whose
+        // last read was unresolved cleanup, while its lane answers. Only a Core that no longer
+        // runs uses the service manager here, and the service refuses that Stop as changed
+        // when the Core runs again by then.
+        let not_running = self
+            .core_service
+            .as_ref()
+            .and_then(|row| row.state.status)
+            .is_some_and(|status| !status.running);
+        if action == ServiceAction::Stop
+            && !not_running
+            && let Some(update) =
+                self.machine_update(&super::machine_list::MachineChoice::Local, cx)
+            && matches!(
+                update.link,
+                crate::updates::machines::MachineLink::Connected
+                    | crate::updates::machines::MachineLink::Incompatible(_)
+            )
+        {
+            self.perform_update_command(
+                crate::updates::state::Command::Machine(
+                    update.machine,
+                    crate::updates::machines::MachineAction::Stop,
+                ),
                 window.window_handle(),
                 cx,
             );

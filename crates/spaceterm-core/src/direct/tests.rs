@@ -87,6 +87,30 @@ pub(crate) fn accept_from(listener: &QuicListener) -> QuicStream {
     stream
 }
 
+/// Answers the next connection's pairing exchange as SpaceTerm Core does, then never answers its
+/// admission, like a work lane that stalls once its route authenticated. The connection stays
+/// open until `release` sends or hangs up.
+pub(crate) fn authenticate_then_stall(
+    state: &host::Shared,
+    release: std::sync::mpsc::Receiver<()>,
+) -> std::thread::JoinHandle<()> {
+    let state = Arc::clone(state);
+    std::thread::spawn(move || {
+        let mut ws = accept_raw(&state);
+        let challenge = state.lock().unwrap().challenge().unwrap();
+        ws.send(&challenge).unwrap();
+        let authentication: wire::Authentication = ws.receive().unwrap();
+        let answer = state
+            .lock()
+            .unwrap()
+            .authenticate(&challenge, &authentication);
+        assert!(matches!(answer, Ok(wire::Answer::Connected)));
+        ws.send(&answer).unwrap();
+        let _ = release.recv_timeout(Duration::from_secs(10));
+        drop(ws);
+    })
+}
+
 /// Admits an authenticated connection as `client` and starts its link.
 pub(crate) fn admitted(
     connection: DirectConnection,

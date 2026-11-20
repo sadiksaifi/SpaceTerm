@@ -51,6 +51,14 @@ pub(crate) mod testing {
         WorkspaceHost::new(super::tests::host())
     }
 
+    /// A host whose Panes start `shell`, an executable the test wrote.
+    pub(crate) fn terminal_host_with_shell(shell: &std::path::Path) -> WorkspaceHost {
+        WorkspaceHost::new(super::tests::host_with_shell(
+            shell.to_str().expect("a UTF-8 shell path"),
+            native_pty_factory(Arc::default()),
+        ))
+    }
+
     /// Prepares `host`'s first Workspace and starts its Pane at `size` for the client `[1; 32]`
     /// over the connection `[1; 32]`.
     pub(crate) fn started_pane(host: &mut WorkspaceHost, size: PaneSize) -> Lease {
@@ -424,6 +432,14 @@ impl CorePaneHost {
             .as_ref()
             .filter(|pane| !pane.ended)
             .is_some_and(|pane| pane.runtime.work_going_on(now))
+    }
+    /// Whether current facts verify work in this Pane's running Terminal Session that a direct
+    /// close would end. A Pane without one has none.
+    pub(crate) fn running_work(&self) -> bool {
+        self.pane
+            .as_ref()
+            .filter(|pane| !pane.ended)
+            .is_some_and(|pane| pane.runtime.running_work())
     }
     /// This Pane's running Terminal Session, if one has not ended.
     pub(crate) fn live_session(&self) -> Option<[u8; 32]> {

@@ -8,6 +8,10 @@ const HEALTHY_CONNECTION: Duration = Duration::from_secs(5);
 struct Start {
     boot: [u8; 32],
     cause: Option<CoreError>,
+    /// A background start, which grants control to nobody. SpaceTerm Core starts a Pane in the
+    /// background at most once per run, and only while it has no live Session and none that
+    /// ended in that run, so any observation of its exact Pane in the same run settles it.
+    background: bool,
 }
 
 #[derive(Default)]
@@ -102,13 +106,18 @@ impl Recovery {
         }
     }
 
-    pub fn begin_start(&mut self, boot: Option<[u8; 32]>) -> Result<(), CoreError> {
+    pub fn begin_start(
+        &mut self,
+        boot: Option<[u8; 32]>,
+        background: bool,
+    ) -> Result<(), CoreError> {
         if let Some(start) = &self.start {
             return Err(start.cause.unwrap_or(CoreError::Protocol));
         }
         self.start = Some(Start {
             boot: boot.or(self.observed_boot).ok_or(CoreError::Protocol)?,
             cause: None,
+            background,
         });
         Ok(())
     }
@@ -141,8 +150,11 @@ impl Recovery {
     }
 
     /// A same-boot dormant observation can overtake the original request on its old transport.
-    /// Only a live grant or proof that the original server run ended unlocks another start.
-    /// Any validated observation ends a restart wait, also for a Pane that stays dormant.
+    /// Only a live grant or proof that the original server run ended unlocks another ordinary
+    /// start. A background start settles on any observation of its Pane in the same run,
+    /// whoever controls it: a delayed Prepare that arrives after it only observes, and asking
+    /// again is safe for the same reason. Any validated observation ends a restart wait, also
+    /// for a Pane that stays dormant.
     pub fn observed(&mut self, reply: &Reply) -> Result<(), CoreError> {
         let boot = match reply {
             Reply::Attached { lease } => {
@@ -153,6 +165,13 @@ impl Recovery {
             Reply::Takeover { target, .. } => Some(target.core),
             _ => return Err(CoreError::Protocol),
         };
+        if self
+            .start
+            .as_ref()
+            .is_some_and(|start| start.background && Some(start.boot) == boot)
+        {
+            self.start = None;
+        }
         self.observed_boot = boot;
         if let Some(start) = &self.start {
             if Some(start.boot) != boot {
@@ -206,6 +225,51 @@ mod tests {
             recovery.restart_wait(later),
             "a new restart gets its own wait"
         );
+    }
+
+    /// A background start whose reply was lost settles on any observation of its Pane in the
+    /// same Core run, whoever controls it: a dormant one, its own unowned Session, or a Session
+    /// another client acquired first. An observation of another run's Pane keeps nothing, and
+    /// an ordinary start keeps its guard on every same-run observation but a live grant.
+    #[test]
+    fn a_lost_background_start_settles_on_any_observation_in_its_run() {
+        use spaceterm_core::pane::control::Controller;
+        let pane = [2; 32];
+        let takeover = |session: [u8; 32], controller: Controller| Reply::Takeover {
+            target: spaceterm_core::pane::PaneTarget {
+                core: [7; 32],
+                session,
+            },
+            controller,
+            session_ended: None,
+        };
+        let lost = |background: bool| {
+            let mut recovery = Recovery::default();
+            recovery.begin_start(Some([7; 32]), background).unwrap();
+            recovery.started(&Err(CoreError::Direct(DirectError::Transport)));
+            recovery
+        };
+        let other = || Controller::Client {
+            name: "Other".into(),
+            this_client: false,
+        };
+        for observation in [
+            takeover(pane, Controller::Nobody),
+            takeover([9; 32], Controller::Nobody),
+            takeover([9; 32], other()),
+        ] {
+            let mut recovery = lost(true);
+            recovery.observed(&observation).unwrap();
+            assert!(!recovery.start_unconfirmed(), "{observation:?}");
+        }
+        for observation in [
+            takeover([9; 32], Controller::Nobody),
+            takeover([9; 32], other()),
+        ] {
+            let mut ordinary = lost(false);
+            assert!(ordinary.observed(&observation).is_err());
+            assert!(ordinary.start_unconfirmed());
+        }
     }
 
     #[test]

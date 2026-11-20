@@ -20,14 +20,15 @@
 //! Requests from its own GitHub CLI, and never reads git for a Workspace itself.
 //!
 pub(crate) use core_workspaces::ArrangementUnavailable;
+pub(crate) use core_workspaces::{CloseConsent, CloseKeyboard};
 pub(crate) use core_workspaces::{
     DirectMachine, DrawnAnswer, OutcomeNotice, OutcomeOwner, OutcomeTicket, WorkspaceAcceptance,
     WorkspaceAttachmentFailure, WorkspaceCloseApproval, WorkspaceCloseIntent, WorkspaceCloseReview,
     WorkspaceCloseState, WorkspaceCloseUnavailable, WorkspaceConflict, WorkspaceEditSource,
-    WorkspaceEdits, WorkspaceFacts, WorkspaceHost, WorkspacePaneOpener, WorkspacePaneSessions,
-    WorkspacePaneSubscription, WorkspacePanes, WorkspacePlan, WorkspaceRefusal,
-    WorkspaceRefusalReason, WorkspaceRemoval, WorkspaceRowStatus, WorkspaceSubmission,
-    WorkspaceTabs, Workspaces, close_changed_title, presenting_window,
+    WorkspaceEditability, WorkspaceEdits, WorkspaceFacts, WorkspaceHost, WorkspacePaneOpener,
+    WorkspacePaneSessions, WorkspacePaneSubscription, WorkspacePanes, WorkspacePlan,
+    WorkspaceRefusal, WorkspaceRefusalReason, WorkspaceRemoval, WorkspaceRowStatus,
+    WorkspaceSubmission, WorkspaceTabs, Workspaces, close_changed_title, presenting_window,
 };
 #[cfg(test)]
 pub(crate) use core_workspaces::{WorkspaceOwner, testing};
@@ -306,6 +307,9 @@ mod core_workspaces {
         forgotten: Option<u64>,
         /// The reading's outcomes handed to alerts the person has not answered yet.
         handed: Rc<std::cell::RefCell<BTreeSet<u64>>>,
+        /// Set once another alert presents these outcomes in this one's place, so this alert's
+        /// close no longer records or releases them.
+        handed_over: Rc<std::cell::Cell<bool>>,
     }
 
     impl OutcomeNotice {
@@ -315,7 +319,29 @@ mod core_workspaces {
         ) -> impl Fn(&spaceterm_ui::ModalLifecycleEvent, &mut App) + 'static + use<> {
             let answered = self.clone();
             let unanswered = self.clone();
-            when_answered(move || answered.acknowledge(), move || unanswered.release())
+            when_answered(
+                move || {
+                    if !answered.handed_over.get() {
+                        answered.acknowledge();
+                    }
+                },
+                move || {
+                    if !unanswered.handed_over.get() {
+                        unanswered.release();
+                    }
+                },
+            )
+        }
+
+        /// The same outcomes for the alert that replaces this one's. The person's answer to that
+        /// alert records them as seen, and this alert's close, however it closes, does nothing.
+        /// Call it before this alert closes.
+        pub(crate) fn hand_over(&self) -> Self {
+            self.handed_over.set(true);
+            Self {
+                handed_over: Rc::default(),
+                ..self.clone()
+            }
         }
 
         /// Records the outcomes as seen. Call it only for the person's answer.
@@ -331,7 +357,7 @@ mod core_workspaces {
         }
 
         /// Leaves the outcomes unseen for the next reading.
-        fn release(&self) {
+        pub(crate) fn release(&self) {
             let forgotten = self.forgotten.map(|_| FORGOTTEN);
             for sequence in self.sequences.iter().copied().chain(forgotten) {
                 if self.handed.borrow_mut().remove(&sequence) {
@@ -1165,6 +1191,9 @@ mod core_workspaces {
         restart_causes: crate::terminal::core_session::restart::PaneRestartCauses,
         /// This computer's name in the platform's wording, for a server with no remote name.
         this_computer: SharedString,
+        /// Whether a Pane these sessions present was explicitly selected, by the person or by
+        /// the landing of their own launch. Until then the window presents a view nobody chose.
+        selected: Rc<std::cell::Cell<bool>>,
     }
 
     impl WorkspacePaneSessions {
@@ -1216,6 +1245,7 @@ mod core_workspaces {
                 edits: None,
                 restart_causes: Arc::default(),
                 this_computer: SharedString::default(),
+                selected: Rc::default(),
             }
         }
 
@@ -1321,6 +1351,10 @@ mod core_workspaces {
         workspace: Id,
         tab: Id,
         panes: BTreeMap<PaneId, Id>,
+        /// The server identity each Pane's subscription was opened for. A provisional Pane has
+        /// none. A Pane binds until its subscription is for its server identity, however its
+        /// recorded identity is translated meanwhile.
+        bound: BTreeMap<PaneId, Id>,
         /// The opener generation each Pane's subscription came from, or `None` once another
         /// presentation of the same server Pane fenced it.
         opened: BTreeMap<PaneId, Option<u64>>,
@@ -1355,6 +1389,7 @@ mod core_workspaces {
                 workspace,
                 tab,
                 panes: BTreeMap::new(),
+                bound: BTreeMap::new(),
                 opened: BTreeMap::new(),
                 views: BTreeMap::new(),
                 screen_focus: BTreeMap::new(),
@@ -1381,10 +1416,14 @@ mod core_workspaces {
                 self.edits.defer_alias_retirement(previous);
             }
             if self.edits.provisional(core) {
+                self.bound.remove(&pane_id);
                 self.pending_starts.borrow_mut().insert(pane_id);
-            } else if self.pending_starts.borrow_mut().remove(&pane_id) {
-                state.start_created();
-                self.shell_starts.borrow_mut().insert(pane_id);
+            } else {
+                self.bound.insert(pane_id, core);
+                if self.pending_starts.borrow_mut().remove(&pane_id) {
+                    state.start_created();
+                    self.shell_starts.borrow_mut().insert(pane_id);
+                }
             }
             state.observe(self.changes.0.clone());
             self.opened
@@ -1402,17 +1441,39 @@ mod core_workspaces {
         /// longer starting.
         pub(crate) fn shell_starting(&self, pane_id: PaneId) -> bool {
             use crate::terminal::core_session::CorePaneStatus;
-            let starting = self.views.get(&pane_id).is_some_and(|view| {
-                matches!(
-                    view.connection().status(),
-                    CorePaneStatus::Connecting | CorePaneStatus::Connected
-                )
-            });
+            let Some(connection) = self.views.get(&pane_id).map(CorePaneView::connection) else {
+                self.shell_starts.borrow_mut().remove(&pane_id);
+                return false;
+            };
+            let status = connection.status();
+            // A background start this client asked for is starting too, until it is answered.
+            if connection.preparing() {
+                return true;
+            }
+            let starting = matches!(
+                status,
+                CorePaneStatus::Connecting | CorePaneStatus::Connected
+            );
             let mut starts = self.shell_starts.borrow_mut();
             if !starting {
                 starts.remove(&pane_id);
             }
             starting && starts.contains(&pane_id)
+        }
+
+        /// Whether Pane `pane_id`'s shell is starting: its creation is still provisional, its
+        /// worker starts it, or this client created it and it has not attached yet.
+        pub(crate) fn title_starting(&self, pane_id: PaneId) -> bool {
+            use crate::terminal::core_session::CorePaneStatus;
+            if self.pending_starts.borrow().contains(&pane_id) {
+                return true;
+            }
+            let Some(connection) = self.views.get(&pane_id).map(CorePaneView::connection) else {
+                return false;
+            };
+            connection.shell_starting()
+                || (connection.status() == CorePaneStatus::Connecting
+                    && self.shell_starts.borrow().contains(&pane_id))
         }
 
         /// Hints after any registered Pane's connection changes. Read every view after each.
@@ -1424,6 +1485,7 @@ mod core_workspaces {
             if let Some(previous) = self.panes.remove(&pane_id) {
                 self.edits.defer_alias_retirement(previous);
             }
+            self.bound.remove(&pane_id);
             self.pending_starts.borrow_mut().remove(&pane_id);
             self.shell_starts.borrow_mut().remove(&pane_id);
             self.opened.remove(&pane_id);
@@ -1433,7 +1495,7 @@ mod core_workspaces {
 
         /// A provisional creation already owns its startup intent. Only a confirmed Pane
         /// receives selection or control acquisition.
-        pub(crate) fn select(&self, pane_id: PaneId) {
+        pub(crate) fn select(&mut self, pane_id: PaneId) {
             if self
                 .panes
                 .get(&pane_id)
@@ -1441,8 +1503,9 @@ mod core_workspaces {
             {
                 return;
             }
-            if let Some(view) = self.views.get(&pane_id) {
+            if let Some(view) = self.views.get_mut(&pane_id) {
                 view.select();
+                self.sessions.selected.set(true);
             }
         }
 
@@ -1490,10 +1553,12 @@ mod core_workspaces {
                 .is_some_and(|generation| *generation != Some(self.sessions.generation()))
         }
 
-        /// Whether the Pane must open again: the server confirmed its provisional identity, or
-        /// its route connected or disconnected since it opened.
+        /// Whether the Pane must open again: no subscription was opened for its server identity
+        /// yet, as for a provisional Pane the server confirmed, or its route connected or
+        /// disconnected since it opened.
         pub(crate) fn needs_binding(&self, pane_id: PaneId, core: Id) -> bool {
-            self.panes.get(&pane_id).is_some_and(|id| *id != core) || self.reopened(pane_id)
+            (self.panes.contains_key(&pane_id) && self.bound.get(&pane_id) != Some(&core))
+                || self.reopened(pane_id)
         }
 
         pub(crate) fn edits(&self) -> WorkspaceEditSource {
@@ -1851,15 +1916,25 @@ mod core_workspaces {
         repositories: super::CoreRepositories,
         /// The close confirmation a person is reviewing now.
         review: Option<WorkspaceCloseReview>,
-        /// The close this process submitted, and the local target a fresh review would reopen.
-        submitted_close: Option<(MachineCloseTarget, CloseTarget)>,
+        /// The close this process submitted, the local target a fresh review would reopen, and
+        /// how the person approved it.
+        submitted_close: Option<SubmittedClose>,
         /// Closes the server refused because what they would end changed after the
         /// confirmation, each with its outcome's sequence.
         stale_closes: VecDeque<(MachineCloseTarget, u64)>,
+        /// The stale closes, by outcome sequence, that this client's own close found running
+        /// work in, while every Pane, Terminal Session and control grant it named is unchanged.
+        /// Each keeps what the refusal proved it would end: the boot, the exact Panes and their
+        /// Terminal Sessions, and whether it removes the Tab or Workspace. Only a review of that
+        /// same scope may present the refusal.
+        working_closes: BTreeMap<u64, spaceterm_core::hierarchy::CloseConfirmation>,
         attachments: spaceterm_core::attachments::Attachments,
         retained_views: Option<crate::ui::client_view_state::RetainedClientViews>,
         saved_views: Option<spaceterm_core::client_view::ClientView>,
         last_saved_view: Option<spaceterm_core::client_view::ClientView>,
+        /// The Workspace, Tab and Focused Pane this client last presented from this Machine, as
+        /// read with the saved arrangement. Only the person's launch of SpaceTerm opens it.
+        saved_selection: Option<spaceterm_core::client_view::Selection>,
         view_error_reported: bool,
         attachment_error: Option<spaceterm_core::CoreError>,
         /// Whether this binding keeps a copy of the inventory it presents, for a paired route.
@@ -1952,10 +2027,12 @@ mod core_workspaces {
                 review: None,
                 submitted_close: None,
                 stale_closes: VecDeque::new(),
+                working_closes: BTreeMap::new(),
                 attachments: spaceterm_core::attachments::Attachments::memory(),
                 retained_views: None,
                 saved_views: None,
                 last_saved_view: None,
+                saved_selection: None,
                 view_error_reported: false,
                 attachment_error: None,
                 retains_copies: false,
@@ -2290,6 +2367,10 @@ mod core_workspaces {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner()) = restarts;
                     }
+                    self.saved_selection = self
+                        .retained_views
+                        .as_ref()
+                        .and_then(|views| views.selection());
                     self.saved_views = Some(saved);
                     Ok(true)
                 }
@@ -2344,6 +2425,42 @@ mod core_workspaces {
             }
             self.saved_views = Some(view.clone());
             self.last_saved_view = Some(view);
+        }
+
+        /// Whether a Pane of this Machine was explicitly selected in this window. Only such a
+        /// selection is the person's, so only it replaces the one a previous launch left.
+        pub(crate) fn selected_explicitly(&self) -> bool {
+            self.sessions.selected.get()
+        }
+
+        /// The Workspace, Tab and Focused Pane this client last presented from this Machine.
+        pub(crate) const fn saved_selection(
+            &self,
+        ) -> Option<spaceterm_core::client_view::Selection> {
+            self.saved_selection
+        }
+
+        /// Retains `selection` as what this client presents from this Machine now. A provisional
+        /// Workspace, Tab or Pane has no server identity yet, so nothing is retained for it, and
+        /// nothing is retained before the saved selection is read, which it would replace.
+        pub(crate) fn save_selection(&mut self, selection: spaceterm_core::client_view::Selection) {
+            if self.edits.has_pending()
+                || (self.saved_views.is_none() && self.retained_views.is_some())
+            {
+                return;
+            }
+            if let Some(retained) = &self.retained_views {
+                retained.save_selection(selection);
+            }
+            self.saved_selection = Some(selection);
+        }
+
+        #[cfg(test)]
+        pub(crate) fn retain_selection_for_test(
+            &mut self,
+            selection: spaceterm_core::client_view::Selection,
+        ) {
+            self.saved_selection = Some(selection);
         }
 
         pub(crate) fn take_view_error(&mut self) -> Option<ArrangementUnavailable> {
@@ -2470,6 +2587,22 @@ mod core_workspaces {
             self.edits.pending.borrow_mut().take_close_intent()
         }
 
+        /// Takes the queued close of exactly `core` and `local` once it may resume, as
+        /// [`Self::take_close_intent`] would hand it over, so a repeat request resumes it.
+        pub(crate) fn take_close_intent_for(
+            &self,
+            core: MachineCloseTarget,
+            local: CloseTarget,
+        ) -> Option<WorkspaceCloseIntent> {
+            if self.edits.follow_restart().is_some() || !self.edits.transport().availability().0 {
+                return None;
+            }
+            self.edits
+                .pending
+                .borrow_mut()
+                .take_close_intent_for(core, local)
+        }
+
         /// Captures what closing `target` ends, as the server reported it last. The capture is
         /// what a person reviews and what a confirmed close submits; nothing rebuilds it later.
         pub(crate) fn close_approval(
@@ -2535,12 +2668,49 @@ mod core_workspaces {
             }
         }
 
+        /// The title of the notice that replaces a confirmation of `approval` because what it
+        /// ends changed. A Terminal Session that ended in a Pane it names, as a shell's own exit
+        /// ends one, is no other client's change, so that notice names no other client. Any other
+        /// change, such as a Pane that joined or a new Terminal Session, keeps the title that
+        /// names another client.
+        pub(crate) fn changed_close_title(
+            &self,
+            approval: &WorkspaceCloseApproval,
+        ) -> &'static str {
+            let approved = &approval.confirmation;
+            let ended_only = self
+                .latest
+                .as_ref()
+                .and_then(|inventory| inventory.close_confirmation(approval.target))
+                .is_some_and(|current| {
+                    current.boot == approved.boot
+                        && current.removes_tab == approved.removes_tab
+                        && current.removes_workspace == approved.removes_workspace
+                        && current.panes.len() == approved.panes.len()
+                        && current
+                            .panes
+                            .iter()
+                            .zip(&approved.panes)
+                            .all(|(now, then)| {
+                                now.id == then.id
+                                    && (now.session.is_none() || now.session == then.session)
+                            })
+                });
+            if ended_only {
+                approval.scope_changed_title()
+            } else {
+                approval.changed_title()
+            }
+        }
+
         /// Asks the server to end exactly what a person approved. `local` is the target a fresh
-        /// review reopens if the server finds the approval stale.
+        /// review reopens if the server finds the approval stale, and `consent` how the person
+        /// approved it.
         pub(crate) fn close(
             &mut self,
             approval: WorkspaceCloseApproval,
             local: CloseTarget,
+            consent: CloseConsent,
         ) -> WorkspaceSubmission {
             let target = approval.target;
             let submission = self.ask(Mutation::Close {
@@ -2548,7 +2718,11 @@ mod core_workspaces {
                 confirmation: approval.confirmation,
             });
             if submission == WorkspaceSubmission::Submitted {
-                self.submitted_close = Some((target, local));
+                self.submitted_close = Some(SubmittedClose {
+                    core: target,
+                    local,
+                    consent,
+                });
             }
             submission
         }
@@ -2580,32 +2754,46 @@ mod core_workspaces {
                 sequences: sequences.into(),
                 forgotten: None,
                 handed: Rc::clone(&self.handed),
+                handed_over: Rc::default(),
             }
         }
 
         /// The oldest close the server refused as stale, with the local target this process
         /// asked to close when it is the one that asked, and its alert's presentation. A
         /// recovered answer names no local target. It stays until [`Self::take_stale_close`].
+        /// When running work in this client's own unchanged Panes refused it rather than another
+        /// client's change, it also carries what the refusal proved the close would end.
         pub(crate) fn next_stale_close(
             &self,
-        ) -> Option<(MachineCloseTarget, Option<CloseTarget>, OutcomeNotice)> {
+        ) -> Option<(
+            MachineCloseTarget,
+            Option<CloseTarget>,
+            OutcomeNotice,
+            Option<spaceterm_core::hierarchy::CloseConfirmation>,
+        )> {
             let (target, sequence) = *self.stale_closes.front()?;
             let local = self
                 .submitted_close
-                .filter(|(submitted, _)| *submitted == target)
-                .map(|(_, local)| local);
-            Some((target, local, self.notice([sequence])))
+                .filter(|submitted| submitted.core == target)
+                .map(|submitted| submitted.local);
+            Some((
+                target,
+                local,
+                self.notice([sequence]),
+                self.working_closes.get(&sequence).cloned(),
+            ))
         }
         pub(crate) fn take_stale_close(
             &mut self,
         ) -> Option<(MachineCloseTarget, Option<CloseTarget>)> {
             let (target, sequence) = self.stale_closes.pop_front()?;
+            self.working_closes.remove(&sequence);
             self.hand(sequence);
             let local = self
                 .submitted_close
                 .take()
-                .filter(|(submitted, _)| *submitted == target)
-                .map(|(_, local)| local);
+                .filter(|submitted| submitted.core == target)
+                .map(|submitted| submitted.local);
             Some((target, local))
         }
 
@@ -3032,6 +3220,9 @@ mod core_workspaces {
                         // A restart can fence the close before its announcement reaches us.
                         // Retry only after a new boot, with exactly the same Panes and no new
                         // Terminal Session. The normal close path captures fresh confirmation.
+                        // The person's confirmation named Sessions of the old boot, so a close
+                        // they confirmed asks them again; a direct close of idle own work stays
+                        // direct while it still is.
                         let unchanged = inventory
                             .and_then(|inventory| inventory.close_confirmation(*target))
                             .is_some_and(|current| {
@@ -3051,22 +3242,42 @@ mod core_workspaces {
                         let queued = unchanged
                             && self
                                 .submitted_close
-                                .as_ref()
-                                .filter(|(submitted, _)| submitted == target)
-                                .is_some_and(|(_, local)| {
+                                .filter(|submitted| submitted.core == *target)
+                                .is_some_and(|submitted| {
                                     self.edits
                                         .pending
                                         .borrow_mut()
                                         .queue_close(WorkspaceCloseIntent {
                                             core: *target,
-                                            local: *local,
-                                            keyboard: None,
+                                            local: submitted.local,
+                                            keyboard: CloseKeyboard::Unknown,
+                                            review: submitted.consent == CloseConsent::Confirmed,
                                         })
                                         .is_ok()
                                 });
+                        // An own close the host refused while everything it named is
+                        // unchanged found running work, such as a command its own input started.
+                        let working = confirmation.own_controls.as_ref().and_then(|reviewed| {
+                            let inventory = inventory?;
+                            let current = inventory
+                                .close_confirmation(*target)
+                                .filter(|current| current.same_targets(confirmation))?;
+                            inventory
+                                .close
+                                .as_ref()
+                                .is_some_and(|live| {
+                                    reviewed
+                                        .iter()
+                                        .all(|control| live.controls.contains(control))
+                                })
+                                .then_some(current)
+                        });
                         if queued {
                             self.edits.presented(sequence);
                         } else {
+                            if let Some(observed) = working {
+                                self.working_closes.insert(sequence, observed);
+                            }
                             self.stale_closes.push_back((*target, sequence));
                         }
                     }
@@ -3255,6 +3466,9 @@ mod core_workspaces {
                     .drain(..)
                     .flat_map(|(_, refused)| refused)
                     .chain(self.stale_closes.drain(..).map(|(_, sequence)| sequence))
+                    .inspect(|sequence| {
+                        self.working_closes.remove(sequence);
+                    })
                     .collect();
                 for sequence in sequences {
                     self.edits.release(sequence);
@@ -3328,6 +3542,12 @@ mod core_workspaces {
     }
 
     impl WorkspaceCloseApproval {
+        /// Whether this approval ends exactly what `observed` names: the same boot, Panes and
+        /// Terminal Sessions, and the same Tab and Workspace removals.
+        pub(crate) fn ends_exactly(&self, observed: &CoreCloseConfirmation) -> bool {
+            self.confirmation.same_targets(observed)
+        }
+
         /// The reviewed Panes that run no Terminal Session the server has reported.
         pub(crate) fn panes_without_session(&self) -> impl Iterator<Item = Id> + '_ {
             self.confirmation
@@ -3500,6 +3720,17 @@ mod core_workspaces {
             close_changed_title(self.target)
         }
 
+        /// The title of the notice that ends a refusal's review because what the close ends
+        /// changed, by any client, after the refusal.
+        pub(crate) const fn scope_changed_title(&self) -> &'static str {
+            match self.target {
+                MachineCloseTarget::Pane { .. } => "Pane Changed",
+                MachineCloseTarget::Tab { .. } => "Tab Changed",
+                MachineCloseTarget::Worktree { .. } => "Tabs Changed",
+                MachineCloseTarget::KillWorkspace { .. } => "Workspace Changed",
+            }
+        }
+
         /// The title of the notice that replaces a confirmation whose target another client
         /// already removed.
         pub(crate) const fn missing_title(&self) -> &'static str {
@@ -3544,12 +3775,46 @@ mod core_workspaces {
         Missing,
     }
 
+    /// How the person approved a close this client submitted.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum CloseConsent {
+        /// This client closed its own idle work without asking.
+        Direct,
+        /// The person confirmed exactly what the close ends.
+        Confirmed,
+    }
+
+    /// A close this process submitted: the server's target, the local target a fresh review
+    /// reopens, and how the person approved it.
+    #[derive(Clone, Copy, Debug)]
+    struct SubmittedClose {
+        core: MachineCloseTarget,
+        local: CloseTarget,
+        consent: CloseConsent,
+    }
+
     /// An unapproved close waiting for the exact provisional creation it names.
     pub(crate) struct WorkspaceCloseIntent {
         pub(crate) core: MachineCloseTarget,
         pub(crate) local: CloseTarget,
         /// The initiating keyboard owner, before any confirmation or later navigation.
-        pub(crate) keyboard: Option<gpui::FocusHandle>,
+        pub(crate) keyboard: CloseKeyboard,
+        /// Whether the close follows a Review, so it asks for confirmation when it resumes.
+        pub(crate) review: bool,
+    }
+
+    /// What a deferred close knows about the keyboard when the person asked for it.
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub(crate) enum CloseKeyboard {
+        /// Nothing recorded it, as for a close a Core restart fenced after this client already
+        /// moved the keyboard to what remains. The close reads who holds the keyboard when it
+        /// resumes.
+        #[default]
+        Unknown,
+        /// The closing Workspace did not hold the keyboard.
+        Elsewhere,
+        /// This focus handle held the keyboard, inside the closing Workspace.
+        Held(gpui::FocusHandle),
     }
 
     /// One shared close confirmation on screen: its Close Confirmation generation, the local
@@ -3559,6 +3824,9 @@ mod core_workspaces {
         pub(crate) target: CloseTarget,
         pub(crate) approval: WorkspaceCloseApproval,
         pub(crate) presentation: Option<spaceterm_ui::ModalPresentationHandle>,
+        /// The refused close's outcome this confirmation presents, which the person's answer
+        /// records as seen.
+        pub(crate) notice: Option<OutcomeNotice>,
     }
 
     /// Why this window removes what the server no longer has. Only this client's own accepted
@@ -3627,6 +3895,17 @@ mod core_workspaces {
 
         /// A scripted Pane whose status a test sets and whose explicit requests it counts.
         pub(crate) struct ScriptedPane {
+            /// The worker starts this Pane's shell, which has not attached yet.
+            shell_starting: std::sync::atomic::AtomicBool,
+            /// The Core starts shells in the background, and this Pane waits for a turn.
+            background: std::sync::atomic::AtomicBool,
+            awaiting_turn: std::sync::atomic::AtomicBool,
+            /// This Pane holds a turn or uses one.
+            in_background: std::sync::atomic::AtomicBool,
+            /// The worker stopped reconnecting, so it waits for no turn until it connects again.
+            parked: std::sync::atomic::AtomicBool,
+            /// How often the window's start queue asked the stopped worker to connect again.
+            rearms: std::sync::atomic::AtomicUsize,
             status: Mutex<crate::terminal::core_session::CorePaneStatus>,
             startup_pending: std::sync::atomic::AtomicBool,
             controller: Mutex<Option<spaceterm_core::pane::control::Controller>>,
@@ -3650,6 +3929,12 @@ mod core_workspaces {
                 std::sync::Arc::new(Self {
                     status: Mutex::new(crate::terminal::core_session::CorePaneStatus::Connecting),
                     startup_pending: std::sync::atomic::AtomicBool::new(true),
+                    shell_starting: std::sync::atomic::AtomicBool::new(false),
+                    background: std::sync::atomic::AtomicBool::new(false),
+                    awaiting_turn: std::sync::atomic::AtomicBool::new(false),
+                    in_background: std::sync::atomic::AtomicBool::new(false),
+                    parked: std::sync::atomic::AtomicBool::new(false),
+                    rearms: std::sync::atomic::AtomicUsize::new(0),
                     controller: Mutex::default(),
                     session_end: Mutex::default(),
                     generation: std::sync::atomic::AtomicU64::new(0),
@@ -3681,7 +3966,53 @@ mod core_workspaces {
                 self.changes.publish();
             }
 
+            /// The restarted Core starts shells in the background, and this Pane's worker waits for
+            /// its turn.
+            pub(crate) fn await_turn(&self) {
+                use std::sync::atomic::Ordering::SeqCst;
+                self.background.store(true, SeqCst);
+                self.awaiting_turn.store(true, SeqCst);
+                self.changes.publish();
+            }
+
+            /// The restarted Core starts shells in the background, but this Pane's worker stopped
+            /// reconnecting while the Core was replaced, so it waits for no turn.
+            pub(crate) fn park(&self) {
+                use std::sync::atomic::Ordering::SeqCst;
+                self.background.store(true, SeqCst);
+                self.parked.store(true, SeqCst);
+                self.changes.publish();
+            }
+
+            /// How often the window's start queue asked this stopped worker to connect again.
+            pub(crate) fn rearms(&self) -> usize {
+                self.rearms.load(std::sync::atomic::Ordering::SeqCst)
+            }
+
+            /// Whether the window's start queue gave this Pane a turn it still uses.
+            pub(crate) fn holds_turn(&self) -> bool {
+                self.in_background.load(std::sync::atomic::Ordering::SeqCst)
+            }
+
+            /// The Core answered the background start this Pane's turn sent.
+            pub(crate) fn finish_turn(&self) {
+                self.in_background
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                self.changes.publish();
+            }
+
+            /// The worker starts this Pane's shell now, as for its first use.
+            pub(crate) fn start_shell(&self) {
+                self.shell_starting
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                self.set(crate::terminal::core_session::CorePaneStatus::Connecting);
+            }
+
             pub(crate) fn set(&self, status: crate::terminal::core_session::CorePaneStatus) {
+                if status != crate::terminal::core_session::CorePaneStatus::Connecting {
+                    self.shell_starting
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
+                }
                 self.startup_pending.store(
                     matches!(
                         status,
@@ -3716,6 +4047,24 @@ mod core_workspaces {
                 self.generation
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 self.set(crate::terminal::core_session::CorePaneStatus::Connected);
+            }
+
+            /// The shell this client started attached in one reading the view never saw it
+            /// connecting in, and stays quiet until its first prompt.
+            pub(crate) fn attach_quietly(&self) {
+                self.generation
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.set(crate::terminal::core_session::CorePaneStatus::Connected);
+                self.shell_starting
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                self.changes.publish();
+            }
+
+            /// The quiet shell reached its first prompt.
+            pub(crate) fn end_startup(&self) {
+                self.shell_starting
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                self.changes.publish();
             }
 
             /// The server says why the Pane's Session ended, if it did.
@@ -3762,6 +4111,42 @@ mod core_workspaces {
         impl crate::ui::core_pane::MachinePaneConnection for ScriptedPane {
             fn status(&self) -> crate::terminal::core_session::CorePaneStatus {
                 *self.status.lock().expect("status")
+            }
+
+            fn shell_starting(&self) -> bool {
+                self.shell_starting
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            }
+
+            fn background_starts(&self) -> bool {
+                self.background.load(std::sync::atomic::Ordering::SeqCst)
+            }
+
+            fn awaiting_turn(&self) -> bool {
+                self.awaiting_turn.load(std::sync::atomic::Ordering::SeqCst)
+            }
+
+            fn starting_in_background(&self) -> bool {
+                self.in_background.load(std::sync::atomic::Ordering::SeqCst)
+            }
+
+            fn grant_turn(&self) {
+                use std::sync::atomic::Ordering::SeqCst;
+                if self.awaiting_turn.swap(false, SeqCst) {
+                    self.in_background.store(true, SeqCst);
+                }
+            }
+
+            /// The stopped worker connects again and waits for its turn.
+            fn rearm_background(&self) -> bool {
+                use std::sync::atomic::Ordering::SeqCst;
+                if !self.parked.swap(false, SeqCst) {
+                    return false;
+                }
+                self.rearms.fetch_add(1, SeqCst);
+                self.awaiting_turn.store(true, SeqCst);
+                self.changes.publish();
+                true
             }
 
             fn running_version(&self) -> Option<spaceterm_core::update::facts::Version> {
@@ -3841,9 +4226,27 @@ mod core_workspaces {
             connected: bool,
             /// Every server Pane opened so far, in the order it was opened.
             order: Mutex<Vec<super::Id>>,
+            /// Panes no subscription opens for yet, as the account-local opener refuses a Pane
+            /// its attachment catalog does not list yet.
+            refused: Mutex<std::collections::BTreeSet<super::Id>>,
         }
 
         impl ScriptedPanes {
+            /// Opens no subscription for `pane` until [`Self::allow`].
+            pub(crate) fn refuse(&self, pane: super::Id) {
+                self.refused.lock().expect("refused").insert(pane);
+            }
+
+            /// Opens subscriptions for `pane` again.
+            pub(crate) fn allow(&self, pane: super::Id) {
+                self.refused.lock().expect("refused").remove(&pane);
+            }
+
+            /// Whether a subscription was ever opened for `pane`.
+            pub(crate) fn was_opened(&self, pane: super::Id) -> bool {
+                self.panes.lock().expect("panes").contains_key(&pane)
+            }
+
             pub(crate) fn new(
                 session_factory: crate::terminal::WorkspaceTerminalSessionFactory,
             ) -> std::rc::Rc<Self> {
@@ -3859,6 +4262,7 @@ mod core_workspaces {
                     local_files,
                     session_factory,
                     panes: Mutex::new(std::collections::BTreeMap::new()),
+                    refused: Mutex::default(),
                     connected: false,
                     order: Mutex::default(),
                 })
@@ -3873,6 +4277,7 @@ mod core_workspaces {
                     local_files: crate::runtime::local_filesystem(),
                     session_factory,
                     panes: Mutex::new(std::collections::BTreeMap::new()),
+                    refused: Mutex::default(),
                     connected: true,
                     order: Mutex::default(),
                 })
@@ -3927,6 +4332,9 @@ mod core_workspaces {
             }
 
             fn open(&self, pane: super::Id) -> Option<super::WorkspacePaneSubscription> {
+                if self.refused.lock().expect("refused").contains(&pane) {
+                    return None;
+                }
                 let connection = ScriptedPane::new();
                 connection
                     .connect_when_observed
@@ -4441,7 +4849,8 @@ mod restart_tests {
                     tab_id: crate::domain::TabId::new(2),
                     pane_id: crate::domain::PaneId::new(3),
                 },
-                keyboard: None,
+                keyboard: CloseKeyboard::Unknown,
+                review: false,
             };
             assert!(binding.defer_close(intent()).unwrap());
             binding.poll();
@@ -4516,7 +4925,12 @@ mod restart_tests {
     #[test]
     fn a_close_fenced_before_the_restart_announcement_waits_for_fresh_confirmation() {
         use super::tests::{inventory, pane, tab};
-        for new_session in [false, true] {
+        for (new_session, consent) in [
+            (false, CloseConsent::Direct),
+            (false, CloseConsent::Confirmed),
+            (true, CloseConsent::Direct),
+            (true, CloseConsent::Confirmed),
+        ] {
             let core = MachineConnection::for_identity("spaceterm-development").unwrap();
             let sessions = WorkspacePaneSessions::with_opener(
                 Rc::new(Panes(core)),
@@ -4542,7 +4956,7 @@ mod restart_tests {
             };
             let approval = binding.close_approval(target).unwrap();
             assert_eq!(
-                binding.close(approval, local),
+                binding.close(approval, local, consent),
                 WorkspaceSubmission::Submitted
             );
             let mut reconnected = initial;
@@ -4553,7 +4967,16 @@ mod restart_tests {
             edits.set_inventory(reconnected);
             edits.answer(spaceterm_core::hierarchy::Outcome::StaleConfirmation);
             binding.poll();
-            assert_eq!(binding.take_close_intent().is_some(), !new_session);
+            let retry = binding.take_close_intent();
+            assert_eq!(retry.is_some(), !new_session);
+            if let Some(retry) = retry {
+                assert_eq!((retry.core, retry.local), (target, local));
+                assert_eq!(
+                    retry.review,
+                    consent == CloseConsent::Confirmed,
+                    "the new boot invalidates the person's confirmation, and only that"
+                );
+            }
             assert_eq!(
                 binding.next_stale_close().is_some(),
                 new_session,

@@ -63,6 +63,8 @@ pub(crate) struct OwnedPrompt {
     pub(crate) zone: Option<PromptZone>,
     /// Input bytes written to the PTY since the owning shell drew a fresh prompt.
     pub(crate) input_bytes: u64,
+    /// Fresh prompts the owning shell drew, ever. A redraw does not count.
+    pub(crate) fresh: u64,
 }
 
 /// One marker a pending run follows, in the order the shell wrote it.
@@ -779,6 +781,7 @@ impl MetadataTracker {
                 }
                 self.finishing = false;
                 self.owned_prompt.input_bytes = std::mem::take(&mut self.typeahead);
+                self.owned_prompt.fresh += 1;
                 Marker::PromptStart
             }
             ("B" | "I", _) => {
@@ -1659,7 +1662,8 @@ mod tests {
             tracker.owned_prompt(),
             OwnedPrompt {
                 zone: Some(PromptZone::CommandInput),
-                input_bytes: 0
+                input_bytes: 0,
+                fresh: 1,
             }
         );
         tracker.note_input(2);

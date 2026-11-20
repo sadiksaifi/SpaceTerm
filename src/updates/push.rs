@@ -201,7 +201,7 @@ pub(crate) fn failure(error: &LaneError) -> ActionFailure {
         LaneError::Core(spaceterm_core::CoreError::Direct(
             spaceterm_core::direct::DirectError::Transport,
         )) => ActionFailure::Unreachable,
-        LaneError::Core(_) | LaneError::Interrupted => ActionFailure::Failed,
+        LaneError::Core(_) | LaneError::Interrupted | LaneError::Deadline => ActionFailure::Failed,
     }
 }
 

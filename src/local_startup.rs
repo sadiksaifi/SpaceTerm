@@ -1,12 +1,17 @@
 //! Account-local startup composition for the desktop host.
 //!
 //! The UI host runs this operation off its event thread and presents the typed outcome.
-use spaceterm_core::{CoreError, LocalStartup, StartupOutcome, service::Service};
+use spaceterm_core::{CoreError, LaunchIntent, LocalStartup, StartupOutcome, service::Service};
 use std::path::{Path, PathBuf};
 
-/// Prepare or reuse the account service. Only explicit Start reverses deliberate Stop.
-/// Existing service policy bypasses candidate discovery.
-pub fn run(cancelled: impl Fn() -> bool) -> Result<StartupOutcome, CoreError> {
+/// Prepare or reuse the account service. Only explicit Start and a
+/// [`LaunchIntent::Foreground`] launch reverse deliberate Stop. Existing service policy bypasses
+/// candidate discovery. `starting` runs once, right before launch installs or starts the server.
+pub fn run(
+    intent: LaunchIntent,
+    starting: &dyn Fn(),
+    cancelled: impl Fn() -> bool,
+) -> Result<StartupOutcome, CoreError> {
     let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
     if owned_foreground() {
         if cancelled() {
@@ -19,14 +24,35 @@ pub fn run(cancelled: impl Fn() -> bool) -> Result<StartupOutcome, CoreError> {
         };
         return Ok(StartupOutcome::Ready { core, status });
     }
-    LocalStartup::for_identity(identity)?.run(
+    LocalStartup::for_identity(identity)?.launch(
+        intent,
         || {
             discover_candidate()
                 .map_err(CoreError::from)
                 .and_then(|candidate| candidate.stage().map(|installation| installation.directory))
         },
         cancelled,
+        starting,
     )
+}
+
+/// Connects to this account's SpaceTerm Core only when it already runs, as after a Start from the
+/// command line. It never installs, enables or starts the server, and never changes Stop. A
+/// stopped server answers [`StartupOutcome::Stopped`], and a server that does not run fails with
+/// [`CoreError::NotRunning`].
+pub fn connect(cancelled: impl Fn() -> bool) -> Result<StartupOutcome, CoreError> {
+    if cancelled() {
+        return Ok(StartupOutcome::Cancelled);
+    }
+    let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
+    let core = spaceterm_core::MachineConnection::for_identity(identity)?;
+    match core.refresh_cancellable(&cancelled) {
+        Ok(status) => Ok(StartupOutcome::Ready { core, status }),
+        Err(CoreError::ServiceBusy) if cancelled() => Ok(StartupOutcome::Cancelled),
+        Err(CoreError::ServiceBusy) => Ok(StartupOutcome::ServiceBusy),
+        Err(CoreError::Stopped) => Ok(StartupOutcome::Stopped),
+        Err(error) => Err(error),
+    }
 }
 
 /// Whether macOS keeps this account's SpaceTerm Core from running because its background item is

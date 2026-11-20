@@ -31,6 +31,12 @@ pub const RULES: &[FileRule] = &[
         stamp: None,
     },
     FileRule {
+        name: "service-outcomes.json",
+        kind: DataKind::ClientRecords,
+        read: crate::service::lane::admin::readable_outcomes,
+        stamp: None,
+    },
+    FileRule {
         name: "attachments.json",
         kind: DataKind::View,
         read: crate::attachments::readable,

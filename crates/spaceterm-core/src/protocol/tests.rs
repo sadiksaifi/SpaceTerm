@@ -293,6 +293,7 @@ fn every_operation_round_trips() {
     let claims = [
         AttachmentClaim::Select { explicit: true },
         AttachmentClaim::Start { core: [5; 32] },
+        AttachmentClaim::Prepare { core: [5; 32] },
         AttachmentClaim::Repair {
             target: target.clone(),
             replacement: Some(PathBuf::from("/tmp")),
@@ -641,6 +642,51 @@ fn work_1_1_carries_the_git_directory_fact_in_its_own_kind() {
         encode_core(&CoreMessage::Inventory(Box::new(git_directory_revision()))).unwrap(),
         wire
     );
+}
+
+/// Claim kinds keep the positions released work 1.3 encodes. Work 1.4 appends Prepare, so a
+/// 1.3 Core reads a 1.4 client's Take Over and directory repair, and a 1.4 Core reads a 1.3
+/// client's, exactly as before.
+#[test]
+fn claim_kinds_keep_their_work_1_3_positions() {
+    let position = |claim: &AttachmentClaim| postcard::to_allocvec(claim).unwrap()[0];
+    let target = directories::Target {
+        boot: [3; 32],
+        pane: [4; 32],
+        original: PathBuf::from("/home/a"),
+    };
+    assert_eq!(position(&AttachmentClaim::Select { explicit: true }), 0);
+    assert_eq!(position(&AttachmentClaim::Start { core: [5; 32] }), 1);
+    assert_eq!(
+        position(&AttachmentClaim::Repair {
+            target,
+            replacement: None
+        }),
+        2
+    );
+    let take_over = AttachmentClaim::TakeOver {
+        target: PaneTarget {
+            core: [6; 32],
+            session: [7; 32],
+        },
+    };
+    assert_eq!(position(&take_over), 3);
+    assert_eq!(position(&AttachmentClaim::Prepare { core: [5; 32] }), 4);
+
+    // A released 1.3 Take Over: its tag, then the target's two fixed arrays.
+    let released: Vec<u8> = [3].into_iter().chain([6; 32]).chain([7; 32]).collect();
+    assert_eq!(postcard::to_allocvec(&take_over).unwrap(), released);
+    let read: AttachmentClaim = postcard::from_bytes(&released).unwrap();
+    assert!(matches!(
+        read,
+        AttachmentClaim::TakeOver { target } if target.core == [6; 32] && target.session == [7; 32]
+    ));
+    // A released 1.3 Start.
+    let start: Vec<u8> = [1].into_iter().chain([5; 32]).collect();
+    assert!(matches!(
+        postcard::from_bytes::<AttachmentClaim>(&start).unwrap(),
+        AttachmentClaim::Start { core } if core == [5; 32]
+    ));
 }
 
 /// Worktree errors keep their v0.11 positions, and work 1.0 reads the error 1.1 added as the

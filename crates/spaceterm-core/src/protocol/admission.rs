@@ -20,7 +20,7 @@ use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 const MAX_FRAME: usize = 8192;
-const CONNECTION_LIMIT: Duration = Duration::from_secs(5);
+pub(crate) const CONNECTION_LIMIT: Duration = Duration::from_secs(5);
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -222,13 +222,34 @@ pub(crate) fn random() -> Result<[u8; 32], CoreError> {
 
 /// The transport of one admission: whole length-prefixed frames, each before a deadline. Account
 /// IPC writes them back to back; a paired connection carries the same bytes on its QUIC L0 stream.
+/// Each transport implements [`Self::send`] or [`Self::send_frame`], and the other follows.
 pub(crate) trait Preamble {
-    fn send(&mut self, frame: &[u8], deadline: Instant) -> Result<(), CoreError>;
+    fn send(&mut self, frame: &[u8], deadline: Instant) -> Result<(), CoreError> {
+        self.send_frame(frame, deadline)
+            .map_err(|unsent| unsent.error)
+    }
+    /// [`Self::send`] that says, when it fails, whether any byte of the frame left. A transport
+    /// that cannot tell says one may have.
+    fn send_frame(&mut self, frame: &[u8], deadline: Instant) -> Result<(), Unsent> {
+        self.send(frame, deadline).map_err(|error| Unsent {
+            error,
+            written: true,
+        })
+    }
     /// One frame of at most `max` bytes, without its length prefix.
     fn receive(&mut self, max: usize, deadline: Instant) -> Result<Vec<u8>, CoreError>;
     /// Admission proved the peer, so the transport may now hold frames as large as the
     /// service lane's. A transport without its own flow control needs nothing.
     fn admitted(&mut self) {}
+}
+
+/// A frame [`Preamble::send_frame`] did not send whole.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Unsent {
+    pub(crate) error: CoreError,
+    /// Whether any byte of the frame may have reached the peer. False is definite: nothing of
+    /// the frame was written.
+    pub(crate) written: bool,
 }
 
 /// Prefixes `bytes` with their length, the admission framing on every transport.
@@ -252,22 +273,31 @@ pub(crate) fn reject_local_capacity(mut stream: UnixStream) {
 }
 
 impl Preamble for UnixStream {
-    fn send(&mut self, frame: &[u8], deadline: Instant) -> Result<(), CoreError> {
-        self.set_nonblocking(true)
-            .map_err(|_| CoreError::Protocol)?;
+    /// Writes nothing once `deadline` has passed: the clock is read again before each write.
+    fn send_frame(&mut self, frame: &[u8], deadline: Instant) -> Result<(), Unsent> {
         let frame = prefixed(frame);
         let mut rest = frame.as_slice();
+        let unsent = |rest: &[u8]| Unsent {
+            error: CoreError::Protocol,
+            written: rest.len() < frame.len(),
+        };
+        if self.set_nonblocking(true).is_err() {
+            return Err(unsent(rest));
+        }
         while !rest.is_empty() {
+            if Instant::now() >= deadline {
+                return Err(unsent(rest));
+            }
             match self.write(rest) {
-                Ok(0) => return Err(CoreError::Protocol),
+                Ok(0) => return Err(unsent(rest)),
                 Ok(count) => rest = &rest[count..],
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if !crate::connection::io::wait_fd(self.as_raw_fd(), true, deadline) {
-                        return Err(CoreError::Protocol);
+                        return Err(unsent(rest));
                     }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(_) => return Err(CoreError::Protocol),
+                Err(_) => return Err(unsent(rest)),
             }
         }
         Ok(())
@@ -336,9 +366,14 @@ pub(crate) struct Wire<'a> {
 }
 impl<'a> Wire<'a> {
     pub(crate) fn new(stream: &'a mut dyn Preamble) -> Self {
+        Self::until(stream, Instant::now() + CONNECTION_LIMIT)
+    }
+    /// Admission frames that end at `deadline` or after [`CONNECTION_LIMIT`], whichever comes
+    /// first. A frame is never sent once `deadline` has passed.
+    pub(crate) fn until(stream: &'a mut dyn Preamble, deadline: Instant) -> Self {
         Self {
             stream,
-            deadline: Instant::now() + CONNECTION_LIMIT,
+            deadline: deadline.min(Instant::now() + CONNECTION_LIMIT),
         }
     }
     pub(crate) fn read<T: DeserializeOwned>(&mut self) -> Result<T, CoreError> {
@@ -347,7 +382,7 @@ impl<'a> Wire<'a> {
     }
     pub(crate) fn write(&mut self, value: &impl Serialize) -> Result<(), CoreError> {
         let bytes = serde_json::to_vec(value).map_err(|_| CoreError::Protocol)?;
-        if bytes.len() > MAX_FRAME {
+        if bytes.len() > MAX_FRAME || Instant::now() >= self.deadline {
             return Err(CoreError::Protocol);
         }
         self.stream.send(&bytes, self.deadline)
@@ -526,8 +561,8 @@ impl Caller<'_> {
     }
 }
 
-/// Admits a service-lane connection as `caller`. The lane needs a shared service major, just as
-/// work admission needs a shared work major.
+/// Admits a service-lane connection as `caller` by `deadline`. The lane needs a shared service
+/// major, just as work admission needs a shared work major.
 #[cfg_attr(
     not(feature = "client"),
     allow(dead_code, reason = "the CLI's server commands open the service lane")
@@ -537,14 +572,15 @@ pub(crate) fn admit_service_lane(
     caller: Caller<'_>,
     core: &[u8; 32],
     build: &str,
+    deadline: Instant,
 ) -> Result<Negotiated, Refused> {
     admit_lane(
         stream,
         caller,
         core,
         build,
-        Lane::Service,
-        &Lane::Service.offered(),
+        (Lane::Service, &Lane::Service.offered()),
+        deadline,
     )
 }
 
@@ -558,8 +594,29 @@ pub(crate) fn admit_client<'a>(
     core: &[u8; 32],
     build: &str,
 ) -> Result<Negotiated, Refused> {
+    admit_client_by(
+        stream,
+        caller,
+        core,
+        build,
+        Instant::now() + CONNECTION_LIMIT,
+    )
+}
+
+/// [`admit_client`] that sends and waits for no admission frame after `deadline`.
+#[cfg_attr(
+    not(feature = "client"),
+    allow(dead_code, reason = "client side used by desktop and admission tests")
+)]
+pub(crate) fn admit_client_by<'a>(
+    stream: &mut UnixStream,
+    caller: impl Into<Caller<'a>>,
+    core: &[u8; 32],
+    build: &str,
+    deadline: Instant,
+) -> Result<Negotiated, Refused> {
     crate::host::check_peer(stream)?;
-    admit_transport(&mut LocalCaller(stream), caller, core, build)
+    admit_transport_by(&mut LocalCaller(stream), caller, core, build, deadline)
 }
 
 struct LocalCaller<'a>(&'a mut UnixStream);
@@ -581,33 +638,52 @@ impl Preamble for LocalCaller<'_> {
 }
 
 /// Admits a work connection as `caller`, offering this build's work versions.
+#[cfg(test)]
 pub(crate) fn admit_transport<'a>(
     stream: &mut dyn Preamble,
     caller: impl Into<Caller<'a>>,
     core: &[u8; 32],
     build: &str,
 ) -> Result<Negotiated, Refused> {
+    admit_transport_by(
+        stream,
+        caller,
+        core,
+        build,
+        Instant::now() + CONNECTION_LIMIT,
+    )
+}
+
+/// Admits a work connection as `caller`, offering this build's work versions. No admission frame
+/// is sent or waited for after `deadline`.
+pub(crate) fn admit_transport_by<'a>(
+    stream: &mut dyn Preamble,
+    caller: impl Into<Caller<'a>>,
+    core: &[u8; 32],
+    build: &str,
+    deadline: Instant,
+) -> Result<Negotiated, Refused> {
     admit_lane(
         stream,
         caller.into(),
         core,
         build,
-        Lane::Work,
-        &Lane::Work.offered(),
+        (Lane::Work, &Lane::Work.offered()),
+        deadline,
     )
 }
 
-/// The caller's half of admission on `lane`, offering `offered`. The Offer must select one of
-/// the offered majors at no more than its offered minor, or none.
+/// The caller's half of admission on `lane`, offering `offered`, by `deadline`. The Offer must
+/// select one of the offered majors at no more than its offered minor, or none.
 fn admit_lane(
     stream: &mut dyn Preamble,
     caller: Caller<'_>,
     core: &[u8; 32],
     build: &str,
-    lane: Lane,
-    offered: &[ProtocolVersion],
+    (lane, offered): (Lane, &[ProtocolVersion]),
+    deadline: Instant,
 ) -> Result<Negotiated, Refused> {
-    let mut wire = Wire::new(stream);
+    let mut wire = Wire::until(stream, deadline);
     wire.write(&Hello {
         lane,
         versions: offered.to_vec(),
@@ -678,8 +754,8 @@ mod tests {
             (&[9; 32], &"Build Mac".into()).into(),
             &[7; 32],
             "spaceterm-development",
-            lane,
-            offered,
+            (lane, offered),
+            Instant::now() + CONNECTION_LIMIT,
         );
         (result, thread.join().unwrap())
     }
@@ -819,8 +895,8 @@ mod tests {
                 (&[9; 32], &"Build Mac".into()).into(),
                 &[7; 32],
                 "spaceterm-development",
-                Lane::Work,
-                &[v(1, 0)],
+                (Lane::Work, &[v(1, 0)]),
+                Instant::now() + CONNECTION_LIMIT,
             );
             assert_eq!(result, Err(Refused::Failed(CoreError::Protocol)));
             thread.join().unwrap();
@@ -987,5 +1063,38 @@ mod tests {
         for invalid in ["", "-a", "Agent", "a_b", "a b", &"a".repeat(33), "é"] {
             assert!(invalid.parse::<AgentName>().is_err(), "{invalid}");
         }
+    }
+
+    /// The account-local transport reads the clock before each write: a frame whose deadline
+    /// passed writes nothing, and one whose deadline passes while its peer reads nothing says
+    /// that part of it left.
+    #[test]
+    fn a_unix_frame_writes_nothing_after_its_deadline_and_says_when_part_of_it_left() {
+        let (mut sender, mut peer) = UnixStream::pair().unwrap();
+        assert_eq!(
+            sender.send_frame(b"{\"request\":\"execute\"}", Instant::now()),
+            Err(Unsent {
+                error: CoreError::Protocol,
+                written: false,
+            })
+        );
+        peer.set_nonblocking(true).unwrap();
+        let mut byte = [0; 1];
+        assert_eq!(
+            peer.read(&mut byte).map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::WouldBlock)
+        );
+        // Far more than the socket buffers, which nobody reads.
+        let frame = vec![0; 8 * 1024 * 1024];
+        let began = Instant::now();
+        let unsent = sender
+            .send_frame(&frame, began + Duration::from_millis(200))
+            .unwrap_err();
+        assert!(unsent.written);
+        assert!(
+            began.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            began.elapsed()
+        );
     }
 }

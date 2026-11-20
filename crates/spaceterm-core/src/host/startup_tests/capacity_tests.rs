@@ -10,6 +10,7 @@ fn fill_local_admission(fixture: &Fixture) -> (ChildGuard, Vec<UnixStream>) {
             (&fixture.device, &"Capacity test".into()).into(),
             &fixture.pin,
             "spaceterm-development",
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
         )
         .unwrap();
         held.push(stream);

@@ -41,6 +41,7 @@ fn machine(id: MachineId, name: &'static str, sessions: u32) -> MachineUpdate {
             skipped: None,
             last_failure: None,
         }),
+        boot: None,
         capabilities: Capabilities::fake(&Capability::ALL),
         push: None,
         bundled: None,
@@ -213,6 +214,126 @@ fn only_this_mac_offers_stop_and_stopping_with_sessions_asks(cx: &mut TestAppCon
     );
 }
 
+/// A Stop whose outcome nothing confirms offers Check Status from the menu, which reads what
+/// happened and never stops again. One that failed offers Try Again, which asks first again.
+#[gpui::test]
+fn a_stop_without_a_confirmed_outcome_offers_check_status_and_a_failed_one_try_again(
+    cx: &mut TestAppContext,
+) {
+    for (failure, follow_up, then) in [
+        (
+            ActionFailure::Unconfirmed,
+            "Check Status",
+            MachineAction::CheckStatus(
+                crate::updates::machines::Checked::Stop,
+                crate::updates::machines::ServiceOperation::new("stop-1"),
+            ),
+        ),
+        (ActionFailure::Failed, "Try Again", MachineAction::Stop),
+    ] {
+        let fixture = start(vec![machine(LOCAL, "This Mac", 2)], cx);
+        let stop = submenu_command(&fixture.host.menu(), LOCAL, copy::STOP_CORE);
+        fixture.host.answers.borrow_mut().push(true);
+        cx.update(|cx| fixture.menu.perform(stop, None, cx));
+        cx.run_until_parked();
+        fixture.machines.emit(MachineUpdatesEvent::Finished {
+            machine: LOCAL,
+            action: MachineAction::Stop,
+            outcome: Err(failure),
+            operation: (failure == ActionFailure::Unconfirmed)
+                .then(|| crate::updates::machines::ServiceOperation::new("stop-1")),
+            request: None,
+        });
+        fixture.host.answers.borrow_mut().push(true);
+        cx.run_until_parked();
+        let alert = fixture.host.alerts.borrow().get(1).cloned();
+        assert_eq!(
+            alert.map(|alert| alert.buttons),
+            Some(AlertButtons::FollowUp(follow_up.to_owned())),
+            "{failure:?}"
+        );
+        if matches!(then, MachineAction::CheckStatus(..)) {
+            assert_eq!(fixture.machines.performed(), [(LOCAL, then)]);
+        } else {
+            // Try Again previews the Stop again, so the person reviews it before it runs.
+            assert_eq!(
+                fixture.machines.asked(),
+                [(LOCAL, then.clone()), (LOCAL, then)]
+            );
+        }
+        assert_eq!(
+            fixture.machines.executed_actions(),
+            [(LOCAL, MachineAction::Stop)],
+            "{failure:?}: nothing stops again without the person"
+        );
+    }
+}
+
+/// An approved Stop says it waits, then that it stops, until it finishes, and the menu offers
+/// no other Stop or Start of the same Core meanwhile.
+#[gpui::test]
+fn an_approved_stop_shows_its_progress_and_offers_nothing_else_until_it_finishes(
+    cx: &mut TestAppContext,
+) {
+    let fixture = start(vec![machine(LOCAL, "This Mac", 2)], cx);
+    let stop = submenu_command(&fixture.host.menu(), LOCAL, copy::STOP_CORE);
+    fixture.host.answers.borrow_mut().push(true);
+    cx.update(|cx| fixture.menu.perform(stop, None, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        fixture.machines.executed_actions(),
+        [(LOCAL, MachineAction::Stop)]
+    );
+    assert_eq!(
+        row(&fixture.host.menu(), LOCAL).status.as_deref(),
+        Some(crate::updates::copy::rows::STOPPING)
+    );
+    fixture.machines.emit(MachineUpdatesEvent::Waiting {
+        machine: LOCAL,
+        action: MachineAction::Stop,
+        request: fixture.machines.last_request(),
+        waiting: true,
+    });
+    cx.run_until_parked();
+    let menu = fixture.host.menu();
+    assert_eq!(
+        row(&menu, LOCAL).status.as_deref(),
+        Some(crate::updates::copy::rows::WAITING_FOR_OPERATION)
+    );
+    assert!(
+        row(&menu, LOCAL).items.is_empty(),
+        "nothing else is offered"
+    );
+
+    // The other operation settled and this Stop runs.
+    fixture.machines.emit(MachineUpdatesEvent::Finished {
+        machine: LOCAL,
+        action: MachineAction::CheckAgain,
+        outcome: Ok(()),
+        operation: None,
+        request: None,
+    });
+    cx.run_until_parked();
+    let menu = fixture.host.menu();
+    assert_eq!(
+        row(&menu, LOCAL).status.as_deref(),
+        Some(crate::updates::copy::rows::WAITING_FOR_OPERATION),
+        "an unrelated answer changes nothing"
+    );
+    fixture.machines.emit(MachineUpdatesEvent::Finished {
+        machine: LOCAL,
+        action: MachineAction::Stop,
+        outcome: Ok(()),
+        operation: None,
+        request: None,
+    });
+    cx.run_until_parked();
+    assert_ne!(
+        row(&fixture.host.menu(), LOCAL).status.as_deref(),
+        Some(crate::updates::copy::rows::WAITING_FOR_OPERATION)
+    );
+}
+
 #[gpui::test]
 fn a_restart_drawn_before_more_sessions_opened_asks_with_the_new_count(cx: &mut TestAppContext) {
     let fixture = start(vec![waiting(machine(PENGUIN, "penguin", 1))], cx);
@@ -373,6 +494,8 @@ fn a_start_refused_by_login_items_opens_that_list_and_never_runs_by_itself(
         machine: LOCAL,
         action: MachineAction::Start,
         outcome: Err(ActionFailure::LoginItemOff),
+        operation: None,
+        request: None,
     });
     cx.run_until_parked();
 
@@ -490,6 +613,8 @@ fn a_refused_preview_never_runs_again_without_a_fresh_confirmation(cx: &mut Test
             machine: PENGUIN,
             action: MachineAction::Restart,
             outcome: Err(ActionFailure::Changed),
+            operation: None,
+            request: None,
         });
         cx.run_until_parked();
         let executed = fixture.machines.executed().len();
@@ -915,6 +1040,8 @@ fn a_refused_approved_restart_opens_d5_once_and_a_later_failure_none(cx: &mut Te
             machine: PENGUIN,
             action: MachineAction::Restart,
             outcome: Err(failure),
+            operation: None,
+            request: None,
         });
         cx.run_until_parked();
         let titles: Vec<String> = fixture

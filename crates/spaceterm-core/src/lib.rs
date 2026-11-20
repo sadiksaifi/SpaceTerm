@@ -36,7 +36,7 @@ pub mod worktree;
 #[cfg(feature = "client")]
 pub use client::{CliRoute, ClientScope, MachineConnection};
 #[cfg(feature = "client")]
-pub use startup::{LocalStartup, StartupOutcome};
+pub use startup::{LaunchIntent, LocalStartup, StartupOutcome};
 pub use storage::{Directory, Lock, LockWait};
 
 /// An admitted work connection's negotiated protocol version.

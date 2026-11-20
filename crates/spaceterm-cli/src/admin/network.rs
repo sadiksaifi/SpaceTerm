@@ -37,14 +37,19 @@ pub fn run(context: &Context<'_>, network: Option<&Network>, token: Option<&str>
         Ok(pending) => pending,
         Err(failure) => return Reply::failure(COMMAND, Some(routed.machine), failure),
     };
-    let opened = match super::open_lane(context, &routed.connection, &routed.route, &pending) {
+    let opened = match super::open_lane(
+        context,
+        &routed.connection,
+        &routed.route,
+        &pending,
+        Instant::now() + admin::REQUEST_LIMIT,
+    ) {
         Ok(opened) => opened,
-        Err(failure) => {
-            let failure = match failure.code {
-                Code::Unreachable if routed.local => Failure::new(Code::NotRunning),
-                _ => failure,
-            };
-            return Reply::failure(COMMAND, Some(routed.machine), failure);
+        Err(mut unopened) => {
+            if unopened.failure.code == Code::Unreachable && routed.local {
+                unopened.failure = Failure::new(Code::NotRunning);
+            }
+            return Reply::unopened(COMMAND, Some(routed.machine), unopened);
         }
     };
     // Paired devices need SpaceTerm Core after logout, so Linux turns Network Access on only

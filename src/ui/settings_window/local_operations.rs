@@ -69,6 +69,20 @@ impl LocalCoreOperations {
     /// again, and Workspace launches waiting on a running server resume, as after a change made
     /// in Settings.
     pub(crate) fn changed_elsewhere(cx: &mut App, status: ServiceStatus) {
+        Self::elsewhere(cx, Some(status.running && !status.stopped));
+    }
+
+    /// Records that a Workspace Window's launch reached this computer's SpaceTerm Core, which may
+    /// have started it, as the person's Start in that window does. Every Settings window reads
+    /// the service again. The window that launched already presents the running Core, so no
+    /// waiting launch resumes.
+    pub(crate) fn launched_elsewhere(cx: &mut App) {
+        Self::elsewhere(cx, None);
+    }
+
+    /// `running` says whether the change left SpaceTerm Core running, so waiting Workspace
+    /// launches resume. `None` resumes none.
+    fn elsewhere(cx: &mut App, running: Option<bool>) {
         let owner = Self::get(cx);
         owner.update(cx, |owner, cx| {
             // A change Settings has underway keeps its own progress; anything Settings observed
@@ -81,11 +95,10 @@ impl LocalCoreOperations {
                 owner.service = None;
                 owner.service_failure = None;
             }
-            owner.finished(
-                CompletedOperation::Elsewhere,
-                status.running && !status.stopped,
-                cx,
-            );
+            match running {
+                Some(running) => owner.finished(CompletedOperation::Elsewhere, running, cx),
+                None => cx.emit(CompletedOperation::Elsewhere),
+            }
         });
     }
 

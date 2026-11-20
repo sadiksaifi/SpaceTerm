@@ -445,6 +445,10 @@ pub(crate) enum TabViewEvent {
         tab_id: TabId,
         pane_id: PaneId,
     },
+    /// A person pressed one of this Tab's Panes, which chooses this Tab as well as that Pane.
+    PanePressed {
+        tab_id: TabId,
+    },
 }
 
 impl std::fmt::Debug for TabViewEvent {
@@ -455,6 +459,7 @@ impl std::fmt::Debug for TabViewEvent {
             Self::PresentationChanged { .. } => "TabViewEvent::PresentationChanged",
             Self::RevealRequested { .. } => "TabViewEvent::RevealRequested",
             Self::PaneDropped { .. } => "TabViewEvent::PaneDropped",
+            Self::PanePressed { .. } => "TabViewEvent::PanePressed",
         })
     }
 }
@@ -739,8 +744,28 @@ pub(crate) struct TabView {
     /// The server Tab this Tab presents.
     binding: WorkspacePaneBinding,
     parked_panes: BTreeMap<PaneId, crate::domain::tab::ParkedPane<Entity<TerminalPane>>>,
+    /// The parked Panes that held the keyboard as their close parked them, which a refusal
+    /// returns it to while it still rests in the Pane parking focused in their place.
+    parked_keyboard: std::collections::BTreeSet<PaneId>,
+    /// The Pane a refusal returned the focus to while a modal, such as another Machine's
+    /// confirmation, held the keyboard its close had moved. The refusal's review returns the
+    /// keyboard to it. Selecting a Pane clears it.
+    returned_keyboard: Option<PaneId>,
     directory_recovery: Option<Entity<super::core_pane::DirectoryRecovery>>,
     /// Reads every Pane's connection status while the Tab lives.
+    /// The Panes whose shell started or is starting without a name yet. `None` while it
+    /// starts; once it started, when it did. Their Tab and Pane Caption wait for the first
+    /// real name together, at most [`NAME_WAIT`] after the start.
+    title_waits: BTreeMap<PaneId, Option<std::time::Instant>>,
+    /// Ends the earliest title wait.
+    _title_wait: Option<gpui::Task<()>>,
+    /// A Pane of this Tab waited for or used a background start turn at the last reading, so the
+    /// next reading wakes the start queue once more when the last turn ends.
+    background_turns: bool,
+    /// Each Pane's connection loss waiting to be classified, and when the Tab saw it begin.
+    losses: BTreeMap<PaneId, (u64, std::time::Instant)>,
+    /// Classifies the connection losses no announcement explained, when the earliest wait ends.
+    _classify: Option<(std::time::Instant, gpui::Task<()>)>,
     _workspace_status: gpui::Task<()>,
     /// Repaints a blocked Pane's notice as the Core's download and SpaceTerm's own update move.
     _blocked_updates: Vec<gpui::Subscription>,
@@ -839,8 +864,15 @@ impl TabView {
             tab_focus: cx.focus_handle(),
             binding,
             parked_panes: BTreeMap::new(),
+            parked_keyboard: std::collections::BTreeSet::new(),
+            returned_keyboard: None,
             directory_recovery: None,
             _blocked_updates: blocked_updates,
+            background_turns: false,
+            losses: BTreeMap::new(),
+            _classify: None,
+            title_waits: BTreeMap::new(),
+            _title_wait: None,
             _workspace_status: cx.spawn_in(window, async move |view, cx| {
                 while changes.recv().await.is_ok() {
                     if view
@@ -874,6 +906,7 @@ impl TabView {
                 TerminalPaneEvent::SurfaceBackgroundChanged => cx.notify(),
                 TerminalPaneEvent::TitleChanged(title) => {
                     view.pane_titles.insert(pane_id, title.clone());
+                    view.track_title_waits(window, cx);
                     cx.emit(TabViewEvent::PresentationChanged {
                         tab_id: view.tab.id(),
                     });
@@ -883,6 +916,7 @@ impl TabView {
                     let caption = PaneCaptionText::from_terminal(terminal.read(cx));
                     if view.pane_captions.get(&pane_id) != Some(&caption) {
                         view.pane_captions.insert(pane_id, caption);
+                        view.track_title_waits(window, cx);
                         if pane_id == view.tab.root_pane_id()
                             || pane_id == view.tab.focused_pane_id()
                         {
@@ -1024,21 +1058,101 @@ impl TabView {
     /// What this Tab presents about the Terminal Session its Focused Pane runs, read from that
     /// Pane's caption facts.
     pub(crate) fn tab_identity(&self) -> TabIdentity {
-        let caption = self
-            .pane_captions
-            .get(&self.tab.focused_pane_id())
-            .cloned()
-            .unwrap_or_default();
-        let title = self
-            .pane_titles
-            .get(&self.tab.focused_pane_id())
-            .map(|title| gpui::SharedString::from(reported_title(title).words.to_owned()))
-            .unwrap_or_else(|| "Terminal".into());
+        let focused = self.tab.focused_pane_id();
         TabIdentity::resolve(
-            caption,
-            title,
+            self.caption_text(focused),
+            self.pane_title(focused),
             self.pane_attention.values().copied().sum::<u32>() > 0,
         )
+    }
+
+    /// The title Pane `pane_id` reported, or Terminal.
+    fn pane_title(&self, pane_id: PaneId) -> gpui::SharedString {
+        self.pane_titles
+            .get(&pane_id)
+            .map(|title| gpui::SharedString::from(reported_title(title).words.to_owned()))
+            .unwrap_or_else(|| "Terminal".into())
+    }
+
+    /// What Pane `pane_id`'s caption says, and whether it still waits for its shell's first
+    /// name. A starting shell's caption and Tab wait for that name together rather than saying
+    /// Terminal, so their first words are its real name.
+    fn caption_text(&self, pane_id: PaneId) -> PaneCaptionText {
+        let mut text = self.named_caption(pane_id);
+        // While its shell starts, a name the Pane has is only provisional, such as the shell's
+        // executable before the shell names itself.
+        text.pending = self.title_waits.get(&pane_id) == Some(&None)
+            || (self.title_waits.contains_key(&pane_id) && !self.pane_named(pane_id));
+        text
+    }
+
+    fn named_caption(&self, pane_id: PaneId) -> PaneCaptionText {
+        self.pane_captions
+            .get(&pane_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Whether Pane `pane_id` has a real name, rather than only Terminal.
+    fn pane_named(&self, pane_id: PaneId) -> bool {
+        TabIdentity::resolve(self.named_caption(pane_id), self.pane_title(pane_id), false)
+            .is_named()
+    }
+
+    /// Follows which Panes wait for their shell's first name. A Pane waits while its shell
+    /// starts, and for [`NAME_WAIT`] after the start, which a blank first screen can end
+    /// before the shell names itself. A name, a shell that is not starting, or the end of
+    /// the wait ends it, and the Tab and Pane Caption show what the Pane has.
+    fn track_title_waits(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::terminal::core_session::CorePaneStatus;
+        let now = cx.background_executor().now();
+        let mut changed = false;
+        for pane_id in self.binding.pane_ids() {
+            let status = self
+                .binding
+                .view(pane_id)
+                .map(|view| view.connection().status());
+            let named = self.pane_named(pane_id);
+            let starting = self.binding.title_starting(pane_id);
+            let wait = match (status, self.title_waits.get(&pane_id).copied()) {
+                // A starting shell's name is provisional until it reaches its prompt.
+                _ if starting => Some(None),
+                _ if named => None,
+                (Some(CorePaneStatus::Connected), Some(None)) => Some(Some(now)),
+                (Some(CorePaneStatus::Connected), Some(Some(since)))
+                    if now.saturating_duration_since(since) < NAME_WAIT =>
+                {
+                    Some(Some(since))
+                }
+                _ => None,
+            };
+            let previous = match wait {
+                Some(wait) => self.title_waits.insert(pane_id, wait),
+                None => self.title_waits.remove(&pane_id),
+            };
+            changed |= previous.is_some() != wait.is_some();
+        }
+        self.title_waits
+            .retain(|pane_id, _| self.binding.view(*pane_id).is_some());
+        if changed {
+            cx.emit(TabViewEvent::PresentationChanged {
+                tab_id: self.tab.id(),
+            });
+            cx.notify();
+        }
+        let earliest = self
+            .title_waits
+            .values()
+            .flatten()
+            .map(|since| *since + NAME_WAIT)
+            .min();
+        self._title_wait = earliest.map(|deadline| {
+            let remaining = deadline.saturating_duration_since(now);
+            cx.spawn_in(window, async move |view, cx| {
+                cx.background_executor().timer(remaining).await;
+                let _ = view.update_in(cx, |view, window, cx| view.track_title_waits(window, cx));
+            })
+        });
     }
 
     /// Records unread attention for one Pane as its Terminal Session would report it.
@@ -1113,6 +1227,8 @@ impl TabView {
         for terminal in self.tab.panes() {
             terminal.update(cx, |terminal, _| terminal.close());
         }
+        self.parked_keyboard.clear();
+        self.returned_keyboard = None;
         for (_, parked) in std::mem::take(&mut self.parked_panes) {
             parked.payload().update(cx, |terminal, _| terminal.close());
         }
@@ -1817,6 +1933,37 @@ impl TabView {
         Some(Bounds::from_corners(point(left, top), point(right, bottom)))
     }
 
+    /// What Pane `pane_id` needs from the window's start queue for its background start: whether
+    /// its Core starts shells in the background, whether it waits for a turn, and whether it
+    /// holds or uses one now.
+    pub(crate) fn readiness_background(&self, pane_id: PaneId) -> (bool, bool, bool) {
+        self.binding
+            .view(pane_id)
+            .map(|view| {
+                let connection = view.connection();
+                (
+                    connection.background_starts(),
+                    connection.awaiting_turn(),
+                    connection.starting_in_background(),
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    /// Asks Pane `pane_id`'s stopped worker to connect once more in the current Core run.
+    pub(crate) fn rearm_background(&self, pane_id: PaneId) -> bool {
+        self.binding
+            .view(pane_id)
+            .is_some_and(|view| view.connection().rearm_background())
+    }
+
+    /// Gives Pane `pane_id` its turn to start its shell in the background.
+    pub(crate) fn grant_background_turn(&self, pane_id: PaneId) {
+        if let Some(view) = self.binding.view(pane_id) {
+            view.connection().grant_turn();
+        }
+    }
+
     pub(crate) fn readiness_starting(&self, pane_id: PaneId) -> bool {
         self.binding
             .view(pane_id)
@@ -1863,6 +2010,9 @@ impl TabView {
                 focused_pane: Some(terminal.entity_id()) == focused_terminal_id,
                 blocker,
             };
+            if let Some(view) = self.binding.view(pane_id) {
+                view.set_foreground(product_focus.active_tab && product_focus.focused_pane);
+            }
             let product_focus_changed = terminal.update(cx, |terminal, cx| {
                 let product_focus_changed = terminal.set_product_focus(product_focus, cx);
                 terminal.synchronize_native_service_hierarchy_generation(hierarchy_generation);
@@ -2099,11 +2249,7 @@ impl TabView {
                     pane_id,
                     background: terminal.read(cx).surface_background(),
                     terminal,
-                    text: self
-                        .pane_captions
-                        .get(&pane_id)
-                        .cloned()
-                        .unwrap_or_default(),
+                    text: self.caption_text(pane_id),
                     focused,
                     zoomed,
                     attention: self.pane_attention.get(&pane_id).copied().unwrap_or(0) > 0,
@@ -2257,6 +2403,9 @@ impl TabView {
                         .any(|(_, control)| control.is_hovered_at(event.position, window));
                     if !on_unselecting_control {
                         view.select_pane(pane_id);
+                        cx.emit(TabViewEvent::PanePressed {
+                            tab_id: view.tab.id(),
+                        });
                     }
                     if view.tab.focused_pane_id() != pane_id {
                         view.focus_pane(pane_id, cx);
@@ -2605,12 +2754,30 @@ impl TabView {
                         .and_then(|id| binding.local_pane(id))
                         .filter(|id| self.tab.pane(*id).is_some())
                         .unwrap_or_else(|| self.tab.root_pane_id());
-                    if self
-                        .tab
-                        .restore_parked_pane(parked, source, side_edge(pane.side))
-                        .is_ok()
+                    // A refused close returns the focus it moved, and the keyboard it moved with
+                    // it, unless the person selected a Pane or moved the keyboard since.
+                    let parked_keyboard = self.parked_keyboard.remove(&pane_id);
+                    let held_keyboard = parked_keyboard && self.holds_keyboard(window, cx);
+                    if let Ok(refocused) =
+                        self.tab
+                            .restore_parked_pane(parked, source, side_edge(pane.side))
                     {
+                        if refocused {
+                            self.focus_epoch = self.focus_epoch.wrapping_add(1);
+                        }
                         self.finish_insertion(pane_id, cx);
+                        if refocused && held_keyboard && self.active {
+                            self.focus(window, cx);
+                        }
+                        // A modal holds the keyboard the close moved, so the keyboard still owes
+                        // this Pane once that modal lets it go.
+                        if refocused
+                            && parked_keyboard
+                            && !held_keyboard
+                            && spaceterm_ui::window_modal_is_open(window, cx)
+                        {
+                            self.returned_keyboard = Some(pane_id);
+                        }
                         changed = true;
                     }
                 }
@@ -2706,6 +2873,7 @@ impl TabView {
             .collect::<Vec<_>>();
         for id in retired {
             if let Some(parked) = self.parked_panes.remove(&id) {
+                self.parked_keyboard.remove(&id);
                 parked.payload().update(cx, |terminal, _| terminal.close());
                 self.forget_pane(id);
             }
@@ -2768,6 +2936,9 @@ impl TabView {
                         terminal.set_accessibility_hierarchy(false);
                     });
                     self.parked_panes.insert(pane_id, parked);
+                    if held_keyboard {
+                        self.parked_keyboard.insert(pane_id);
+                    }
                     self.advance_native_service_hierarchy_generation(cx);
                     self.pane_layout_revision += 1;
                     self.pane_motion.expect_change();
@@ -2929,18 +3100,24 @@ impl TabView {
         ) {
             return Some(false);
         }
+        // A shell still starting runs nothing yet. Only a running command the facts about this
+        // exact Terminal Session verify asks first; an interrupted connection says nothing
+        // current about it, so it asks too.
         Some(if live_session {
-            status == CorePaneStatus::Connected
-                && !self
-                    .tab
-                    .pane(pane)?
-                    .read(cx)
-                    .close_facts()
-                    .requires_confirmation()
+            matches!(
+                status,
+                CorePaneStatus::Connected | CorePaneStatus::Connecting
+            ) && !self
+                .tab
+                .pane(pane)?
+                .read(cx)
+                .close_facts()
+                .running_command()
         } else {
             matches!(
                 status,
                 CorePaneStatus::Connected
+                    | CorePaneStatus::Connecting
                     | CorePaneStatus::Restored
                     | CorePaneStatus::SessionEnded(_)
                     | CorePaneStatus::Ended
@@ -2956,6 +3133,31 @@ impl TabView {
                 .tab
                 .panes_with_ids()
                 .any(|(pane_id, terminal)| self.pane_holds_focus(pane_id, terminal, window, cx))
+    }
+
+    /// Whether closing this Tab, or only its Pane `pane_id`, removes the control `focus`: its Tab
+    /// strip item, one of the closing Panes, or the screen replacing one of them. Closing a Tab's
+    /// last Pane closes the Tab.
+    pub(crate) fn close_removes_focus(
+        &self,
+        pane_id: Option<PaneId>,
+        focus: &FocusHandle,
+        window: &Window,
+        cx: &App,
+    ) -> bool {
+        let closes_tab = pane_id.is_none() || self.tab.pane_count() == 1;
+        (closes_tab && self.tab_focus.contains(focus, window))
+            || self
+                .tab
+                .panes_with_ids()
+                .filter(|(id, _)| pane_id.is_none_or(|pane_id| pane_id == *id))
+                .any(|(id, terminal)| {
+                    terminal.read(cx).contains_focus(focus, window)
+                        || self
+                            .binding
+                            .screen_focus(id)
+                            .is_some_and(|screen| screen.contains(focus, window))
+                })
     }
 
     /// Presents the prepared File Preview for the server Pane `server`. `false` when this Tab
@@ -3115,6 +3317,85 @@ impl TabView {
         if changed {
             cx.notify();
         }
+        // A Pane that wants a background start turn, or uses one, lets the window's start queue
+        // move on as each turn ends.
+        let background = self.binding.pane_ids().into_iter().any(|pane_id| {
+            let (_, awaiting, in_flight) = self.readiness_background(pane_id);
+            awaiting || in_flight
+        });
+        if std::mem::replace(&mut self.background_turns, background) || background {
+            super::terminal_readiness::Readiness::for_window(window, cx).wake();
+        }
+        self.track_title_waits(window, cx);
+        self.schedule_classification(window, cx);
+    }
+
+    /// Calls each Pane connection loss that nothing explained within
+    /// [`crate::ui::core_pane::CLASSIFY_LIMIT`] an interruption, so only then does the Pane say
+    /// it reconnects. Input paused when the loss began. Each loss waits from its own beginning,
+    /// and a timer only classifies the exact loss it waited for.
+    fn schedule_classification(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let now = cx.background_executor().now();
+        let waiting: BTreeMap<PaneId, u64> = self
+            .binding
+            .pane_ids()
+            .into_iter()
+            .filter_map(|pane_id| {
+                let loss = self.binding.view(pane_id)?.classifying()?;
+                Some((pane_id, loss))
+            })
+            .collect();
+        self.losses
+            .retain(|pane_id, (loss, _)| waiting.get(pane_id) == Some(loss));
+        for (pane_id, loss) in waiting {
+            self.losses.entry(pane_id).or_insert((loss, now));
+        }
+        let Some(deadline) = self
+            .losses
+            .values()
+            .map(|(_, since)| *since + crate::ui::core_pane::CLASSIFY_LIMIT)
+            .min()
+        else {
+            self._classify = None;
+            return;
+        };
+        if self
+            ._classify
+            .as_ref()
+            .is_some_and(|(scheduled, _)| *scheduled == deadline)
+        {
+            return;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let task = cx.spawn_in(window, async move |view, cx| {
+            cx.background_executor().timer(remaining).await;
+            let _ = view.update_in(cx, |view, window, cx| {
+                view._classify = None;
+                let now = cx.background_executor().now();
+                let due: Vec<(PaneId, u64)> = view
+                    .losses
+                    .iter()
+                    .filter(|(_, (_, since))| *since + crate::ui::core_pane::CLASSIFY_LIMIT <= now)
+                    .map(|(pane_id, (loss, _))| (*pane_id, *loss))
+                    .collect();
+                for (pane_id, loss) in due {
+                    view.losses.remove(&pane_id);
+                    let Some(sync) = view
+                        .binding
+                        .view_mut(pane_id)
+                        .map(|core| core.classify(loss))
+                    else {
+                        continue;
+                    };
+                    if sync.changed {
+                        view.apply_sync(pane_id, sync, window, cx);
+                        cx.notify();
+                    }
+                }
+                view.schedule_classification(window, cx);
+            });
+        });
+        self._classify = Some((deadline, task));
     }
 
     fn apply_sync(
@@ -3166,10 +3447,22 @@ impl TabView {
     /// Close, keyboard Pane navigation, or opening its Tab. Close, focus a Pane regains on its
     /// own, window restoration, and membership publication never do, so none of them starts a
     /// retained shell. An unreachable server is asked for nothing at all.
-    fn select_pane(&self, pane_id: PaneId) {
+    fn select_pane(&mut self, pane_id: PaneId) {
+        // An explicit selection, even of the Focused Pane, is the person's choice, which a
+        // refused close's return of focus or keyboard no longer overrides.
+        self.tab.claim_focused_pane();
+        self.returned_keyboard = None;
         if self.binding.reachable() {
             self.binding.select(pane_id);
         }
+    }
+
+    /// Whether a refusal returned `pane_id` the focus while something else held the keyboard its
+    /// close had moved, which the keyboard now owes it. Asking clears it.
+    pub(crate) fn take_returned_keyboard(&mut self, pane_id: PaneId) -> bool {
+        self.returned_keyboard
+            .take_if(|returned| *returned == pane_id)
+            .is_some()
     }
 
     fn forget_pane(&mut self, pane_id: PaneId) {
@@ -3953,6 +4246,13 @@ impl Render for TabView {
     }
 }
 
+/// How long a Pane whose shell started waits for its first name before its Tab and Pane Caption
+/// say what they have, such as Terminal.
+pub(crate) const NAME_WAIT: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// What assistive technology hears for a Pane or Tab whose shell is still starting.
+pub(crate) const STARTING_NAME: &str = "Starting shell";
+
 /// What one Tab presents about the Terminal Session its Focused Pane runs. A Tab never composes a
 /// path or interprets a title, and leaves a segment empty rather than inventing one.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -3969,6 +4269,9 @@ pub(crate) struct TabIdentity {
     pub(crate) glyph: Option<gpui::SharedString>,
     /// Whether any Pane in the Tab is asking for attention.
     pub(crate) attention: bool,
+    /// The Focused Pane's shell is starting and has not named itself yet, so the Tab waits for
+    /// its first name the same way the Pane Caption does.
+    pub(crate) pending: bool,
 }
 
 impl TabIdentity {
@@ -4001,6 +4304,7 @@ impl TabIdentity {
             place,
             glyph: caption.glyph,
             attention,
+            pending: caption.pending,
         }
     }
 
@@ -4041,6 +4345,9 @@ struct PaneCaptionText {
     running: bool,
     progress: TerminalProgress,
     repository: Option<RepositoryCaption>,
+    /// The Pane's shell is starting and has not named itself yet. The caption and its Tab show
+    /// one waiting presentation until its first confirmed name, which then shows whole.
+    pending: bool,
 }
 
 impl PaneCaptionText {
@@ -4060,6 +4367,7 @@ impl PaneCaptionText {
                 running: facts.running,
                 progress: facts.progress,
                 repository: facts.repository,
+                pending: false,
             };
         }
         let (leading, name) = split_directory_leaf(&facts.directory);
@@ -4073,6 +4381,7 @@ impl PaneCaptionText {
             running: facts.running,
             progress: facts.progress,
             repository: facts.repository,
+            pending: false,
         }
     }
 }
@@ -4473,7 +4782,13 @@ fn render_pane_caption_content(
             )
         };
     }
-    let caption_name = format!("Pane Caption, {}", text.name);
+    // While the shell starts, assistive technology hears that rather than a name the caption
+    // does not show yet.
+    let caption_name = if text.pending {
+        format!("Pane Caption, {STARTING_NAME}")
+    } else {
+        format!("Pane Caption, {}", text.name)
+    };
     let repository = text.repository.clone();
     let caption_content =
         render_caption_identity(pane_id, text, attention, layout, appearance, &paint);
@@ -4706,24 +5021,33 @@ fn render_caption_identity(
             color,
             appearance,
         ));
+    // A shell that is starting shows no words until its first confirmed name, as its Tab does,
+    // so neither says Terminal first and then something else.
+    let pending = text.pending;
+    let waiting = move |segment: gpui::Div| segment.when(pending, |segment| segment.opacity(0.0));
+    caption_content = caption_content.when(pending, |row| {
+        row.child(
+            div().debug_selector(move || format!("pane-caption-name-pending-{}", pane_id.get())),
+        )
+    });
     if text.has_directory {
         caption_content = caption_content
             .when(layout.show_directory && !text.directory.is_empty(), |row| {
-                row.child(
+                row.child(waiting(
                     div()
                         .debug_selector(move || format!("pane-caption-directory-{}", pane_id.get()))
                         .flex_shrink_0()
                         .text_color(gpui_color(color))
                         .child(text.directory),
-                )
+                ))
             })
-            .child(
+            .child(waiting(
                 div()
                     .debug_selector(move || format!("pane-caption-name-{}", pane_id.get()))
                     .min_w_0()
                     .truncate()
                     .child(text.name),
-            )
+            ))
             .when(layout.show_status_separator, |row| {
                 row.child(
                     div()
@@ -4749,14 +5073,14 @@ fn render_caption_identity(
                     )),
             )
             .when(layout.show_label && !text.label.is_empty(), |row| {
-                row.child(
+                row.child(waiting(
                     div()
                         .debug_selector(move || format!("pane-caption-label-{}", pane_id.get()))
                         .min_w_0()
                         .truncate()
                         .text_color(gpui_color(color))
                         .child(text.label),
-                )
+                ))
             });
     } else {
         caption_content = caption_content
@@ -4766,13 +5090,13 @@ fn render_caption_identity(
                 paint,
                 appearance,
             ))
-            .child(
+            .child(waiting(
                 div()
                     .debug_selector(move || format!("pane-caption-name-{}", pane_id.get()))
                     .min_w_0()
                     .truncate()
                     .child(text.name),
-            );
+            ));
     }
     caption_content
 }

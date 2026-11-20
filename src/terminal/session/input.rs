@@ -23,6 +23,8 @@ pub(super) struct PtyInput {
     /// Each pending serial and the byte count that must be written before it applies.
     serials: VecDeque<(u64, u32)>,
     serial: u32,
+    /// The byte count that ends each submitted line whose bytes the PTY has not all accepted.
+    lines: VecDeque<u64>,
 }
 
 impl PtyInput {
@@ -36,6 +38,27 @@ impl PtyInput {
         } else if let Some(newest) = self.serials.back_mut() {
             *newest = (self.enqueued, serial);
         }
+    }
+
+    /// Bytes ever enqueued.
+    pub(super) const fn enqueued(&self) -> u64 {
+        self.enqueued
+    }
+
+    /// Notes that a submitted line's bytes are all enqueued. It counts as written once the PTY
+    /// accepted every one of them.
+    pub(super) fn note_line(&mut self) {
+        self.lines.push_back(self.enqueued);
+    }
+
+    /// How many submitted lines the PTY accepted whole since the last call, oldest first.
+    pub(super) fn take_written_lines(&mut self) -> usize {
+        let mut count = 0;
+        while self.lines.front().is_some_and(|end| *end <= self.written) {
+            self.lines.pop_front();
+            count += 1;
+        }
+        count
     }
 
     /// A new client claim numbers its Input from 1 again. Bytes still queued are written, but no
@@ -135,6 +158,40 @@ mod tests {
             input.drain(&mut written).unwrap();
         }
         assert_eq!(written, vec![b'x'; MAX_PENDING_BYTES]);
+    }
+
+    #[test]
+    fn a_line_counts_as_written_once_the_pty_accepted_all_of_it() {
+        struct Budget(usize);
+        impl Write for Budget {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(io::ErrorKind::WouldBlock.into());
+                }
+                let count = bytes.len().min(self.0);
+                self.0 -= count;
+                Ok(count)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut input = PtyInput::default();
+        input.enqueue(b"ls\r").unwrap();
+        input.note_line();
+        input.enqueue(b"pwd\r").unwrap();
+        input.note_line();
+        input.drain(&mut Budget(2)).unwrap();
+        assert_eq!(
+            input.take_written_lines(),
+            0,
+            "a partial write writes no line"
+        );
+        input.drain(&mut Budget(3)).unwrap();
+        assert_eq!(input.take_written_lines(), 1);
+        input.drain(&mut Budget(64)).unwrap();
+        assert_eq!(input.take_written_lines(), 1);
+        assert_eq!(input.take_written_lines(), 0);
     }
 
     /// Accepts at most `budget` bytes per call, then blocks.

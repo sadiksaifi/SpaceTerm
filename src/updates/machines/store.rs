@@ -25,7 +25,7 @@ use spaceterm_core::update::facts::{Operation, UpdateCheck, Version};
 
 use super::{
     ActionFailure, Asked, FailedPush, MachineAction, MachineId, MachineLink, MachinePreview,
-    MachineUpdate, MachineUpdatesAdapter, MachineUpdatesEvent,
+    MachineUpdate, MachineUpdatesAdapter, MachineUpdatesEvent, Request,
 };
 use crate::updates::confirm::{self, Approval, Confirmation};
 use crate::updates::state::{Checked, Dismissed, PUSH_FAILURE};
@@ -90,6 +90,9 @@ pub(crate) struct MachineUpdatesNotice {
     pub(crate) action: MachineAction,
     pub(crate) surface: Surface,
     pub(crate) outcome: Result<(), ActionFailure>,
+    /// The Stop or Restart whose outcome nothing confirmed, which this notice's Check Status
+    /// reads. Set only with `Unconfirmed`.
+    pub(crate) operation: Option<super::ServiceOperation>,
     /// The Core refused the click's restart at once, while the person waits on it: at its
     /// preview, or when the approved restart executed. Only such a refusal opens an alert unasked
     /// (D5); a later outcome shows once in the title bar.
@@ -101,16 +104,25 @@ impl MachineUpdatesNotice {
     /// action the Core refused at its preview, and a failed Start or Stop, which no update step
     /// reports. A later outcome of an update action shows once in the title bar instead (design
     /// 4.6). `Changed` and `LoginItemOff` have no alert.
-    pub(crate) fn unasked_alert(&self) -> Option<(SharedString, SharedString)> {
+    pub(crate) fn unasked_alert(&self) -> Option<crate::updates::confirm::Explanation> {
         let Err(failure) = self.outcome else {
             return None;
         };
         let waiting = self.refused_at_once
-            || matches!(self.action, MachineAction::Start | MachineAction::Stop);
+            || matches!(
+                self.action,
+                MachineAction::Start | MachineAction::Stop | MachineAction::CheckStatus(..)
+            );
         if !waiting {
             return None;
         }
-        crate::updates::copy::dialogs::action_failure(&self.name, &self.action, failure)
+        crate::updates::copy::dialogs::action_failure_alert(
+            &self.name,
+            self.machine,
+            &self.action,
+            failure,
+            self.operation.as_ref(),
+        )
     }
 }
 
@@ -218,8 +230,14 @@ pub(crate) struct MachineUpdates {
     adapter: Rc<dyn MachineUpdatesAdapter>,
     machines: Vec<MachineUpdate>,
     dismissed: Dismissed,
-    /// Actions performed that have not finished, oldest first.
-    performed: Vec<(MachineId, MachineAction, Surface)>,
+    /// Actions performed that have not finished, oldest first, with the request that executed
+    /// a confirmed Stop or Restart.
+    performed: Vec<(MachineId, MachineAction, Surface, Option<Request>)>,
+    /// The previews and approved Stops and Restarts that wait for another operation on their
+    /// Machine, by request.
+    waiting: Vec<(Request, MachineId, MachineAction)>,
+    /// The last request named, which names the next one.
+    requests: Request,
     /// Each check or install a person started that has not ended, oldest first.
     asked: Vec<AskedWork>,
     /// How many checks, installs and restarts people started, which names the next one.
@@ -275,6 +293,8 @@ impl MachineUpdates {
                 machines: Vec::new(),
                 dismissed: Dismissed::new(),
                 performed: Vec::new(),
+                waiting: Vec::new(),
+                requests: 0,
                 asked: Vec::new(),
                 serial: 0,
                 deferred: HashMap::new(),
@@ -313,6 +333,63 @@ impl MachineUpdates {
         &self.machines
     }
 
+    /// The preview or approved Stop or Restart on `machine` that waits for another SpaceTerm
+    /// Core operation to settle.
+    pub(crate) fn waiting(&self, machine: MachineId) -> Option<&MachineAction> {
+        self.waiting
+            .iter()
+            .find(|(_, id, _)| *id == machine)
+            .map(|(_, _, action)| action)
+    }
+
+    /// The approved Stop or Restart on `machine` that a surface executed and that has not
+    /// finished. At most one runs on each Machine.
+    fn executing(&self, machine: MachineId) -> Option<Request> {
+        self.performed
+            .iter()
+            .find(|(id, action, _, request)| {
+                *id == machine
+                    && request.is_some()
+                    && matches!(action, MachineAction::Stop | MachineAction::Restart)
+            })
+            .and_then(|(.., request)| *request)
+    }
+
+    fn next_request(&mut self) -> Request {
+        self.requests += 1;
+        self.requests
+    }
+
+    /// Each Machine's approved Stop or Restart that a surface executed and that has not
+    /// finished, and whether it still waits for another SpaceTerm Core operation. Settings, the
+    /// title-bar list and the status menu all show it from here.
+    pub(crate) fn approved(&self) -> Vec<(MachineId, crate::updates::state::Approved)> {
+        let checked = |action: &MachineAction| match action {
+            MachineAction::Stop => Some(super::Checked::Stop),
+            MachineAction::Restart => Some(super::Checked::Restart),
+            _ => None,
+        };
+        let mut approved: Vec<(MachineId, crate::updates::state::Approved)> = Vec::new();
+        for (machine, action, _, request) in &self.performed {
+            let Some(action) = checked(action) else {
+                continue;
+            };
+            if approved.iter().any(|(known, _)| known == machine) {
+                continue;
+            }
+            // Only this request's own wait shows: a preview's wait, or another request's, says
+            // nothing about whether the Core admitted this one.
+            let waiting = request.is_some_and(|request| {
+                self.waiting.iter().any(|(waiting, ..)| *waiting == request)
+            });
+            approved.push((
+                *machine,
+                crate::updates::state::Approved { action, waiting },
+            ));
+        }
+        approved
+    }
+
     pub(crate) fn dismissed(&self) -> &Dismissed {
         &self.dismissed
     }
@@ -349,6 +426,7 @@ impl MachineUpdates {
             deferred: &HashMap::new(),
             pushes_held: self.holds_pushes(cx),
             checked: &self.checked,
+            approved: &[],
         };
         crate::updates::state::cancel_defers(update, marks, now)
     }
@@ -386,7 +464,10 @@ impl MachineUpdates {
             }
             MachineAction::CheckAgain | MachineAction::ConnectAndCheck => Some(Asked::Check),
             MachineAction::Install => Some(Asked::Install),
-            MachineAction::Restart | MachineAction::Start | MachineAction::Stop => None,
+            MachineAction::Restart
+            | MachineAction::Start
+            | MachineAction::Stop
+            | MachineAction::CheckStatus(..) => None,
         };
         if let Some(asked) = asked {
             self.serial += 1;
@@ -408,7 +489,8 @@ impl MachineUpdates {
         }
         self.mark();
         cx.notify();
-        self.performed.push((machine, action.clone(), surface));
+        self.performed
+            .push((machine, action.clone(), surface, None));
         self.adapter.perform(machine, action);
     }
 
@@ -680,7 +762,7 @@ impl MachineUpdates {
     /// fails; the rest are prepared together. After a `stale` approval, a restart whose Pending
     /// Version is gone is dropped and one into another version asks.
     fn prepare(
-        &self,
+        &mut self,
         actions: &[(MachineId, MachineAction)],
         always: bool,
         stale: Option<Approval>,
@@ -689,25 +771,40 @@ impl MachineUpdates {
     ) -> Task<Prepared> {
         let (answered, answers) = async_channel::unbounded();
         for (index, (machine, action)) in actions.iter().enumerate() {
-            let answer = self.adapter.preview(*machine, action.clone());
+            let request = self.next_request();
+            let answer = self.adapter.preview(*machine, action.clone(), request);
             let answered = answered.clone();
             let (machine, action) = (*machine, action.clone());
             cx.background_executor()
                 .spawn(async move {
                     let outcome = answer.recv().await.unwrap_or(Err(ActionFailure::Failed));
-                    let _ = answered.send((index, machine, action, outcome)).await;
+                    let _ = answered
+                        .send((index, machine, action, outcome, request))
+                        .await;
                 })
                 .detach();
         }
         drop(answered);
         cx.spawn(async move |this, cx| {
             let mut previews = Vec::new();
-            while let Ok((index, machine, action, outcome)) = answers.recv().await {
+            while let Ok((index, machine, action, outcome, request)) = answers.recv().await {
+                // An answered preview waits for nothing more, however it ended.
+                let _ = this.update(cx, |this, cx| {
+                    this.waiting.retain(|(waiting, ..)| *waiting != request);
+                    cx.notify();
+                });
                 match outcome {
                     Ok(preview) => previews.push((index, preview)),
                     Err(failure) => {
                         let _ = this.update(cx, |this, cx| {
-                            this.notify_outcome(machine, action, surface, Err(failure), true, cx);
+                            this.notify_outcome(
+                                machine,
+                                action,
+                                surface,
+                                (Err(failure), None),
+                                true,
+                                cx,
+                            );
                         });
                     }
                 }
@@ -754,6 +851,20 @@ impl MachineUpdates {
         surface: Surface,
         cx: &mut Context<Self>,
     ) {
+        // One approved Stop or Restart runs on each Machine at a time. A second confirmation
+        // that another surface opened meanwhile admits nothing, and its own surface hears why.
+        if self.executing(preview.machine).is_some() {
+            self.notify_outcome(
+                preview.machine,
+                preview.action,
+                surface,
+                (Err(ActionFailure::Busy), None),
+                true,
+                cx,
+            );
+            return;
+        }
+        let request = self.next_request();
         if preview.action == MachineAction::Restart {
             self.serial += 1;
             let serial = self.serial;
@@ -809,9 +920,15 @@ impl MachineUpdates {
             self.mark();
             cx.notify();
         }
-        self.performed
-            .push((preview.machine, preview.action.clone(), surface));
-        self.adapter.execute(preview);
+        self.performed.push((
+            preview.machine,
+            preview.action.clone(),
+            surface,
+            Some(request),
+        ));
+        self.mark();
+        cx.notify();
+        self.adapter.execute(preview, request);
     }
 
     fn notify_outcome(
@@ -819,7 +936,7 @@ impl MachineUpdates {
         machine: MachineId,
         action: MachineAction,
         surface: Surface,
-        outcome: Result<(), ActionFailure>,
+        (outcome, operation): (Result<(), ActionFailure>, Option<super::ServiceOperation>),
         refused_at_once: bool,
         cx: &mut Context<Self>,
     ) {
@@ -833,6 +950,7 @@ impl MachineUpdates {
             action,
             surface,
             outcome,
+            operation,
             refused_at_once,
         });
     }
@@ -863,11 +981,29 @@ impl MachineUpdates {
                     None => self.machines.push(update),
                 }
             }
+            MachineUpdatesEvent::Waiting {
+                machine,
+                action,
+                request,
+                waiting,
+            } => {
+                let known = self.waiting.iter().any(|(known, ..)| *known == request);
+                if !waiting {
+                    self.waiting.retain(|(known, ..)| *known != request);
+                } else if !known {
+                    self.waiting.push((request, machine, action));
+                }
+            }
             MachineUpdatesEvent::Finished {
                 machine,
                 action,
                 outcome,
+                operation,
+                request,
             } => {
+                if let Some(request) = request {
+                    self.waiting.retain(|(known, ..)| *known != request);
+                }
                 let automatic = (action == MachineAction::Install)
                     .then(|| self.installing.iter().position(|(id, _)| *id == machine))
                     .flatten()
@@ -877,7 +1013,7 @@ impl MachineUpdates {
                 }
                 if automatic.is_none() {
                     self.answer(machine, &action, &outcome, cx);
-                    self.finish_performed(machine, action, outcome, cx);
+                    self.finish_performed(machine, (action, request), (outcome, operation), cx);
                 }
             }
         }
@@ -886,36 +1022,47 @@ impl MachineUpdates {
         cx.notify();
     }
 
-    /// Reports `outcome` to the surface that performed `action` on `machine`. An action no
-    /// surface performed reports to none.
+    /// Reports `outcome` to the surface that performed `action` on `machine`: the surface of
+    /// `request` when it names one, so an outcome never reaches a surface whose request it isn't.
+    /// An action no surface performed reports to none, and so does a request that is gone.
     fn finish_performed(
         &mut self,
         machine: MachineId,
-        action: MachineAction,
-        outcome: Result<(), ActionFailure>,
+        (action, request): (MachineAction, Option<Request>),
+        (outcome, operation): (Result<(), ActionFailure>, Option<super::ServiceOperation>),
         cx: &mut Context<Self>,
     ) {
-        let Some(index) = self
-            .performed
-            .iter()
-            .position(|(id, performed, _)| *id == machine && *performed == action)
-        else {
+        let Some(index) = self.performed.iter().position(|(id, performed, _, known)| {
+            *id == machine
+                && *performed == action
+                && request.is_none_or(|request| *known == Some(request))
+        }) else {
             return;
         };
-        let (_, _, surface) = self.performed.remove(index);
+        let (_, _, surface, _) = self.performed.remove(index);
         if let MachineAction::DismissFailure(_) = action {
             return;
         }
         // An approved restart the Core refused without running it leaves no failure in its
         // facts, so the person waiting on the click hears it at once.
+        // So does one whose outcome nothing confirmed: only Check Status reads its receipt.
+        // A restart without a Pending Version records no update failure the title bar could
+        // show, so its confirmed failure is heard at once as well.
+        let same_version = self
+            .machines
+            .iter()
+            .find(|known| known.machine == machine)
+            .and_then(|known| known.facts.as_ref())
+            .is_none_or(|facts| facts.pending.is_none());
         let refused = action == MachineAction::Restart
-            && matches!(
+            && (matches!(
                 outcome,
                 Err(ActionFailure::Busy
                     | ActionFailure::Unreachable
-                    | ActionFailure::Unavailable(_))
-            );
-        self.notify_outcome(machine, action, surface, outcome, refused, cx);
+                    | ActionFailure::Unavailable(_)
+                    | ActionFailure::Unconfirmed)
+            ) || (same_version && outcome.is_err()));
+        self.notify_outcome(machine, action, surface, (outcome, operation), refused, cx);
     }
 
     /// Keeps the outcome of an Install that pushed the bundled Core: an automatic one of
@@ -1053,6 +1200,7 @@ mod tests {
                 skipped: None,
                 last_failure: None,
             }),
+            boot: None,
             capabilities: Capabilities::fake(&Capability::ALL),
             push: None,
             bundled: None,
@@ -1101,6 +1249,8 @@ mod tests {
             machine,
             action: MachineAction::CheckAgain,
             outcome,
+            operation: None,
+            request: None,
         };
         let asked = |cx: &mut gpui::TestAppContext| {
             cx.read(|cx| state::current(cx).machines[0].asked_check)
@@ -1166,6 +1316,8 @@ mod tests {
             machine,
             action: MachineAction::CheckAgain,
             outcome: Ok(()),
+            operation: None,
+            request: None,
         };
         let asked = |cx: &mut gpui::TestAppContext| {
             cx.read(|cx| state::current(cx).machines[0].asked_check)
@@ -1229,6 +1381,8 @@ mod tests {
             machine,
             action: MachineAction::ConnectAndCheck,
             outcome: Err(ActionFailure::Unreachable),
+            operation: None,
+            request: None,
         });
         cx.run_until_parked();
         let row = cx.read(|cx| state::current(cx).machine_rows().remove(0));
@@ -1284,6 +1438,8 @@ mod tests {
             machine,
             action: MachineAction::CheckAgain,
             outcome: Err(failure),
+            operation: None,
+            request: None,
         };
         let asked = |cx: &mut gpui::TestAppContext| {
             cx.read(|cx| state::current(cx).machines[0].asked_check)
@@ -1358,6 +1514,8 @@ mod tests {
             machine,
             action,
             outcome: Ok(()),
+            operation: None,
+            request: None,
         };
         adapter.emit(MachineUpdatesEvent::Machines(vec![penguin.clone()]));
         cx.run_until_parked();
@@ -1424,6 +1582,8 @@ mod tests {
             machine,
             action: MachineAction::CheckAgain,
             outcome: Err(ActionFailure::Busy),
+            operation: None,
+            request: None,
         });
         adapter.emit(MachineUpdatesEvent::Changed(Box::new(installing)));
         cx.run_until_parked();
@@ -1482,6 +1642,8 @@ mod tests {
             machine,
             action: MachineAction::Install,
             outcome: Err(ActionFailure::Failed),
+            operation: None,
+            request: None,
         });
         cx.run_until_parked();
         assert_eq!(
@@ -1528,6 +1690,8 @@ mod tests {
             machine,
             action: MachineAction::Install,
             outcome: Ok(()),
+            operation: None,
+            request: None,
         });
         cx.run_until_parked();
         assert_eq!(asked(cx), Some(Asked::Install));
@@ -1559,6 +1723,7 @@ mod tests {
             link: super::super::MachineLink::Unconfirmed {
                 expected: Version::parse("0.9.0").unwrap(),
                 since: 1,
+                operation: None,
             },
             ..update("0.8.0", None)
         };
@@ -1572,6 +1737,8 @@ mod tests {
             machine,
             action: MachineAction::CheckAgain,
             outcome: Ok(()),
+            operation: None,
+            request: None,
         });
         cx.run_until_parked();
         assert_eq!(
@@ -1614,6 +1781,7 @@ mod tests {
             link: super::super::MachineLink::Unconfirmed {
                 expected: Version::parse("0.9.0").unwrap(),
                 since: 1,
+                operation: None,
             },
             ..update("0.8.0", None)
         };
@@ -1629,6 +1797,8 @@ mod tests {
                 machine,
                 action: MachineAction::CheckAgain,
                 outcome: Ok(()),
+                operation: None,
+                request: None,
             });
             cx.run_until_parked();
         };
@@ -1719,6 +1889,8 @@ mod tests {
             machine: [2; 32],
             action: install.clone(),
             outcome: Err(ActionFailure::Failed),
+            operation: None,
+            request: None,
         });
         adapter.emit(MachineUpdatesEvent::Changed(Box::new(offered(
             update("0.8.0", None),
@@ -1767,6 +1939,8 @@ mod tests {
                 machine: penguin,
                 action: install.clone(),
                 outcome: Err(failure),
+                operation: None,
+                request: None,
             });
             adapter.emit(MachineUpdatesEvent::Changed(Box::new(idle())));
             cx.run_until_parked();
@@ -1806,6 +1980,8 @@ mod tests {
             machine: penguin,
             action: install.clone(),
             outcome: Ok(()),
+            operation: None,
+            request: None,
         });
         cx.run_until_parked();
         let view = cx.update(|cx| state::current(cx));
@@ -1839,6 +2015,8 @@ mod tests {
             machine: penguin,
             action: install.clone(),
             outcome: Err(ActionFailure::DiskFull),
+            operation: None,
+            request: None,
         });
         adapter.emit(MachineUpdatesEvent::Changed(Box::new(incompatible())));
         cx.run_until_parked();
@@ -1883,6 +2061,8 @@ mod tests {
             machine: [2; 32],
             action: MachineAction::Restart,
             outcome: Err(ActionFailure::Busy),
+            operation: None,
+            request: None,
         });
         cx.run_until_parked();
         assert!(notices.borrow().is_empty());
@@ -1895,6 +2075,8 @@ mod tests {
             machine: [2; 32],
             action: MachineAction::Restart,
             outcome: Err(ActionFailure::Busy),
+            operation: None,
+            request: None,
         });
         cx.run_until_parked();
 
@@ -1971,5 +2153,175 @@ mod tests {
         ));
         cx.run_until_parked();
         assert_eq!(adapter.performed(), [([2; 32], MachineAction::Install)]);
+    }
+
+    /// The scripted adapter, the store, every notice the store reports, and the subscription
+    /// that collects them.
+    type LifecycleStore = (
+        Rc<ScriptedMachines>,
+        Entity<MachineUpdates>,
+        Rc<std::cell::RefCell<Vec<MachineUpdatesNotice>>>,
+        gpui::Subscription,
+    );
+
+    /// A store with one connected Machine, and every notice it reports.
+    fn lifecycle_store(cx: &mut gpui::TestAppContext) -> LifecycleStore {
+        let updater = Rc::new(crate::updates::testing::RecordingAdapter::available());
+        cx.update(|cx| crate::updates::ApplicationUpdates::install(updater.clone(), cx));
+        let adapter = Rc::new(ScriptedMachines::default());
+        cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
+        updater.emit(crate::updates::UpdateEvent::UpToDate);
+        cx.run_until_parked();
+        let store = cx.update(|cx| MachineUpdates::global(cx).unwrap());
+        let notices = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let subscription = cx.update(|cx| {
+            let notices = notices.clone();
+            cx.subscribe(&store, move |_, notice: &MachineUpdatesNotice, _| {
+                notices.borrow_mut().push(notice.clone());
+            })
+        });
+        adapter.emit(MachineUpdatesEvent::Machines(vec![update("0.9.0", None)]));
+        cx.run_until_parked();
+        (adapter, store, notices, subscription)
+    }
+
+    /// Two confirmations of a Restart, open on two surfaces before either was approved: the
+    /// second approval admits nothing and tells its own surface, and each outcome reaches only
+    /// the surface whose request it is, whatever order the outcomes arrive in.
+    #[gpui::test]
+    fn competing_confirmations_run_one_restart_and_route_each_outcome_by_request(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (adapter, store, notices, _subscription) = lifecycle_store(cx);
+        let machine = [2; 32];
+        let restart = || super::super::testing::preview(machine, MachineAction::Restart, 0);
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.execute(restart(), Surface::Settings, cx);
+                store.execute(restart(), Surface::Window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(adapter.executed().len(), 1, "only the first approval runs");
+        let first = adapter.last_request();
+        assert_eq!(notices.borrow().len(), 1);
+        assert_eq!(notices.borrow()[0].surface, Surface::Window);
+        assert_eq!(notices.borrow()[0].outcome, Err(ActionFailure::Busy));
+        assert!(notices.borrow()[0].refused_at_once);
+
+        // A callback of a request that isn't running reaches no surface and ends nothing.
+        adapter.emit(MachineUpdatesEvent::Finished {
+            machine,
+            action: MachineAction::Restart,
+            outcome: Err(ActionFailure::Unconfirmed),
+            operation: None,
+            request: Some(first + 1),
+        });
+        cx.run_until_parked();
+        assert_eq!(notices.borrow().len(), 1);
+        assert_eq!(cx.read(|cx| store.read(cx).approved().len()), 1);
+
+        adapter.emit(MachineUpdatesEvent::Finished {
+            machine,
+            action: MachineAction::Restart,
+            outcome: Ok(()),
+            operation: None,
+            request: Some(first),
+        });
+        cx.run_until_parked();
+        assert_eq!(notices.borrow().len(), 2);
+        assert_eq!(notices.borrow()[1].surface, Surface::Settings);
+        assert_eq!(notices.borrow()[1].outcome, Ok(()));
+        assert!(cx.read(|cx| store.read(cx).approved().is_empty()));
+
+        // Once it finished, another surface's approval runs.
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.execute(restart(), Surface::Window, cx)
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(adapter.executed().len(), 2);
+    }
+
+    /// A preview's wait ends with its preview, however the preview ends, and an approved Stop
+    /// shows only its own wait: once the Core admitted it, Stopping shows even while another
+    /// request still waits.
+    #[gpui::test]
+    fn each_wait_belongs_to_its_request_and_ends_with_it(cx: &mut gpui::TestAppContext) {
+        let (adapter, store, _notices, _subscription) = lifecycle_store(cx);
+        let machine = [2; 32];
+        adapter.hold_previews();
+        let waits = |request, waiting| MachineUpdatesEvent::Waiting {
+            machine,
+            action: MachineAction::Stop,
+            request,
+            waiting,
+        };
+        for answer in [
+            Ok(super::super::testing::preview(
+                machine,
+                MachineAction::Stop,
+                0,
+            )),
+            Err(ActionFailure::Unreachable),
+        ] {
+            let prepared = cx.update(|cx| {
+                store.update(cx, |store, cx| {
+                    store.prepare(
+                        &[(machine, MachineAction::Stop)],
+                        false,
+                        None,
+                        Surface::Settings,
+                        cx,
+                    )
+                })
+            });
+            adapter.emit(waits(adapter.last_request(), true));
+            cx.run_until_parked();
+            assert!(cx.read(|cx| store.read(cx).waiting(machine).is_some()));
+            adapter.answer_preview(move |_, _| answer);
+            cx.run_until_parked();
+            assert!(
+                cx.read(|cx| store.read(cx).waiting(machine).is_none()),
+                "an answered preview waits for nothing"
+            );
+            drop(prepared);
+        }
+
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.execute(
+                    super::super::testing::preview(machine, MachineAction::Stop, 0),
+                    Surface::Settings,
+                    cx,
+                );
+            });
+        });
+        let executed = adapter.last_request();
+        let approved = |cx: &mut gpui::TestAppContext| {
+            cx.read(|cx| store.read(cx).approved())
+                .first()
+                .map(|(_, approved)| approved.waiting)
+        };
+        // Another surface's preview waits behind the same Core operation.
+        adapter.emit(waits(executed + 100, true));
+        cx.run_until_parked();
+        assert_eq!(
+            approved(cx),
+            Some(false),
+            "another request's wait isn't this one's"
+        );
+        adapter.emit(waits(executed, true));
+        cx.run_until_parked();
+        assert_eq!(approved(cx), Some(true));
+        // The Core admitted the Stop.
+        adapter.emit(waits(executed, false));
+        cx.run_until_parked();
+        assert_eq!(
+            approved(cx),
+            Some(false),
+            "Stopping shows once the Core admitted it"
+        );
     }
 }

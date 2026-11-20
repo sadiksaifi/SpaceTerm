@@ -193,9 +193,8 @@ pub(super) fn caption(
         None => {}
     }
     match availability {
-        Availability::Unknown | Availability::Offline => {
-            guidance(format!("Connect to {core} to end its Terminal Sessions."))
-        }
+        // The row's dimmed button already says End All waits for the server.
+        Availability::Unknown | Availability::Offline => None,
         Availability::Pending => guidance(format!(
             "End All Sessions is available once {core} answers an earlier change."
         )),

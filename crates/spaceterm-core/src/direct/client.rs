@@ -302,11 +302,9 @@ impl DirectConnection {
     pub(crate) fn paired(&self) -> &PairedDevice {
         &self.paired
     }
-    /// Admits this client on the authenticated connection and returns its carrier.
-    #[cfg_attr(
-        not(any(feature = "client", test)),
-        allow(dead_code, reason = "the desktop admits and carries the connection")
-    )]
+    /// Admits this client on the authenticated connection within the admission budget and
+    /// returns its carrier.
+    #[cfg(test)]
     pub(crate) fn admit<'a>(
         self,
         client: impl Into<crate::protocol::Caller<'a>>,
@@ -317,25 +315,66 @@ impl DirectConnection {
         ),
         crate::protocol::Refused,
     > {
+        self.admit_by(
+            client,
+            std::time::Instant::now() + crate::protocol::CONNECTION_LIMIT,
+        )
+    }
+    /// Admits this client on the authenticated connection and returns its carrier. No admission
+    /// frame is sent or waited for after `deadline`.
+    #[cfg_attr(
+        not(any(feature = "client", test)),
+        allow(dead_code, reason = "the desktop admits and carries the connection")
+    )]
+    pub(crate) fn admit_by<'a>(
+        self,
+        client: impl Into<crate::protocol::Caller<'a>>,
+        deadline: std::time::Instant,
+    ) -> Result<
+        (
+            Box<dyn crate::connection::carrier::Carrier>,
+            crate::protocol::Negotiated,
+        ),
+        crate::protocol::Refused,
+    > {
         let mut stream = *self.stream;
-        let negotiated = crate::protocol::admit_transport(
+        let negotiated = crate::protocol::admit_transport_by(
             &mut stream,
             client,
             &self.paired.pin.core,
             &self.paired.pin.build,
+            deadline,
         )?;
         Ok((Box::new(stream.into_carrier()), negotiated))
     }
     /// Admits this client to the service lane on the authenticated connection, which needs a
     /// shared service major whatever the work majors, and returns the stream the lane's JSON
     /// frames travel on.
+    #[cfg(test)]
+    pub(crate) fn admit_service_lane(
+        self,
+        caller: crate::protocol::Caller<'_>,
+    ) -> Result<
+        (
+            Box<crate::connection::quic::QuicStream>,
+            crate::protocol::Negotiated,
+        ),
+        crate::protocol::Refused,
+    > {
+        self.admit_service_lane_by(
+            caller,
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        )
+    }
+    /// [`Self::admit_service_lane`] that sends no admission frame once `deadline` has passed.
     #[cfg_attr(
         not(any(feature = "client", test)),
         allow(dead_code, reason = "the CLI administers paired servers over the lane")
     )]
-    pub(crate) fn admit_service_lane(
+    pub(crate) fn admit_service_lane_by(
         self,
         caller: crate::protocol::Caller<'_>,
+        deadline: std::time::Instant,
     ) -> Result<
         (
             Box<crate::connection::quic::QuicStream>,
@@ -349,6 +388,7 @@ impl DirectConnection {
             caller,
             &self.paired.pin.core,
             &self.paired.pin.build,
+            deadline,
         )?;
         Ok((stream, negotiated))
     }

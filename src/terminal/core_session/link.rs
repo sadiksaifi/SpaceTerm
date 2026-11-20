@@ -1363,6 +1363,7 @@ impl PaneLink {
             // Claims need this Pane's attachment permit.
             Request::SelectPane { .. }
             | Request::StartRestored { .. }
+            | Request::PrepareRestored { .. }
             | Request::TakeOver { .. }
             | Request::RepairDirectory { .. }
             | Request::ClaimPane { .. } => Err(CoreError::Unsupported),
@@ -1669,6 +1670,18 @@ pub(super) fn present(
                 .scrollback
                 .attach(lease.session);
             let mut demand = inbox::Demand::new(state.presentable.load(Ordering::Acquire), max_hz);
+            // A shell this client just started keeps its surface quiet until the Session shows
+            // its first prompt, names itself or takes the person's input, or until the limit,
+            // so a shell without prompt markers is still shown.
+            let mut quiet = state
+                .shell_starting
+                .load(Ordering::Acquire)
+                .then(|| std::time::Instant::now() + STARTUP_QUIET_LIMIT);
+            state.set_startup_quiet(quiet.is_some());
+            // Only the person's own input ends the quiet. This worker's focus report and
+            // pointer, wheel and resize requests take Input serials too, but say nothing about
+            // whether the person started working in the Pane.
+            let mut typed = false;
             let attached = (|| loop {
                 if !alive.load(Ordering::Acquire) {
                     return Ok(());
@@ -1690,6 +1703,7 @@ pub(super) fn present(
                         let (before, sent_at) =
                             (connection.last_input(), std::time::Instant::now());
                         let reply = send(&presenter, &alive, &mut connection, request)?;
+                        typed |= persons_input(request);
                         let serial =
                             Some(connection.last_input()).filter(|serial| *serial > before);
                         predictor.sent(request, serial, sent_at);
@@ -1862,9 +1876,32 @@ pub(super) fn present(
                         send(&presenter, &alive, &mut connection, request)
                     })?;
                 }
+                // The quiet ends on the Session's own evidence, the Terminal Metadata SpaceTerm
+                // Core publishes for exactly this Session, so a reading the view coalesces never
+                // skips it.
+                if let Some(until) = quiet {
+                    let answered = state.session_ready(pane_id, lease.session);
+                    if typed || answered || std::time::Instant::now() >= until {
+                        quiet = None;
+                        state.set_startup_quiet(false);
+                        if let Some((_, mapping)) = &mut latest_screen {
+                            generation = generation.next();
+                            *mapping = show(
+                                &state,
+                                (&events, &semantics),
+                                &mut semantic,
+                                None,
+                                (epoch, generation, *mapping),
+                                paste_unconfirmed,
+                            )?;
+                        }
+                    }
+                }
                 // Graphics transfers continue one chunk per turn without waiting.
                 let mut busy = more_input;
-                let mut deadline = None;
+                // The published metadata is read again shortly while the quiet lasts.
+                let mut deadline =
+                    quiet.map(|until| until.min(std::time::Instant::now() + STARTUP_QUIET_POLL));
                 if ready && let Some((_, mapping)) = &mut latest_screen {
                     // Pages decode outside the reading lock, which the main thread takes for
                     // every key, pointer and wheel event; the lock is held only to add the rows.
@@ -1906,7 +1943,9 @@ pub(super) fn present(
                             paste_unconfirmed,
                         )?;
                     }
-                    deadline = turn.deadline;
+                    // The quiet keeps reading the published metadata and ends at its limit even
+                    // while nothing else is due.
+                    deadline = [deadline, turn.deadline].into_iter().flatten().min();
                     let requests = state
                         .reading
                         .lock()
@@ -1999,6 +2038,8 @@ pub(super) fn present(
                     state.wake.wait(deadline);
                 }
             })();
+            // Whatever ended the attachment, the next one shows what it receives.
+            state.set_startup_quiet(false);
             if alive.load(Ordering::Acquire) {
                 return attached;
             }
@@ -2025,6 +2066,11 @@ pub(super) fn present(
                     && std::mem::take(&mut attached_session)
                 {
                     CoreError::StaleControl
+                } else if error == CoreError::SessionUnavailable && state.listed(pane_id) {
+                    // A Pane the route's live inventory still lists was not removed. A Core
+                    // that is being replaced can answer this way, so the worker reconnects
+                    // within its bounded recovery.
+                    CoreError::Protocol
                 } else {
                     error
                 };
@@ -2067,6 +2113,13 @@ pub(super) fn present(
         }
     }
 }
+
+/// How long a shell this client started may stay quiet without reaching its first prompt,
+/// naming itself or taking input.
+pub(super) const STARTUP_QUIET_LIMIT: Duration = Duration::from_secs(8);
+
+/// How often a quiet shell's published Terminal Metadata is read again.
+const STARTUP_QUIET_POLL: Duration = Duration::from_millis(100);
 
 /// Presents this client's view as `generation`, of `frame` when one arrived, then publishes the
 /// semantic document bound to that presentation and view. Returns the frame's mapping.
@@ -2162,6 +2215,22 @@ pub(super) fn encode_key(k: KeyInput) -> pane::Key {
         modifiers: encode_modifiers(k.modifiers),
         consumed: encode_modifiers(k.consumed_modifiers),
         option_as_alt: k.option_as_alt == OptionAsAltPolicy::Both,
+    }
+}
+
+/// Whether `request` carries the person's own input to the Session: keys, text they paste or
+/// copy-or-forward. A focus report, pointer, wheel and resize requests do not.
+pub(super) fn persons_input(request: &Request) -> bool {
+    match request {
+        Request::Keys { keys, .. } => !keys.is_empty(),
+        Request::Input { input, .. } => matches!(
+            input,
+            pane::InteractiveInput::Key(_)
+                | pane::InteractiveInput::Paste { .. }
+                | pane::InteractiveInput::CopyOrForward { .. }
+                | pane::InteractiveInput::ResolvePaste { confirm: true, .. }
+        ),
+        _ => false,
     }
 }
 

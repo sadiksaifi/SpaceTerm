@@ -328,7 +328,10 @@ fn a_queued_direct_close_keeps_its_original_control_fence_and_requires_review_af
             .unwrap()
             .direct_close(|_, _| true)
             .unwrap();
-        assert_eq!(model.close(approval, local), WorkspaceSubmission::Submitted);
+        assert_eq!(
+            model.close(approval, local, CloseConsent::Direct),
+            WorkspaceSubmission::Submitted
+        );
         assert_eq!(
             core.dispatched().len(),
             2,
@@ -370,7 +373,10 @@ fn a_queued_direct_close_keeps_its_original_control_fence_and_requires_review_af
             "stale consent never submits a replacement"
         );
         let explicit = model.close_approval(target).unwrap();
-        assert_eq!(model.close(explicit, local), WorkspaceSubmission::Submitted);
+        assert_eq!(
+            model.close(explicit, local, CloseConsent::Confirmed),
+            WorkspaceSubmission::Submitted
+        );
         assert!(
             matches!(core.dispatched().last(), Some(Mutation::Close { confirmation, .. })
             if confirmation.own_controls.is_none())
@@ -425,7 +431,8 @@ fn combined_pending_tab_closes_retain_the_workspace_until_the_final_close_is_rev
                 crate::close_confirmation::CloseTarget::Tab {
                     workspace_id: first_workspace_id(),
                     tab_id: TabId::new(index as u64 + 1),
-                }
+                },
+                CloseConsent::Direct,
             ),
             WorkspaceSubmission::Submitted
         );
@@ -1120,7 +1127,8 @@ fn close_own_tab(harness: &WindowHarness, tab_id: TabId, cx: &mut VisualTestCont
             crate::close_confirmation::CloseTarget::Tab {
                 workspace_id: first_workspace_id(),
                 tab_id,
-            }
+            },
+            CloseConsent::Confirmed,
         ),
         WorkspaceSubmission::Submitted
     );
@@ -1276,6 +1284,103 @@ fn optimistic_rapid_tabs_keep_each_start_intent_after_later_navigation(cx: &mut 
     }
     assert_eq!(local_view(&harness, cx), selected);
     assert_eq!(cx.update(|window, cx| window.focused(cx)), focus);
+}
+
+/// After SpaceTerm Core restarts, every restored Pane of the layout waits for a background start
+/// turn. The window gives at most three at once, the visible Pane first, and the rest as turns
+/// finish, whatever the person selects meanwhile.
+#[gpui::test]
+fn background_starts_after_a_restart_take_bounded_turns_visible_first(cx: &mut TestAppContext) {
+    let (harness, cx) = window_harness(cx);
+    for _ in 0..7 {
+        cx.dispatch_action(crate::ui::NewTab);
+    }
+    for _ in 0..7 {
+        harness.core.finish(true, true);
+        project_window(&harness, cx);
+    }
+    cx.dispatch_action(crate::ui::ActivateTab1);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(16));
+    cx.run_until_parked();
+    let panes = harness.panes.opened();
+    assert_eq!(panes.len(), 8);
+    for pane in &panes {
+        pane.admitted();
+        pane.await_turn();
+    }
+    let visible = harness
+        .panes
+        .pane(harness.core.inventory().workspaces[0].tabs[0].root_pane);
+    let turns = |cx: &mut VisualTestContext| {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(16));
+        cx.run_until_parked();
+        panes.iter().filter(|pane| pane.holds_turn()).count()
+    };
+    assert_eq!(turns(cx), 3, "three background starts run at once");
+    assert!(visible.holds_turn(), "the visible Pane goes first");
+
+    // The person moves on while the turns run. Selection starts its own Pane outside the turns.
+    cx.dispatch_action(crate::ui::ActivateTab5);
+    assert_eq!(turns(cx), 3, "a selection never widens the bound");
+    for pane in panes.iter().filter(|pane| pane.holds_turn()) {
+        pane.finish_turn();
+    }
+    assert_eq!(turns(cx), 3, "finished turns pass to the waiting Panes");
+}
+
+/// Retained Panes whose workers stopped reconnecting while SpaceTerm Core was replaced, as
+/// Panes another client created just before the replacement can, still get their background
+/// turns: the window asks each such worker to connect again and gives it a turn within the same
+/// bound of three.
+#[gpui::test]
+fn retained_panes_whose_workers_stopped_still_take_bounded_background_turns(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = window_harness(cx);
+    for _ in 0..4 {
+        cx.dispatch_action(crate::ui::NewTab);
+    }
+    for _ in 0..4 {
+        harness.core.finish(true, true);
+        project_window(&harness, cx);
+    }
+    cx.dispatch_action(crate::ui::ActivateTab1);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(16));
+    cx.run_until_parked();
+    let panes = harness.panes.opened();
+    assert_eq!(panes.len(), 5);
+    for pane in &panes {
+        pane.admitted();
+    }
+    let (parked, waiting) = panes.split_at(2);
+    for pane in parked {
+        pane.park();
+    }
+    for pane in waiting {
+        pane.await_turn();
+    }
+    let turns = |cx: &mut VisualTestContext| {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(16));
+        cx.run_until_parked();
+        panes.iter().filter(|pane| pane.holds_turn()).count()
+    };
+    assert_eq!(turns(cx), 3, "the bound holds");
+    for pane in parked {
+        assert_eq!(pane.rearms(), 1, "each stopped worker connects again once");
+    }
+    let mut started = 0;
+    for _ in 0..3 {
+        for pane in panes.iter().filter(|pane| pane.holds_turn()) {
+            pane.finish_turn();
+            started += 1;
+        }
+        assert!(turns(cx) <= 3);
+    }
+    assert_eq!(started, panes.len(), "every retained Pane got its turn");
 }
 
 #[gpui::test]
@@ -1531,7 +1636,8 @@ fn optimistic_close_hides_before_a_doomed_pane_status_and_restores_the_same_view
                 workspace_id: first_workspace_id(),
                 tab_id: closed_view.0,
                 pane_id: closed_view.1,
-            }
+            },
+            CloseConsent::Confirmed,
         ),
         WorkspaceSubmission::Submitted
     );
@@ -1561,7 +1667,7 @@ fn optimistic_close_hides_before_a_doomed_pane_status_and_restores_the_same_view
         harness.core.finish(true, true).outcome,
         Outcome::StaleConfirmation
     );
-    let focus = cx.update(|window, cx| window.focused(cx));
+    let survivor = cx.update(|window, cx| window.focused(cx));
     project_window(&harness, cx);
     assert_eq!(
         harness.manager.read_with(cx, |manager, cx| manager
@@ -1570,11 +1676,18 @@ fn optimistic_close_hides_before_a_doomed_pane_status_and_restores_the_same_view
             .pane_count()),
         2
     );
-    assert_eq!(
-        cx.update(|window, cx| window.focused(cx)),
-        focus,
-        "rollback never steals the survivor's keyboard"
-    );
+    // The close moved the keyboard to the survivor, and nobody moved it since, so the refusal
+    // returns it to the Pane the person asked to close, whose takeover screen takes it.
+    assert_eq!(local_view(&harness, cx), closed_view);
+    assert_ne!(cx.update(|window, cx| window.focused(cx)), survivor);
+    assert!(cx.update(|window, cx| {
+        harness
+            .manager
+            .read(cx)
+            .active_tab_view()
+            .read(cx)
+            .holds_keyboard(window, cx)
+    }));
     // The restored Pane retains its original local identity and layout, not a replacement Pane.
     assert!(
         cx.debug_bounds(format!("pane-surface-{}", closed_view.1.get()).leak())
@@ -1743,7 +1856,8 @@ fn optimistic_workspace_close_keeps_its_host_through_a_lost_ack() {
     assert_eq!(
         model.close(
             approval,
-            crate::close_confirmation::CloseTarget::KillWorkspace(first_workspace_id())
+            crate::close_confirmation::CloseTarget::KillWorkspace(first_workspace_id()),
+            CloseConsent::Confirmed,
         ),
         WorkspaceSubmission::Submitted
     );
@@ -1776,6 +1890,7 @@ fn a_committed_original_keeps_resolving_without_a_workspace_window(cx: &mut Test
     model.close(
         approval,
         crate::close_confirmation::CloseTarget::KillWorkspace(first_workspace_id()),
+        CloseConsent::Confirmed,
     );
     core.finish(false, true);
     model.poll();
@@ -1827,6 +1942,7 @@ fn successive_refused_tab_closes_restore_the_original_order(cx: &mut TestAppCont
                     workspace_id: first_workspace_id(),
                     tab_id: original[index],
                 },
+                CloseConsent::Confirmed,
             ),
             WorkspaceSubmission::Submitted
         );
@@ -1874,7 +1990,8 @@ fn optimistic_tab_close_ack_keeps_later_find_focus(cx: &mut TestAppContext) {
             crate::close_confirmation::CloseTarget::Tab {
                 workspace_id: first_workspace_id(),
                 tab_id: closed.0,
-            }
+            },
+            CloseConsent::Confirmed,
         ),
         WorkspaceSubmission::Submitted
     );
@@ -2067,4 +2184,72 @@ fn optimistic_field_presentation_never_renews_an_unseen_conflicting_version() {
         assert_eq!(conflict.authoritative.as_ref(), "Their name");
     }
     assert!(model.take_conflict().is_none());
+}
+
+/// The person opens a Tab and splits it, and asks for another Tab after the server answered the
+/// first but before this window polled that answer. The second request presents the first Tab's
+/// confirmed Pane at once, while the account-local opener's attachment catalog does not list it
+/// yet and opens no subscription. That Pane still binds to its server identity once it can, and
+/// starts its shell, so a rapid burst never leaves a Pane without a shell.
+#[gpui::test]
+fn a_confirmed_tab_whose_subscription_could_not_open_yet_still_binds_and_starts(
+    cx: &mut TestAppContext,
+) {
+    confirmed_panes_bind_once_their_subscriptions_open(false, cx);
+}
+
+/// [`a_confirmed_tab_whose_subscription_could_not_open_yet_still_binds_and_starts`], for New Tab
+/// then Split Right.
+#[gpui::test]
+fn a_confirmed_split_whose_subscription_could_not_open_yet_still_binds_and_starts(
+    cx: &mut TestAppContext,
+) {
+    confirmed_panes_bind_once_their_subscriptions_open(true, cx);
+}
+
+fn confirmed_panes_bind_once_their_subscriptions_open(split: bool, cx: &mut TestAppContext) {
+    {
+        let (harness, cx) = window_harness(cx);
+        cx.dispatch_action(crate::ui::NewTab);
+        if split {
+            cx.dispatch_action(crate::ui::SplitRight);
+        }
+        harness.core.finish(true, true);
+        let created = harness.core.inventory().workspaces[0]
+            .tabs
+            .last()
+            .unwrap()
+            .root_pane;
+        harness.panes.refuse(created);
+        // The next request presents what the server answered before any poll.
+        cx.dispatch_action(crate::ui::NewTab);
+        if split {
+            cx.dispatch_action(crate::ui::SplitRight);
+        }
+        cx.run_until_parked();
+        harness.panes.allow(created);
+        for _ in 0..8 {
+            project_window(&harness, cx);
+            if harness.core.0.borrow().original.is_some() {
+                harness.core.finish(true, true);
+            }
+        }
+        let inventory = harness.core.inventory();
+        let panes: Vec<Id> = inventory.workspaces[0].tabs[1..]
+            .iter()
+            .flat_map(|tab| tab.panes.iter().map(|pane| pane.id))
+            .collect();
+        assert_eq!(panes.len(), if split { 4 } else { 2 });
+        for pane in panes {
+            assert!(
+                harness.panes.was_opened(pane),
+                "split={split}: every confirmed Pane gets its subscription"
+            );
+            assert_eq!(
+                harness.panes.pane(pane).created_starts(),
+                1,
+                "split={split}: every created Pane starts its shell once"
+            );
+        }
+    }
 }

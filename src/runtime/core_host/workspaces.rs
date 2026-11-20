@@ -10,6 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 #[cfg(test)]
+#[path = "workspaces/close_activity_tests.rs"]
+mod close_activity_tests;
+#[cfg(test)]
 #[path = "workspaces/close_control_tests.rs"]
 mod close_control_tests;
 #[cfg(test)]
@@ -17,6 +20,9 @@ mod close_control_tests;
 mod create_control_tests;
 mod edits;
 mod journal;
+#[cfg(test)]
+#[path = "workspaces/prepare_tests.rs"]
+mod prepare_tests;
 mod publication;
 mod runs;
 #[cfg(test)]
@@ -559,6 +565,31 @@ impl WorkspaceHost {
         }
         Ok(reply)
     }
+    /// Starts the first Session of a retained Pane in the background, with no client holding
+    /// its control, so a client prepares the Panes the person is likely to use without taking
+    /// them (ADR 0022). Only an unclaimed Pane with nothing running and no ended Session in this
+    /// run starts; anything else is observed as a plain selection observes it. A Pane another
+    /// client created stays theirs to start.
+    fn prepare(
+        &mut self,
+        device: Id,
+        connection: Id,
+        id: Id,
+        size: PaneSize,
+        style: Option<PresentationStyle>,
+    ) -> Result<Reply, Refusal> {
+        size.validate().map_err(|_| Refusal::Unsupported)?;
+        let creator = self.state.pane(id).ok_or(Refusal::Missing)?.2.creator;
+        let host = self.pane_host(id)?;
+        if host.pane.is_some()
+            || host.dormant.is_some()
+            || creator.is_some_and(|owner| owner != device)
+        {
+            return self.select(device, connection, id, Selection::Observe, size, style);
+        }
+        let lease = host.start_unclaimed(connection, size, style)?;
+        Ok(host.takeover(lease.into(), None, device))
+    }
     fn repair_directory(
         &mut self,
         device: Id,
@@ -631,6 +662,24 @@ impl WorkspaceHost {
         }
         let mut next = self.state.clone();
         next.inventory = self.inventory();
+        // A close that asks nobody first reads each exact Session's activity now, after every
+        // input this host accepted before it.
+        if let Mutation::Close { confirmation, .. } = &mutation
+            && confirmation.own_controls.is_some()
+        {
+            let working = confirmation
+                .panes
+                .iter()
+                .filter_map(|pane| {
+                    let session = pane.session?;
+                    let host = self.panes.get(&pane.id)?;
+                    (host.live_session() == Some(session) && host.running_work()).then_some(session)
+                })
+                .collect();
+            next.set_working(working);
+        } else {
+            next.set_working(Default::default());
+        }
         let mut directory = Ok(self.prototype.directory.clone());
         if let Mutation::SplitPane {
             workspace,
@@ -837,6 +886,12 @@ impl WorkspaceHost {
                             return Err(Refusal::Stale);
                         }
                         self.select(device, connection, id, Selection::Start, size, style)?
+                    }
+                    AttachmentClaim::Prepare { core } => {
+                        if core != self.prototype.boot {
+                            return Err(Refusal::Stale);
+                        }
+                        self.prepare(device, connection, id, size, style)?
                     }
                     AttachmentClaim::TakeOver { target } => {
                         let host = self.pane_host(id)?;

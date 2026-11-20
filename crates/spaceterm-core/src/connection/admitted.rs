@@ -95,6 +95,15 @@ impl AdmittedConnection {
         Ok(match message {
             ClientMessage::Request(request) => {
                 self.outbox.begin(request.id)?;
+                // Work 1.4 adds the background start. A connection whose admission selected an
+                // older work minor never carries it, so it is refused before its channel or any
+                // attachment changes, and the connection continues.
+                if prepares(&request.operation)
+                    && self.outbox.work().minor < crate::pane::MINOR_PREPARE
+                {
+                    self.outbox.reply(request.id, Err(Refusal::Unsupported))?;
+                    return Ok(None);
+                }
                 if let Some(channel) = introduced(&request.operation) {
                     if channel.0 <= self.highest_channel {
                         return Err(Fatal::ProtocolViolation);
@@ -270,6 +279,16 @@ fn introduced(operation: &Operation) -> Option<Channel> {
         Operation::Observe { channel, .. } => Some(*channel),
         _ => None,
     }
+}
+
+fn prepares(operation: &Operation) -> bool {
+    matches!(
+        operation,
+        Operation::Claim(crate::protocol::Claim {
+            claim: crate::pane::AttachmentClaim::Prepare { .. },
+            ..
+        })
+    )
 }
 
 fn administration(operation: &Operation) -> bool {
