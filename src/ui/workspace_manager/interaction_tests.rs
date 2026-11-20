@@ -1079,13 +1079,13 @@ fn a_changed_control_grant_refuses_the_original_direct_close_without_renewing_it
     assert_eq!(harness.closes(), original);
 }
 
-/// The server refuses this client's own direct close because a command started in its
-/// unchanged Pane, as after Enter and Close in quick succession. The notice says so instead of
-/// blaming another client, and Review stays the one way forward.
+/// The server refuses this client's own direct close for work in its unchanged Pane, as after
+/// Enter and Close in quick succession, or after a line in a shell without shell integration
+/// that nothing proved finished, such as a quiet `/bin/sleep` that already ended or a raw
+/// `read -k` after it. The client cannot tell which, so it claims no running command and blames
+/// no other client: the neutral confirmation opens, and only its answer closes anything.
 #[gpui::test]
-fn an_own_close_refused_for_running_work_names_the_command_not_another_client(
-    cx: &mut TestAppContext,
-) {
+fn an_own_close_refused_for_work_asks_the_neutral_confirmation(cx: &mut TestAppContext) {
     use spaceterm_core::hierarchy::{ConfirmedControl, Mutation, Outcome};
     let (harness, cx) = close_harness(cx);
     let mut idle = close_inventory(
@@ -1105,17 +1105,34 @@ fn an_own_close_refused_for_running_work_names_the_command_not_another_client(
     cx.dispatch_action(crate::ui::CloseTab);
     redraw(cx);
     let original = harness.closes();
-    assert!(matches!(&original[..], [Mutation::Close { .. }]));
+    assert!(matches!(&original[..], [Mutation::Close { confirmation, .. }]
+        if confirmation.own_controls.is_some()));
+    harness.edits.answer(Outcome::StaleConfirmation);
+    harness.publish(idle.clone(), cx);
+    redraw(cx);
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+    assert!(tree.find("Close Tab?").is_some());
+    assert!(tree.find("Command Running in Tab").is_none());
+    assert!(tree.find("Tab Changed on Another Client").is_none());
+    assert!(cx.debug_bounds("modal-action-close-confirm").is_some());
+    assert_eq!(harness.closes(), original, "nothing closes before an answer");
+
+    // Cancel leaves the work alone, and a later Close asks again only if the server refuses.
+    click("modal-action-close-cancel", cx);
+    harness.sync(cx);
+    assert_eq!(harness.closes(), original, "Cancel closes nothing");
+
+    cx.dispatch_action(crate::ui::CloseTab);
+    redraw(cx);
     harness.edits.answer(Outcome::StaleConfirmation);
     harness.publish(idle, cx);
-    let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
-    assert!(tree.find("Command Running in Tab").is_some());
-    assert!(tree.find("Tab Changed on Another Client").is_none());
-    assert!(cx.debug_bounds("modal-action-close-review").is_some());
-    assert_eq!(
-        harness.closes(),
-        original,
-        "nothing is closed without Review"
+    redraw(cx);
+    click("modal-action-close-confirm", cx);
+    let closes = harness.closes();
+    assert!(
+        matches!(closes.last(), Some(Mutation::Close { confirmation, .. })
+            if confirmation.own_controls.is_none()),
+        "the person's answer sends a reviewed close: {closes:?}"
     );
 }
 

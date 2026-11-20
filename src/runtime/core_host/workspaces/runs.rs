@@ -178,12 +178,6 @@ impl WorkspaceHost {
     pub(in crate::runtime::core_host) fn running_lease(&self, pane: Id) -> Option<Lease> {
         self.panes.get(&pane)?.pane.as_ref().map(|pane| pane.lease)
     }
-    /// Whether a direct close of the Pane would now ask first, as Close reads it.
-    pub(in crate::runtime::core_host) fn running_work(&self, pane: Id) -> bool {
-        self.panes
-            .get(&pane)
-            .is_some_and(CorePaneHost::running_work)
-    }
 }
 
 #[cfg(test)]

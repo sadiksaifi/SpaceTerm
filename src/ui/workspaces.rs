@@ -27,7 +27,7 @@ pub(crate) use core_workspaces::{
     WorkspaceEditability, WorkspaceEdits, WorkspaceFacts, WorkspaceHost, WorkspacePaneOpener,
     WorkspacePaneSessions, WorkspacePaneSubscription, WorkspacePanes, WorkspacePlan,
     WorkspaceRefusal, WorkspaceRefusalReason, WorkspaceRemoval, WorkspaceRowStatus,
-    WorkspaceSubmission, WorkspaceTabs, Workspaces, close_changed_title, close_working_title,
+    WorkspaceSubmission, WorkspaceTabs, Workspaces, close_changed_title,
     presenting_window,
 };
 #[cfg(test)]
@@ -332,7 +332,7 @@ mod core_workspaces {
         }
 
         /// Leaves the outcomes unseen for the next reading.
-        fn release(&self) {
+        pub(crate) fn release(&self) {
             let forgotten = self.forgotten.map(|_| FORGOTTEN);
             for sequence in self.sequences.iter().copied().chain(forgotten) {
                 if self.handed.borrow_mut().remove(&sequence) {
@@ -3637,17 +3637,6 @@ mod core_workspaces {
             MachineCloseTarget::Tab { .. } => "Tab Changed on Another Client",
             MachineCloseTarget::Worktree { .. } => "Tabs Changed on Another Client",
             MachineCloseTarget::KillWorkspace { .. } => "Workspace Changed on Another Client",
-        }
-    }
-
-    /// The title of the notice that says this client's own close ended nothing because a
-    /// command is running in what it would close.
-    pub(crate) const fn close_working_title(target: MachineCloseTarget) -> &'static str {
-        match target {
-            MachineCloseTarget::Pane { .. } => "Command Running in Pane",
-            MachineCloseTarget::Tab { .. } => "Command Running in Tab",
-            MachineCloseTarget::Worktree { .. } => "Commands Running in Tabs",
-            MachineCloseTarget::KillWorkspace { .. } => "Command Running in Workspace",
         }
     }
 

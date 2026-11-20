@@ -583,19 +583,6 @@ impl SessionProbe for ShellSession {
         Ok(foreground == self.session.leader.process)
     }
 
-    fn line_editor(&self) -> io::Result<bool> {
-        let descriptor = self
-            .foreground
-            .upgrade()
-            .ok_or_else(|| io::Error::other("the PTY line mode is unavailable"))?;
-        // The shell holds the foreground on both sides of the mode read, so the mode is its own.
-        if !self.shell_foreground()? {
-            return Ok(false);
-        }
-        let canonical = read_termios(descriptor.as_raw_fd())?.c_lflag & libc::ICANON != 0;
-        Ok(!canonical && self.shell_foreground()?)
-    }
-
     /// Reads every visible process exactly, unlike cleanup's best-effort enumeration: a
     /// process that could not be read is an error, never a process that is not there.
     fn others(&self) -> io::Result<bool> {

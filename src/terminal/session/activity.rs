@@ -30,14 +30,6 @@ pub(super) struct ActivityState {
 /// shell, as `sleep 3; read answer` does. That return answers only the lines the program read
 /// itself. Output alone answers nothing, since the shell itself echoes and ends the line before
 /// the program it runs takes the foreground.
-///
-/// A shell that draws no prompt of its own, as without shell integration, never answers a line it
-/// reads. Its oldest line is answered instead when it was typed at the shell's line editor, a
-/// program took the foreground while it was the oldest, and a fresh read then finds the shell's
-/// line editor waiting again with no other process. The line editor waits only once the shell has
-/// finished the line, which a builtin after the program, as in `sleep 3; read answer`, has not.
-/// Each completion answers only the oldest line, since a line typed ahead of the program is read
-/// by that same line editor and may run a builtin of its own.
 #[derive(Default)]
 struct Submissions {
     accepted: u64,
@@ -47,8 +39,6 @@ struct Submissions {
     awaiting: std::collections::VecDeque<Line>,
     /// A program other than the shell owned the foreground after the last written line.
     started: bool,
-    /// The most fresh prompts of its own the owning shell has drawn.
-    prompts: u64,
 }
 
 /// Who reads a written line, by who held the PTY when the PTY accepted it.
@@ -66,16 +56,9 @@ pub(crate) enum Reader {
 }
 
 struct Line {
-    /// Which written line it is, counting from one.
-    number: u64,
     /// The count of fresh prompts the owning shell must have drawn before one answers it. Only a
     /// line the shell may read has one.
     needs: Option<u64>,
-    /// The owning shell's line editor waited for it when the worker wrote it, and the shell had
-    /// drawn no prompt of its own.
-    at_line_editor: bool,
-    /// A program other than the shell owned the foreground while this was the oldest line.
-    ran: bool,
 }
 
 impl Line {
@@ -91,11 +74,9 @@ impl Submissions {
     }
 
     /// The PTY accepted the next line whole while the owning shell was as `progress` says, and
-    /// `reader` was to read it. `line_editor` says the shell's line editor read it.
-    fn written(&mut self, progress: PromptProgress, reader: Reader, line_editor: bool) {
+    /// `reader` was to read it.
+    fn written(&mut self, progress: PromptProgress, reader: Reader) {
         self.written = (self.written + 1).min(self.accepted);
-        self.prompts = self.prompts.max(progress.fresh);
-        let number = self.written;
         // A line typed at a prompt is read there and answered by the next fresh prompt. A line
         // written while the shell runs a command, starts, or runs a program that may leave the
         // line unread is read at a prompt yet to come, which may already wait unread, so only the
@@ -104,12 +85,7 @@ impl Submissions {
         let reads_at = match reader {
             Reader::Program => {
                 self.started = true;
-                self.awaiting.push_back(Line {
-                    number,
-                    needs: None,
-                    at_line_editor: false,
-                    ran: false,
-                });
+                self.awaiting.push_back(Line { needs: None });
                 return;
             }
             Reader::LineProgram => {
@@ -129,15 +105,7 @@ impl Submissions {
             .rev()
             .find_map(|before| before.needs)
             .map_or(reads_at + 1, |before| (reads_at + 1).max(before + 1));
-        self.awaiting.push_back(Line {
-            number,
-            needs: Some(needs),
-            at_line_editor: reader == Reader::Shell
-                && line_editor
-                && progress.zone == ShellZone::Starting
-                && self.prompts == 0,
-            ran: false,
-        });
+        self.awaiting.push_back(Line { needs: Some(needs) });
     }
 
     /// Removes the awaiting lines `answers` says are answered.
@@ -150,32 +118,12 @@ impl Submissions {
 
     /// The owning shell has drawn `fresh` fresh prompts. Each answers at most one line it read.
     fn prompted(&mut self, fresh: u64) {
-        self.prompts = self.prompts.max(fresh);
         self.answer(|line| line.needs.is_some_and(|needs| needs <= fresh));
     }
 
     /// A program other than the shell owns the foreground.
     fn program_running(&mut self) {
         self.started = true;
-        if let Some(oldest) = self.awaiting.front_mut() {
-            oldest.ran = true;
-        }
-    }
-
-    /// The oldest line, by number, that the shell's line editor waiting again would answer: one
-    /// typed at that line editor, a program having run while it was the oldest, from a shell
-    /// that draws no prompt of its own.
-    fn completable(&self) -> Option<u64> {
-        let oldest = self.awaiting.front()?;
-        (self.prompts == 0 && oldest.at_line_editor && oldest.ran).then_some(oldest.number)
-    }
-
-    /// A fresh read found the shell's line editor waiting with no other process after the line
-    /// [`Self::completable`] named. Answers that line alone, if it is still the oldest.
-    fn completed(&mut self, number: u64) {
-        if self.completable() == Some(number) {
-            self.answer(|line| line.number == number);
-        }
     }
 
     /// The program gave the foreground back to the shell. It answers the lines it read itself.
@@ -344,14 +292,8 @@ impl TerminalEventPublisher {
     /// The PTY accepted the next submitted line whole, in the order it was accepted, while the
     /// owning shell was as `progress` says. `canonical` is the PTY's ICANON mode then, which says
     /// whether a program holding the foreground reads keys itself. A mode that can't be read
-    /// leaves who reads the line open. `line_editor` says the owning shell held the foreground
-    /// with ICANON off just before the worker wrote the line, so its line editor read it.
-    pub(super) fn note_written(
-        &self,
-        progress: PromptProgress,
-        canonical: Option<bool>,
-        line_editor: bool,
-    ) {
+    /// leaves who reads the line open.
+    pub(super) fn note_written(&self, progress: PromptProgress, canonical: Option<bool>) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let activity = &mut state.activity;
         let program = activity
@@ -363,7 +305,7 @@ impl TerminalEventPublisher {
             (true, Some(false)) => Reader::Program,
             (true, _) => Reader::LineProgram,
         };
-        activity.submitted.written(progress, reader, line_editor);
+        activity.submitted.written(progress, reader);
     }
 
     /// The worker read output after its writes. A program that took the foreground after a
@@ -380,42 +322,10 @@ impl TerminalEventPublisher {
             .map(|probe| probe.shell_foreground())
         {
             Some(Ok(false)) => activity.submitted.program_running(),
-            Some(Ok(true)) => {
-                if activity.submitted.started {
-                    activity.submitted.returned();
-                }
-                drop(state);
-                self.complete_oldest();
+            Some(Ok(true)) if activity.submitted.started => {
+                activity.submitted.returned();
             }
             _ => {}
-        }
-    }
-
-    /// Answers the oldest line that [`Submissions::completable`] names when a fresh read finds
-    /// the shell's line editor waiting with no other process in its terminal session. A fresh
-    /// read that finds a program in the foreground records that it ran.
-    fn complete_oldest(&self) {
-        let (probe, number) = {
-            let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
-            let activity = &mut state.activity;
-            let Some(probe) = activity.probe.clone() else {
-                return;
-            };
-            if activity.submitted.awaiting.is_empty() {
-                return;
-            }
-            if matches!(probe.shell_foreground(), Ok(false)) {
-                activity.submitted.program_running();
-                return;
-            }
-            let Some(number) = activity.submitted.completable() else {
-                return;
-            };
-            (probe, number)
-        };
-        if matches!(probe.line_editor(), Ok(true)) && matches!(probe.others(), Ok(false)) {
-            let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
-            state.activity.submitted.completed(number);
         }
     }
 
@@ -424,7 +334,6 @@ impl TerminalEventPublisher {
     /// in its terminal session, or a submitted line that nothing answered yet. Facts it cannot
     /// read verify nothing, so a shell that is starting or waits at its prompt closes directly.
     pub(super) fn running_work(&self) -> bool {
-        self.complete_oldest();
         let (probe, submitted, stopped) = {
             let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
             (

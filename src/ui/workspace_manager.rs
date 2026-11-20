@@ -295,6 +295,10 @@ pub(crate) struct WorkspaceManager {
     /// A close waiting for a shell its target is still starting, and the close a wait that ran
     /// out lets through to review.
     close_start: CloseStartWait,
+    /// Set while a request follows the server's refusal of this client's own direct close for
+    /// work in its unchanged Panes. The request asks for confirmation instead of closing
+    /// directly, and the confirmation presents the refusal's notice, if any.
+    close_review: Option<Option<super::workspaces::OutcomeNotice>>,
     /// Reads every server again once the window's modal closes, while a reading waits on it.
     modal_reread: Option<gpui::Subscription>,
     sidebar_worktrees: worktrees::SidebarWorktrees,
@@ -444,6 +448,7 @@ impl WorkspaceManager {
             close_confirmation: CloseConfirmation::default(),
             close_keyboard: WorkspaceCloseKeyboard::default(),
             close_start: CloseStartWait::default(),
+            close_review: None,
             modal_reread: None,
             sidebar_worktrees: worktrees::SidebarWorktrees::default(),
             workspace_repositories: workspace_repositories::WorkspaceRepositories::default(),
@@ -3657,7 +3662,8 @@ impl WorkspaceManager {
             self.wait_for_starting_shell(target, window, cx);
             return true;
         }
-        let direct = approval.direct_close(|pane, live_session| {
+        // A close the server refused for work in this client's own Panes asks the person.
+        let direct = self.close_review.is_none().then(|| approval.direct_close(|pane, live_session| {
             self.workspaces
                 .workspace(workspace_id)
                 .is_some_and(|entry| {
@@ -3666,7 +3672,7 @@ impl WorkspaceManager {
                         .read(cx)
                         .pane_closes_directly(pane, live_session, cx)
                 })
-        });
+        })).flatten();
         if let Some(approval) = direct {
             use super::workspaces::WorkspaceSubmission;
 
@@ -3724,6 +3730,12 @@ impl WorkspaceManager {
         if let Some(detail) = approval.detail() {
             alert = alert.detail(detail);
         }
+        // The refused close's outcome counts as seen once the person answers this confirmation.
+        let lifecycle = self
+            .close_review
+            .take()
+            .flatten()
+            .map(|notice| notice.lifecycle());
         // A Review opens this beneath the notice's held sidebar rename, which it keeps holding.
         let presented = self.present_keeping_sidebar_rename(
             alert,
@@ -3739,7 +3751,11 @@ impl WorkspaceManager {
                     manager.settle_close(generation, target, confirmed, window, cx);
                 });
             },
-            |_, _| {},
+            move |event, cx| {
+                if let Some(lifecycle) = &lifecycle {
+                    lifecycle(event, cx);
+                }
+            },
             window,
             cx,
         );
@@ -3912,7 +3928,7 @@ impl WorkspaceManager {
             }
             WorkspaceCloseState::Changed => {
                 self.present_close_changed(
-                    (review.approval.changed_title(), false),
+                    review.approval.changed_title(),
                     Some(target),
                     held_keyboard,
                     None,
@@ -3957,7 +3973,7 @@ impl WorkspaceManager {
             }
             _ => {
                 self.present_close_changed(
-                    (review.approval.changed_title(), false),
+                    review.approval.changed_title(),
                     Some(review.target),
                     held_keyboard,
                     None,
@@ -3974,20 +3990,16 @@ impl WorkspaceManager {
     /// keyboard when the person asked, so the approved fresh close moves it as the first would.
     /// Returns whether the alert was admitted. `notice` records the presentation of an unseen
     /// outcome.
-    /// `working` says running work in this client's own unchanged Panes refused the close, rather
-    /// than another client's change.
     fn present_close_changed(
         &mut self,
-        (title, working): (&'static str, bool),
+        title: &'static str,
         target: Option<CloseTarget>,
         held_keyboard: bool,
         notice: Option<&super::workspaces::OutcomeNotice>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let message = if working && target.is_some() {
-            "Nothing was closed. Review the running command before closing."
-        } else if target.is_some() {
+        let message = if target.is_some() {
             "Nothing was closed. Review the updated Terminal Sessions before closing."
         } else {
             "Nothing was closed. Check the Workspace before closing it again."
@@ -4115,13 +4127,27 @@ impl WorkspaceManager {
         let held_keyboard = local
             .and_then(|local| self.workspaces.workspace(close_target_workspace(local)))
             .is_some_and(|entry| entry.payload().read(cx).holds_keyboard(window, cx));
-        // Running work in this client's own unchanged Panes is not another client's change.
-        let title = if working {
-            super::workspaces::close_working_title(machine_target)
-        } else {
-            super::workspaces::close_changed_title(machine_target)
-        };
-        self.present_close_changed((title, working), local, held_keyboard, notice, window, cx)
+        // The server found work in this client's own unchanged Panes, which is not another
+        // client's change. It may be a command it verified running, or a submitted line nothing
+        // proved finished, as a shell without shell integration leaves every line. The client
+        // cannot tell which, so it claims neither and asks the neutral confirmation, which
+        // presents this outcome's notice.
+        if working && let Some(local) = local {
+            let notice = notice.cloned();
+            cx.defer_in(window, move |manager, window, cx| {
+                manager.close_review = Some(notice);
+                manager.close_keyboard.reviewed = Some(held_keyboard);
+                manager.request_close(local, window, cx);
+                manager.close_keyboard.reviewed = None;
+                // A request that opened no confirmation leaves the outcome unseen.
+                if let Some(Some(notice)) = manager.close_review.take() {
+                    notice.release();
+                }
+            });
+            return true;
+        }
+        let title = super::workspaces::close_changed_title(machine_target);
+        self.present_close_changed(title, local, held_keyboard, notice, window, cx)
     }
 
     /// Explains that another client already removed what a close confirmation named.

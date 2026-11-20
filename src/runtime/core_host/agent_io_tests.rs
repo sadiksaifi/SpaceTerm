@@ -88,14 +88,6 @@ fn installed(shell: &str) -> Option<std::path::PathBuf> {
 }
 
 fn integrated_host(shell: &std::path::Path, home: &Home) -> CorePaneHost {
-    host_with(shell, home, ShellIntegrationMode::Automatic)
-}
-
-fn host_with(
-    shell: &std::path::Path,
-    home: &Home,
-    integration: ShellIntegrationMode,
-) -> CorePaneHost {
     let filesystem = local_filesystem();
     let directory = filesystem.validate_directory(&home.0).unwrap();
     let factory = NativeTerminalSessionFactory::new(
@@ -106,7 +98,7 @@ fn host_with(
         ShellLaunchPlanner::new(
             shell.into(),
             crate::platform::launch_host::resource_root(),
-            integration,
+            ShellIntegrationMode::Automatic,
             ShellEnvironment::default(),
             ShellIntegrationPolicy {
                 legacy_bash: false,
@@ -142,22 +134,7 @@ impl Bench {
     }
 
     fn with_home(shell: &std::path::Path, home: Home) -> Self {
-        Self::with_host(integrated_host(shell, &home), home)
-    }
-
-    /// A Pane of `shell` without SpaceTerm shell integration, so it draws no prompt of its own.
-    fn unintegrated(shell: &std::path::Path) -> Self {
-        let home = Home::new();
-        // Zsh offers its new-user setup in a home without startup files.
-        std::fs::write(home.0.join(".zshrc"), "").unwrap();
-        Self::with_host(
-            host_with(shell, &home, ShellIntegrationMode::Disabled),
-            home,
-        )
-    }
-
-    fn with_host(host: CorePaneHost, home: Home) -> Self {
-        let mut binding = WorkspaceHost::new(host);
+        let mut binding = WorkspaceHost::new(integrated_host(shell, &home));
         let workspace = create_workspace(&mut binding, 1);
         let pane = workspace_inventory(&mut binding)
             .workspaces
@@ -480,87 +457,6 @@ fn integrated_shells_run_one_command_and_bind_its_status() {
             bench.run(3, "true"),
             RunReply::Refused(RunRefusal::InputPending),
             "{name}: typed input is never run over"
-        );
-    }
-}
-
-fn enter() -> InputEvent {
-    InputEvent::Key(
-        spaceterm_core::pane::keys::named("Enter")
-            .unwrap()
-            .remove(0),
-    )
-}
-
-impl Bench {
-    /// Whether a direct close of the Pane would ask first, once the worker has drained what the
-    /// shell wrote.
-    fn running_work(&mut self) -> bool {
-        self.pump();
-        self.served.host().running_work(self.pane)
-    }
-
-    /// Waits until a direct close of the Pane stops asking.
-    fn await_idle(&mut self, what: &str) {
-        let deadline = Instant::now() + DEADLINE;
-        while self.running_work() {
-            assert!(
-                Instant::now() < deadline,
-                "{what}: still work; screen: {:?}",
-                self.rows
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-}
-
-/// Without SpaceTerm shell integration the shell draws no prompt of its own. A line typed at its
-/// line editor that runs a program in the foreground stops making Close ask once the program
-/// ended and the line editor waits again. A builtin left running after the program, and a line
-/// queued behind the program, keep it asking.
-#[test]
-#[cfg_attr(
-    not(feature = "native-tests"),
-    ignore = "starts installed shells; run mise run cli:shells:native"
-)]
-fn unintegrated_shells_close_directly_only_after_a_foreground_line_completes() {
-    for name in ["zsh", "bash"] {
-        let Some(shell) = installed(name) else {
-            continue;
-        };
-        let mut bench = Bench::unintegrated(&shell);
-        // The shell's line editor waits before the first line.
-        std::thread::sleep(Duration::from_millis(1000));
-        bench.await_idle(name);
-
-        bench.input(vec![
-            text("/bin/sh -c 'sleep 1; echo do''ne; sleep 1'"),
-            enter(),
-        ]);
-        bench.await_row("done");
-        assert!(bench.running_work(), "{name}: the program runs");
-        bench.await_idle(name);
-
-        // `sleep` returns, then `read` runs in the shell itself.
-        bench.input(vec![text("/bin/sleep 1; read first"), enter()]);
-        std::thread::sleep(Duration::from_millis(2000));
-        assert!(bench.running_work(), "{name}: `read` waits after `sleep`");
-
-        // A fresh shell: `sleep` and `read` both queued before `sleep` takes the foreground.
-        let mut bench = Bench::unintegrated(&shell);
-        std::thread::sleep(Duration::from_millis(1000));
-        bench.await_idle(name);
-        bench.input(vec![
-            text("/bin/sleep 1"),
-            enter(),
-            text("read second"),
-            enter(),
-        ]);
-        std::thread::sleep(Duration::from_millis(2500));
-        assert!(
-            bench.running_work(),
-            "{name}: the queued builtin waits; screen: {:?}",
-            bench.rows
         );
     }
 }

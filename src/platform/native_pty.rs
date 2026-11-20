@@ -166,12 +166,6 @@ pub trait SessionProbe: Send + Sync {
     fn shell_foreground(&self) -> io::Result<bool> {
         Err(io::Error::other("the PTY foreground is unavailable"))
     }
-    /// Reads now whether the shell owns the PTY foreground and reads keys itself, with ICANON
-    /// off, as its own line editor does while it waits for a command line. An unavailable read
-    /// never proves it.
-    fn line_editor(&self) -> io::Result<bool> {
-        Err(io::Error::other("the PTY line mode is unavailable"))
-    }
     /// Whether any process other than the shell runs in its terminal session: a running or
     /// stopped job, a background job, or any other child. An error means it could not be read.
     fn others(&self) -> io::Result<bool>;
