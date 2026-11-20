@@ -274,8 +274,9 @@ pub(crate) struct ParkedPane<T> {
     original: PaneNode,
     remaining: PaneNode,
     was_root: bool,
-    /// The Pane parking focused in its place, when this Pane was the Focused Pane.
-    successor: Option<PaneId>,
+    /// The Pane parking focused in its place, when this Pane was the Focused Pane, with the
+    /// count of explicit Pane selections at that moment.
+    successor: Option<(PaneId, u64)>,
 }
 
 impl<T> ParkedPane<T> {
@@ -290,6 +291,9 @@ pub(crate) struct Tab<T> {
     panes: BTreeMap<PaneId, T>,
     focused_pane_id: PaneId,
     focus_history: Vec<PaneId>,
+    /// How many times a person explicitly selected a Pane, including the Focused Pane itself.
+    /// A Pane parking focuses is an automatic handoff until a person claims it.
+    selections: u64,
     root_pane_id: PaneId,
     zoom_state: ZoomState,
     minimum_pane_size: PaneSize,
@@ -310,6 +314,7 @@ impl<T> Tab<T> {
             panes: BTreeMap::from([(initial_pane_id, create_initial_pane(initial_pane_id))]),
             focused_pane_id: initial_pane_id,
             focus_history: vec![initial_pane_id],
+            selections: 0,
             root_pane_id: initial_pane_id,
             zoom_state: ZoomState::Restored,
             minimum_pane_size,
@@ -419,6 +424,12 @@ impl<T> Tab<T> {
 
         self.set_focused_pane(pane_id);
         Ok(())
+    }
+
+    /// Records that a person explicitly selected a Pane, even the Focused Pane itself. A refused
+    /// close then leaves the focus where the person put it.
+    pub(crate) const fn claim_focused_pane(&mut self) {
+        self.selections = self.selections.wrapping_add(1);
     }
 
     pub(crate) fn focus_pane_in_direction(&mut self, direction: FocusDirection) -> Option<PaneId> {
@@ -777,22 +788,22 @@ impl<T> Tab<T> {
                 original,
                 remaining: self.root.clone(),
                 was_root,
-                successor: was_focused.then_some(self.focused_pane_id),
+                successor: was_focused.then_some((self.focused_pane_id, self.selections)),
             })),
             ClosePaneOutcome::CloseTab { .. } => Ok(None),
         }
     }
 
     /// Returns the Pane to the layout. It takes the focus back when it was the Focused Pane and
-    /// the Pane parking focused in its place still is, so nobody focused another Pane since.
-    /// Returns whether it did.
+    /// the Pane parking focused in its place still is, with no explicit Pane selection since, so
+    /// nobody selected a Pane, not even that one. Returns whether it did.
     pub(crate) fn restore_parked_pane(
         &mut self,
         parked: ParkedPane<T>,
         source: PaneId,
         edge: PaneEdge,
     ) -> Result<bool, PaneError> {
-        let refocus = parked.successor == Some(self.focused_pane_id);
+        let refocus = parked.successor == Some((self.focused_pane_id, self.selections));
         if self.root == parked.remaining {
             self.root = parked.original;
         } else {
@@ -1516,6 +1527,19 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(tab.focused_pane_id(), chosen);
+
+        // A person who selected the Pane parking focused, which is already the Focused Pane,
+        // keeps it.
+        tab.focus_pane(PaneId::new(3)).unwrap();
+        let parked = tab.park_pane(PaneId::new(3)).unwrap().unwrap();
+        let successor = tab.focused_pane_id();
+        tab.claim_focused_pane();
+        assert!(
+            !tab.restore_parked_pane(parked, PaneId::new(1), PaneEdge::Right)
+                .unwrap()
+        );
+        assert_eq!(tab.focused_pane_id(), successor);
+        let chosen = successor;
 
         // An unfocused Pane never takes the focus.
         let parked = tab.park_pane(PaneId::new(3)).unwrap().unwrap();

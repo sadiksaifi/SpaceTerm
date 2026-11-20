@@ -214,6 +214,13 @@ struct NavigationMark {
     within: Option<(u64, crate::domain::TabId, u64)>,
 }
 
+/// The review a refusal of this client's own direct close asks for: the refusal's notice, if
+/// any, and what the refusal proved the close would end, from the reading that carried it.
+struct RefusedCloseReview {
+    notice: Option<super::workspaces::OutcomeNotice>,
+    observed: spaceterm_core::hierarchy::CloseConfirmation,
+}
+
 /// One question to the owning server about the directory a person chose in Open Remote
 /// Directory: which attached Workspace there, if any, is already pinned to it.
 struct CoreDirectoryMatch {
@@ -297,8 +304,9 @@ pub(crate) struct WorkspaceManager {
     close_start: CloseStartWait,
     /// Set while a request follows the server's refusal of this client's own direct close for
     /// work in its unchanged Panes. The request asks for confirmation instead of closing
-    /// directly, and the confirmation presents the refusal's notice, if any.
-    close_review: Option<Option<super::workspaces::OutcomeNotice>>,
+    /// directly, and the confirmation presents the refusal's notice, if any. The confirmation
+    /// presents the refusal only while it ends exactly what the refusal proved.
+    close_review: Option<RefusedCloseReview>,
     /// Reads every server again once the window's modal closes, while a reading waits on it.
     modal_reread: Option<gpui::Subscription>,
     sidebar_worktrees: worktrees::SidebarWorktrees,
@@ -3650,6 +3658,24 @@ impl WorkspaceManager {
                 return true;
             }
         };
+        // A refusal's review covers only what the refusal proved the close would end. A new
+        // Terminal Session in the same Pane, a Pane that joined, or a changed removal is work
+        // the person never asked to close, so the refusal ends as a stale close whose Review
+        // asks again from the person's own request.
+        if let Some(review) = self
+            .close_review
+            .take_if(|review| !approval.ends_exactly(&review.observed))
+        {
+            self.present_close_changed(
+                approval.changed_title(),
+                Some(target),
+                held_keyboard,
+                review.notice.as_ref(),
+                window,
+                cx,
+            );
+            return true;
+        }
         // A Pane whose shell is still starting has no Terminal Session to review yet, and will
         // have one in a moment, which would make any review stale before the person answers.
         // The close waits for the shell to start, fail or end, and then reviews what it ends.
@@ -3740,7 +3766,7 @@ impl WorkspaceManager {
         let lifecycle = self
             .close_review
             .take()
-            .flatten()
+            .and_then(|review| review.notice)
             .map(|notice| notice.lifecycle());
         // A Review opens this beneath the notice's held sidebar rename, which it keeps holding.
         let presented = self.present_keeping_sidebar_rename(
@@ -4124,7 +4150,7 @@ impl WorkspaceManager {
         machine_target: spaceterm_core::hierarchy::CloseTarget,
         local: Option<CloseTarget>,
         notice: Option<&super::workspaces::OutcomeNotice>,
-        working: bool,
+        working: Option<spaceterm_core::hierarchy::CloseConfirmation>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -4136,25 +4162,29 @@ impl WorkspaceManager {
         // presents this outcome's notice. While another confirmation, perhaps another
         // Machine's, holds the window, the refusal stays queued with its exact target, and the
         // reading that follows that modal's close reviews it.
-        if working
+        if working.is_some()
             && local.is_some()
             && (self.close_confirmation.pending().is_some()
                 || spaceterm_ui::window_modal_is_open(window, cx))
         {
             return false;
         }
-        // A modal that held the keyboard as the refusal returned its Tab still owes the keyboard
-        // to that Tab.
+        // A modal that held the keyboard as the refusal returned its Tab or Pane still owes the
+        // keyboard to that Tab or Pane.
         let returned = local.is_some_and(|local| {
-            let (CloseTarget::Tab { tab_id, .. } | CloseTarget::Pane { tab_id, .. }) = local else {
-                return false;
+            let (tab_id, pane_id) = match local {
+                CloseTarget::Tab { tab_id, .. } => (tab_id, None),
+                CloseTarget::Pane {
+                    tab_id, pane_id, ..
+                } => (tab_id, Some(pane_id)),
+                _ => return false,
             };
             self.workspaces
                 .workspace(close_target_workspace(local))
                 .is_some_and(|entry| {
-                    entry
-                        .payload()
-                        .update(cx, |manager, _| manager.take_returned_keyboard(tab_id))
+                    entry.payload().update(cx, |manager, cx| {
+                        manager.take_returned_keyboard(tab_id, pane_id, cx)
+                    })
                 })
         });
         // The refused close returns the keyboard with its Tab or Pane, so a Review keeps what
@@ -4163,18 +4193,23 @@ impl WorkspaceManager {
             || local
                 .and_then(|local| self.workspaces.workspace(close_target_workspace(local)))
                 .is_some_and(|entry| entry.payload().read(cx).holds_keyboard(window, cx));
-        if working && let Some(local) = local {
+        if let Some(observed) = working
+            && let Some(local) = local
+        {
             // The review opens over the Pane the person asked to close, so its Cancel returns
             // the keyboard there rather than where a modal opened meanwhile left it.
             if held_keyboard && self.close_target_is_active(local, cx) {
                 self.focus(window, cx);
             }
-            self.close_review = Some(notice.cloned());
+            self.close_review = Some(RefusedCloseReview {
+                notice: notice.cloned(),
+                observed,
+            });
             self.close_keyboard.reviewed = Some(held_keyboard);
             self.request_close(local, window, cx);
             self.close_keyboard.reviewed = None;
             // A request that opened no confirmation leaves the outcome unseen.
-            if let Some(Some(notice)) = self.close_review.take() {
+            if let Some(notice) = self.close_review.take().and_then(|review| review.notice) {
                 notice.release();
             }
             return true;

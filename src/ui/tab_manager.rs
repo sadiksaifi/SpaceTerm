@@ -1573,8 +1573,14 @@ impl TabManager {
         counts
     }
 
+    /// Opens `tab_id` for a person. Choosing a Tab, even the Active Tab, is an explicit
+    /// selection, which a refused close's return of the selection no longer overrides.
     fn activate_tab(&mut self, tab_id: TabId, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        self.activate_tab_focusing(tab_id, true, window, cx)
+        let activated = self.activate_tab_focusing(tab_id, true, window, cx);
+        if activated {
+            self.tabs.claim_active_tab();
+        }
+        activated
     }
 
     fn activate_tab_focusing(
@@ -3679,7 +3685,8 @@ impl TabManager {
         for id in restoring {
             if let Some(parked) = self.parked_tabs.remove(&id) {
                 // A refused close returns the selection it moved, and the keyboard it moved with
-                // it, unless the person chose another Tab or moved the keyboard since.
+                // it, unless the person chose a Tab, even the one parking selected, or moved the
+                // keyboard since.
                 let held_keyboard = self.parked_keyboard.remove(&id);
                 if self.tabs.restore_parked_tab(parked) {
                     let focus =
@@ -4342,12 +4349,25 @@ impl TabManager {
         self.binding.forget(tab_id);
     }
 
-    /// Whether a refusal returned `tab_id` the selection while something else held the keyboard
-    /// its close had moved, which the keyboard now owes it. Asking clears it.
-    pub(crate) fn take_returned_keyboard(&mut self, tab_id: TabId) -> bool {
-        self.returned_keyboard
+    /// Whether a refusal returned `tab_id`, or its Pane `pane_id`, the selection while something
+    /// else held the keyboard its close had moved, which the keyboard now owes it. Asking clears
+    /// both records.
+    pub(crate) fn take_returned_keyboard(
+        &mut self,
+        tab_id: TabId,
+        pane_id: Option<PaneId>,
+        cx: &mut App,
+    ) -> bool {
+        let tab = self
+            .returned_keyboard
             .take_if(|returned| *returned == tab_id)
-            .is_some()
+            .is_some();
+        let pane = pane_id.is_some_and(|pane_id| {
+            self.tabs.tab(tab_id).is_some_and(|view| {
+                view.update(cx, |view, _| view.take_returned_keyboard(pane_id))
+            })
+        });
+        tab || pane
     }
 
     /// Whether the keyboard rests in one of this strip's Tabs or their Panes.

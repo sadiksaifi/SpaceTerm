@@ -1897,7 +1897,10 @@ mod core_workspaces {
         stale_closes: VecDeque<(MachineCloseTarget, u64)>,
         /// The stale closes, by outcome sequence, that this client's own close found running
         /// work in, while every Pane, Terminal Session and control grant it named is unchanged.
-        working_closes: BTreeSet<u64>,
+        /// Each keeps what the refusal proved it would end: the boot, the exact Panes and their
+        /// Terminal Sessions, and whether it removes the Tab or Workspace. Only a review of that
+        /// same scope may present the refusal.
+        working_closes: BTreeMap<u64, spaceterm_core::hierarchy::CloseConfirmation>,
         attachments: spaceterm_core::attachments::Attachments,
         retained_views: Option<crate::ui::client_view_state::RetainedClientViews>,
         saved_views: Option<spaceterm_core::client_view::ClientView>,
@@ -1997,7 +2000,7 @@ mod core_workspaces {
                 review: None,
                 submitted_close: None,
                 stale_closes: VecDeque::new(),
-                working_closes: BTreeSet::new(),
+                working_closes: BTreeMap::new(),
                 attachments: spaceterm_core::attachments::Attachments::memory(),
                 retained_views: None,
                 saved_views: None,
@@ -2673,12 +2676,16 @@ mod core_workspaces {
         /// The oldest close the server refused as stale, with the local target this process
         /// asked to close when it is the one that asked, and its alert's presentation. A
         /// recovered answer names no local target. It stays until [`Self::take_stale_close`].
-        /// The next stale close to present, the local target it closes, its notice, and whether
-        /// running work in this client's own unchanged Panes refused it rather than another
-        /// client's change.
+        /// When running work in this client's own unchanged Panes refused it rather than another
+        /// client's change, it also carries what the refusal proved the close would end.
         pub(crate) fn next_stale_close(
             &self,
-        ) -> Option<(MachineCloseTarget, Option<CloseTarget>, OutcomeNotice, bool)> {
+        ) -> Option<(
+            MachineCloseTarget,
+            Option<CloseTarget>,
+            OutcomeNotice,
+            Option<spaceterm_core::hierarchy::CloseConfirmation>,
+        )> {
             let (target, sequence) = *self.stale_closes.front()?;
             let local = self
                 .submitted_close
@@ -2688,7 +2695,7 @@ mod core_workspaces {
                 target,
                 local,
                 self.notice([sequence]),
-                self.working_closes.contains(&sequence),
+                self.working_closes.get(&sequence).cloned(),
             ))
         }
         pub(crate) fn take_stale_close(
@@ -3162,23 +3169,24 @@ mod core_workspaces {
                                 });
                         // An own close the host refused while everything it named is
                         // unchanged found running work, such as a command its own input started.
-                        let working = confirmation.own_controls.as_ref().is_some_and(|reviewed| {
-                            inventory.is_some_and(|inventory| {
-                                inventory
-                                    .close_confirmation(*target)
-                                    .is_some_and(|current| current.same_targets(confirmation))
-                                    && inventory.close.as_ref().is_some_and(|live| {
-                                        reviewed
-                                            .iter()
-                                            .all(|control| live.controls.contains(control))
-                                    })
-                            })
+                        let working = confirmation.own_controls.as_ref().and_then(|reviewed| {
+                            let inventory = inventory?;
+                            let current = inventory
+                                .close_confirmation(*target)
+                                .filter(|current| current.same_targets(confirmation))?;
+                            inventory
+                                .close
+                                .as_ref()
+                                .is_some_and(|live| {
+                                    reviewed.iter().all(|control| live.controls.contains(control))
+                                })
+                                .then_some(current)
                         });
                         if queued {
                             self.edits.presented(sequence);
                         } else {
-                            if working {
-                                self.working_closes.insert(sequence);
+                            if let Some(observed) = working {
+                                self.working_closes.insert(sequence, observed);
                             }
                             self.stale_closes.push_back((*target, sequence));
                         }
@@ -3444,6 +3452,12 @@ mod core_workspaces {
     }
 
     impl WorkspaceCloseApproval {
+        /// Whether this approval ends exactly what `observed` names: the same boot, Panes and
+        /// Terminal Sessions, and the same Tab and Workspace removals.
+        pub(crate) fn ends_exactly(&self, observed: &CoreCloseConfirmation) -> bool {
+            self.confirmation.same_targets(observed)
+        }
+
         /// The reviewed Panes that run no Terminal Session the server has reported.
         pub(crate) fn panes_without_session(&self) -> impl Iterator<Item = Id> + '_ {
             self.confirmation

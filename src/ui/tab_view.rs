@@ -742,6 +742,10 @@ pub(crate) struct TabView {
     /// The parked Panes that held the keyboard as their close parked them, which a refusal
     /// returns it to while it still rests in the Pane parking focused in their place.
     parked_keyboard: std::collections::BTreeSet<PaneId>,
+    /// The Pane a refusal returned the focus to while a modal, such as another Machine's
+    /// confirmation, held the keyboard its close had moved. The refusal's review returns the
+    /// keyboard to it. Selecting a Pane clears it.
+    returned_keyboard: Option<PaneId>,
     directory_recovery: Option<Entity<super::core_pane::DirectoryRecovery>>,
     /// Reads every Pane's connection status while the Tab lives.
     /// The Panes whose shell started or is starting without a name yet. `None` while it
@@ -856,6 +860,7 @@ impl TabView {
             binding,
             parked_panes: BTreeMap::new(),
             parked_keyboard: std::collections::BTreeSet::new(),
+            returned_keyboard: None,
             directory_recovery: None,
             _blocked_updates: blocked_updates,
             background_turns: false,
@@ -1218,6 +1223,7 @@ impl TabView {
             terminal.update(cx, |terminal, _| terminal.close());
         }
         self.parked_keyboard.clear();
+        self.returned_keyboard = None;
         for (_, parked) in std::mem::take(&mut self.parked_panes) {
             parked.payload().update(cx, |terminal, _| terminal.close());
         }
@@ -2741,9 +2747,9 @@ impl TabView {
                         .filter(|id| self.tab.pane(*id).is_some())
                         .unwrap_or_else(|| self.tab.root_pane_id());
                     // A refused close returns the focus it moved, and the keyboard it moved with
-                    // it, unless the person focused another Pane or moved the keyboard since.
-                    let held_keyboard =
-                        self.parked_keyboard.remove(&pane_id) && self.holds_keyboard(window, cx);
+                    // it, unless the person selected a Pane or moved the keyboard since.
+                    let parked_keyboard = self.parked_keyboard.remove(&pane_id);
+                    let held_keyboard = parked_keyboard && self.holds_keyboard(window, cx);
                     if let Ok(refocused) =
                         self.tab
                             .restore_parked_pane(parked, source, side_edge(pane.side))
@@ -2754,6 +2760,15 @@ impl TabView {
                         self.finish_insertion(pane_id, cx);
                         if refocused && held_keyboard && self.active {
                             self.focus(window, cx);
+                        }
+                        // A modal holds the keyboard the close moved, so the keyboard still owes
+                        // this Pane once that modal lets it go.
+                        if refocused
+                            && parked_keyboard
+                            && !held_keyboard
+                            && spaceterm_ui::window_modal_is_open(window, cx)
+                        {
+                            self.returned_keyboard = Some(pane_id);
                         }
                         changed = true;
                     }
@@ -3400,9 +3415,21 @@ impl TabView {
     /// own, window restoration, and membership publication never do, so none of them starts a
     /// retained shell. An unreachable server is asked for nothing at all.
     fn select_pane(&mut self, pane_id: PaneId) {
+        // An explicit selection, even of the Focused Pane, is the person's choice, which a
+        // refused close's return of focus or keyboard no longer overrides.
+        self.tab.claim_focused_pane();
+        self.returned_keyboard = None;
         if self.binding.reachable() {
             self.binding.select(pane_id);
         }
+    }
+
+    /// Whether a refusal returned `pane_id` the focus while something else held the keyboard its
+    /// close had moved, which the keyboard now owes it. Asking clears it.
+    pub(crate) fn take_returned_keyboard(&mut self, pane_id: PaneId) -> bool {
+        self.returned_keyboard
+            .take_if(|returned| *returned == pane_id)
+            .is_some()
     }
 
     fn forget_pane(&mut self, pane_id: PaneId) {

@@ -24,8 +24,9 @@ struct TabEntry<T> {
 pub(crate) struct ParkedTab<T> {
     entry: TabEntry<T>,
     was_root: bool,
-    /// The Tab parking selected in its place, when this Tab was the Active Tab.
-    successor: Option<TabId>,
+    /// The Tab parking selected in its place, when this Tab was the Active Tab, with the count
+    /// of explicit selections at that moment.
+    successor: Option<(TabId, u64)>,
 }
 
 impl<T> ParkedTab<T> {
@@ -53,6 +54,9 @@ pub(crate) struct TabCollection<T> {
     root_tab_id: TabId,
     /// Tabs from least to most recently activated.
     activation_order: Vec<TabId>,
+    /// How many times a person explicitly selected a Tab, including the Tab already selected.
+    /// A Tab parking selects is an automatic handoff until a person claims it.
+    selections: u64,
     next_tab_id: u64,
 }
 
@@ -69,6 +73,7 @@ impl<T> TabCollection<T> {
             active_tab_id: initial_tab_id,
             root_tab_id: initial_tab_id,
             activation_order: vec![initial_tab_id],
+            selections: 0,
             next_tab_id: 2,
         }
     }
@@ -197,6 +202,12 @@ impl<T> TabCollection<T> {
         self.index_of(tab_id)?;
         self.set_active(tab_id);
         Ok(())
+    }
+
+    /// Records that a person explicitly selected the Active Tab, even when it was already the
+    /// Active Tab. A refused close then leaves the selection where the person put it.
+    pub(crate) const fn claim_active_tab(&mut self) {
+        self.selections = self.selections.wrapping_add(1);
     }
 
     /// Moves a Tab to `position` among its Worktree's Tabs and reports whether the order changed.
@@ -353,7 +364,7 @@ impl<T> TabCollection<T> {
                 Ok(Some(ParkedTab {
                     entry: TabEntry { id, scope, payload },
                     was_root,
-                    successor: was_active.then_some(self.active_tab_id),
+                    successor: was_active.then_some((self.active_tab_id, self.selections)),
                 }))
             }
             CloseTabOutcome::CloseWorkspace { .. } => Ok(None),
@@ -363,10 +374,10 @@ impl<T> TabCollection<T> {
     /// A refusal restores only this Tab. Later selection and rearrangement stay where they are.
     ///
     /// Returns whether the Tab should take the selection back: it was the Active Tab, and the
-    /// Tab parking selected in its place still is, so nobody chose another Tab since. The caller
-    /// activates it.
+    /// Tab parking selected in its place still is, with no explicit selection since, so nobody
+    /// chose a Tab, not even that one. The caller activates it.
     pub(crate) fn restore_parked_tab(&mut self, parked: ParkedTab<T>) -> bool {
-        let reselect = parked.successor == Some(self.active_tab_id);
+        let reselect = parked.successor == Some((self.active_tab_id, self.selections));
         let (scope, retained) = self
             .parked_positions
             .remove(&parked.entry.id)
@@ -481,6 +492,14 @@ mod tests {
         };
         tabs.activate_tab(chosen).unwrap();
         assert!(!tabs.restore_parked_tab(parked));
+
+        // A person who chose the Tab parking selected, which is already the Active Tab, keeps it.
+        tabs.activate_tab(second).unwrap();
+        let parked = tabs.park_tab(second).unwrap().unwrap();
+        let successor = tabs.active_tab_id();
+        tabs.claim_active_tab();
+        assert!(!tabs.restore_parked_tab(parked));
+        assert_eq!(tabs.active_tab_id(), successor);
 
         // An inactive Tab never takes the selection.
         let parked = tabs.park_tab(second).unwrap().unwrap();
