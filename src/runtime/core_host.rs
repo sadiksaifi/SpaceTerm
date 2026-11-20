@@ -51,6 +51,14 @@ pub(crate) mod testing {
         WorkspaceHost::new(super::tests::host())
     }
 
+    /// A host whose Panes start `shell`, an executable the test wrote.
+    pub(crate) fn terminal_host_with_shell(shell: &std::path::Path) -> WorkspaceHost {
+        WorkspaceHost::new(super::tests::host_with_shell(
+            shell.to_str().expect("a UTF-8 shell path"),
+            native_pty_factory(Arc::default()),
+        ))
+    }
+
     /// Prepares `host`'s first Workspace and starts its Pane at `size` for the client `[1; 32]`
     /// over the connection `[1; 32]`.
     pub(crate) fn started_pane(host: &mut WorkspaceHost, size: PaneSize) -> Lease {

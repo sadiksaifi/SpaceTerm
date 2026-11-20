@@ -1678,7 +1678,10 @@ pub(super) fn present(
                 .load(Ordering::Acquire)
                 .then(|| std::time::Instant::now() + STARTUP_QUIET_LIMIT);
             state.set_startup_quiet(quiet.is_some());
-            let mut inputs = connection.last_input();
+            // Only the person's own input ends the quiet. This worker's focus report and
+            // pointer, wheel and resize requests take Input serials too, but say nothing about
+            // whether the person started working in the Pane.
+            let mut typed = false;
             let attached = (|| loop {
                 if !alive.load(Ordering::Acquire) {
                     return Ok(());
@@ -1700,6 +1703,7 @@ pub(super) fn present(
                         let (before, sent_at) =
                             (connection.last_input(), std::time::Instant::now());
                         let reply = send(&presenter, &alive, &mut connection, request)?;
+                        typed |= persons_input(request);
                         let serial =
                             Some(connection.last_input()).filter(|serial| *serial > before);
                         predictor.sent(request, serial, sent_at);
@@ -1876,7 +1880,6 @@ pub(super) fn present(
                 // Core publishes for exactly this Session, so a reading the view coalesces never
                 // skips it.
                 if let Some(until) = quiet {
-                    let typed = connection.last_input() != inputs;
                     let answered = state.session_ready(pane_id, lease.session);
                     if typed || answered || std::time::Instant::now() >= until {
                         quiet = None;
@@ -1894,7 +1897,6 @@ pub(super) fn present(
                         }
                     }
                 }
-                inputs = connection.last_input();
                 // Graphics transfers continue one chunk per turn without waiting.
                 let mut busy = more_input;
                 // The published metadata is read again shortly while the quiet lasts.
@@ -2206,6 +2208,22 @@ pub(super) fn encode_key(k: KeyInput) -> pane::Key {
         modifiers: encode_modifiers(k.modifiers),
         consumed: encode_modifiers(k.consumed_modifiers),
         option_as_alt: k.option_as_alt == OptionAsAltPolicy::Both,
+    }
+}
+
+/// Whether `request` carries the person's own input to the Session: keys, text they paste or
+/// copy-or-forward. A focus report, pointer, wheel and resize requests do not.
+pub(super) fn persons_input(request: &Request) -> bool {
+    match request {
+        Request::Keys { keys, .. } => !keys.is_empty(),
+        Request::Input { input, .. } => matches!(
+            input,
+            pane::InteractiveInput::Key(_)
+                | pane::InteractiveInput::Paste { .. }
+                | pane::InteractiveInput::CopyOrForward { .. }
+                | pane::InteractiveInput::ResolvePaste { confirm: true, .. }
+        ),
+        _ => false,
     }
 }
 
@@ -2925,3 +2943,4 @@ mod tests {
         assert_eq!(batches, 1, "nothing is replayed");
     }
 }
+

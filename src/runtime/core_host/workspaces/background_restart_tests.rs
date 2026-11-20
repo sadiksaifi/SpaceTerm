@@ -206,3 +206,70 @@ fn three_panes_observe_restart_after_the_window_reopens_offline() {
         "each Pane of the restarted server started once in the background"
     );
 }
+
+/// After a Core replacement, the focused Pane that was attached starts its shell again at once.
+/// That restarted shell stays blank and its name waits, through the worker's own focus report,
+/// until the Session names itself.
+#[test]
+fn a_restarted_focused_shell_stays_blank_until_it_names_itself() {
+    use crate::terminal::core_session::push_tests::{screened, slow_shell, write_slow_shell};
+    let (directory, original) = slow_shell("0");
+    let shell = directory.join("shell");
+    let organization: Organization =
+        serde_json::from_slice(&serde_json::to_vec(&original.state.envelope()).unwrap()).unwrap();
+    let core = ConnectedPane::with_host(
+        crate::machine_connection::MachineConnection::for_identity("spaceterm-development")
+            .unwrap(),
+        original,
+    );
+    let state = Arc::clone(&core.state);
+    let started = core
+        .factory
+        .start(
+            TerminalGeometry::from_viewport(
+                LogicalSize::new(640.0, 432.0),
+                LogicalCellSize::new(8.0, 18.0),
+                BackingScale::ONE,
+                CellGridSize::new(80, 24),
+            ),
+            TerminalAppearanceUpdate::builtin().unwrap(),
+        )
+        .unwrap();
+    started.handle.set_presentable(true);
+    started.handle.interactive_focus(true, true);
+    state.set_foreground(true);
+    await_status(&state, CorePaneStatus::Connected);
+    let until = Instant::now() + Duration::from_secs(10);
+    while state.shell_starting() {
+        assert!(Instant::now() < until, "the first shell never named itself");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    write_slow_shell(&shell, "2");
+    core.stop_core();
+    let mut restored = crate::runtime::directory_testing::terminal_host_with_shell(&shell);
+    restored.restore_organization(Some(&organization));
+    core.restore_core(restored);
+    (core.reconnect)();
+    let until = Instant::now() + Duration::from_secs(10);
+    while !state.startup_quiet() {
+        assert!(Instant::now() < until, "the restarted shell never attached");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let _ = screened(&started);
+    let began = Instant::now();
+    while began.elapsed() < Duration::from_millis(1200) {
+        assert!(state.shell_starting(), "the name waits for the shell's own");
+        assert!(!screened(&started), "the startup banner stays off the surface");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let until = Instant::now() + Duration::from_secs(10);
+    while state.shell_starting() {
+        assert!(Instant::now() < until, "the restarted shell never ended its quiet");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    drop(started);
+    drop(core);
+    let _ = std::fs::remove_dir_all(directory);
+}
+

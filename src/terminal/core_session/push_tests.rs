@@ -194,6 +194,8 @@ fn ticking(
 /// A real server and loopback connection shared by Pane presentation tests.
 pub(crate) struct ConnectedPane {
     pub(crate) factory: CoreSessionFactory,
+    /// The state of the first Pane, which `factory` starts.
+    pub(crate) state: Arc<CorePaneState>,
     traffic: Arc<Traffic>,
     start_loss: Arc<StartReplyLoss>,
     stop: Option<Box<dyn FnOnce()>>,
@@ -243,6 +245,7 @@ impl ConnectedPane {
             Arc::clone(&state),
             pane_id,
         )]));
+        let first = Arc::clone(&state);
         let factory = factory.with_attachment(permit);
         let traffic = Arc::new(Traffic::default());
         let start_loss = Arc::new(StartReplyLoss::default());
@@ -337,6 +340,7 @@ impl ConnectedPane {
         reconnect();
         Self {
             factory,
+            state: first,
             traffic,
             start_loss,
             reconnect,
@@ -957,3 +961,132 @@ fn a_demanding_pane_worker_publishes_pushed_semantics_across_output_hide_and_rec
     assert_eq!(row_of(&again, "SEMANTIC-one").0, kept.0);
     drop(started);
 }
+
+/// A shell that prints a banner from its startup files and then waits before it names itself
+/// and prompts, as a slow rc file does. `wait` is in seconds.
+pub(crate) fn slow_shell(wait: &str) -> (std::path::PathBuf, crate::runtime::WorkspaceHost) {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = std::env::temp_dir().canonicalize().unwrap().join(format!(
+        "spaceterm-slow-shell-{}-{}",
+        std::process::id(),
+        Instant::now().elapsed().as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let shell = directory.join("shell");
+    write_slow_shell(&shell, wait);
+    std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut host = crate::runtime::directory_testing::terminal_host_with_shell(&shell);
+    host.prepare_initial_organization().unwrap();
+    (directory, host)
+}
+
+/// Writes the shell of [`slow_shell`] at `shell`, waiting `wait` seconds.
+pub(crate) fn write_slow_shell(shell: &std::path::Path, wait: &str) {
+    std::fs::write(
+        shell,
+        format!(
+            "#!/bin/sh\nprintf 'R3 startup banner\\r\\n'\nsleep {wait}\nprintf '\\033]0;R3 Ready\\007$ '\nexec sleep 60\n"
+        ),
+    )
+    .unwrap();
+}
+
+/// Whether any screen reached the view since the last call.
+pub(crate) fn screened(started: &crate::terminal::StartedTerminalSession) -> bool {
+    std::iter::from_fn(|| started.events.try_recv().ok())
+        .filter(|event| matches!(event, TerminalSessionEvent::Screen(_)))
+        .count()
+        > 0
+}
+
+/// The Pane worker's own first focus report is not the person's input: a shell this client
+/// starts stays blank and its name waits through it, while the startup banner prints and the
+/// Core publishes the provisional shell name, until the Session names itself.
+#[test]
+fn a_starting_shell_stays_blank_and_unnamed_through_its_own_focus_report() {
+    let (directory, host) = slow_shell("2");
+    let core = ConnectedPane::with_host(
+        MachineConnection::for_identity("spaceterm-development").unwrap(),
+        host,
+    );
+    let state = Arc::clone(&core.state);
+    let started = core
+        .factory
+        .start(
+            *super::tests::Adapter::new().handle.geometry.lock().unwrap(),
+            TerminalAppearanceUpdate::builtin().unwrap(),
+        )
+        .unwrap();
+    started.handle.set_presentable(true);
+    started.handle.interactive_focus(true, true);
+    let until = Instant::now() + Duration::from_secs(10);
+    while !state.startup_quiet() {
+        assert!(Instant::now() < until, "the Pane never attached");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // What the window showed before the Pane attached is not the shell's.
+    let _ = screened(&started);
+    let began = Instant::now();
+    while began.elapsed() < Duration::from_millis(1200) {
+        assert!(state.shell_starting(), "the name waits for the shell's own");
+        assert!(!screened(&started), "the startup banner stays off the surface");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let until = Instant::now() + Duration::from_secs(10);
+    while state.shell_starting() {
+        assert!(Instant::now() < until, "the named shell never ended its quiet");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        began.elapsed() >= Duration::from_millis(1500),
+        "only the Session's own name ended the quiet"
+    );
+    let until = Instant::now() + Duration::from_secs(5);
+    while !screened(&started) {
+        assert!(Instant::now() < until, "the named shell never showed");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    drop(started);
+    drop(core);
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+/// The person's own typing during the quiet ends it at once, and what they typed reaches the
+/// Session.
+#[test]
+fn the_persons_typing_ends_a_starting_shells_quiet() {
+    let (directory, host) = slow_shell("5");
+    let core = ConnectedPane::with_host(
+        MachineConnection::for_identity("spaceterm-development").unwrap(),
+        host,
+    );
+    let state = Arc::clone(&core.state);
+    let started = core
+        .factory
+        .start(
+            *super::tests::Adapter::new().handle.geometry.lock().unwrap(),
+            TerminalAppearanceUpdate::builtin().unwrap(),
+        )
+        .unwrap();
+    started.handle.set_presentable(true);
+    started.handle.interactive_focus(true, true);
+    let until = Instant::now() + Duration::from_secs(10);
+    while !state.startup_quiet() {
+        assert!(Instant::now() < until, "the Pane never attached");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    admitted(&started);
+    let began = Instant::now();
+    started.handle.key(KeyInput::text_input("x"));
+    while state.shell_starting() {
+        assert!(
+            began.elapsed() < Duration::from_secs(3),
+            "typing never ended the quiet"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(started);
+    drop(core);
+    let _ = std::fs::remove_dir_all(directory);
+}
+

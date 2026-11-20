@@ -699,7 +699,10 @@ pub(super) fn host() -> CorePaneHost {
     host_with_shell("/bin/sh", native_pty_factory(Arc::default()))
 }
 
-fn host_with_shell(shell: &str, pty: Arc<dyn NativePtyAdapterFactory>) -> CorePaneHost {
+pub(super) fn host_with_shell(
+    shell: &str,
+    pty: Arc<dyn NativePtyAdapterFactory>,
+) -> CorePaneHost {
     let filesystem = local_filesystem();
     let directory = filesystem
         .validate_directory(&std::env::temp_dir())
