@@ -416,31 +416,44 @@ impl ClaimWorker<'_> {
                     grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
                     let update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     grant_appearance = None;
-                    state.preparing.store(true, Ordering::Release);
                     let prepared = exchange(&Request::PrepareRestored {
                         core: boot,
                         pane,
                         size: grant_size,
                         style: Some(encode_style(&update)),
                     });
-                    state.preparing.store(false, Ordering::Release);
                     state.changed();
                     reply = match prepared {
                         Err(CoreError::DirectoryUnavailable) => {
+                            state.end_background();
                             unavailable = true;
                             state.invalidate();
                             reply
                         }
                         // A Core that selected an older minor cannot start it in the background.
-                        Err(CoreError::Unsupported) => reply,
+                        Err(CoreError::Unsupported) => {
+                            state.end_background();
+                            reply
+                        }
                         // SpaceTerm Core admitted nothing, or the reply was lost, so the Pane asks
                         // again on a later turn. Core starts a Pane at most once per boot: a
                         // repeated Prepare for a Pane that has or had a Session only observes it.
                         Err(error) => {
+                            state.end_background();
                             state.release_prepare(boot);
                             return Err(error);
                         }
-                        Ok(reply) => reply,
+                        // The shell SpaceTerm Core started keeps the Pane's place in the queue
+                        // until it shows it is ready. Any other answer started nothing here.
+                        Ok(reply) => {
+                            match &reply {
+                                Reply::Takeover { target, .. } => {
+                                    state.prepared(target.session, std::time::Instant::now());
+                                }
+                                _ => state.end_background(),
+                            }
+                            reply
+                        }
                     };
                 } else {
                     if background {
@@ -518,8 +531,13 @@ impl ClaimWorker<'_> {
                     })?;
                 } else {
                     // Take Over, selection and dismissal wake this wait, and so does anything
-                    // `ControlWatch` sees that can change the server's answer.
-                    state.wake.wait(None);
+                    // `ControlWatch` sees that can change the server's answer. A shell this Pane
+                    // started in the background ends its place in the start queue once it shows
+                    // it is ready, or when its time runs out.
+                    if !state.settle_background(pane_id, std::time::Instant::now()) {
+                        state.wake.wait(state.background_deadline());
+                        state.settle_background(pane_id, std::time::Instant::now());
+                    }
                     let size = *size.lock().unwrap_or_else(|e| e.into_inner());
                     grant_size = size;
                     grant_appearance = None;
@@ -1404,6 +1422,49 @@ mod tests {
             |request| exchange(state, [2; 32], request, &mut core),
             || {},
         )
+    }
+
+    /// A background start holds one place in the window's start queue from its turn until the
+    /// shell it started shows it is ready, its time runs out, or it fails: never only until
+    /// SpaceTerm Core answers, which comes before the native shell opens.
+    #[test]
+    fn a_background_start_holds_its_place_until_its_shell_is_ready() {
+        use crate::terminal::core_session::BACKGROUND_READY_LIMIT;
+        let state = CorePaneState::new();
+        state.set(CorePaneStatus::Restored);
+        state.want_turn();
+        assert!(state.awaiting_turn());
+        assert!(!state.starting_in_background());
+        state.grant_turn();
+        assert!(state.starting_in_background());
+        assert!(state.take_turn());
+        assert!(
+            state.starting_in_background() && state.preparing(),
+            "no moment passes between the turn and the start"
+        );
+        let answered = std::time::Instant::now();
+        state.prepared([3; 32], answered);
+        state.offered_take_over(
+            spaceterm_core::pane::control::Controller::Nobody,
+            None,
+        );
+        assert!(!state.preparing());
+        assert!(
+            state.starting_in_background(),
+            "the answer alone frees no place"
+        );
+        assert!(!state.settle_background([2; 32], answered));
+        assert!(state.starting_in_background());
+        assert!(state.settle_background([2; 32], answered + BACKGROUND_READY_LIMIT));
+        assert!(!state.starting_in_background());
+
+        // A start that admitted nothing frees its place at once.
+        state.set(CorePaneStatus::Restored);
+        state.want_turn();
+        state.grant_turn();
+        assert!(state.take_turn());
+        state.end_background();
+        assert!(!state.starting_in_background());
     }
 
     #[test]

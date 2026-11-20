@@ -67,6 +67,27 @@ enum Admission {
     Waiting,
     Granted,
 }
+/// How long a shell started in the background keeps its place in the window's start queue
+/// without showing it is ready, so a shell that never reports a prompt or title still lets the
+/// queue go on.
+pub(crate) const BACKGROUND_READY_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// One Pane's place in the window's background start queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reservation {
+    Idle,
+    /// The worker waits for a turn.
+    Wanted,
+    /// The window gave the Pane a turn its worker has not used yet.
+    Granted,
+    /// The worker used its turn. `session` is the Session SpaceTerm Core started, once it
+    /// answered, and `until` when the place lapses without readiness.
+    Starting {
+        session: Option<[u8; 32]>,
+        until: Option<std::time::Instant>,
+    },
+}
+
 pub(crate) struct CorePaneState {
     status: Mutex<CorePaneStatus>,
     /// What the person typed that the Core refused or never confirmed, since the Pane last
@@ -88,14 +109,11 @@ pub(crate) struct CorePaneState {
     foreground: AtomicBool,
     /// The Core boot whose background start this Pane last asked for, so it asks once per boot.
     prepared: Mutex<Option<[u8; 32]>>,
-    /// A background start is on its way to the Core and unanswered.
-    preparing: AtomicBool,
     /// This Pane's worker is starting its shell, or presents one that has not attached yet.
     shell_starting: AtomicBool,
-    /// The worker waits for a turn to start this Pane's shell in the background.
-    turn_wanted: AtomicBool,
-    /// The window's start queue gave this Pane its turn, which the worker has not used yet.
-    turn: AtomicBool,
+    /// This Pane's one place in the window's background start queue, from the worker's wait for
+    /// a turn until the shell it started shows it is ready, fails or is cancelled.
+    background: Mutex<Reservation>,
     created_start: Arc<AtomicBool>,
     take_over: AtomicBool,
     start_restored: Arc<AtomicBool>,
@@ -143,10 +161,8 @@ impl CorePaneState {
             selected: Arc::default(),
             foreground: AtomicBool::new(false),
             prepared: Mutex::default(),
-            preparing: AtomicBool::new(false),
             shell_starting: AtomicBool::new(false),
-            turn_wanted: AtomicBool::new(false),
-            turn: AtomicBool::new(false),
+            background: Mutex::new(Reservation::Idle),
             created_start: Arc::default(),
             take_over: AtomicBool::new(false),
             start_restored: Arc::default(),
@@ -277,7 +293,14 @@ impl CorePaneState {
 
     /// Whether a background start of this Pane is on its way and unanswered.
     pub(crate) fn preparing(&self) -> bool {
-        self.preparing.load(Ordering::Acquire)
+        matches!(
+            *self.reservation(),
+            Reservation::Starting { session: None, .. }
+        )
+    }
+
+    fn reservation(&self) -> std::sync::MutexGuard<'_, Reservation> {
+        self.background.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Whether this Pane may still ask Core `boot` for its background start.
@@ -303,36 +326,142 @@ impl CorePaneState {
 
     /// The worker waits for this Pane's turn to start its shell in the background.
     pub(crate) fn want_turn(&self) {
-        if !self.turn_wanted.swap(true, Ordering::AcqRel) {
+        let mut reservation = self.reservation();
+        if *reservation == Reservation::Idle {
+            *reservation = Reservation::Wanted;
+            drop(reservation);
             self.changed();
         }
     }
 
     /// Whether the worker waits for a turn the window's start queue has not given yet.
     pub(crate) fn awaiting_turn(&self) -> bool {
-        self.turn_wanted.load(Ordering::Acquire) && !self.turn.load(Ordering::Acquire)
+        *self.reservation() == Reservation::Wanted
     }
 
     /// Whether this Pane holds a turn its worker has not used yet.
     pub(crate) fn turn_granted(&self) -> bool {
-        self.turn.load(Ordering::Acquire)
+        *self.reservation() == Reservation::Granted
+    }
+
+    /// Whether this Pane holds a place in the background start queue: a turn its worker has not
+    /// used yet, or a start whose shell has not shown it is ready.
+    pub(crate) fn starting_in_background(&self) -> bool {
+        match *self.reservation() {
+            Reservation::Granted => true,
+            // A place whose time ran out lets the queue go on, even before its worker reads it.
+            Reservation::Starting { until, .. } => {
+                until.is_none_or(|until| std::time::Instant::now() < until)
+            }
+            Reservation::Idle | Reservation::Wanted => false,
+        }
     }
 
     /// Gives this Pane its turn to start its shell in the background, and wakes its worker.
     pub(crate) fn grant_turn(&self) {
-        if self.turn_wanted.load(Ordering::Acquire) && !self.turn.swap(true, Ordering::AcqRel) {
+        let mut reservation = self.reservation();
+        if *reservation == Reservation::Wanted {
+            *reservation = Reservation::Granted;
+            drop(reservation);
             self.wake.notify();
         }
     }
 
-    /// Uses the turn this Pane holds, if any.
+    /// Uses the turn this Pane holds, if any. The place stays held, with no moment between the
+    /// turn and the start, until [`Self::prepared`] and readiness or [`Self::end_background`].
     pub(crate) fn take_turn(&self) -> bool {
-        if self.turn.swap(false, Ordering::AcqRel) {
-            self.turn_wanted.store(false, Ordering::Release);
+        let mut reservation = self.reservation();
+        if *reservation == Reservation::Granted {
+            *reservation = Reservation::Starting {
+                session: None,
+                until: None,
+            };
             true
         } else {
             false
         }
+    }
+
+    /// SpaceTerm Core started Session `session` for this Pane's background start. Its place stays
+    /// held until the shell shows it is ready, or [`BACKGROUND_READY_LIMIT`] after `now`.
+    pub(crate) fn prepared(&self, session: [u8; 32], now: std::time::Instant) {
+        let mut reservation = self.reservation();
+        if matches!(*reservation, Reservation::Starting { .. }) {
+            *reservation = Reservation::Starting {
+                session: Some(session),
+                until: Some(now + BACKGROUND_READY_LIMIT),
+            };
+        }
+    }
+
+    /// Gives up this Pane's place in the background start queue: its start failed, admitted
+    /// nothing, or was cancelled.
+    pub(crate) fn end_background(&self) {
+        let mut reservation = self.reservation();
+        if *reservation != Reservation::Idle {
+            *reservation = Reservation::Idle;
+            drop(reservation);
+            self.changed();
+        }
+    }
+
+    /// When the started shell's place lapses without readiness, if one is held.
+    pub(crate) fn background_deadline(&self) -> Option<std::time::Instant> {
+        match *self.reservation() {
+            Reservation::Starting { until, .. } => until,
+            _ => None,
+        }
+    }
+
+    /// Ends the place of the shell this Pane started in the background once Pane `pane`'s
+    /// published Terminal Metadata shows that Session at its prompt or naming itself, or its
+    /// time ran out at `now`. Returns whether the place ended.
+    pub(crate) fn settle_background(&self, pane: [u8; 32], now: std::time::Instant) -> bool {
+        let Reservation::Starting {
+            session: Some(session),
+            until: Some(until),
+        } = *self.reservation()
+        else {
+            return false;
+        };
+        if now < until && !self.session_ready(pane, session) {
+            return false;
+        }
+        self.end_background();
+        true
+    }
+
+    /// Whether SpaceTerm Core's latest inventory shows Session `session` of Pane `pane` started:
+    /// its shell reached a prompt, finished a command or named itself.
+    fn session_ready(&self, pane: [u8; 32], session: [u8; 32]) -> bool {
+        use spaceterm_core::pane::metadata::{PromptZone, TitleProvenance};
+        let Some((_, revision)) = self
+            .directory_core()
+            .and_then(|core| core.live_link())
+            .and_then(|link| link.inventory())
+        else {
+            return false;
+        };
+        let inventory = &revision.inventory;
+        let current = inventory.close.as_ref().is_some_and(|close| {
+            close
+                .sessions
+                .iter()
+                .any(|confirmed| confirmed.id == pane && confirmed.session == Some(session))
+        });
+        current
+            && inventory
+                .workspaces
+                .iter()
+                .flat_map(|workspace| &workspace.tabs)
+                .flat_map(|tab| &tab.panes)
+                .find(|candidate| candidate.id == pane)
+                .and_then(|candidate| candidate.presentation.as_deref())
+                .is_some_and(|metadata| {
+                    metadata.prompt_zone != PromptZone::Unknown
+                        || metadata.finished_commands > 0
+                        || metadata.title_provenance != TitleProvenance::Fallback
+                })
     }
 
     /// Whether this Pane's Core starts a retained shell in the background without granting
@@ -728,14 +857,20 @@ impl CorePaneState {
         if status != CorePaneStatus::Connecting {
             self.shell_starting.store(false, Ordering::Release);
         }
-        // Only a restored Pane waits for a background start, or is about to use its turn.
-        if !matches!(
-            status,
-            CorePaneStatus::Restored | CorePaneStatus::Connecting
-        ) {
-            self.turn_wanted.store(false, Ordering::Release);
-            self.turn.store(false, Ordering::Release);
+        // Only a restored Pane waits for a background start, or is about to use its turn. A
+        // started shell keeps its place until it shows it is ready, unless it ended or failed.
+        let mut reservation = self.reservation();
+        match (*reservation, &status) {
+            (_, CorePaneStatus::Restored | CorePaneStatus::Connecting) => {}
+            (
+                Reservation::Starting {
+                    session: Some(_), ..
+                },
+                CorePaneStatus::Takeover | CorePaneStatus::TakingOver,
+            ) => {}
+            _ => *reservation = Reservation::Idle,
         }
+        drop(reservation);
         if status != CorePaneStatus::Connected {
             self.reading
                 .lock()
@@ -788,8 +923,8 @@ impl CorePaneState {
         }
         *status = CorePaneStatus::Connected;
         self.shell_starting.store(false, Ordering::Release);
-        self.turn_wanted.store(false, Ordering::Release);
-        self.turn.store(false, Ordering::Release);
+        // This client presents the Pane's shell now, so it no longer waits in the queue.
+        *self.reservation() = Reservation::Idle;
         drop(status);
         // Each frame reaches here. Only a new status or generation concerns a view.
         if changed {

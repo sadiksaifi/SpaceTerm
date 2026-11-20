@@ -1123,7 +1123,7 @@ mod connection {
         }
 
         fn starting_in_background(&self) -> bool {
-            Self::preparing(self) || Self::turn_granted(self)
+            Self::starting_in_background(self)
         }
 
         fn grant_turn(&self) {
