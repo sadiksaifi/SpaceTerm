@@ -117,6 +117,10 @@ pub(crate) trait MachineLane: Send + Sync {
     fn resolve(&self, _operation: &str) -> Result<(), ActionFailure> {
         Err(ActionFailure::Unconfirmed)
     }
+    /// The paired route this lane reaches the Core through. None for the account-local lane.
+    fn route(&self) -> Option<crate::direct_connections::DirectRouteId> {
+        None
+    }
 }
 
 /// What one `Execute` learned beside its own outcome.
@@ -169,6 +173,18 @@ pub(crate) trait Machine: Send + Sync {
     /// after a Stop. `None` where no ledger is readable here.
     fn resolve_offline(&self, _operation: &str) -> Option<Result<(), ActionFailure>> {
         None
+    }
+    /// Check Status: what the receipt of `operation`, which this desktop executed, says now,
+    /// read where the route and Client Identity that admitted it keep it. `Unconfirmed` while it
+    /// has not settled or nothing that admitted it can answer.
+    fn resolve(&self, operation: &ServiceOperation) -> Result<(), ActionFailure> {
+        match self.resolve_offline(operation.id()) {
+            Some(outcome) if outcome != Err(ActionFailure::Unconfirmed) => outcome,
+            _ => match self.reach() {
+                Reach::Lane { lane, .. } => lane.resolve(operation.id()),
+                _ => Err(ActionFailure::Unconfirmed),
+            },
+        }
     }
 }
 
@@ -494,12 +510,21 @@ fn run_previewed(
         });
     };
     let outcome = lane.execute(lane_preview, &mut report, &waiting);
-    let operation = report.operation.as_deref().map(ServiceOperation::new);
+    let route = lane.route();
+    let operation = report
+        .operation
+        .as_deref()
+        .map(|id| ServiceOperation::admitted(id, route));
     {
         let mut state = shared.lock();
         // Each acknowledged receipt keeps its outcome until Check Status reads that exact
-        // operation, whatever this desktop runs meanwhile.
-        state.settled.extend(report.settled);
+        // operation of that route, whatever this desktop runs meanwhile.
+        state.settled.extend(
+            report
+                .settled
+                .into_iter()
+                .map(|(id, outcome)| (ServiceOperation::admitted(&id, route), outcome)),
+        );
         if outcome == Err(ActionFailure::Unconfirmed)
             && let Some(awaited) = state
                 .entries
@@ -529,16 +554,8 @@ fn check_status(
     checked: Checked,
     operation: ServiceOperation,
 ) -> (Result<(), ActionFailure>, Option<ServiceOperation>) {
-    let acknowledged = shared.lock().settled.remove(operation.id());
-    let outcome = acknowledged.unwrap_or_else(|| {
-        match target.known.machine.resolve_offline(operation.id()) {
-            Some(outcome) if outcome != Err(ActionFailure::Unconfirmed) => outcome,
-            _ => match target.known.machine.reach() {
-                Reach::Lane { lane, .. } => lane.resolve(operation.id()),
-                _ => Err(ActionFailure::Unconfirmed),
-            },
-        }
-    });
+    let acknowledged = shared.lock().settled.remove(&operation);
+    let outcome = acknowledged.unwrap_or_else(|| target.known.machine.resolve(&operation));
     if checked == Checked::Restart && outcome.is_err() && outcome != Err(ActionFailure::Unconfirmed)
     {
         shared.forget_restart(machine);
@@ -704,8 +721,8 @@ struct State {
     previews: VecDeque<(MachinePreview, admin::Preview)>,
     next_preview: u64,
     /// The outcome of each operation of this desktop whose receipt an `Execute` acknowledged
-    /// on its way, by operation ID, until Check Status reads it.
-    settled: HashMap<String, Result<(), ActionFailure>>,
+    /// on its way, by operation ID and route, until Check Status reads it.
+    settled: HashMap<ServiceOperation, Result<(), ActionFailure>>,
 }
 
 struct Entry {

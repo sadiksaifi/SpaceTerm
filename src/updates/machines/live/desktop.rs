@@ -20,7 +20,7 @@ use crate::direct_connections::{
     DirectConnections, DirectRouteId, DirectRouteStatus, RefusalReason,
 };
 use crate::machine_connection::{CoreError, MachineConnection};
-use crate::updates::machines::{ActionFailure, MachineId, MachineUpdatesError};
+use crate::updates::machines::{ActionFailure, MachineId, MachineUpdatesError, ServiceOperation};
 use crate::updates::push::{self, EmbeddedCore};
 
 /// How long `WaitFacts` may take beyond the Core's own limit before the lane gives up.
@@ -284,6 +284,10 @@ pub(crate) trait Routes: Send + Sync {
     fn retry_now(&self, route: &DirectRouteId);
     /// Connects the saved route, marking it active, as the person's Connect does.
     fn connect(&self, route: &DirectRouteId);
+    /// The outcome of `operation` the route's own Client Identity kept when any surface of this
+    /// desktop acknowledged its receipt, read from this computer without connecting. None when
+    /// it kept none or its record can't be read.
+    fn kept(&self, route: &DirectRouteId, operation: &str) -> Option<Result<(), ActionFailure>>;
 }
 
 /// A route's service lane, and the work version its Core offered at admission.
@@ -299,7 +303,15 @@ impl Routes for RegistryRoutes {
     }
 
     fn lane(&self, route: &DirectRouteId) -> Option<Arc<dyn RouteLane>> {
-        Some(Arc::new(CoreLane::new(self.0.service(route)?)))
+        Some(Arc::new(CoreLane::paired(self.0.service(route)?, *route)))
+    }
+
+    fn kept(&self, route: &DirectRouteId, operation: &str) -> Option<Result<(), ActionFailure>> {
+        let pending = self.0.storage(route)?.service_operations().ok()?;
+        let receipt = pending
+            .kept_by(operation, Instant::now() + admin::REQUEST_LIMIT)
+            .ok()??;
+        Some(receipt_outcome(&receipt))
     }
 
     fn retry_now(&self, route: &DirectRouteId) {
@@ -392,6 +404,23 @@ impl Machine for PairedMachine {
         }
     }
 
+    /// Only the route that admitted `operation` answers for it: first from the outcome its
+    /// Client Identity kept, which needs no connection, then from the Core over that route
+    /// alone. Another route to the same Core is another Client Identity, so its answer is never
+    /// taken for this one.
+    fn resolve(&self, operation: &ServiceOperation) -> Result<(), ActionFailure> {
+        let Some(route) = operation.route().filter(|route| self.ids.contains(route)) else {
+            return Err(ActionFailure::Unconfirmed);
+        };
+        if let Some(outcome) = self.routes.kept(route, operation.id()) {
+            return outcome;
+        }
+        match self.routes.lane(route) {
+            Some(lane) => lane.resolve(operation.id()),
+            None => Err(ActionFailure::Unconfirmed),
+        }
+    }
+
     fn connecting(&self) -> bool {
         self.ids.iter().any(|route| {
             matches!(
@@ -423,6 +452,8 @@ struct CoreLane {
     /// The identity of this computer's own Core, whose ledger records a Stop's outcome once the
     /// Core closed the lane. None for a paired Machine, which never stops over its lane.
     ledger: Option<String>,
+    /// The paired route the lane reaches the Core through. None for the account-local lane.
+    route: Option<DirectRouteId>,
 }
 
 /// How often a local Stop reads its ledger record while it waits for the outcome.
@@ -434,6 +465,15 @@ impl CoreLane {
             core,
             session: Mutex::new(None),
             ledger: None,
+            route: None,
+        }
+    }
+
+    /// A paired Core reached through `route`.
+    fn paired(core: MachineConnection, route: DirectRouteId) -> Self {
+        Self {
+            route: Some(route),
+            ..Self::new(core)
         }
     }
 
@@ -635,6 +675,10 @@ impl MachineLane for CoreLane {
 
     /// Check Status reads the outcome any surface of this desktop kept for this Machine's route
     /// when it acknowledged the receipt, including Settings, before it asks the Core.
+    fn route(&self) -> Option<DirectRouteId> {
+        self.route
+    }
+
     fn resolve(&self, operation: &str) -> Result<(), ActionFailure> {
         let Some(id) = spaceterm_core::service::operations::OperationId::parse(operation) else {
             return Err(ActionFailure::Unconfirmed);
@@ -784,6 +828,9 @@ mod tests {
     /// A lane that answers nothing and whose Core offered work major `major`.
     struct Lane {
         major: u16,
+        /// The route the lane reaches its Core through, and each route whose Core Check Status
+        /// asked, in order.
+        route: Option<(DirectRouteId, Arc<Mutex<Vec<DirectRouteId>>>)>,
     }
 
     impl MachineLane for Lane {
@@ -822,6 +869,15 @@ mod tests {
         ) -> Result<(), ActionFailure> {
             Ok(())
         }
+        /// The Core answers that the operation was done.
+        fn resolve(&self, _: &str) -> Result<(), ActionFailure> {
+            let (route, asked) = self.route.as_ref().ok_or(ActionFailure::Unconfirmed)?;
+            asked.lock().unwrap().push(*route);
+            Ok(())
+        }
+        fn route(&self) -> Option<DirectRouteId> {
+            self.route.as_ref().map(|(route, _)| *route)
+        }
     }
 
     impl RouteLane for Lane {
@@ -840,7 +896,13 @@ mod tests {
             service: Arc::new(Service(status)),
             connect: Arc::new(move || {
                 dialed.fetch_add(1, Ordering::SeqCst);
-                Ok((Arc::new(Lane { major: 1 }) as Arc<dyn MachineLane>, Ok(())))
+                Ok((
+                    Arc::new(Lane {
+                        major: 1,
+                        route: None,
+                    }) as Arc<dyn MachineLane>,
+                    Ok(()),
+                ))
             }),
         }
     }
@@ -985,6 +1047,10 @@ mod tests {
         retried: Mutex<Vec<DirectRouteId>>,
         /// Each route `connect` was called for, in order.
         connected: Mutex<Vec<DirectRouteId>>,
+        /// The outcome each route's own Client Identity kept, by operation.
+        kept: Vec<(DirectRouteId, &'static str, Result<(), ActionFailure>)>,
+        /// Each route whose Core Check Status asked, in order.
+        asked: Arc<Mutex<Vec<DirectRouteId>>>,
     }
 
     impl Routes for FakeRoutes {
@@ -996,8 +1062,26 @@ mod tests {
         }
 
         fn lane(&self, route: &DirectRouteId) -> Option<Arc<dyn RouteLane>> {
-            let (_, _, major) = self.routes.iter().find(|(id, ..)| id == route)?;
-            Some(Arc::new(Lane { major: (*major)? }))
+            let (_, status, major) = self.routes.iter().find(|(id, ..)| id == route)?;
+            // A disconnected route holds no handle to its Core.
+            if *status == DirectRouteStatus::Disconnected {
+                return None;
+            }
+            Some(Arc::new(Lane {
+                major: (*major)?,
+                route: Some((*route, Arc::clone(&self.asked))),
+            }))
+        }
+
+        fn kept(
+            &self,
+            route: &DirectRouteId,
+            operation: &str,
+        ) -> Option<Result<(), ActionFailure>> {
+            self.kept
+                .iter()
+                .find(|(id, kept, _)| id == route && *kept == operation)
+                .map(|(.., outcome)| *outcome)
         }
 
         fn retry_now(&self, route: &DirectRouteId) {
@@ -1066,6 +1150,72 @@ mod tests {
         assert_eq!(*routes.retried.lock().unwrap(), [[4; 32]]);
         assert!(machine.connecting());
         assert!(!paired(vec![([1; 32], DirectRouteStatus::Disconnected, Some(1))]).connecting());
+    }
+
+    /// Route A admitted a Restart whose outcome nothing confirmed, and Settings, checking through
+    /// A, kept its receipt before the Core forgot it. A then disconnects while route B to the same
+    /// Core still answers. Check Status reads the outcome A's own Client Identity kept, without
+    /// asking B's Core, which knows only B's Client Identity.
+    #[test]
+    fn check_status_after_failover_reads_the_admitting_routes_kept_outcome() {
+        let (a, b) = ([1; 32], [2; 32]);
+        let routes = Arc::new(FakeRoutes {
+            routes: vec![
+                (a, DirectRouteStatus::Disconnected, Some(1)),
+                (b, DirectRouteStatus::Connected, Some(1)),
+            ],
+            kept: vec![(a, "restart-a", Err(ActionFailure::Failed))],
+            ..FakeRoutes::default()
+        });
+        let machine = paired_with(Arc::clone(&routes));
+        assert!(
+            matches!(machine.reach(), Reach::Lane { lane, .. } if lane.route() == Some(b)),
+            "B reaches the Core now"
+        );
+        assert_eq!(
+            machine.resolve(&ServiceOperation::admitted("restart-a", Some(a))),
+            Err(ActionFailure::Failed),
+            "A's kept outcome"
+        );
+        // An operation A admitted that A kept nothing for stays unconfirmed while A is down,
+        // and nothing B's Core says answers for it.
+        assert_eq!(
+            machine.resolve(&ServiceOperation::admitted("restart-other", Some(a))),
+            Err(ActionFailure::Unconfirmed)
+        );
+        // An operation of no known route of this Machine is nobody's to answer.
+        assert_eq!(
+            machine.resolve(&ServiceOperation::admitted("restart-a", Some([9; 32]))),
+            Err(ActionFailure::Unconfirmed)
+        );
+        assert_eq!(
+            machine.resolve(&ServiceOperation::new("restart-a")),
+            Err(ActionFailure::Unconfirmed)
+        );
+        assert!(
+            routes.asked.lock().unwrap().is_empty(),
+            "B's Core was never asked"
+        );
+    }
+
+    /// Once the admitting route connects again, Check Status asks the Core over that route
+    /// alone, even while another route to the same Core is connected too.
+    #[test]
+    fn check_status_asks_the_core_only_over_the_admitting_route() {
+        let (a, b) = ([1; 32], [2; 32]);
+        let routes = Arc::new(FakeRoutes {
+            routes: vec![
+                (b, DirectRouteStatus::Connected, Some(1)),
+                (a, DirectRouteStatus::Connected, Some(1)),
+            ],
+            ..FakeRoutes::default()
+        });
+        let machine = paired_with(Arc::clone(&routes));
+        assert_eq!(
+            machine.resolve(&ServiceOperation::admitted("restart-a", Some(a))),
+            Ok(())
+        );
+        assert_eq!(*routes.asked.lock().unwrap(), [a]);
     }
 
     const INCOMPATIBLE: DirectRouteStatus = DirectRouteStatus::Refused(RefusalReason::Incompatible);

@@ -151,18 +151,40 @@ pub(crate) enum MachineAction {
     CheckStatus(Checked, ServiceOperation),
 }
 
-/// One Stop or Restart a Core may have admitted for this desktop, by its operation ID.
+/// One Stop or Restart a Core may have admitted for this desktop, by its operation ID and the
+/// route that admitted it. A paired route is its own Client Identity, so only that route's
+/// record and that route's Core answer for the operation.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ServiceOperation(std::sync::Arc<str>);
+pub(crate) struct ServiceOperation {
+    id: std::sync::Arc<str>,
+    route: Option<crate::direct_connections::DirectRouteId>,
+}
 
 impl ServiceOperation {
+    /// An operation the account-local lane admitted.
     pub(crate) fn new(id: &str) -> Self {
-        Self(id.into())
+        Self::admitted(id, None)
+    }
+
+    /// An operation `route` admitted, or the account-local lane when `route` is None.
+    pub(crate) fn admitted(
+        id: &str,
+        route: Option<crate::direct_connections::DirectRouteId>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            route,
+        }
     }
 
     /// The operation ID the Core's ledger names it by.
     pub(crate) fn id(&self) -> &str {
-        &self.0
+        &self.id
+    }
+
+    /// The paired route that admitted it. None for the account-local lane.
+    pub(crate) const fn route(&self) -> Option<&crate::direct_connections::DirectRouteId> {
+        self.route.as_ref()
     }
 }
 
