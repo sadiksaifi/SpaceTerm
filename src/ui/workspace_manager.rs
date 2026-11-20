@@ -3801,7 +3801,11 @@ impl WorkspaceManager {
         let Some(generation) = self.close_confirmation.begin(target) else {
             return true;
         };
-        self.close_keyboard.pending = Some((generation, held_keyboard));
+        self.close_keyboard.pending = Some((
+            generation,
+            held_keyboard,
+            held_keyboard.then(|| window.focused(cx)).flatten(),
+        ));
         let mut alert = Alert::new(
             ModalId::new("close-confirmation"),
             approval.title(),
@@ -3905,6 +3909,32 @@ impl WorkspaceManager {
         }
     }
 
+    /// Whether closing `target` removes the control `focus` names: one of the closing Tab's
+    /// controls, or the closing Pane, or the strip item of the Tab whose last Pane it is.
+    fn close_removes_focus(
+        &self,
+        target: CloseTarget,
+        focus: &gpui::FocusHandle,
+        window: &Window,
+        cx: &App,
+    ) -> bool {
+        let (tab_id, pane_id) = match target {
+            CloseTarget::Tab { tab_id, .. } => (tab_id, None),
+            CloseTarget::Pane {
+                tab_id, pane_id, ..
+            } => (tab_id, Some(pane_id)),
+            CloseTarget::KillWorkspace(_) | CloseTarget::Worktree { .. } => return false,
+        };
+        self.workspaces
+            .workspace(close_target_workspace(target))
+            .is_some_and(|entry| {
+                entry
+                    .payload()
+                    .read(cx)
+                    .close_removes_focus(tab_id, pane_id, focus, window, cx)
+            })
+    }
+
     /// What a refused shared close says it did not do.
     const fn close_operation(target: CloseTarget) -> &'static str {
         match target {
@@ -3989,9 +4019,16 @@ impl WorkspaceManager {
     ) {
         use super::workspaces::{WorkspaceCloseState, WorkspaceSubmission};
 
-        // Navigation since the confirmation opened wins over the keyboard intent it kept.
-        let held_keyboard =
-            self.close_keyboard.take(generation) && self.close_target_is_active(target, cx);
+        // Navigation since the confirmation opened wins over the keyboard intent it kept, unless
+        // the close removes the control the confirmation took the keyboard from, as an inactive
+        // Tab's strip item. The confirmation could return the keyboard to nothing else.
+        let held_keyboard = self
+            .close_keyboard
+            .take_owner(generation)
+            .is_some_and(|owner| {
+                self.close_target_is_active(target, cx)
+                    || owner.is_some_and(|owner| self.close_removes_focus(target, &owner, window, cx))
+            });
 
         // The review lives with the server that owns what it would close.
         let review = self.binding.keys().into_iter().find_map(|key| {
@@ -5778,19 +5815,23 @@ impl WorkspaceManager {
 /// Whether a shared close's Workspace held the keyboard when the person asked for the close.
 #[derive(Default)]
 struct WorkspaceCloseKeyboard {
-    /// The open confirmation's generation and its answer.
-    pending: Option<(u64, bool)>,
+    /// The open confirmation's generation, its answer, and the focus the confirmation took the
+    /// keyboard from.
+    pending: Option<(u64, bool, Option<gpui::FocusHandle>)>,
 }
 
 impl WorkspaceCloseKeyboard {
     /// Takes the answer for confirmation `generation`. Another generation's answer is false.
     fn take(&mut self, generation: u64) -> bool {
-        match self.pending {
-            Some((pending, held)) if pending == generation => {
-                self.pending = None;
-                held
-            }
-            _ => false,
+        self.take_owner(generation).is_some()
+    }
+
+    /// Takes the answer for confirmation `generation` with the focus it took the keyboard from.
+    /// `None` when the close held no keyboard, or for another generation.
+    fn take_owner(&mut self, generation: u64) -> Option<Option<gpui::FocusHandle>> {
+        match self.pending.take_if(|(pending, _, _)| *pending == generation) {
+            Some((_, true, owner)) => Some(owner),
+            _ => None,
         }
     }
 }

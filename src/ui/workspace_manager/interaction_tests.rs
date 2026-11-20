@@ -2482,6 +2482,71 @@ fn a_close_fenced_by_a_restart_keeps_the_tab_a_person_chose(cx: &mut TestAppCont
     confirm_a_close_fenced_by_a_restart(true, cx);
 }
 
+/// With the first Tab active, VoiceOver focuses the second Tab's strip item without selecting it,
+/// opens that Tab's menu and chooses Close Tab. Another client runs its shell, so the close asks
+/// first. Confirming removes the strip item the confirmation took the keyboard from, so the
+/// keyboard moves to the Tab that remains, and the next key reaches its shell.
+#[gpui::test]
+fn confirming_an_inactive_tab_close_from_its_focused_strip_item_keeps_typing_in_the_active_tab(
+    cx: &mut TestAppContext,
+) {
+    use gpui::accesskit::Action;
+    use spaceterm_core::hierarchy::CloseTarget as MachineCloseTarget;
+    use spaceterm_core::hierarchy::Mutation;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let records = TestTerminalSessionRecords::default();
+    let (harness, cx) = close_harness_recording(records.clone(), cx);
+    let running = close_inventory(
+        2,
+        &[
+            (CLOSE_ROOT_TAB, &[(CLOSE_ROOT_PANE, Some([31; 32]))]),
+            (CLOSE_SECOND_TAB, &[(CLOSE_SECOND_PANE, Some([33; 32]))]),
+        ],
+    );
+    harness.publish(running, cx);
+    harness.panes.pane(CLOSE_SECOND_PANE).reconnect();
+    settle_panes(cx);
+    focus_active_workspace(&harness.manager, cx);
+    let active = close_identity(&harness, cx);
+    cx.simulate_keystrokes("a");
+    let active_session = last_key_session(&records).expect("the active Tab's shell reads keys");
+
+    let tree = A11yTree::read(cx);
+    perform(cx, tree.with_role("Tab")[1], Action::Focus);
+    let tree = A11yTree::read(cx);
+    perform(cx, tree.with_role("Tab")[1], Action::ShowContextMenu);
+    assert_eq!(close_identity(&harness, cx), active, "the menu selects nothing");
+    click("tab-menu-row-close", cx);
+    redraw(cx);
+    assert!(
+        cx.debug_bounds("modal-action-close-confirm").is_some(),
+        "another client's work asks first"
+    );
+    click("modal-action-close-confirm", cx);
+    settle_panes(cx);
+
+    let closes = harness.closes();
+    assert!(
+        matches!(closes.as_slice(), [Mutation::Close { target: MachineCloseTarget::Tab { tab, .. }, .. }]
+            if *tab == CLOSE_SECOND_TAB),
+        "the Confirm closes the second Tab: {closes:?}"
+    );
+    assert_eq!(close_identity(&harness, cx), active);
+    assert!(
+        close_terminal_is_focused(&harness, cx),
+        "the keyboard moves to the Tab that remains"
+    );
+    let keys = key_count(&records);
+    cx.simulate_keystrokes("x");
+    assert_eq!(key_count(&records), keys + 1, "the next key reaches a shell");
+    assert_eq!(
+        last_key_session(&records),
+        Some(active_session),
+        "the next key reaches the active Tab's shell"
+    );
+}
+
 /// Confirms closing the second Tab, whose shell another client runs, then fences that close with
 /// a Core restart and confirms the retry's fresh confirmation. With `chooses_survivor`, the person
 /// clicks the terminal of the Tab the first close opened before the restart's answer arrives.

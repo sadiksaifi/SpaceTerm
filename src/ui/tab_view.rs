@@ -3135,6 +3135,31 @@ impl TabView {
                 .any(|(pane_id, terminal)| self.pane_holds_focus(pane_id, terminal, window, cx))
     }
 
+    /// Whether closing this Tab, or only its Pane `pane_id`, removes the control `focus`: its Tab
+    /// strip item, one of the closing Panes, or the screen replacing one of them. Closing a Tab's
+    /// last Pane closes the Tab.
+    pub(crate) fn close_removes_focus(
+        &self,
+        pane_id: Option<PaneId>,
+        focus: &FocusHandle,
+        window: &Window,
+        cx: &App,
+    ) -> bool {
+        let closes_tab = pane_id.is_none() || self.tab.pane_count() == 1;
+        (closes_tab && self.tab_focus.contains(focus, window))
+            || self
+                .tab
+                .panes_with_ids()
+                .filter(|(id, _)| pane_id.is_none_or(|pane_id| pane_id == *id))
+                .any(|(id, terminal)| {
+                    terminal.read(cx).contains_focus(focus, window)
+                        || self
+                            .binding
+                            .screen_focus(id)
+                            .is_some_and(|screen| screen.contains(focus, window))
+                })
+    }
+
     /// Presents the prepared File Preview for the server Pane `server`. `false` when this Tab
     /// holds no such Pane or the Pane cannot preview a local file.
     pub(crate) fn preview_local_file(

@@ -1673,6 +1673,11 @@ impl TerminalPane {
         self.focus_handle.is_focused(window)
     }
 
+    /// Whether `focus` is this Pane's terminal or a control inside it.
+    pub(crate) fn contains_focus(&self, focus: &FocusHandle, window: &Window) -> bool {
+        self.focus_handle.contains(focus, window)
+    }
+
     #[cfg(test)]
     pub(crate) const fn font_size(&self) -> f32 {
         self.font_size
