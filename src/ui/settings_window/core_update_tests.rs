@@ -1,7 +1,9 @@
 //! Settings uses the application Machine store's preview and current update state.
 
 use super::super::machine_card::MENU_SELECTOR;
-use super::super::machines::testing::{ScriptedCore, ScriptedService, connected, running};
+use super::super::machines::testing::{
+    ScriptedCore, ScriptedService, connected, running, stopped,
+};
 use super::super::machines::{CoreServiceControl, LocalCoreControl, OfferedMachine, ServiceAction};
 use super::super::{SettingsSectionId, SettingsWindow};
 use super::{UPDATE_CANCEL_SELECTOR, UPDATE_CONFIRM_SELECTOR, UPDATE_SELECTOR};
@@ -61,12 +63,31 @@ fn open<'a>(
     Rc<ScriptedMachines>,
     &'a mut VisualTestContext,
 ) {
+    let (settings, adapter, _, visual) = open_with(
+        cx,
+        machine(pending, 3),
+        ScriptedService::new(Ok(running())),
+    );
+    (settings, adapter, visual)
+}
+
+/// Settings for This Mac as `update` describes it, whose service `service` reads.
+fn open_with<'a>(
+    cx: &'a mut TestAppContext,
+    update: MachineUpdate,
+    service: Arc<ScriptedService>,
+) -> (
+    Entity<SettingsWindow>,
+    Rc<ScriptedMachines>,
+    Arc<ScriptedService>,
+    &'a mut VisualTestContext,
+) {
     let adapter = Rc::new(ScriptedMachines::default());
     cx.update(|cx| MachineUpdates::install(adapter.clone(), cx));
-    adapter.emit(MachineUpdatesEvent::Machines(vec![machine(pending, 3)]));
+    adapter.emit(MachineUpdatesEvent::Machines(vec![update]));
     cx.run_until_parked();
     let core = ScriptedCore::new(Ok(connected(1)));
-    let service = ScriptedService::new(Ok(running()));
+    let scripted = Arc::clone(&service);
     let offered = OfferedMachine {
         connection: Ok(core as Arc<dyn LocalCoreControl>),
         service: Some(Ok(service as Arc<dyn CoreServiceControl>)),
@@ -100,7 +121,7 @@ fn open<'a>(
         });
     });
     visual.run_until_parked();
-    (settings, adapter, visual)
+    (settings, adapter, scripted, visual)
 }
 
 fn click(selector: &'static str, cx: &mut VisualTestContext) {
@@ -446,4 +467,32 @@ fn the_cards_check_now_asks_its_core_to_check(cx: &mut TestAppContext) {
     perform(cx, tree.node("Check Now"), Action::Click);
     cx.run_until_parked();
     assert_eq!(adapter.performed(), [(MACHINE, MachineAction::CheckAgain)]);
+}
+
+/// SpaceTerm Core was started outside every SpaceTerm surface, as by the CLI, while Settings
+/// stayed open on a stopped This Mac. Once this client's link to the Core comes back, the same
+/// Settings window reads the service again and shows This Mac running.
+#[gpui::test]
+fn a_start_outside_spaceterm_reaches_open_settings_when_the_link_returns(
+    cx: &mut TestAppContext,
+) {
+    let mut down = machine(None, 0);
+    down.link = MachineLink::Stopped;
+    let (settings, adapter, service, cx) =
+        open_with(cx, down, ScriptedService::new(Ok(stopped())));
+    let state = |settings: &Entity<SettingsWindow>, cx: &mut VisualTestContext| {
+        settings.read_with(cx, |settings, _| {
+            settings
+                .core_state(&super::super::machine_list::MachineChoice::Local)
+                .state
+                .to_string()
+        })
+    };
+    assert_eq!(state(&settings, cx), "Stopped");
+
+    service.report(Ok(running()));
+    adapter.emit(MachineUpdatesEvent::Machines(vec![machine(None, 2)]));
+    cx.run_until_parked();
+
+    assert_eq!(state(&settings, cx), "Running");
 }
