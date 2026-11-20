@@ -1169,6 +1169,7 @@ fn follow(shared: &Shared, id: MachineId, wake: &Wake) {
             Reach::Incompatible(incompatible) => {
                 shared.publish(id, |entry| {
                     entry.update.link = MachineLink::Incompatible(incompatible);
+                    entry.update.boot = None;
                     entry.update.capabilities = reached(Err(incompatible));
                     entry.restart = None;
                 });
@@ -1211,6 +1212,7 @@ fn follow(shared: &Shared, id: MachineId, wake: &Wake) {
                 Err(ActionFailure::Unavailable(Unavailable::ClientTooOld)) => {
                     shared.publish(id, |entry| {
                         entry.update.link = MachineLink::Incompatible(Incompatible::CallerTooOld);
+                        entry.update.boot = None;
                         entry.restart = None;
                     });
                     None

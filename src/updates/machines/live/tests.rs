@@ -221,6 +221,7 @@ impl MachineLane for ScriptedLane {
 enum Script {
     Stopped,
     Offline,
+    ServiceLaneRefused,
     /// Reached over the service lane of a route refused as incompatible, whose Core still
     /// refuses this desktop's work protocol.
     Incompatible,
@@ -271,6 +272,7 @@ impl Machine for ScriptedMachine {
         match *self.script.lock().unwrap() {
             Script::Stopped => Reach::Stopped,
             Script::Offline => Reach::Offline,
+            Script::ServiceLaneRefused => Reach::Incompatible(Incompatible::CallerTooOld),
             Script::Incompatible => Reach::Lane {
                 lane: Arc::clone(&self.lane) as Arc<dyn MachineLane>,
                 work: Err(Incompatible::ListenerTooOld),
@@ -491,6 +493,24 @@ fn a_local_core_reports_its_facts_and_follows_each_change() {
         version("0.9.0")
     );
     assert_eq!(lane.requests()[..2], ["facts", "wait boot-1 1"]);
+}
+
+#[test]
+fn a_service_lane_refusal_does_not_report_an_earlier_boot() {
+    let lane = ScriptedLane::new([Ok(facts(1, 0, None))]);
+    let machine = ScriptedMachine::new(Script::Lane, lane);
+    let sources = ScriptedSources::with(vec![known(LOCAL, "This Mac", true, &machine)]);
+    let (_adapter, events) = started(&sources, RESTART_LIMIT);
+
+    let connected = changed(&events, "the first run", |update| update.boot.is_some());
+    assert_eq!(connected.boot.as_deref(), Some("boot-1"));
+
+    machine.set(Script::ServiceLaneRefused);
+    sources.change();
+    let incompatible = changed(&events, "the incompatible answer", |update| {
+        matches!(update.link, MachineLink::Incompatible(_))
+    });
+    assert_eq!(incompatible.boot, None);
 }
 
 /// A Core that answers `Facts` with `unsupported` reads as "Can't check", not as a missing
