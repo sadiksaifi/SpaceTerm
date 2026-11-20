@@ -501,7 +501,7 @@ pub fn execute(
         pending,
         &mut journal,
         share,
-        dispatch,
+        (dispatch, &mut || {}),
         interrupted,
     );
     forget_refused(&outcome, id, journal.journaled && shared, pending);
@@ -518,8 +518,8 @@ struct Journal {
 
 /// One `Execute` attempt of operation `id` under [`Lane::perform_as`]. The operation is recorded
 /// in `pending` before its first `Execute` only, after `dispatch` allows each attempt, and
-/// removed once its receipt settled and was acknowledged. Also returns whether `share` was
-/// shared again afterwards.
+/// removed once its receipt settled and was acknowledged. `accepted` runs once the server is
+/// known to have admitted it. Also returns whether `share` was shared again afterwards.
 #[allow(
     clippy::too_many_arguments,
     reason = "one execution's parts, used once"
@@ -532,15 +532,13 @@ fn execute_as(
     pending: &PendingOperations,
     journal: &mut Journal,
     share: &mut dyn Share,
-    dispatch: &mut dyn FnMut() -> Result<(), LaneError>,
+    (dispatch, accepted): (&mut dyn FnMut() -> Result<(), LaneError>, &mut dyn FnMut()),
     interrupted: &dyn Fn() -> Option<Instant>,
 ) -> (Result<Outcome, LaneError>, bool) {
     let until = Instant::now() + wait;
     let outcome = lane.perform_as(
         session,
-        action,
-        token,
-        id,
+        (action, token, id),
         wait,
         &mut |operation| {
             dispatch()?;
@@ -555,6 +553,7 @@ fn execute_as(
             share.release();
             Ok(())
         },
+        accepted,
         interrupted,
     );
     let shared = share.resume();
@@ -591,17 +590,31 @@ pub fn busy(error: &LaneError) -> bool {
 }
 
 /// Asks the server to preview `action`, waiting until `deadline` while another operation holds
-/// it. `waiting` runs once, when the wait begins, so the client can say so.
+/// it. `waiting(true)` runs when the wait begins, so the client can say so, and `waiting(false)`
+/// when the preview it began for ends, however it ends.
 pub fn preview_when_ready(
     lane: &Lane,
     session: Session,
     action: LaneAction,
     deadline: Instant,
     interrupted: &dyn Fn() -> Option<Instant>,
-    waiting: &mut dyn FnMut(),
+    waiting: &mut dyn FnMut(bool),
+) -> Result<(Session, Preview), LaneError> {
+    let mut wait = BusyWait::new(deadline, waiting);
+    let previewed = preview_after_waits(lane, session, action, deadline, interrupted, &mut wait);
+    wait.ended();
+    previewed
+}
+
+fn preview_after_waits(
+    lane: &Lane,
+    session: Session,
+    action: LaneAction,
+    deadline: Instant,
+    interrupted: &dyn Fn() -> Option<Instant>,
+    wait: &mut BusyWait<'_>,
 ) -> Result<(Session, Preview), LaneError> {
     let mut session = session;
-    let mut wait = BusyWait::new(deadline, waiting);
     loop {
         // Each preview stops at the caller's deadline, or at once after an interrupt.
         let sent = Instant::now();
@@ -625,7 +638,8 @@ pub fn preview_when_ready(
 /// Core admits nothing and keeps the token, so the same approval executes again once that
 /// operation settles, until `deadline`. When what the action affects changed meanwhile,
 /// SpaceTerm Core refuses the token as `changed`, and the person reviews a fresh preview. After
-/// an interrupt nothing is executed again. `waiting` runs once, when the wait begins.
+/// an interrupt nothing is executed again. `waiting(true)` runs when a wait begins, and
+/// `waiting(false)` once SpaceTerm Core admitted the operation after it, or the approval ended.
 #[allow(clippy::too_many_arguments, reason = "one approval's parts, used once")]
 pub fn execute_approved(
     lane: &Lane,
@@ -638,9 +652,36 @@ pub fn execute_approved(
     share: &mut dyn Share,
     dispatch: &mut dyn FnMut() -> Result<(), LaneError>,
     interrupted: &dyn Fn() -> Option<Instant>,
-    waiting: &mut dyn FnMut(),
+    waiting: &mut dyn FnMut(bool),
 ) -> Result<Outcome, LaneError> {
     let mut busy_wait = BusyWait::new(deadline, waiting);
+    let outcome = execute_after_waits(
+        lane,
+        session,
+        (action, token),
+        (deadline, follow),
+        pending,
+        share,
+        dispatch,
+        interrupted,
+        &mut busy_wait,
+    );
+    busy_wait.ended();
+    outcome
+}
+
+#[allow(clippy::too_many_arguments, reason = "one approval's parts, used once")]
+fn execute_after_waits(
+    lane: &Lane,
+    session: Session,
+    (action, token): (LaneAction, String),
+    (deadline, follow): (Instant, Duration),
+    pending: &PendingOperations,
+    share: &mut dyn Share,
+    dispatch: &mut dyn FnMut() -> Result<(), LaneError>,
+    interrupted: &dyn Fn() -> Option<Instant>,
+    busy_wait: &mut BusyWait<'_>,
+) -> Result<Outcome, LaneError> {
     let mut session = session;
     // One operation ID for the whole approval, journaled once. An attempt whose reply was lost
     // is followed under that ID until it answers, so a later attempt never admits another.
@@ -667,7 +708,7 @@ pub fn execute_approved(
             pending,
             &mut journal,
             share,
-            dispatch,
+            (&mut *dispatch, &mut || busy_wait.ended()),
             interrupted,
         );
         shared = resumed;
@@ -700,15 +741,25 @@ pub fn execute_approved(
 /// One approval's wait for another operation, until its absolute deadline.
 struct BusyWait<'a> {
     deadline: Instant,
-    /// Runs once, when the wait begins.
-    waiting: Option<&'a mut dyn FnMut()>,
+    /// `true` when a wait begins and `false` when it ends.
+    waiting: &'a mut dyn FnMut(bool),
+    /// A wait began and has not ended.
+    announced: bool,
 }
 
 impl<'a> BusyWait<'a> {
-    fn new(deadline: Instant, waiting: &'a mut dyn FnMut()) -> Self {
+    fn new(deadline: Instant, waiting: &'a mut dyn FnMut(bool)) -> Self {
         Self {
             deadline: deadline.min(Instant::now() + BUSY_WAIT),
-            waiting: Some(waiting),
+            waiting,
+            announced: false,
+        }
+    }
+
+    /// The wait that began is over: what it waited for ran or ended.
+    fn ended(&mut self) {
+        if std::mem::take(&mut self.announced) {
+            (self.waiting)(false);
         }
     }
 
@@ -723,8 +774,9 @@ impl<'a> BusyWait<'a> {
         interrupted: &dyn Fn() -> Option<Instant>,
         refused: LaneError,
     ) -> Result<Session, LaneError> {
-        if let Some(waiting) = self.waiting.take() {
-            waiting();
+        if !self.announced {
+            self.announced = true;
+            (self.waiting)(true);
         }
         let deadline = self.deadline;
         loop {

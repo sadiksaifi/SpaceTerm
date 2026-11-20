@@ -241,6 +241,7 @@ fn a_stop_without_a_confirmed_outcome_offers_check_status_and_a_failed_one_try_a
             outcome: Err(failure),
             operation: (failure == ActionFailure::Unconfirmed)
                 .then(|| crate::updates::machines::ServiceOperation::new("stop-1")),
+                request: None,
         });
         fixture.host.answers.borrow_mut().push(true);
         cx.run_until_parked();
@@ -289,6 +290,8 @@ fn an_approved_stop_shows_its_progress_and_offers_nothing_else_until_it_finishes
     fixture.machines.emit(MachineUpdatesEvent::Waiting {
         machine: LOCAL,
         action: MachineAction::Stop,
+        request: fixture.machines.last_request(),
+        waiting: true,
     });
     cx.run_until_parked();
     let menu = fixture.host.menu();
@@ -307,6 +310,7 @@ fn an_approved_stop_shows_its_progress_and_offers_nothing_else_until_it_finishes
         action: MachineAction::CheckAgain,
         outcome: Ok(()),
         operation: None,
+        request: None,
     });
     cx.run_until_parked();
     let menu = fixture.host.menu();
@@ -320,6 +324,7 @@ fn an_approved_stop_shows_its_progress_and_offers_nothing_else_until_it_finishes
         action: MachineAction::Stop,
         outcome: Ok(()),
         operation: None,
+        request: None,
     });
     cx.run_until_parked();
     assert_ne!(
@@ -489,6 +494,7 @@ fn a_start_refused_by_login_items_opens_that_list_and_never_runs_by_itself(
         action: MachineAction::Start,
         outcome: Err(ActionFailure::LoginItemOff),
         operation: None,
+        request: None,
     });
     cx.run_until_parked();
 
@@ -607,6 +613,7 @@ fn a_refused_preview_never_runs_again_without_a_fresh_confirmation(cx: &mut Test
             action: MachineAction::Restart,
             outcome: Err(ActionFailure::Changed),
             operation: None,
+            request: None,
         });
         cx.run_until_parked();
         let executed = fixture.machines.executed().len();
@@ -1033,6 +1040,7 @@ fn a_refused_approved_restart_opens_d5_once_and_a_later_failure_none(cx: &mut Te
             action: MachineAction::Restart,
             outcome: Err(failure),
             operation: None,
+            request: None,
         });
         cx.run_until_parked();
         let titles: Vec<String> = fixture

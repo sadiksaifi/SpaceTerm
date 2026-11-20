@@ -1809,7 +1809,7 @@ mod flow {
                 std::thread::sleep(Duration::from_millis(1500));
                 settle();
             });
-            let mut waits = 0;
+            let mut said = Vec::new();
             let outcome = admin::execute_approved(
                 &client,
                 session,
@@ -1821,16 +1821,24 @@ mod flow {
                 &mut admin::Unshared,
                 &mut || Ok(()),
                 &|| None,
-                &mut || waits += 1,
+                &mut |began| said.push((began, Instant::now())),
             )
             .unwrap();
+            let returned = Instant::now();
             settled.join().unwrap();
             // No helper runs here, so the admitted Stop is followed until the wait ends.
             assert!(
                 matches!(outcome, Outcome::Unconfirmed { .. }),
                 "{outcome:?}"
             );
-            assert_eq!(waits, 1, "the wait is said once");
+            let said_began: Vec<_> = said.iter().map(|(began, _)| *began).collect();
+            assert_eq!(
+                said_began,
+                [true, false],
+                "the wait is said once and ends once"
+            );
+            // The wait ends when the Core admits the Stop, not when its follow ends.
+            assert!(returned - said[1].1 >= Duration::from_millis(900));
             assert_eq!(
                 lane.launches.load(Ordering::SeqCst),
                 2,
@@ -1863,7 +1871,7 @@ mod flow {
                 &mut admin::Unshared,
                 &mut || Ok(()),
                 &|| None,
-                &mut || {},
+                &mut |_| {},
             );
             settled.join().unwrap();
             assert_eq!(outcome, Err(LaneError::Code("changed".into())));
@@ -1894,7 +1902,7 @@ mod flow {
                 &mut admin::Unshared,
                 &mut || Ok(()),
                 &|| None,
-                &mut || {},
+                &mut |_| {},
             );
             assert_eq!(outcome, Err(LaneError::Code("service_busy".into())));
             assert!(
@@ -1924,7 +1932,11 @@ mod flow {
                 &mut admin::Unshared,
                 &mut || Ok(()),
                 &|| interrupted.get(),
-                &mut || interrupted.set(Some(Instant::now())),
+                &mut |began| {
+                    if began {
+                        interrupted.set(Some(Instant::now()));
+                    }
+                },
             );
             assert_eq!(outcome, Err(LaneError::Code("service_busy".into())));
             assert_eq!(lane.launches.load(Ordering::SeqCst), 1);
@@ -2268,7 +2280,7 @@ mod flow {
                 LaneAction::Restart,
                 began + Duration::from_millis(1500),
                 &|| None,
-                &mut || {},
+                &mut |_| {},
             );
             assert!(previewed.is_err());
             assert!(
@@ -2554,7 +2566,7 @@ mod flow {
                     Ok(())
                 },
                 &|| None,
-                &mut || {},
+                &mut |_| {},
             );
             assert_eq!(outcome, Err(LaneError::Deadline));
             assert_eq!(dispatched, 0);
@@ -2740,7 +2752,7 @@ mod flow {
                     &mut admin::Unshared,
                     &mut || Ok(()),
                     &|| None,
-                    &mut || {},
+                    &mut |_| {},
                 )
             });
             pending.add(&earlier).unwrap();

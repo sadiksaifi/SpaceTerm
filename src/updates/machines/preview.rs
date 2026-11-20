@@ -22,7 +22,7 @@ use spaceterm_core::update::facts::{
 
 use super::{
     ActionFailure, MachineAction, MachineId, MachineLink, MachinePreview, MachineUpdate,
-    MachineUpdatesAdapter, MachineUpdatesError, MachineUpdatesEvent, PreviewAnswer,
+    MachineUpdatesAdapter, MachineUpdatesError, MachineUpdatesEvent, PreviewAnswer, Request,
 };
 
 const THIS_MACHINE: MachineId = [1; 32];
@@ -243,6 +243,7 @@ impl PreviewMachines {
                     action,
                     outcome,
                     operation: None,
+                    request: None,
                 });
             }
         };
@@ -267,6 +268,7 @@ impl PreviewMachines {
                 action,
                 outcome,
                 operation: None,
+                request: None,
             });
         }
     }
@@ -311,7 +313,7 @@ impl MachineUpdatesAdapter for PreviewMachines {
     }
 
     /// Previews from the scenario's facts. Executing runs the action's transitions.
-    fn preview(&self, machine: MachineId, action: MachineAction) -> PreviewAnswer {
+    fn preview(&self, machine: MachineId, action: MachineAction, _: Request) -> PreviewAnswer {
         let (answer, answered) = async_channel::bounded(1);
         let previewed = self.shared.lock().ok().and_then(|shared| {
             let update = shared.machines.iter().find(|m| m.machine == machine)?;
@@ -337,7 +339,7 @@ impl MachineUpdatesAdapter for PreviewMachines {
         answered
     }
 
-    fn execute(&self, preview: MachinePreview) {
+    fn execute(&self, preview: MachinePreview, _: Request) {
         self.run(preview.machine, preview.action);
     }
 }
@@ -825,8 +827,8 @@ mod tests {
         machine: MachineId,
         action: MachineAction,
     ) -> Result<(), ActionFailure> {
-        let previewed = preview.preview(machine, action).recv_blocking().unwrap()?;
-        preview.execute(previewed);
+        let previewed = preview.preview(machine, action, 1).recv_blocking().unwrap()?;
+        preview.execute(previewed, 1);
         Ok(())
     }
 

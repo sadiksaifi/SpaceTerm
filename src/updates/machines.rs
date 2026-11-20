@@ -221,12 +221,19 @@ pub(crate) enum MachineUpdatesEvent {
         /// The Stop or Restart whose outcome nothing confirmed yet, which Check Status reads.
         /// Set only with `Unconfirmed`, once the operation may have reached the Core.
         operation: Option<ServiceOperation>,
+        /// The store's request that [`MachineUpdatesAdapter::execute`] ran, so its outcome
+        /// reaches that request's surface alone. `None` for an action performed without a
+        /// confirmation.
+        request: Option<Request>,
     },
-    /// The approved `action` waits for another SpaceTerm Core operation on `machine` to settle
-    /// before it runs, until it finishes.
+    /// `request`'s preview or approved `action` on `machine` began to wait for another
+    /// SpaceTerm Core operation to settle, when `waiting`, or that wait ended: the Core
+    /// answered the preview or admitted the action, or the request ended.
     Waiting {
         machine: MachineId,
         action: MachineAction,
+        request: Request,
+        waiting: bool,
     },
 }
 
@@ -275,6 +282,9 @@ pub(crate) struct MachinePreview {
     pub(crate) id: u64,
 }
 
+/// The store's name for one preview or one execution of a Restart or Stop, unique in its run.
+pub(crate) type Request = u64;
+
 /// The answer to [`MachineUpdatesAdapter::preview`], sent once.
 pub(crate) type PreviewAnswer = async_channel::Receiver<Result<MachinePreview, ActionFailure>>;
 
@@ -286,9 +296,11 @@ pub(crate) trait MachineUpdatesAdapter {
     /// Performs an action that needs no confirmation: Install, Check Again, Dismiss Failure or
     /// Start. Restart and Stop run only through [`Self::preview`] and [`Self::execute`].
     fn perform(&self, machine: MachineId, action: MachineAction);
-    /// Asks the Machine's Core to preview a Restart or Stop.
-    fn preview(&self, machine: MachineId, action: MachineAction) -> PreviewAnswer;
-    /// Executes exactly `preview`. It ends with one [`MachineUpdatesEvent::Finished`] for
-    /// `preview.action`.
-    fn execute(&self, preview: MachinePreview);
+    /// Asks the Machine's Core to preview a Restart or Stop for the store's `request`, which
+    /// names its [`MachineUpdatesEvent::Waiting`] events.
+    fn preview(&self, machine: MachineId, action: MachineAction, request: Request)
+    -> PreviewAnswer;
+    /// Executes exactly `preview` for the store's `request`. It ends with one
+    /// [`MachineUpdatesEvent::Finished`] for `preview.action` that names `request`.
+    fn execute(&self, preview: MachinePreview, request: Request);
 }

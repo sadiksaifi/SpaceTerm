@@ -44,7 +44,7 @@ use crate::updates::push::{EmbeddedCore, EmbeddedCores};
 use super::{
     ActionFailure, Checked, MachineAction, MachineId, MachineLink, MachinePreview, MachineUpdate,
     MachineUpdatesAdapter, MachineUpdatesError, MachineUpdatesEvent, PreviewAnswer,
-    ServiceOperation,
+    Request, ServiceOperation,
 };
 
 /// How long a restart may take before the Machine reads "Can't confirm". It matches how long the
@@ -94,12 +94,13 @@ pub(crate) trait MachineLane: Send + Sync {
     /// Pushes `build` when supplied, otherwise fetches from the Core's feed. Answers with the
     /// Core's facts after it. A feed that names nothing newer downloads nothing.
     fn install(&self, build: Option<&EmbeddedCore>) -> Result<UpdateFacts, ActionFailure>;
-    /// `Preview` of `change`: the Core's token and what it affects. `waiting` runs once when
-    /// the preview waits for another SpaceTerm Core operation to settle.
+    /// `Preview` of `change`: the Core's token and what it affects. `waiting(true)` runs when
+    /// the preview begins to wait for another SpaceTerm Core operation to settle, and
+    /// `waiting(false)` when that wait ends.
     fn preview(
         &self,
         change: LaneChange,
-        waiting: &(dyn Fn() + Sync),
+        waiting: &(dyn Fn(bool) + Sync),
     ) -> Result<admin::Preview, ActionFailure>;
     /// `Execute` of exactly `preview`, followed until it settles. `report` receives the
     /// operation ID once the request may have reached the Core, so its outcome can be read
@@ -109,7 +110,7 @@ pub(crate) trait MachineLane: Send + Sync {
         &self,
         preview: admin::Preview,
         report: &mut ExecuteReport,
-        waiting: &(dyn Fn() + Sync),
+        waiting: &(dyn Fn(bool) + Sync),
     ) -> Result<(), ActionFailure>;
     /// What the receipt of `operation`, which this desktop executed, says now. `Unconfirmed`
     /// while it has not settled or the Core cannot answer.
@@ -232,8 +233,7 @@ impl LiveMachines {
     fn spawn_action(
         &self,
         shared: &Arc<Shared>,
-        machine: MachineId,
-        action: MachineAction,
+        (machine, action, request): (MachineId, MachineAction, Option<Request>),
         work: impl FnOnce(&Shared) -> (Result<(), ActionFailure>, Option<ServiceOperation>)
         + Send
         + 'static,
@@ -250,6 +250,7 @@ impl LiveMachines {
                     action: finished,
                     outcome,
                     operation: operation.filter(|_| outcome == Err(ActionFailure::Unconfirmed)),
+                    request,
                 });
             });
         if spawned.is_err() {
@@ -258,6 +259,7 @@ impl LiveMachines {
                 action,
                 outcome: Err(ActionFailure::Failed),
                 operation: None,
+                request,
             });
         }
     }
@@ -326,29 +328,35 @@ impl MachineUpdatesAdapter for LiveMachines {
                 action,
                 outcome: Err(ActionFailure::Unreachable),
                 operation: None,
+                request: None,
             });
             return;
         };
         let performed = action.clone();
         if let MachineAction::CheckStatus(checked, operation) = &action {
             let (checked, operation) = (*checked, operation.clone());
-            self.spawn_action(shared, machine, action, move |shared| {
+            self.spawn_action(shared, (machine, action, None), move |shared| {
                 check_status(shared, machine, &target, checked, operation)
             });
             return;
         }
         if action == MachineAction::ConnectAndCheck {
-            self.spawn_action(shared, machine, action, move |shared| {
+            self.spawn_action(shared, (machine, action, None), move |shared| {
                 (connect_and_check(shared, machine, &target), None)
             });
             return;
         }
-        self.spawn_action(shared, machine, action, move |_| {
+        self.spawn_action(shared, (machine, action, None), move |_| {
             (act(&target, &performed), None)
         });
     }
 
-    fn preview(&self, machine: MachineId, action: MachineAction) -> PreviewAnswer {
+    fn preview(
+        &self,
+        machine: MachineId,
+        action: MachineAction,
+        request: Request,
+    ) -> PreviewAnswer {
         let (answer, answered) = async_channel::bounded(1);
         let Some(shared) = self.shared.get() else {
             let _ = answer.try_send(Err(ActionFailure::Unreachable));
@@ -364,7 +372,7 @@ impl MachineUpdatesAdapter for LiveMachines {
             .spawn({
                 let answer = answer.clone();
                 move || {
-                    let previewed = preview(&shared, machine, &target, &action);
+                    let previewed = preview(&shared, (machine, request), &target, &action);
                     let _ = answer.try_send(previewed);
                 }
             });
@@ -374,7 +382,7 @@ impl MachineUpdatesAdapter for LiveMachines {
         answered
     }
 
-    fn execute(&self, preview: MachinePreview) {
+    fn execute(&self, preview: MachinePreview, request: Request) {
         let Some(shared) = self.shared.get() else {
             return;
         };
@@ -382,7 +390,7 @@ impl MachineUpdatesAdapter for LiveMachines {
         let retained = shared.take_preview(&preview);
         let target = shared.target(machine);
         let action = preview.action.clone();
-        self.spawn_action(shared, machine, action, move |shared| {
+        self.spawn_action(shared, (machine, action, Some(request)), move |shared| {
             // A forgotten preview, or one of a removed Machine, is confirmed by nobody now.
             let (Some(lane_preview), Some(target)) = (retained, target) else {
                 return (Err(ActionFailure::Changed), None);
@@ -390,7 +398,13 @@ impl MachineUpdatesAdapter for LiveMachines {
             let Reach::Lane { lane, .. } = target.known.machine.reach() else {
                 return (Err(ActionFailure::Unreachable), None);
             };
-            run_previewed(shared, machine, lane.as_ref(), &preview, lane_preview)
+            run_previewed(
+                shared,
+                (machine, request),
+                lane.as_ref(),
+                &preview,
+                lane_preview,
+            )
         });
     }
 }
@@ -425,7 +439,7 @@ fn previewed_target(preview: &admin::Preview) -> Option<Version> {
 
 fn preview(
     shared: &Shared,
-    machine: MachineId,
+    (machine, request): (MachineId, Request),
     target: &Target,
     action: &MachineAction,
 ) -> Result<MachinePreview, ActionFailure> {
@@ -433,10 +447,12 @@ fn preview(
     let Reach::Lane { lane, .. } = target.known.machine.reach() else {
         return Err(ActionFailure::Unreachable);
     };
-    let waiting = || {
+    let waiting = |waiting| {
         shared.emit(MachineUpdatesEvent::Waiting {
             machine,
             action: action.clone(),
+            request,
+            waiting,
         });
     };
     let lane_preview = lane.preview(change, &waiting)?;
@@ -459,7 +475,7 @@ fn preview(
 /// the outcome and the operation, which Check Status reads while nothing confirmed it.
 fn run_previewed(
     shared: &Shared,
-    machine: MachineId,
+    (machine, request): (MachineId, Request),
     lane: &dyn MachineLane,
     preview: &MachinePreview,
     lane_preview: admin::Preview,
@@ -469,10 +485,12 @@ fn run_previewed(
         shared.expect_restart(machine, preview.target.clone());
     }
     let mut report = ExecuteReport::default();
-    let waiting = || {
+    let waiting = |waiting| {
         shared.emit(MachineUpdatesEvent::Waiting {
             machine,
             action: preview.action.clone(),
+            request,
+            waiting,
         });
     };
     let outcome = lane.execute(lane_preview, &mut report, &waiting);

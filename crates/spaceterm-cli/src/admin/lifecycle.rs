@@ -168,10 +168,10 @@ fn not_running(
 
 /// Says once, to a person at the terminal, that the command waits for another SpaceTerm Core
 /// operation to finish before it goes on.
-fn say_waiting(context: &Context<'_>) -> impl FnMut() + use<> {
-    let interactive = context.interactive();
-    move || {
-        if interactive {
+fn say_waiting(context: &Context<'_>) -> impl FnMut(bool) + use<> {
+    let mut interactive = context.interactive();
+    move |began| {
+        if began && std::mem::take(&mut interactive) {
             eprintln!("Waiting for another SpaceTerm Core operation to finish\u{2026}");
         }
     }

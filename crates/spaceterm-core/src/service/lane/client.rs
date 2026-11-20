@@ -304,6 +304,7 @@ pub enum Outcome {
 ///
 /// `id` names the operation. The caller may execute the same approval again under the same ID
 /// after a definite refusal, so a reply lost on an earlier attempt still settles there.
+#[cfg(test)]
 #[allow(
     clippy::too_many_arguments,
     reason = "one execution's parts, used once"
@@ -316,6 +317,28 @@ pub(crate) fn perform(
     id: OperationId,
     wait: Duration,
     admitted: &mut dyn FnMut(&OperationId) -> Result<(), LaneError>,
+    interrupted: &dyn Fn() -> Option<Instant>,
+) -> Result<Outcome, LaneError> {
+    perform_following(
+        connector,
+        session,
+        (action, token, id),
+        wait,
+        admitted,
+        &mut || {},
+        interrupted,
+    )
+}
+
+/// [`perform`] that runs `accepted` once, as soon as the server is known to have admitted the
+/// operation: its `Accepted` reply, or a receipt for it.
+fn perform_following(
+    connector: &Arc<dyn Connector>,
+    session: Session,
+    (action, token, id): (LaneAction, String, OperationId),
+    wait: Duration,
+    admitted: &mut dyn FnMut(&OperationId) -> Result<(), LaneError>,
+    accepted: &mut dyn FnMut(),
     interrupted: &dyn Fn() -> Option<Instant>,
 ) -> Result<Outcome, LaneError> {
     let started = Instant::now();
@@ -345,7 +368,10 @@ pub(crate) fn perform(
     };
     let (mut boot, mut current) =
         match session.send_within(&execute, &request_deadline(Instant::now())) {
-            (Ok(LaneReply::Accepted { boot, .. }), _) => (Some(boot), Some(session)),
+            (Ok(LaneReply::Accepted { boot, .. }), _) => {
+                accepted();
+                (Some(boot), Some(session))
+            }
             // A refused Execute admitted nothing.
             (Ok(LaneReply::Error { code }), _) => return Err(LaneError::Code(code)),
             // No byte of Execute was written, so nothing was dispatched.
@@ -368,12 +394,16 @@ pub(crate) fn perform(
             Some(session) if boot.is_none() && interrupted().is_none() => {
                 match session.request_within(&execute, &request_deadline(Instant::now())) {
                     Ok(LaneReply::Accepted { boot: admitted, .. }) => {
+                        accepted();
                         boot = Some(admitted);
                         continue;
                     }
                     Ok(LaneReply::Error { code }) => {
                         match resolve(session, &operation, &request_deadline(Instant::now())) {
-                            Ok(LaneReply::Receipt(receipt)) => boot = Some(receipt.boot),
+                            Ok(LaneReply::Receipt(receipt)) => {
+                                accepted();
+                                boot = Some(receipt.boot);
+                            }
                             // Another operation holds the Core, and the first Execute may still
                             // wait behind it on the lost connection, where it can admit this
                             // same operation once that settles. Nothing proves it never will,
@@ -403,7 +433,10 @@ pub(crate) fn perform(
                         return Ok(Outcome::Settled { receipt, boot });
                     }
                     Ok(LaneReply::Receipt(receipt)) => {
-                        boot.get_or_insert_with(|| receipt.boot.clone());
+                        if boot.is_none() {
+                            accepted();
+                            boot = Some(receipt.boot.clone());
+                        }
                         last = Some(receipt);
                     }
                     // The operation may still arrive on the lost connection, so this proves nothing.
@@ -701,32 +734,34 @@ impl Lane {
         interrupted: &dyn Fn() -> Option<Instant>,
     ) -> Result<Outcome, LaneError> {
         let id = OperationId::random()?;
-        self.perform_as(session, action, token, id, wait, admitted, interrupted)
+        self.perform_as(
+            session,
+            (action, token, id),
+            wait,
+            admitted,
+            &mut || {},
+            interrupted,
+        )
     }
 
-    /// Executes a previewed action as operation `id` and follows it. See [`perform`].
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "one execution's parts, used once"
-    )]
+    /// Executes a previewed action as operation `id` and follows it. See [`perform`]. `accepted`
+    /// runs once, as soon as the server is known to have admitted the operation.
     pub fn perform_as(
         &self,
         session: Session,
-        action: LaneAction,
-        token: String,
-        id: OperationId,
+        (action, token, id): (LaneAction, String, OperationId),
         wait: Duration,
         admitted: &mut dyn FnMut(&OperationId) -> Result<(), LaneError>,
+        accepted: &mut dyn FnMut(),
         interrupted: &dyn Fn() -> Option<Instant>,
     ) -> Result<Outcome, LaneError> {
-        perform(
+        perform_following(
             &self.connector,
             session,
-            action,
-            token,
-            id,
+            (action, token, id),
             wait,
             admitted,
+            accepted,
             interrupted,
         )
     }

@@ -946,6 +946,7 @@ fn a_restart_that_ran_opens_no_alert_and_a_refused_preview_does(cx: &mut gpui::T
         action: MachineAction::Restart,
         outcome: Err(ActionFailure::Failed),
         operation: None,
+        request: None,
     });
     visual.run_until_parked();
     assert!(
@@ -1439,6 +1440,7 @@ fn a_failed_check_row_beside_a_waiting_update_opens_its_details(cx: &mut gpui::T
         action: MachineAction::CheckAgain,
         outcome: Err(ActionFailure::Busy),
         operation: None,
+        request: None,
     });
     visual.run_until_parked();
     click("update-pill-menu", visual);

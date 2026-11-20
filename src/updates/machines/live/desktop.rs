@@ -608,7 +608,7 @@ impl MachineLane for CoreLane {
     fn preview(
         &self,
         change: LaneChange,
-        waiting: &(dyn Fn() + Sync),
+        waiting: &(dyn Fn(bool) + Sync),
     ) -> Result<admin::Preview, ActionFailure> {
         let action = match change {
             LaneChange::Restart => LaneAction::Restart,
@@ -627,7 +627,7 @@ impl MachineLane for CoreLane {
             action,
             Instant::now() + admin::BUSY_WAIT,
             &|| None,
-            &mut || waiting(),
+            &mut |began| waiting(began),
         )
         .map(|(_, preview)| preview)
         .map_err(lane_failure)
@@ -657,7 +657,7 @@ impl MachineLane for CoreLane {
         &self,
         preview: admin::Preview,
         report: &mut ExecuteReport,
-        waiting: &(dyn Fn() + Sync),
+        waiting: &(dyn Fn(bool) + Sync),
     ) -> Result<(), ActionFailure> {
         let wait = admin::wait(&preview.action);
         // One absolute deadline covers the wait for another operation, the action's settlement
@@ -698,7 +698,7 @@ impl MachineLane for CoreLane {
             &mut admin::Unshared,
             &mut || Ok(()),
             &|| None,
-            &mut || waiting(),
+            &mut |began| waiting(began),
         )
         .map_err(lane_failure)?;
         report.operation = Some(match &outcome {
@@ -810,7 +810,7 @@ mod tests {
         fn preview(
             &self,
             _: LaneChange,
-            _: &(dyn Fn() + Sync),
+            _: &(dyn Fn(bool) + Sync),
         ) -> Result<admin::Preview, ActionFailure> {
             Err(ActionFailure::Unreachable)
         }
@@ -818,7 +818,7 @@ mod tests {
             &self,
             _: admin::Preview,
             _: &mut ExecuteReport,
-            _: &(dyn Fn() + Sync),
+            _: &(dyn Fn(bool) + Sync),
         ) -> Result<(), ActionFailure> {
             Ok(())
         }
