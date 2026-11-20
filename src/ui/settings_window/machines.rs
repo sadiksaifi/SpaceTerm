@@ -113,7 +113,10 @@ pub(super) trait CoreServiceControl: Send + Sync {
     /// runtime the service already uses.
     fn install(&self, installation: &Path) -> Result<ServiceStatus, CoreError>;
     fn start(&self) -> CoreAnswer<'_, ServiceStatus>;
-    /// Stops the server, ends its Terminal Sessions, and keeps it stopped until an explicit Start.
+    /// Stops a server that no Stop preview covers, and keeps it stopped until an explicit Start,
+    /// only where that ends no Terminal Session: it finishes the native cleanup of a published
+    /// Stop, or stops a service whose server does not run, checked under the service lock. A
+    /// running server refuses with [`CoreError::Changed`]; it stops through its own preview.
     fn stop(&self) -> Result<ServiceStatus, CoreError>;
     /// Stops and removes the service. Workspaces and installations are kept.
     fn uninstall(&self) -> Result<ServiceStatus, CoreError>;
@@ -157,7 +160,7 @@ impl CoreServiceControl for Service {
     }
 
     fn stop(&self) -> Result<ServiceStatus, CoreError> {
-        Service::stop(self)
+        Service::stop_offline(self)
     }
 
     fn uninstall(&self) -> Result<ServiceStatus, CoreError> {
@@ -1580,19 +1583,26 @@ impl SettingsWindow {
             );
             return;
         }
-        // A running SpaceTerm Core stops through its own preview of the exact Terminal Sessions
-        // that end, with its receipt, its Stopping announcement and its wait through another
-        // operation, as the menu bar and the CLI stop it. Only native cleanup of a Core that no
-        // longer runs uses the service manager here.
-        let running = self
+        // A SpaceTerm Core that may run stops through its own preview of the exact Terminal
+        // Sessions that end, with its receipt, its Stopping announcement and its wait through
+        // another operation, as the menu bar and the CLI stop it. That includes a Core whose
+        // last read was unresolved cleanup, while its lane answers. Only a Core that no longer
+        // runs uses the service manager here, and the service refuses that Stop as changed
+        // when the Core runs again by then.
+        let not_running = self
             .core_service
             .as_ref()
             .and_then(|row| row.state.status)
-            .is_some_and(|status| status.running);
+            .is_some_and(|status| !status.running);
         if action == ServiceAction::Stop
-            && running
+            && !not_running
             && let Some(update) =
                 self.machine_update(&super::machine_list::MachineChoice::Local, cx)
+            && matches!(
+                update.link,
+                crate::updates::machines::MachineLink::Connected
+                    | crate::updates::machines::MachineLink::Incompatible(_)
+            )
         {
             self.perform_update_command(
                 crate::updates::state::Command::Machine(

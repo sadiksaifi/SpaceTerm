@@ -737,6 +737,18 @@ impl Service {
     pub fn stop(&self) -> Result<ServiceStatus, CoreError> {
         self.apply_control(control::Action::Stop, None)
     }
+    /// Stops SpaceTerm Core only where that ends no Terminal Session a preview did not cover:
+    /// it finishes the native cleanup of a Stop already published, or stops a service whose
+    /// Core does not run, both checked under the service lock. A running Core that no published
+    /// Stop covers refuses with [`CoreError::Changed`]; it stops through its own preview of the
+    /// exact Sessions that end.
+    pub fn stop_offline(&self) -> Result<ServiceStatus, CoreError> {
+        let (data, _) = self.read()?.ok_or(CoreError::NotInstalled)?;
+        let _operation = data.lock("service.lock", false)?;
+        let stopped = Self::state(&data)?.is_some_and(|state| state.stopped);
+        let observed = (!stopped).then_some(false);
+        self.apply_control_locked(&data, control::Action::Stop, observed)
+    }
     /// Confirm an already completed Stop without issuing another native service action.
     pub fn stop_if_stopped(&self) -> Result<Option<ServiceStatus>, CoreError> {
         let Some((data, _)) = self.read()? else {
@@ -2600,7 +2612,17 @@ mod tests {
                             .run(|| provision(&service, archive, signature), || false)
                             .unwrap(),
                     );
+                    // A running Core that no Stop covers stops only through its own preview.
+                    assert_eq!(service.stop_offline().err(), Some(CoreError::Changed));
+                    assert!(
+                        !Service::state(&Directory::open(&fixture.paths.data, false).unwrap())
+                            .unwrap()
+                            .unwrap()
+                            .stopped
+                    );
                     service.stop().unwrap();
+                    // Once a Stop is published, the offline Stop only confirms its cleanup.
+                    assert!(service.stop_offline().unwrap().stopped);
                     let starting = std::cell::Cell::new(0);
                     assert!(matches!(
                         startup.launch(LaunchIntent::Passive, no_provision, || false, &|| {
