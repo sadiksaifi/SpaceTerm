@@ -487,7 +487,9 @@ impl CorePaneState {
     }
 
     /// Whether SpaceTerm Core's latest inventory shows Session `session` of Pane `pane` started:
-    /// its shell reached a prompt, finished a command or named itself.
+    /// its shell reached a prompt, finished a command or named itself with a terminal title. A
+    /// title derived from a directory the shell reported is no name: zsh's `chpwd` reports one
+    /// from its startup files, before the first prompt.
     pub(crate) fn session_ready(&self, pane: [u8; 32], session: [u8; 32]) -> bool {
         use spaceterm_core::pane::metadata::{PromptZone, TitleProvenance};
         let Some((_, revision)) = self
@@ -516,7 +518,7 @@ impl CorePaneState {
                 .is_some_and(|metadata| {
                     metadata.prompt_zone != PromptZone::Unknown
                         || metadata.finished_commands > 0
-                        || metadata.title_provenance != TitleProvenance::Fallback
+                        || metadata.title_provenance == TitleProvenance::TerminalControl
                 })
     }
 

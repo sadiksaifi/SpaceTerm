@@ -2013,9 +2013,10 @@ impl TabManager {
         let reveal = TabReveal::new(motion, close_button_size, close_clearance, appearance);
         // A Tab that arrived says nothing until its Terminal Session names it, however fast it
         // grows in, so its first words are its real name. One that never gets a name says
-        // Terminal once its wait ends.
-        let named =
-            identity.is_named() || (!identity.pending && !self.unnamed_since.contains_key(&tab_id));
+        // Terminal once its wait ends. While its Focused Pane's shell starts, any name it has is
+        // provisional, such as the shell's executable, so the Tab still says nothing.
+        let named = !identity.pending
+            && (identity.is_named() || !self.unnamed_since.contains_key(&tab_id));
         // A Tab growing in offers its close control once the control shows whole, so no part of
         // it cut off by the Tab's slot takes a press or reaches assistive technology.
         let close_control = if role != TabItemRole::InBar || reveal.close <= 0.0 {
@@ -2483,7 +2484,7 @@ impl TabManager {
             previous_inactive_tab = (!active).then_some(tab_id);
             let identity = view.read(cx).tab_identity();
             let tab_focus = view.read(cx).tab_focus().clone();
-            let title = if identity.pending && !identity.is_named() {
+            let title = if identity.pending {
                 super::tab_view::STARTING_NAME
             } else if identity.activity.is_empty() {
                 "Terminal"
@@ -9296,6 +9297,66 @@ mod tests {
             (None, true, true, true, true),
             "the first Tab says what it is at once; a new Tab says nothing until it is named, \
              and says Terminal once its wait ends without a name"
+        );
+    }
+
+    /// A new Tab whose shell is starting has a provisional name, the shell's executable and the
+    /// directory it reported before its first prompt. The Tab says nothing, and its accessible
+    /// name says the shell is starting, until the Session's startup ends, and then says the name.
+    #[gpui::test]
+    fn a_starting_shells_provisional_name_stays_off_its_tab_until_startup_ends(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::terminal::metadata::TitleProvenance;
+        let (manager, _records, cx) = tab_manager(cx);
+        click("create-tab-button", cx);
+        let core = cx.update(|_, cx| {
+            cx.global::<crate::ui::workspace_manager::tests::LocalCore>()
+                .clone()
+        });
+        let pane = core.panes.pane(core.panes.opened_at(1));
+        pane.attach_quietly();
+        cx.run_until_parked();
+        for (generation, provenance) in [
+            (1, TitleProvenance::Fallback),
+            (2, TitleProvenance::WorkingDirectory),
+        ] {
+            report_metadata(cx, 2, generation, |metadata| {
+                metadata.directory.path = Arc::from("/srv/app");
+                metadata.title.value = Arc::from("zsh");
+                metadata.title.provenance = provenance;
+            });
+            // A slow start outlasts the Tab's own wait for a name.
+            cx.executor().advance_clock(TAB_NAME_WAIT * 2);
+            cx.run_until_parked();
+            assert!(
+                cx.debug_bounds("tab-name-pending-2").is_some(),
+                "a provisional name stays off the Tab while the shell starts"
+            );
+            let identity = manager.read_with(cx, |manager, cx| {
+                manager.tabs.active_tab().read(cx).tab_identity()
+            });
+            assert!(identity.pending, "the Tab's identity waits for the shell");
+            assert!(
+                identity.is_named(),
+                "the Tab holds a provisional name: {:?}",
+                identity.one_line()
+            );
+            spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Starting shell");
+        }
+
+        pane.end_startup();
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("tab-name-pending-2").is_none(),
+            "the Tab says its name once the shell's startup ends"
+        );
+        let identity = manager.read_with(cx, |manager, cx| {
+            manager.tabs.active_tab().read(cx).tab_identity()
+        });
+        assert_eq!(
+            (identity.pending, identity.one_line().to_string()),
+            (false, "Terminal \u{b7} app".to_owned())
         );
     }
 

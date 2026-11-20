@@ -1090,6 +1090,75 @@ fn a_starting_shell_stays_blank_and_unnamed_through_its_own_focus_report() {
     let _ = std::fs::remove_dir_all(directory);
 }
 
+/// A shell whose startup files report its directory before its first prompt, as zsh's `chpwd`
+/// does, stays blank and unnamed: SpaceTerm Core's title derived from that directory is no name.
+/// Only the Session's own terminal title and prompt end the quiet.
+#[test]
+fn a_directory_reported_during_startup_keeps_a_starting_shells_quiet() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = std::env::temp_dir().canonicalize().unwrap().join(format!(
+        "spaceterm-chpwd-shell-{}-{}",
+        std::process::id(),
+        Instant::now().elapsed().as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let shell = directory.join("shell");
+    std::fs::write(
+        &shell,
+        "#!/bin/sh\nprintf '\\033]7;file://localhost/tmp\\007R3 startup banner\\r\\n'\nsleep 2\nprintf '\\033]0;R3 Ready\\007$ '\nexec sleep 60\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut host = crate::runtime::directory_testing::terminal_host_with_shell(&shell);
+    host.prepare_initial_organization().unwrap();
+    let core = ConnectedPane::with_host(
+        MachineConnection::for_identity("spaceterm-development").unwrap(),
+        host,
+    );
+    let state = Arc::clone(&core.state);
+    let started = core
+        .factory
+        .start(
+            *super::tests::Adapter::new().handle.geometry.lock().unwrap(),
+            TerminalAppearanceUpdate::builtin().unwrap(),
+        )
+        .unwrap();
+    started.handle.set_presentable(true);
+    let until = Instant::now() + Duration::from_secs(10);
+    while !state.startup_quiet() {
+        assert!(Instant::now() < until, "the Pane never attached");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let _ = screened(&started);
+    let began = Instant::now();
+    while began.elapsed() < Duration::from_millis(1200) {
+        assert!(
+            state.shell_starting(),
+            "a reported directory is not the shell's name"
+        );
+        assert!(
+            !screened(&started),
+            "the startup banner stays off the surface"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let until = Instant::now() + Duration::from_secs(10);
+    while state.shell_starting() {
+        assert!(
+            Instant::now() < until,
+            "the named shell never ended its quiet"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        began.elapsed() >= Duration::from_millis(1500),
+        "only the Session's own title or prompt ended the quiet"
+    );
+    drop(started);
+    drop(core);
+    let _ = std::fs::remove_dir_all(directory);
+}
+
 /// The person's own typing during the quiet ends it at once, and what they typed reaches the
 /// Session.
 #[test]
