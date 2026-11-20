@@ -2741,8 +2741,9 @@ mod tests {
                 written: false,
             })
         );
-        // The client takes L0 only once its first byte arrives, and none did.
-        std::thread::sleep(Duration::from_millis(200));
+        // The client takes L0 only once its first byte arrives, and no STREAM frame left.
+        stream.driver.pump();
+        assert_eq!(stream.driver.connection.stats().frame_tx.stream, 0);
         assert!(!client.is_finished());
         // Far more than the client's receive window, which nobody reads.
         let frame = vec![0; 512 * 1024];
