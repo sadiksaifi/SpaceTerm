@@ -8,6 +8,9 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex, Weak};
 
+/// The lock a paired route's client records are checked under.
+const ROUTE_LOCK: &str = "route.lock";
+
 /// Whether `value` is a `client.json` this build reads.
 pub(crate) fn readable_identity(value: &serde_json::Value) -> bool {
     ClientIdentity::deserialize(value)
@@ -279,10 +282,32 @@ impl MachineConnection {
     }
 
     fn client_directory(&self) -> Result<Directory, CoreError> {
+        self.client_directory_until(None)?
+            .ok_or(CoreError::StorageUnavailable)
+    }
+    /// This handle's client records. A paired route's records are checked against its pairing
+    /// under the route's lock, waited for until `deadline` at most when there is one. `None` when
+    /// another holder kept that lock past `deadline`.
+    fn client_directory_until(
+        &self,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Option<Directory>, CoreError> {
         let directory =
             Directory::open(&self.paths.data.join("clients").join(&self.account), true)?;
         if let Some(direct) = &self.direct {
-            let _lock = directory.lock("route.lock", false)?;
+            let _lock = match deadline {
+                None => directory.lock(ROUTE_LOCK, false)?,
+                Some(deadline) => match directory.wait_lock(
+                    ROUTE_LOCK,
+                    deadline.saturating_duration_since(std::time::Instant::now()),
+                    None,
+                )? {
+                    crate::storage::LockWait::Locked(lock) => lock,
+                    crate::storage::LockWait::Held | crate::storage::LockWait::Cancelled => {
+                        return Ok(None);
+                    }
+                },
+            };
             match directory.read_json::<DirectRecord>("route.json")? {
                 Some(record) if record.version == 1 && record.paired == direct.paired => {}
                 Some(_) => return Err(CoreError::AuthenticationRefused),
@@ -295,7 +320,7 @@ impl MachineConnection {
                 )?,
             }
         }
-        Ok(directory)
+        Ok(Some(directory))
     }
     /// The Client Identity the server admits this handle as: an agent's is derived from the
     /// base one.
@@ -1024,8 +1049,46 @@ impl MachineConnection {
     /// This handle's service lane, which answers across protocol majors. Opening it never starts
     /// a server.
     pub fn service_lane(&self) -> Result<crate::service::lane::client::Lane, CoreError> {
-        if let Some(direct) = &self.direct {
+        if self.direct.is_some() {
             self.client_directory()?;
+        }
+        self.lane()
+    }
+    /// [`Self::service_lane`] that waits for a paired route's client records until `deadline` at
+    /// most, so a confirmed action's one deadline also bounds admitting its route.
+    pub fn service_lane_by(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Result<crate::service::lane::client::Lane, crate::service::lane::client::LaneError> {
+        use crate::service::lane::client::LaneError;
+        if self.direct.is_some()
+            && self
+                .client_directory_until(Some(deadline))
+                .map_err(LaneError::Core)?
+                .is_none()
+        {
+            return Err(LaneError::Deadline);
+        }
+        self.lane().map_err(LaneError::Core)
+    }
+    /// [`Self::service_operations`] that waits for a paired route's client records until
+    /// `deadline` at most.
+    pub fn service_operations_by(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Result<
+        crate::service::lane::admin::PendingOperations,
+        crate::service::lane::client::LaneError,
+    > {
+        use crate::service::lane::client::LaneError;
+        self.client_directory_until(Some(deadline))
+            .map_err(LaneError::Core)?
+            .map(crate::service::lane::admin::PendingOperations::new)
+            .ok_or(LaneError::Deadline)
+    }
+    /// This handle's service lane, once its route's client records were checked.
+    fn lane(&self) -> Result<crate::service::lane::client::Lane, CoreError> {
+        if let Some(direct) = &self.direct {
             return Ok(crate::service::lane::client::Lane::paired(
                 std::sync::Arc::clone(&direct.connector),
                 direct.paired.clone(),
@@ -1669,6 +1732,46 @@ mod tests {
             .with_direct([3; 32], paired, Arc::new(NoConnect))
             .unwrap()
     }
+    /// Another command holds the paired route's lock while a confirmed action opens its lane.
+    /// Admitting the route waits no later than the action's one deadline, and once the lock is
+    /// free the same handle opens its lane and its record.
+    #[test]
+    fn a_held_route_lock_ends_a_confirmed_lane_opening_at_its_deadline() {
+        use crate::service::lane::client::LaneError;
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "st-route-lock-{:x}",
+            u64::from_be_bytes(protocol::random().unwrap()[..8].try_into().unwrap())
+        ));
+        let remote = direct_fixture(&root, paired_identity());
+        let records = Directory::open(
+            &remote.paths.data.join("clients").join(&remote.account),
+            true,
+        )
+        .unwrap();
+        let held = records.lock(ROUTE_LOCK, false).unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        assert_eq!(
+            remote.service_lane_by(deadline).err(),
+            Some(LaneError::Deadline)
+        );
+        assert!(
+            std::time::Instant::now() < deadline + std::time::Duration::from_millis(200),
+            "the lane opening ended at its deadline"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        assert!(matches!(
+            remote.service_operations_by(deadline),
+            Err(LaneError::Deadline)
+        ));
+
+        drop(held);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        assert!(remote.service_lane_by(deadline).is_ok());
+        assert!(remote.service_operations_by(deadline).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn workspace_owners_distinguish_full_pins_clients_pairings_and_saved_routes() {
         let paired = paired_identity();

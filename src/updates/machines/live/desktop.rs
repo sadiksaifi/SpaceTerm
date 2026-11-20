@@ -707,14 +707,11 @@ impl MachineLane for CoreLane {
         // One absolute deadline covers the wait for another operation, the action's settlement
         // and, for a Stop, confirming its native cleanup afterwards.
         let deadline = Instant::now() + admin::BUSY_WAIT + wait;
-        let lane = self
-            .core
-            .service_lane()
-            .map_err(|error| core_failure(&error))?;
+        let lane = self.core.service_lane_by(deadline).map_err(lane_failure)?;
         let pending = self
             .core
-            .service_operations()
-            .map_err(|error| core_failure(&error))?;
+            .service_operations_by(deadline)
+            .map_err(lane_failure)?;
         // Opening acknowledged these receipts, so their outcomes go to the surfaces that ask, even
         // when the connection failed after acknowledging them.
         let opened = admin::open(&lane, &pending, deadline);

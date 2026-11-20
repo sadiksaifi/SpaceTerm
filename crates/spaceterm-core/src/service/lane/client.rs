@@ -380,7 +380,7 @@ pub(crate) fn perform(
         connector,
         session,
         (action, token, id),
-        wait,
+        Instant::now() + wait,
         admitted,
         &mut || {},
         &mut acknowledge_only,
@@ -410,14 +410,15 @@ fn perform_following(
     connector: &Arc<dyn Connector>,
     session: Session,
     (action, token, id): (LaneAction, String, OperationId),
-    wait: Duration,
+    until: Instant,
     admitted: &mut dyn FnMut(&OperationId) -> Result<(), LaneError>,
     accepted: &mut dyn FnMut(),
     settle: &mut Settle<'_>,
     interrupted: &dyn Fn() -> Option<Instant>,
 ) -> Result<Outcome, LaneError> {
-    let started = Instant::now();
-    let deadline = || interrupted().into_iter().fold(started + wait, Instant::min);
+    // The caller's absolute instant, never recomputed from a remaining duration, so time spent
+    // before this flow runs can't move it later.
+    let deadline = || interrupted().into_iter().fold(until, Instant::min);
     // Fixed per request from when it is sent, and moved closer by an interrupt.
     let request_deadline = |sent: Instant| move || deadline().min(sent + REQUEST_LIMIT);
     // A caller whose deadline passed before `Execute` dispatches nothing.
@@ -796,21 +797,22 @@ impl Lane {
         self.perform_as(
             session,
             (action, token, id),
-            wait,
+            Instant::now() + wait,
             admitted,
             (&mut || {}, &mut acknowledge_only),
             interrupted,
         )
     }
 
-    /// Executes a previewed action as operation `id` and follows it. See [`perform`]. `accepted`
-    /// runs once, as soon as the server is known to have admitted the operation, and `settle`
-    /// takes its settled receipt on the session that read it.
+    /// Executes a previewed action as operation `id` and follows it until the absolute instant
+    /// `until`. See [`perform`]. `accepted` runs once, as soon as the server is known to have
+    /// admitted the operation, and `settle` takes its settled receipt on the session that read
+    /// it.
     pub fn perform_as(
         &self,
         session: Session,
         (action, token, id): (LaneAction, String, OperationId),
-        wait: Duration,
+        until: Instant,
         admitted: &mut dyn FnMut(&OperationId) -> Result<(), LaneError>,
         (accepted, settle): (&mut dyn FnMut(), &mut Settle<'_>),
         interrupted: &dyn Fn() -> Option<Instant>,
@@ -819,7 +821,7 @@ impl Lane {
             &self.connector,
             session,
             (action, token, id),
-            wait,
+            until,
             admitted,
             accepted,
             settle,

@@ -707,7 +707,7 @@ pub fn execute(
         lane,
         session,
         (action, token, id),
-        wait,
+        Instant::now() + wait,
         pending,
         &mut journal,
         share,
@@ -739,14 +739,13 @@ fn execute_as(
     lane: &Lane,
     session: Session,
     (action, token, id): (LaneAction, String, OperationId),
-    wait: Duration,
+    until: Instant,
     pending: &PendingOperations,
     journal: &mut Journal,
     share: &mut dyn Share,
     (dispatch, accepted): (&mut dyn FnMut() -> Result<(), LaneError>, &mut dyn FnMut()),
     interrupted: &dyn Fn() -> Option<Instant>,
 ) -> (Result<Outcome, LaneError>, bool) {
-    let until = Instant::now() + wait;
     // Recording the operation and settling its receipt both write the record and move the share.
     let journal = std::cell::RefCell::new(journal);
     let share = std::cell::RefCell::new(share);
@@ -755,7 +754,7 @@ fn execute_as(
     let outcome = lane.perform_as(
         session,
         (action, token, id),
-        wait,
+        until,
         &mut |operation| {
             dispatch()?;
             let mut journal = journal.borrow_mut();
@@ -924,8 +923,10 @@ fn execute_after_waits(
     // Whether the state the record lives in was shared again after the last attempt.
     let mut shared = true;
     loop {
-        let wait = follow.min(deadline.saturating_duration_since(Instant::now()));
-        if wait.is_zero() {
+        // Each attempt follows for `follow` at most and never past the approval's one absolute
+        // `deadline`, which every step below reads as an instant.
+        let until = deadline.min(Instant::now() + follow);
+        if Instant::now() >= until {
             // No attempt is sent once the deadline passed.
             let outcome = Err(refused.unwrap_or(LaneError::Deadline));
             forget_refused(&outcome, id, journal.journaled && shared, pending);
@@ -935,7 +936,7 @@ fn execute_after_waits(
             lane,
             session,
             (action.clone(), token.clone(), id),
-            wait,
+            until,
             pending,
             &mut journal,
             share,

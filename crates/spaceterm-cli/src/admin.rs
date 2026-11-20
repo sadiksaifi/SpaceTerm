@@ -560,9 +560,8 @@ pub fn open_lane(
 ) -> Result<Opened, Unopened> {
     let identity = &context.identity_kind();
     let connection = connection.as_ref().map_err(Clone::clone)?;
-    let lane = connection
-        .service_lane()
-        .map_err(contract::from_core_error)?;
+    // Admitting the route waits for its client records no later than `deadline` either.
+    let lane = connection.service_lane_by(deadline).map_err(lane_failure)?;
     let (mut session, settled) =
         admin::open(&lane, &pending.operations, deadline).map_err(|unopened| Unopened {
             failure: lane_failure(unopened.error),

@@ -3090,6 +3090,49 @@ mod flow {
         }
     }
 
+    fn executes(request: &LaneRequest) -> bool {
+        matches!(request, LaneRequest::Execute { .. })
+    }
+
+    /// An approval's one absolute deadline holds across every handoff before `Execute`. A step
+    /// that runs past it, as a slow journal or a process suspended between steps would, sends
+    /// no byte of `Execute`, admits nothing and leaves no record.
+    #[test]
+    fn no_execute_byte_leaves_after_the_approvals_deadline() {
+        with_lane(|lane| {
+            let pending = pending(&lane);
+            let (route, cut) = cutting(&lane, false);
+            let (mut session, _) =
+                admin::open(&route, &pending, Instant::now() + REQUEST_LIMIT).unwrap();
+            let preview = admin::preview(&mut session, LaneAction::Restart).unwrap();
+            *cut.lock().unwrap() = Some((executes as fn(&LaneRequest) -> bool, 1));
+            let deadline = Instant::now() + Duration::from_millis(300);
+            let outcome = admin::execute_approved(
+                &route,
+                session,
+                LaneAction::Restart,
+                preview.token,
+                deadline,
+                Duration::from_secs(20),
+                &pending,
+                &mut admin::Unshared,
+                &mut || {
+                    std::thread::sleep(
+                        deadline.saturating_duration_since(Instant::now())
+                            + Duration::from_millis(50),
+                    );
+                    Ok(())
+                },
+                &|| None,
+                &mut |_| {},
+            );
+            assert_eq!(outcome, Err(LaneError::Deadline));
+            assert!(cut.lock().unwrap().is_some(), "no Execute reached the Core");
+            assert!(pending.list().unwrap().is_empty());
+            assert!(lane.lane.ledger().unwrap().records().unwrap().is_empty());
+        });
+    }
+
     /// Settings' Check Now on a paired Machine opens the lane as the original surface's identity
     /// and acknowledges its leftovers, whole or in part. The original surface's Check Status for
     /// each operation then reads the same outcome.
