@@ -45,21 +45,54 @@ pub fn run(context: &Context<'_>) -> Reply {
     {
         return over_lane(context, &Ok(connection), core, RouteKey::Local);
     }
+    // A Stop's outcome stays readable in this machine's own ledger after SpaceTerm Core exited,
+    // also when its service can't be read, as while its cleanup is unresolved.
+    let receipts = super::offline_receipts(context);
     let status = Offline::new(context.identity)
         .and_then(|offline| offline.admin().status(None))
         .map_err(contract::from_core_error);
     match status {
-        // A Stop's outcome stays readable here after SpaceTerm Core exited.
-        Ok(status) => report(
-            context,
-            core,
-            &status,
-            None,
-            &RouteKey::Local,
-            super::offline_receipts(context),
-        ),
-        Err(failure) => Reply::failure(COMMAND, Some(core), failure),
+        Ok(status) => report(context, core, &status, None, &RouteKey::Local, receipts),
+        Err(failure) => {
+            let text = recovered_text(&receipts);
+            Reply::new(
+                &super::with_recovered(
+                    Envelope::error(COMMAND, Some(core), failure, contract::Empty {}),
+                    receipts,
+                ),
+                text,
+            )
+        }
     }
+}
+
+/// One line for each earlier operation SpaceTerm settled or read first, with its outcome.
+pub(crate) fn recovered_text(recovered: &[crate::contract::RecoveredOperation]) -> String {
+    use crate::contract::RecoveredState;
+    recovered
+        .iter()
+        .map(
+            |operation| match (operation.outcome.state, operation.outcome.code) {
+                (RecoveredState::Applied, _) => format!(
+                    "An earlier SpaceTerm Core operation finished: {}\n",
+                    operation.operation
+                ),
+                (RecoveredState::Refused, Some(code)) => format!(
+                    "An earlier SpaceTerm Core operation didn't finish ({}): {}\n",
+                    code.as_str(),
+                    operation.operation
+                ),
+                (RecoveredState::Refused, None) => format!(
+                    "An earlier SpaceTerm Core operation didn't finish: {}\n",
+                    operation.operation
+                ),
+                (RecoveredState::Unknown, _) => format!(
+                    "An earlier SpaceTerm Core operation hasn't finished yet: {}\n",
+                    operation.operation
+                ),
+            },
+        )
+        .collect()
 }
 
 fn over_lane(
@@ -390,7 +423,8 @@ pub(crate) fn envelope(
             )
         })
         .map(crate::notice::Finish::sentences);
-    let text = text(&core, &data, commands, finish.as_deref());
+    let mut text = text(&core, &data, commands, finish.as_deref());
+    text.push_str(&recovered_text(&recovered));
     (
         super::with_recovered(Envelope::ok(COMMAND, Some(core), data), recovered),
         text,

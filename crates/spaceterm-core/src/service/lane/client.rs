@@ -24,6 +24,8 @@ const STALE: Duration = Duration::from_secs(20);
 const CHECK: Duration = Duration::from_millis(100);
 /// The thread name of lane I/O that [`within`] runs.
 const LANE_IO: &str = "spaceterm-lane-io";
+/// The lane code of a refusal because another service operation holds SpaceTerm Core.
+pub(crate) const BUSY: &str = "service_busy";
 
 /// An admitted service-lane connection, the lane version its admission selected, and the
 /// service version the Core offered.
@@ -140,6 +142,20 @@ impl Session {
         })
     }
 
+    /// Like [`Self::call`], but stops waiting as soon as `deadline()` passes. A request
+    /// abandoned that way ends this session.
+    pub fn call_within(
+        &mut self,
+        request: &LaneRequest,
+        deadline: &dyn Fn() -> Instant,
+    ) -> Result<LaneReply, LaneError> {
+        match self.request_within(request, deadline)? {
+            LaneReply::Error { code } => Err(LaneError::Code(code)),
+            LaneReply::BelowFloor { floor } => Err(LaneError::BelowFloor(floor)),
+            reply => Ok(reply),
+        }
+    }
+
     /// Like [`Self::request`], but stops waiting as soon as `deadline()` passes. A request
     /// abandoned that way ends this session.
     fn request_within(
@@ -241,11 +257,19 @@ pub enum Outcome {
 /// interrupted. From then on the flow only resolves: it never sends `Execute` again. Every
 /// connection and request reads it again while it waits, so a stalled server cannot hold the
 /// flow past that instant.
+///
+/// `id` names the operation. The caller may execute the same approval again under the same ID
+/// after a definite refusal, so a reply lost on an earlier attempt still settles there.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one execution's parts, used once"
+)]
 pub(crate) fn perform(
     connector: &Arc<dyn Connector>,
     session: Session,
     action: LaneAction,
     token: String,
+    id: OperationId,
     wait: Duration,
     admitted: &mut dyn FnMut(&OperationId) -> Result<(), LaneError>,
     interrupted: &dyn Fn() -> Option<Instant>,
@@ -255,7 +279,6 @@ pub(crate) fn perform(
     } else {
         session
     };
-    let id = OperationId::random()?;
     admitted(&id)?;
     let operation = id.to_string();
     // Stop and Uninstall end the Core that answers the lane, so the flow does not reconnect once
@@ -300,6 +323,12 @@ pub(crate) fn perform(
                     Ok(LaneReply::Error { code }) => {
                         match resolve(session, &operation, &request_deadline(Instant::now())) {
                             Ok(LaneReply::Receipt(receipt)) => boot = Some(receipt.boot),
+                            // Another operation holds the Core, and the first Execute may still
+                            // wait behind it on the lost connection, where it can admit this
+                            // same operation once that settles. Nothing proves it never will,
+                            // so the flow asks again under the same ID.
+                            Ok(LaneReply::Error { code: missing })
+                                if missing == "not_found" && code == BUSY => {}
                             // Executes are serialized, so no record means none was admitted.
                             Ok(LaneReply::Error { code: missing }) if missing == "not_found" => {
                                 return Err(LaneError::Code(code));
@@ -570,7 +599,7 @@ impl Lane {
         Session::open(self.connector.as_ref(), Instant::now() + REQUEST_LIMIT)
     }
 
-    /// Executes a previewed action and follows it. See [`perform`].
+    /// Executes a previewed action as a new operation and follows it. See [`perform`].
     pub fn perform(
         &self,
         session: Session,
@@ -580,11 +609,31 @@ impl Lane {
         admitted: &mut dyn FnMut(&OperationId) -> Result<(), LaneError>,
         interrupted: &dyn Fn() -> Option<Instant>,
     ) -> Result<Outcome, LaneError> {
+        let id = OperationId::random()?;
+        self.perform_as(session, action, token, id, wait, admitted, interrupted)
+    }
+
+    /// Executes a previewed action as operation `id` and follows it. See [`perform`].
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one execution's parts, used once"
+    )]
+    pub fn perform_as(
+        &self,
+        session: Session,
+        action: LaneAction,
+        token: String,
+        id: OperationId,
+        wait: Duration,
+        admitted: &mut dyn FnMut(&OperationId) -> Result<(), LaneError>,
+        interrupted: &dyn Fn() -> Option<Instant>,
+    ) -> Result<Outcome, LaneError> {
         perform(
             &self.connector,
             session,
             action,
             token,
+            id,
             wait,
             admitted,
             interrupted,

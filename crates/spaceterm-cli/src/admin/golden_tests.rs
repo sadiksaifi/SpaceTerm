@@ -144,6 +144,13 @@ fn status_reports_service_network_devices_and_held_outcomes() {
     let (envelope, text) = status::envelope(core(), &lane, held, recovered(), &COMMANDS, None, NOW);
     assert_exit(&envelope, 0);
     assert_golden("status", &envelope);
+    // The settled operation's outcome reads in text as well as in JSON.
+    assert!(
+        text.contains(
+            "An earlier SpaceTerm Core operation finished: fedcba9876543210fedcba9876543210\n"
+        ),
+        "{text}"
+    );
     assert!(
         text.contains(
             "Downloaded: 0.8.0 at 2026-11-03T09:12:00Z. A SpaceTerm Core update to 0.8.0 has \

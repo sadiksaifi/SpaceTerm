@@ -1664,6 +1664,7 @@ mod flow {
                 session,
                 LaneAction::Restart,
                 token,
+                OperationId::random().unwrap(),
                 Duration::from_secs(20),
                 &mut |op| {
                     admitted.push(*op);
@@ -1691,6 +1692,7 @@ mod flow {
             session,
             LaneAction::Uninstall,
             token,
+            OperationId::random().unwrap(),
             Duration::from_secs(20),
             &mut |_| Ok(()),
             &|| None,
@@ -1951,6 +1953,7 @@ mod flow {
                 session,
                 LaneAction::Stop,
                 token,
+                OperationId::random().unwrap(),
                 Duration::from_secs(20),
                 &mut |op| {
                     admitted = Some(*op);
@@ -2005,6 +2008,7 @@ mod flow {
                 session,
                 LaneAction::Restart,
                 token,
+                OperationId::random().unwrap(),
                 Duration::from_secs(20),
                 &mut |_| Ok(()),
                 &|| None,
@@ -2025,6 +2029,8 @@ mod flow {
     struct Lossy {
         lane: Mutex<Option<Arc<LaneCore>>>,
         lose: Arc<AtomicBool>,
+        /// Drops the next `Execute` unread instead, as a request lost on its way.
+        drop: Arc<AtomicBool>,
     }
     impl Connector for Lossy {
         fn connect(&self, _: Instant) -> Result<client::Connected, CoreError> {
@@ -2036,6 +2042,7 @@ mod flow {
                 .ok_or(CoreError::NotRunning)?;
             let (client, mut core) = UnixStream::pair().map_err(|_| CoreError::Protocol)?;
             let lose = self.lose.clone();
+            let drop = self.drop.clone();
             std::thread::spawn(move || {
                 loop {
                     let deadline = Instant::now() + Duration::from_secs(5);
@@ -2044,6 +2051,10 @@ mod flow {
                     };
                     let request: LaneRequest = serde_json::from_slice(&bytes).unwrap();
                     let execute = matches!(request, LaneRequest::Execute { .. });
+                    if execute && drop.swap(false, Ordering::SeqCst) {
+                        let _ = core.shutdown(std::net::Shutdown::Both);
+                        return;
+                    }
                     let reply = lane.answer(request, &LOCAL);
                     if execute && lose.swap(false, Ordering::SeqCst) {
                         let _ = core.shutdown(std::net::Shutdown::Both);
@@ -2104,6 +2115,7 @@ mod flow {
                 session,
                 LaneAction::Restart,
                 token,
+                OperationId::random().unwrap(),
                 Duration::from_secs(20),
                 &mut |op| {
                     admitted = Some(*op);
@@ -2122,6 +2134,59 @@ mod flow {
         });
     }
 
+    /// The first `Execute` never reached the Core, and another operation holds it when the flow
+    /// asks again. Busy then proves nothing about the first request, so the flow keeps the same
+    /// operation and admits it, once, after the other operation settles.
+    #[test]
+    fn a_busy_replay_after_a_lost_execute_keeps_the_same_operation() {
+        with_lane(|lane| {
+            lane.host.sessions.lock().unwrap().push([3; 32]);
+            let lossy = Lossy::up(&lane);
+            let (session, token) = lossy.previewed(LaneAction::Stop);
+            lossy.lose.store(false, Ordering::SeqCst);
+            lossy.drop.store(true, Ordering::SeqCst);
+            // The other client's Restart holds the Core until `settle`; only this Stop's helper
+            // settles at once.
+            let hook = lane.hook.lock().unwrap().take();
+            let settle = another_clients_restart(&lane);
+            *lane.hook.lock().unwrap() = hook;
+            let settled = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(2500));
+                settle();
+            });
+            let id = OperationId::random().unwrap();
+            let mut admitted = Vec::new();
+            let outcome = client::perform(
+                &(lossy.clone() as Arc<dyn Connector>),
+                session,
+                LaneAction::Stop,
+                token,
+                id,
+                Duration::from_secs(20),
+                &mut |op| {
+                    admitted.push(*op);
+                    Ok(())
+                },
+                &|| None,
+            );
+            settled.join().unwrap();
+            let operation = match outcome {
+                Ok(
+                    Outcome::Shutdown { operation, .. } | Outcome::Unconfirmed { operation, .. },
+                ) => operation,
+                Ok(Outcome::Settled { receipt, .. }) => receipt.operation,
+                Err(error) => panic!("a lost Execute is never refused as busy: {error:?}"),
+            };
+            assert_eq!(operation, id.to_string());
+            assert_eq!(admitted, [id]);
+            assert_eq!(
+                lane.launches.load(Ordering::SeqCst),
+                2,
+                "the other Restart and this Stop each launched once"
+            );
+        });
+    }
+
     #[test]
     fn an_interrupted_flow_resolves_a_lost_accepted_reply_without_sending_execute_again() {
         with_lane(|lane| {
@@ -2134,6 +2199,7 @@ mod flow {
                 session,
                 LaneAction::Restart,
                 token,
+                OperationId::random().unwrap(),
                 Duration::from_secs(60),
                 &mut |_| Ok(()),
                 &|| Some(interrupted),
@@ -2184,6 +2250,34 @@ mod flow {
         }
     }
 
+    /// A preview that a stalled Core never answers ends at the caller's deadline, not at the
+    /// lane's own request limit.
+    #[test]
+    fn a_stalled_preview_ends_at_the_callers_deadline() {
+        with_lane(|lane| {
+            let stalling = Arc::new(Stalling::default());
+            *stalling.lane.lock().unwrap() = Some(lane.lane.clone());
+            stalling.stalled.store(true, Ordering::SeqCst);
+            let client = client::Lane::over(stalling.clone());
+            let session = client.session().unwrap();
+            let began = Instant::now();
+            let previewed = admin::preview_when_ready(
+                &client,
+                session,
+                LaneAction::Restart,
+                began + Duration::from_millis(1500),
+                &|| None,
+                &mut || {},
+            );
+            assert!(previewed.is_err());
+            assert!(
+                began.elapsed() < Duration::from_secs(4),
+                "{:?}",
+                began.elapsed()
+            );
+        });
+    }
+
     #[test]
     fn an_interrupt_ends_a_request_a_stalled_core_holds_within_the_grace() {
         with_lane(|lane| {
@@ -2210,6 +2304,7 @@ mod flow {
                 session,
                 LaneAction::Restart,
                 token,
+                OperationId::random().unwrap(),
                 Duration::from_secs(60),
                 &mut |_| Ok(()),
                 &|| (Instant::now() >= at).then_some(at + Duration::from_secs(5)),
@@ -2243,6 +2338,7 @@ mod flow {
                 session,
                 LaneAction::Stop,
                 token,
+                OperationId::random().unwrap(),
                 Duration::from_secs(20),
                 &mut |_| Ok(()),
                 &|| None,

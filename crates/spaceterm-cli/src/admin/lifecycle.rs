@@ -84,6 +84,8 @@ pub fn start(context: &Context<'_>) -> Reply {
 }
 
 pub fn stop_or_restart(context: &Context<'_>, kind: Kind, token: Option<&str>) -> Reply {
+    // A confirmed command's `--timeout` covers everything it does from here.
+    let started = Instant::now();
     let command = kind.command();
     // A stopped SpaceTerm Core can't be started from a paired machine, so Stop runs only here.
     if kind == Kind::Stop
@@ -104,7 +106,15 @@ pub fn stop_or_restart(context: &Context<'_>, kind: Kind, token: Option<&str>) -
         Err(failure) => return not_running(context, &routed, command, failure),
     };
     match token {
-        Some(token) => execute(context, kind, routed, opened, &pending, token.to_owned()),
+        Some(token) => execute(
+            context,
+            kind,
+            routed,
+            opened,
+            &pending,
+            token.to_owned(),
+            started,
+        ),
         None => preview(context, kind, routed, opened, &pending),
     }
 }
@@ -149,9 +159,12 @@ fn preview(
     pending: &Pending,
 ) -> Reply {
     let command = kind.command();
+    // One deadline covers reading the facts and the preview with its wait for another
+    // operation.
+    let deadline = Instant::now() + context.timeout(admin::BUSY_WAIT);
     // A Core that reports no facts still previews; its restart then names no breaking change.
     let facts = match kind {
-        Kind::Restart => admin::facts(&mut opened.session)
+        Kind::Restart => admin::facts_by(&mut opened.session, crate::interrupt::limit(deadline))
             .ok()
             .map(|(_, facts)| facts),
         Kind::Stop => None,
@@ -162,7 +175,7 @@ fn preview(
         &opened.lane,
         opened.session,
         kind.action(),
-        crate::interrupt::limit(Instant::now() + context.timeout(admin::BUSY_WAIT)),
+        crate::interrupt::limit(deadline),
         &crate::interrupt::settle_by,
         &mut say_waiting(context),
     );
@@ -193,7 +206,16 @@ fn preview(
         contract::write_warnings(&warnings, &mut std::io::stderr().lock());
         eprint!("{summary}");
         if super::confirm(kind.confirm_label()) {
-            return execute(context, kind, routed, opened, pending, token);
+            // The person's answer starts the confirmed action's own budget.
+            return execute(
+                context,
+                kind,
+                routed,
+                opened,
+                pending,
+                token,
+                Instant::now(),
+            );
         }
         return Reply::failure(
             command,
@@ -360,6 +382,7 @@ fn execute(
     opened: Opened,
     pending: &Pending,
     token: String,
+    started: Instant,
 ) -> Reply {
     let command = kind.command();
     let Opened {
@@ -367,9 +390,15 @@ fn execute(
         mut session,
         mut recovered,
     } = opened;
+    // One absolute deadline, from `started`, covers reading the facts, the wait for another
+    // operation, the action's settlement and, for a local Stop, reading its outcome afterwards.
+    // `--timeout` sets the whole of it.
+    let deadline = started + context.timeout(admin::BUSY_WAIT + kind.wait());
     // A restart moves into the Pending Version when one waits, so its outcome names it.
     let before = match kind {
-        Kind::Restart => admin::facts(&mut session).ok().map(|(_, facts)| facts),
+        Kind::Restart => admin::facts_by(&mut session, crate::interrupt::limit(deadline))
+            .ok()
+            .map(|(_, facts)| facts),
         Kind::Stop => None,
     };
     let target = before
@@ -379,9 +408,6 @@ fn execute(
     // An approved Stop or Restart waits for another operation that holds SpaceTerm Core, then
     // runs under the same approval. SpaceTerm Core refuses it as changed when what it affects
     // changed meanwhile.
-    // One absolute deadline covers the wait for another operation, the action's settlement
-    // and, for a local Stop, reading its outcome afterwards. `--timeout` sets the whole of it.
-    let deadline = Instant::now() + context.timeout(admin::BUSY_WAIT + kind.wait());
     let outcome = admin::execute_approved(
         &lane,
         session,

@@ -41,8 +41,7 @@ pub const NETWORK_WAIT: Duration = Duration::from_secs(30);
 pub const BUSY_WAIT: Duration = Duration::from_secs(180);
 /// How often a waiting approval asks again whether SpaceTerm Core is still busy.
 const BUSY_POLL: Duration = Duration::from_secs(1);
-/// The lane code of a refusal because another service operation holds SpaceTerm Core.
-const BUSY: &str = "service_busy";
+use super::client::BUSY;
 
 /// How long an action is followed after its `Execute`. Only Stop and Uninstall end the lane they
 /// are followed over, so every other action, including one added later, is followed until it
@@ -172,6 +171,21 @@ pub fn preview(session: &mut Session, action: LaneAction) -> Result<Preview, Lan
     previewed(action, reply)
 }
 
+/// [`preview`] that stops waiting as soon as `deadline()` passes, which ends the session.
+pub fn preview_within(
+    session: &mut Session,
+    action: LaneAction,
+    deadline: &dyn Fn() -> Instant,
+) -> Result<Preview, LaneError> {
+    let reply = session.call_within(
+        &LaneRequest::Preview {
+            action: action.clone(),
+        },
+        deadline,
+    )?;
+    previewed(action, reply)
+}
+
 fn previewed(action: LaneAction, reply: LaneReply) -> Result<Preview, LaneError> {
     match reply {
         LaneReply::Preview {
@@ -225,7 +239,19 @@ pub fn preview_network(
 
 /// The Core's update facts and the run of the Core that reported them.
 pub fn facts(session: &mut Session) -> Result<(String, UpdateFacts), LaneError> {
-    match session.call(&LaneRequest::Facts {}, Instant::now() + REQUEST_LIMIT)? {
+    let deadline = Instant::now() + REQUEST_LIMIT;
+    facts_by(session, deadline)
+}
+
+/// [`facts`] that stops waiting at `deadline`, which ends the session.
+pub fn facts_by(
+    session: &mut Session,
+    deadline: Instant,
+) -> Result<(String, UpdateFacts), LaneError> {
+    let sent = Instant::now();
+    match session.call_within(&LaneRequest::Facts {}, &|| {
+        deadline.min(sent + REQUEST_LIMIT)
+    })? {
         LaneReply::Facts { boot, facts } => Ok((boot, *facts)),
         _ => Err(LaneError::Core(CoreError::Protocol)),
     }
@@ -387,37 +413,84 @@ pub fn execute(
     dispatch: &mut dyn FnMut() -> Result<(), LaneError>,
     interrupted: &dyn Fn() -> Option<Instant>,
 ) -> Result<Outcome, LaneError> {
-    let mut recorded = None;
-    let outcome = lane.perform(
+    let id = OperationId::random()?;
+    let mut journaled = false;
+    let (outcome, shared) = execute_as(
+        lane,
+        session,
+        (action, token, id),
+        wait,
+        pending,
+        &mut journaled,
+        share,
+        dispatch,
+        interrupted,
+    );
+    forget_refused(&outcome, id, journaled && shared, pending);
+    outcome
+}
+
+/// One `Execute` attempt of operation `id` under [`Lane::perform_as`]. The operation is recorded
+/// in `pending` before its first `Execute` only, after `dispatch` allows each attempt, and
+/// removed once its receipt settled and was acknowledged. Also returns whether `share` was
+/// shared again afterwards.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one execution's parts, used once"
+)]
+fn execute_as(
+    lane: &Lane,
+    session: Session,
+    (action, token, id): (LaneAction, String, OperationId),
+    wait: Duration,
+    pending: &PendingOperations,
+    journaled: &mut bool,
+    share: &mut dyn Share,
+    dispatch: &mut dyn FnMut() -> Result<(), LaneError>,
+    interrupted: &dyn Fn() -> Option<Instant>,
+) -> (Result<Outcome, LaneError>, bool) {
+    let outcome = lane.perform_as(
         session,
         action,
         token,
+        id,
         wait,
         &mut |operation| {
             dispatch()?;
-            pending
-                .add(operation)
-                .map_err(|_| LaneError::Core(CoreError::StorageUnavailable))?;
-            recorded = Some(*operation);
+            if !*journaled {
+                pending
+                    .add(operation)
+                    .map_err(|_| LaneError::Core(CoreError::StorageUnavailable))?;
+                *journaled = true;
+            }
             share.release();
             Ok(())
         },
         interrupted,
     );
     let shared = share.resume();
-    // A busy Core refuses Execute before it admits anything, so no later connection has an
-    // operation to settle.
-    if let (Err(error), Some(operation)) = (&outcome, recorded)
-        && shared
-        && busy(error)
-    {
-        let _ = pending.remove(&operation.to_string());
-    }
-    let outcome = outcome?;
-    if shared && let Outcome::Settled { receipt, .. } = &outcome {
+    if shared && let Ok(Outcome::Settled { receipt, .. }) = &outcome {
         let _ = pending.remove(&receipt.operation);
     }
-    Ok(outcome)
+    (outcome, shared)
+}
+
+/// Removes the record of operation `id` once its last `Execute` was refused because another
+/// operation holds the Core. Every attempt under `id` either got that definite refusal or was
+/// followed until it answered, so nothing admits `id` later. `journaled` is false when the
+/// record was never written or its state left this build's generation.
+fn forget_refused(
+    outcome: &Result<Outcome, LaneError>,
+    id: OperationId,
+    journaled: bool,
+    pending: &PendingOperations,
+) {
+    if let Err(error) = outcome
+        && journaled
+        && busy(error)
+    {
+        let _ = pending.remove(&id.to_string());
+    }
 }
 
 /// Whether `error` is a refusal because another service operation holds SpaceTerm Core, which
@@ -440,7 +513,14 @@ pub fn preview_when_ready(
     let mut session = session;
     let mut wait = BusyWait::new(deadline, waiting);
     loop {
-        match preview(&mut session, action.clone()) {
+        // Each preview stops at the caller's deadline, or at once after an interrupt.
+        let sent = Instant::now();
+        let by = || {
+            interrupted()
+                .into_iter()
+                .fold(deadline.min(sent + REQUEST_LIMIT), Instant::min)
+        };
+        match preview_within(&mut session, action.clone(), &by) {
             Ok(preview) => return Ok((session, preview)),
             Err(error) if busy(&error) => {
                 session = wait.for_lane(lane, interrupted, error)?;
@@ -472,22 +552,32 @@ pub fn execute_approved(
 ) -> Result<Outcome, LaneError> {
     let mut busy_wait = BusyWait::new(deadline, waiting);
     let mut session = session;
+    // One operation ID for the whole approval, journaled once. An attempt whose reply was lost
+    // is followed under that ID until it answers, so a later attempt never admits another.
+    let id = OperationId::random()?;
+    let mut journaled = false;
     loop {
         let wait = follow.min(deadline.saturating_duration_since(Instant::now()));
-        match execute(
+        let (outcome, shared) = execute_as(
             lane,
             session,
-            action.clone(),
-            token.clone(),
+            (action.clone(), token.clone(), id),
             wait,
             pending,
+            &mut journaled,
             share,
             dispatch,
             interrupted,
-        ) {
-            Err(error) if busy(&error) => {
-                session = busy_wait.for_lane(lane, interrupted, error)?;
-            }
+        );
+        match outcome {
+            Err(error) if busy(&error) => match busy_wait.for_lane(lane, interrupted, error) {
+                Ok(next) => session = next,
+                Err(error) => {
+                    let refused = Err(error);
+                    forget_refused(&refused, id, journaled && shared, pending);
+                    return refused;
+                }
+            },
             outcome => return outcome,
         }
     }
