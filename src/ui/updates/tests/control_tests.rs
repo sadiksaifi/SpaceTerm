@@ -1325,6 +1325,7 @@ fn waiting(machine: MachineId, sessions: u32) -> MachineUpdate {
             skipped: None,
             last_failure: None,
         }),
+        boot: None,
         capabilities: Capabilities::fake(&Capability::ALL),
         push: None,
         bundled: None,

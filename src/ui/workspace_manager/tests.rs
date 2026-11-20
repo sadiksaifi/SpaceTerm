@@ -8793,6 +8793,7 @@ fn a_blocked_pane_follows_the_cores_download_and_restarts_only_after_approval(
             skipped: None,
             last_failure: None,
         }),
+        boot: None,
         capabilities: spaceterm_core::protocol::capability::Capabilities::fake(
             &spaceterm_core::protocol::capability::Capability::ALL,
         ),

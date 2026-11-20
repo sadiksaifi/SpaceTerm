@@ -50,6 +50,7 @@ fn machine(pending: Option<&str>, sessions: u32) -> MachineUpdate {
             skipped: None,
             last_failure: None,
         }),
+        boot: None,
     }
 }
 

@@ -62,6 +62,7 @@ pub(crate) fn machine(
         local,
         link: MachineLink::Connected,
         facts,
+        boot: None,
         detailed: None,
         capabilities: Capabilities::fake(&Capability::ALL),
         push: None,

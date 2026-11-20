@@ -623,6 +623,48 @@ pub(super) struct LocalLaunchState {
     /// The failed connection attempts counted when the person last chose Try Again on the empty
     /// view, while that view still waits for this computer's server.
     pub(super) reconnect_from: std::cell::Cell<Option<u64>>,
+    /// What Machine updates read of this computer's SpaceTerm Core when the latest launch began.
+    began_with: LocalCoreReading,
+    /// The reading this window waits to change since its own launch read a deliberate Stop.
+    /// None while nothing waits.
+    stopped_past: Option<LocalCoreReading>,
+    /// Follows Machine updates once a launch of this window read a deliberate Stop.
+    _core_runs: Option<gpui::Subscription>,
+}
+
+/// What Machine updates read of this computer's SpaceTerm Core, as a window that read a
+/// deliberate Stop compares it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LocalCoreReading {
+    /// A Core run answered over `link`. The boot names the run whose facts arrived, if any.
+    Answers(crate::updates::machines::MachineLink, Option<Arc<str>>),
+    /// The Core is stopped, unreachable or unconfirmed, no reading verified a run yet, or
+    /// Machine updates do not follow this computer.
+    Silent,
+}
+
+impl LocalCoreReading {
+    /// What Machine updates read of this computer's SpaceTerm Core now. Connected counts only
+    /// with facts of a known run, so the reading listed before the first answer is silent.
+    fn read(cx: &App) -> Self {
+        use crate::updates::machines::{MachineLink, store::MachineUpdates};
+        let Some(store) = MachineUpdates::global(cx) else {
+            return Self::Silent;
+        };
+        let store = store.read(cx);
+        let Some(update) = store.machines().iter().find(|update| update.local) else {
+            return Self::Silent;
+        };
+        match &update.link {
+            MachineLink::Connected if update.boot.is_none() => Self::Silent,
+            link @ (MachineLink::Connected
+            | MachineLink::Incompatible(_)
+            | MachineLink::Unreported) => Self::Answers(link.clone(), update.boot.clone()),
+            MachineLink::Stopped
+            | MachineLink::Offline { .. }
+            | MachineLink::Unconfirmed { .. } => Self::Silent,
+        }
+    }
 }
 
 impl LocalLaunchState {
@@ -651,6 +693,9 @@ impl LocalLaunchState {
             _blocked_updates: Vec::new(),
             create_when_presented: false,
             reconnect_from: std::cell::Cell::new(None),
+            began_with: LocalCoreReading::Silent,
+            stopped_past: None,
+            _core_runs: None,
         }
     }
 
@@ -832,8 +877,11 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let began_with = LocalCoreReading::read(cx);
         let launch = &mut self.launch;
         launch.state = step.map_or(LaunchState::Launching, LaunchState::Working);
+        launch.began_with = began_with;
+        launch.stopped_past = None;
         // Only the window's first launch begins quietly. A later one follows a screen the person
         // already sees, so it keeps saying what it is doing.
         if launch.quiet_until.is_none() {
@@ -952,6 +1000,9 @@ impl WorkspaceManager {
             self.run_local_launch(None, window, cx);
             return;
         }
+        if state == LaunchState::Stopped && self.await_local_core_run(window, cx) {
+            return;
+        }
         // A running server answers the Panes a stop interrupted, so they connect again, and the
         // window's own connection reconnects without waiting for its delay.
         if state == LaunchState::Ready {
@@ -980,6 +1031,49 @@ impl WorkspaceManager {
             self.focus(window, cx);
         }
         cx.notify();
+    }
+
+    /// After this window's launch read a deliberate Stop, runs launch once more when Machine
+    /// updates read a Core run answer that the launch did not see before it began, as after a
+    /// Start from the command line, even when they never read the Core stopped. A run they
+    /// read while the launch ran resumes at once. Nothing here starts the server. Returns
+    /// whether launch runs again.
+    fn await_local_core_run(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.launch.stopped_past = Some(self.launch.began_with.clone());
+        if self.launch._core_runs.is_none()
+            && let Some(store) = crate::updates::machines::store::MachineUpdates::global(cx)
+        {
+            self.launch._core_runs =
+                Some(cx.observe_in(&store, window, |manager, _, window, cx| {
+                    manager.local_core_read(window, cx);
+                }));
+        }
+        self.local_core_read(window, cx)
+    }
+
+    /// Compares Machine updates' latest reading of this computer's SpaceTerm Core with the one
+    /// a stopped window waits past, and runs launch once when a Core run answers anew. A silent
+    /// reading replaces the one it waits past, so the next answer of any run resumes. Returns
+    /// whether launch runs again.
+    fn local_core_read(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(past) = &self.launch.stopped_past else {
+            return false;
+        };
+        // Launch already ran again, as Settings or the central follower ran it.
+        if self.launch.state != LaunchState::Stopped || self.launch._task.is_some() {
+            self.launch.stopped_past = None;
+            return false;
+        }
+        let reading = LocalCoreReading::read(cx);
+        if reading == *past {
+            return false;
+        }
+        if reading == LocalCoreReading::Silent {
+            self.launch.stopped_past = Some(reading);
+            return false;
+        }
+        self.run_local_launch(None, window, cx);
+        true
     }
 
     /// Reconnects each Pane a stop or Login Items interrupted, once this computer's server runs
@@ -1653,6 +1747,8 @@ pub(crate) mod testing {
         intents: Mutex<Vec<LaunchIntent>>,
         /// The next run starts SpaceTerm Core before it answers.
         starts_core: std::sync::atomic::AtomicBool,
+        /// Runs once inside the next run, before it answers.
+        during_run: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     }
 
     impl ScriptedLaunch {
@@ -1685,6 +1781,10 @@ pub(crate) mod testing {
             self.starts_core
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        /// Runs `during` inside the next run, before it answers.
+        pub(crate) fn during_next_run(&self, during: impl FnOnce() + Send + 'static) {
+            *self.during_run.lock().unwrap() = Some(Box::new(during));
+        }
     }
 
     impl LocalLaunch for ScriptedLaunch {
@@ -1701,6 +1801,9 @@ pub(crate) mod testing {
                 .swap(false, std::sync::atomic::Ordering::Relaxed)
             {
                 starting();
+            }
+            if let Some(during) = self.during_run.lock().unwrap().take() {
+                during();
             }
             self.runs
                 .lock()

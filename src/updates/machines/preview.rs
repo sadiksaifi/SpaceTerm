@@ -588,6 +588,7 @@ fn machine(
     now: u64,
 ) -> MachineUpdate {
     MachineUpdate {
+        boot: None,
         detailed: None,
         machine,
         name: name.into(),

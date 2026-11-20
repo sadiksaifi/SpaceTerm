@@ -41,6 +41,7 @@ fn machine(id: MachineId, name: &'static str, sessions: u32) -> MachineUpdate {
             skipped: None,
             last_failure: None,
         }),
+        boot: None,
         capabilities: Capabilities::fake(&Capability::ALL),
         push: None,
         bundled: None,

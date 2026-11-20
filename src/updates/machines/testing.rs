@@ -91,6 +91,12 @@ pub(crate) fn preview(machine: MachineId, action: MachineAction, sessions: u32) 
 }
 
 impl ScriptedMachines {
+    /// The store's event channel, for an event sent off the test's thread, as the adapter's
+    /// followers send them. It records nothing the scripted previews read.
+    pub(crate) fn events(&self) -> Option<async_channel::Sender<MachineUpdatesEvent>> {
+        self.events.borrow().clone()
+    }
+
     /// Sends `event` as the adapter. Panics before `start`.
     pub(crate) fn emit(&self, event: MachineUpdatesEvent) {
         let reported = match &event {

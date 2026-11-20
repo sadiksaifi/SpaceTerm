@@ -1255,6 +1255,7 @@ fn too_old_core(
             spaceterm_core::protocol::version::Incompatible::ListenerTooOld,
         ),
         facts: Some(facts),
+        boot: None,
         capabilities: spaceterm_core::protocol::capability::Capabilities::fake(
             &spaceterm_core::protocol::capability::Capability::ALL,
         ),
@@ -3257,8 +3258,126 @@ fn a_command_line_start_opens_a_window_that_opened_while_stopped(cx: &mut TestAp
     assert_eq!(harness.launch.steps(), ["run", "run"]);
 }
 
-/// A Core that answers without Machine updates having read it stopped, as after a network
-/// interruption, resumes no launch.
+/// This computer's Machine as Machine updates read it, with `link` and the facts of Core run
+/// `boot`.
+fn local_run(
+    link: crate::updates::machines::MachineLink,
+    boot: &str,
+) -> crate::updates::machines::MachineUpdate {
+    crate::updates::machines::MachineUpdate {
+        boot: Some(boot.into()),
+        ..local_machine(link)
+    }
+}
+
+/// Machine updates that follow this computer's Core, as the application installs them, and
+/// read Core run `boot` answering before any window opens.
+fn following_local_run(
+    boot: &str,
+    cx: &mut TestAppContext,
+) -> (
+    Rc<crate::updates::machines::testing::ScriptedMachines>,
+    impl Fn(crate::updates::machines::MachineUpdate, &mut VisualTestContext) + use<>,
+) {
+    use crate::updates::machines::{MachineLink, MachineUpdatesEvent};
+    let machines = scripted_machines(cx);
+    cx.update(crate::ui::workspace_manager::follow_local_core_runs);
+    machines.emit(MachineUpdatesEvent::Changed(Box::new(local_run(
+        MachineLink::Connected,
+        boot,
+    ))));
+    cx.run_until_parked();
+    let emitter = Rc::clone(&machines);
+    (machines, move |update, cx: &mut VisualTestContext| {
+        emitter.emit(MachineUpdatesEvent::Changed(Box::new(update)));
+        cx.run_until_parked();
+    })
+}
+
+/// A window that reopens while this computer's Core is deliberately stopped reads the Stop
+/// itself, even when Machine updates never read the Core stopped because a Start from the
+/// command line came first. The window waits past the Core run it saw answering, so another
+/// answer of that run resumes nothing, and the new run's first answer opens its retained Pane
+/// with one launch and no Start of its own.
+#[gpui::test]
+fn a_window_that_read_the_stop_itself_opens_when_a_new_core_run_answers(cx: &mut TestAppContext) {
+    use crate::updates::machines::MachineLink;
+    let (_machines, read) = following_local_run("before-stop", cx);
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped), ready()], cx);
+    cx.run_until_parked();
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+
+    read(local_run(MachineLink::Connected, "before-stop"), cx);
+    read(local_machine(MachineLink::Connected), cx);
+    assert_eq!(
+        harness.launch.steps(),
+        ["run"],
+        "the run it saw, or a reading of no run, keeps the Stop"
+    );
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+
+    read(local_run(MachineLink::Connected, "after-start"), cx);
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "run"],
+        "no Start of its own"
+    );
+    assert_eq!(harness.launch.intents(), [launch::LaunchIntent::Passive; 2]);
+    assert_eq!(harness.launch_title(cx), None);
+    assert_eq!(harness.rows(cx), 1);
+    assert!(harness.panes.was_opened(PANE), "its retained Pane opens");
+
+    read(local_run(MachineLink::Connected, "after-start"), cx);
+    read(
+        local_run(MachineLink::Offline { since: 1 }, "after-start"),
+        cx,
+    );
+    read(local_run(MachineLink::Connected, "after-start"), cx);
+    assert_eq!(harness.launch.steps(), ["run", "run"], "once per Core run");
+}
+
+/// A new Core run that Machine updates read while the window's launch was still reading the
+/// Stop resumes that window once, whether the reading arrives before the Stop applies, with no
+/// later reading, or after it. The iterations order the two both ways.
+#[gpui::test(iterations = 20)]
+fn a_core_run_read_while_the_launch_read_the_stop_resumes_at_once(cx: &mut TestAppContext) {
+    use crate::updates::machines::{MachineLink, MachineUpdatesEvent};
+    let (machines, read) = following_local_run("before-stop", cx);
+    let events = machines
+        .events()
+        .expect("the store follows the scripted Machines");
+    let launch = ScriptedLaunch::default();
+    launch.answer(Ok(LaunchOutcome::Stopped));
+    launch.answer(ready());
+    launch.during_next_run(move || {
+        let _ = events.try_send(MachineUpdatesEvent::Changed(Box::new(local_run(
+            MachineLink::Connected,
+            "after-start",
+        ))));
+    });
+    let (harness, cx) = scripted_harness(
+        launch,
+        ScriptedEdits::new(Some(inventory())),
+        [],
+        None,
+        launch::LaunchIntent::Passive,
+        cx,
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "run"],
+        "no Start of its own"
+    );
+    assert_eq!(harness.launch_title(cx), None);
+    assert!(harness.panes.was_opened(PANE), "its retained Pane opens");
+
+    read(local_run(MachineLink::Connected, "after-start"), cx);
+    assert_eq!(harness.launch.steps(), ["run", "run"], "once per Core run");
+}
+
+/// A reading that names no Core run, as Machine updates list before the Core's first answer,
+/// resumes no launch, even after an unreachable reading.
 #[gpui::test]
 fn a_core_that_answers_again_without_a_stop_resumes_nothing(cx: &mut TestAppContext) {
     use crate::updates::machines::MachineLink;

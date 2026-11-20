@@ -900,6 +900,7 @@ impl Shared {
                         local: machine.local,
                         link: MachineLink::Connected,
                         facts: None,
+                        boot: None,
                         capabilities: unconnected(),
                         push: None,
                         bundled: None,
@@ -968,6 +969,7 @@ impl Shared {
             };
             entry.update.capabilities = reached(work);
             entry.update.facts = Some(observed.facts.clone());
+            entry.update.boot = Some(observed.boot.as_str().into());
             entry.update.detailed = observed.detailed.clone();
             entry.boot = Some(observed.boot.clone());
             let restarting = match &observed.facts.operation {
@@ -1008,6 +1010,7 @@ impl Shared {
             entry.update.link = MachineLink::Unreported;
             entry.update.capabilities = reached(work);
             entry.update.facts = None;
+            entry.update.boot = None;
             entry.update.detailed = None;
             entry.update.push = None;
             entry.update.bundled = None;

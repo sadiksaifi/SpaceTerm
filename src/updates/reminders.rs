@@ -409,6 +409,7 @@ mod tests {
                 skipped: None,
                 last_failure: None,
             }),
+            boot: None,
             capabilities: Capabilities::fake(&Capability::ALL),
             push: None,
             bundled: None,
