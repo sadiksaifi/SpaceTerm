@@ -8,8 +8,9 @@ const HEALTHY_CONNECTION: Duration = Duration::from_secs(5);
 struct Start {
     boot: [u8; 32],
     cause: Option<CoreError>,
-    /// A background start, which grants control to nobody. Seeing its exact Pane run a Session
-    /// in the same Core run with nobody in control proves it started.
+    /// A background start, which grants control to nobody. SpaceTerm Core starts a Pane in the
+    /// background at most once per run, and only while it has no live Session and none that
+    /// ended in that run, so any observation of its exact Pane in the same run settles it.
     background: bool,
 }
 
@@ -149,33 +150,28 @@ impl Recovery {
     }
 
     /// A same-boot dormant observation can overtake the original request on its old transport.
-    /// Only a live grant, proof that the original server run ended, or for a background start
-    /// its Pane `pane` running a Session in that run with nobody in control unlocks another
-    /// start. Any validated observation ends a restart wait, also for a Pane that stays dormant.
-    pub fn observed(&mut self, reply: &Reply, pane: [u8; 32]) -> Result<(), CoreError> {
+    /// Only a live grant or proof that the original server run ended unlocks another ordinary
+    /// start. A background start settles on any observation of its Pane in the same run,
+    /// whoever controls it: a delayed Prepare that arrives after it only observes, and asking
+    /// again is safe for the same reason. Any validated observation ends a restart wait, also
+    /// for a Pane that stays dormant.
+    pub fn observed(&mut self, reply: &Reply) -> Result<(), CoreError> {
         let boot = match reply {
             Reply::Attached { lease } => {
                 self.start = None;
                 Some(lease.core)
             }
             Reply::Restored { core, .. } => Some(*core),
-            Reply::Takeover {
-                target, controller, ..
-            } => {
-                let live_and_unowned = target.session != pane
-                    && *controller == spaceterm_core::pane::control::Controller::Nobody;
-                if live_and_unowned
-                    && self
-                        .start
-                        .as_ref()
-                        .is_some_and(|start| start.background && start.boot == target.core)
-                {
-                    self.start = None;
-                }
-                Some(target.core)
-            }
+            Reply::Takeover { target, .. } => Some(target.core),
             _ => return Err(CoreError::Protocol),
         };
+        if self
+            .start
+            .as_ref()
+            .is_some_and(|start| start.background && Some(start.boot) == boot)
+        {
+            self.start = None;
+        }
         self.observed_boot = boot;
         if let Some(start) = &self.start {
             if Some(start.boot) != boot {
@@ -220,7 +216,7 @@ mod tests {
             directory_unavailable: false,
             session_ended: None,
         };
-        recovery.observed(&restored, [2; 32]).unwrap();
+        recovery.observed(&restored).unwrap();
         // The connection drops again after the first wait's deadline.
         let later = now + Duration::from_secs(200);
         assert!(!recovery.restart_expired(later));
@@ -231,11 +227,12 @@ mod tests {
         );
     }
 
-    /// A background start whose reply was lost settles once the same Core run shows its Pane
-    /// running a Session nobody controls. A dormant observation in that run, or one naming a
-    /// controller, keeps the guard, and so does any such observation of an ordinary start.
+    /// A background start whose reply was lost settles on any observation of its Pane in the
+    /// same Core run, whoever controls it: a dormant one, its own unowned Session, or a Session
+    /// another client acquired first. An observation of another run's Pane keeps nothing, and
+    /// an ordinary start keeps its guard on every same-run observation but a live grant.
     #[test]
-    fn a_lost_background_start_settles_on_its_live_unowned_session() {
+    fn a_lost_background_start_settles_on_any_observation_in_its_run() {
         use spaceterm_core::pane::control::Controller;
         let pane = [2; 32];
         let takeover = |session: [u8; 32], controller: Controller| Reply::Takeover {
@@ -252,40 +249,24 @@ mod tests {
             recovery.started(&Err(CoreError::Direct(DirectError::Transport)));
             recovery
         };
-
-        let mut recovery = lost(true);
-        assert!(
-            recovery
-                .observed(&takeover(pane, Controller::Nobody), pane)
-                .is_err()
-        );
-        assert!(
-            recovery
-                .observed(
-                    &takeover(
-                        [9; 32],
-                        Controller::Client {
-                            name: "Other".into(),
-                            this_client: false,
-                        },
-                    ),
-                    pane,
-                )
-                .is_err(),
-            "another client's Session proves nothing about this start"
-        );
-        recovery
-            .observed(&takeover([9; 32], Controller::Nobody), pane)
-            .unwrap();
-        assert!(!recovery.start_unconfirmed());
-
-        let mut ordinary = lost(false);
-        assert!(
-            ordinary
-                .observed(&takeover([9; 32], Controller::Nobody), pane)
-                .is_err()
-        );
-        assert!(ordinary.start_unconfirmed());
+        let other = || Controller::Client {
+            name: "Other".into(),
+            this_client: false,
+        };
+        for observation in [
+            takeover(pane, Controller::Nobody),
+            takeover([9; 32], Controller::Nobody),
+            takeover([9; 32], other()),
+        ] {
+            let mut recovery = lost(true);
+            recovery.observed(&observation).unwrap();
+            assert!(!recovery.start_unconfirmed(), "{observation:?}");
+        }
+        for observation in [takeover([9; 32], Controller::Nobody), takeover([9; 32], other())] {
+            let mut ordinary = lost(false);
+            assert!(ordinary.observed(&observation).is_err());
+            assert!(ordinary.start_unconfirmed());
+        }
     }
 
     #[test]

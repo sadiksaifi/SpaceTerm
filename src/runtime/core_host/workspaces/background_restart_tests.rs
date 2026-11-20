@@ -273,3 +273,56 @@ fn a_restarted_focused_shell_stays_blank_until_it_names_itself() {
     let _ = std::fs::remove_dir_all(directory);
 }
 
+/// A background start whose reply is lost after SpaceTerm Core ran it keeps its place in the
+/// window's start queue, so the queue starts no other shell meanwhile. Once the worker
+/// reconnects, it settles on the shell that start began, without starting another or taking
+/// control.
+#[test]
+fn a_lost_prepare_reply_keeps_its_place_until_its_shell_settles() {
+    let mut original = crate::runtime::directory_testing::terminal_host();
+    original.prepare_initial_organization().unwrap();
+    let organization: Organization =
+        serde_json::from_slice(&serde_json::to_vec(&original.state.envelope()).unwrap()).unwrap();
+    let restored = || {
+        let mut host = crate::runtime::directory_testing::terminal_host();
+        host.restore_organization(Some(&organization));
+        host
+    };
+    let core = ConnectedPane::with_host(paired_connection(Arc::new(Away)), original);
+    let state = Arc::clone(&core.state);
+    let _started = core
+        .factory
+        .start(
+            TerminalGeometry::from_viewport(
+                LogicalSize::new(640.0, 432.0),
+                LogicalCellSize::new(8.0, 18.0),
+                BackingScale::ONE,
+                CellGridSize::new(2, 2),
+            ),
+            TerminalAppearanceUpdate::builtin().unwrap(),
+        )
+        .unwrap();
+    state.select();
+    await_status(&state, CorePaneStatus::Connected);
+
+    core.stop_core();
+    core.restore_core(restored());
+    core.lose_next_prepare_reply();
+    (core.reconnect)();
+    let until = Instant::now() + Duration::from_secs(10);
+    while !core.prepare_reply_lost() {
+        assert!(Instant::now() < until, "the background start never ran");
+        state.grant_turn();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        state.starting_in_background(),
+        "a lost reply keeps the start's place in the queue"
+    );
+    let starts = core.starts();
+    (core.reconnect)();
+    await_status(&state, CorePaneStatus::Takeover);
+    assert_eq!(core.sessions().len(), 1, "the lost start's shell is the only one");
+    assert_eq!(core.starts(), starts, "nothing took control");
+}
+

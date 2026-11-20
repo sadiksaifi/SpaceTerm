@@ -341,10 +341,15 @@ impl CorePaneState {
         }
     }
 
-    /// The worker waits for this Pane's turn to start its shell in the background.
+    /// The worker waits for this Pane's turn to start its shell in the background. A place whose
+    /// time ran out waits for a new turn.
     pub(crate) fn want_turn(&self) {
         let mut reservation = self.reservation();
-        if *reservation == Reservation::Idle {
+        let lapsed = matches!(
+            *reservation,
+            Reservation::Starting { until: Some(until), .. } if std::time::Instant::now() >= until
+        );
+        if *reservation == Reservation::Idle || lapsed {
             *reservation = Reservation::Wanted;
             drop(reservation);
             self.changed();
@@ -407,6 +412,35 @@ impl CorePaneState {
             *reservation = Reservation::Starting {
                 session: Some(session),
                 until: Some(now + BACKGROUND_READY_LIMIT),
+            };
+        }
+    }
+
+    /// The reply to this Pane's background start was lost after the start may have reached
+    /// SpaceTerm Core, which may be starting its shell now. Its place stays held until what Core
+    /// shows settles the start, or until `until`.
+    pub(crate) fn unconfirmed_background(&self, until: std::time::Instant) {
+        let mut reservation = self.reservation();
+        if matches!(*reservation, Reservation::Starting { session: None, .. }) {
+            *reservation = Reservation::Starting {
+                session: None,
+                until: Some(until),
+            };
+        }
+    }
+
+    /// A background start whose reply was lost settled on Session `session` of this Pane, which
+    /// it or another start began. Its place lasts until that shell is ready or its time runs out.
+    pub(crate) fn settled_background(&self, session: [u8; 32]) {
+        let mut reservation = self.reservation();
+        if let Reservation::Starting {
+            session: None,
+            until: Some(until),
+        } = *reservation
+        {
+            *reservation = Reservation::Starting {
+                session: Some(session),
+                until: Some(until),
             };
         }
     }

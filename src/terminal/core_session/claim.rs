@@ -179,11 +179,31 @@ fn bookkept(
         }
     }
     let reply = result?;
+    let unconfirmed = state.start_unconfirmed();
     state
         .connection_recovery
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .observed(&reply, pane_id)?;
+        .observed(&reply)?;
+    // A background start whose reply was lost keeps its place until what Core shows settles it.
+    if unconfirmed && !state.start_unconfirmed() {
+        match &reply {
+            Reply::Takeover {
+                target,
+                session_ended: None,
+                ..
+            } if target.session != pane_id => state.settled_background(target.session),
+            Reply::Takeover {
+                session_ended: Some(_),
+                ..
+            }
+            | Reply::Restored {
+                session_ended: Some(_),
+                ..
+            } => state.end_background(),
+            _ => {}
+        }
+    }
     if !state.start_unconfirmed() {
         state
             .directory_note
@@ -416,6 +436,7 @@ impl ClaimWorker<'_> {
                     grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
                     let update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     grant_appearance = None;
+                    let sent = std::time::Instant::now();
                     let prepared = exchange(&Request::PrepareRestored {
                         core: boot,
                         pane,
@@ -435,9 +456,17 @@ impl ClaimWorker<'_> {
                             state.end_background();
                             reply
                         }
-                        // SpaceTerm Core admitted nothing, or the reply was lost, so the Pane asks
-                        // again on a later turn. Core starts a Pane at most once per boot: a
-                        // repeated Prepare for a Pane that has or had a Session only observes it.
+                        // The reply was lost, and Core may be starting the shell now, so the Pane
+                        // keeps its place until what Core shows settles the start or its time runs
+                        // out. Core starts a Pane at most once per boot: a repeated Prepare for a
+                        // Pane that has or had a Session only observes it, so a later turn may ask
+                        // again.
+                        Err(error) if state.start_unconfirmed() => {
+                            state.unconfirmed_background(sent + BACKGROUND_READY_LIMIT);
+                            state.release_prepare(boot);
+                            return Err(error);
+                        }
+                        // SpaceTerm Core admitted nothing, so the Pane asks again on a later turn.
                         Err(error) => {
                             state.end_background();
                             state.release_prepare(boot);
@@ -461,10 +490,17 @@ impl ClaimWorker<'_> {
                         state.want_turn();
                     }
                     // Start, selection, repair and dismissal wake this wait, and so does
-                    // anything `ControlWatch` sees that can change the server's answer.
-                    state.wake.wait(recheck.then(|| {
+                    // anything `ControlWatch` sees that can change the server's answer. A place
+                    // a lost start still holds looks again when its time runs out.
+                    let recheck = recheck.then(|| {
                         std::time::Instant::now() + std::time::Duration::from_millis(250)
-                    }));
+                    });
+                    state.wake.wait(
+                        [recheck, state.background_deadline()]
+                            .into_iter()
+                            .flatten()
+                            .min(),
+                    );
                     let size = *size.lock().unwrap_or_else(|e| e.into_inner());
                     grant_size = size;
                     grant_appearance = None;
@@ -1462,6 +1498,76 @@ mod tests {
         assert!(state.take_turn());
         state.end_background();
         assert!(!state.starting_in_background());
+    }
+
+    /// A background start whose reply was lost keeps its place until what Core shows settles
+    /// it or its time runs out. A Session another client acquired before the worker reconnected
+    /// settles it as well: the Pane offers Take Over as for any other client's shell, and the
+    /// place lasts until that shell is ready or its time runs out.
+    #[test]
+    fn a_lost_background_start_settles_on_a_shell_another_client_took() {
+        use crate::terminal::core_session::BACKGROUND_READY_LIMIT;
+        let state = CorePaneState::new();
+        state.set(CorePaneStatus::Restored);
+        state.want_turn();
+        state.grant_turn();
+        assert!(state.take_turn());
+        {
+            let mut recovery = state.connection_recovery.lock().unwrap();
+            recovery.begin_start(Some([9; 32]), true).unwrap();
+            recovery.started(&Err(CoreError::Direct(DirectError::Transport)));
+        }
+        let sent = std::time::Instant::now();
+        state.unconfirmed_background(sent + BACKGROUND_READY_LIMIT);
+        assert!(state.starting_in_background(), "the place stays held");
+        state.want_turn();
+        assert!(!state.awaiting_turn(), "a held place wants no other turn");
+
+        let mut observations = 0;
+        let result = run_claim(&state, |request| match request {
+            Request::SelectPane {
+                explicit: false, ..
+            } => {
+                observations += 1;
+                if observations > 1 {
+                    return Err(CoreError::Stopped);
+                }
+                state.wake.notify();
+                Ok(Reply::Takeover {
+                    target: pane::PaneTarget {
+                        core: [9; 32],
+                        session: [5; 32],
+                    },
+                    controller: pane::control::Controller::Client {
+                        name: "Other".into(),
+                        this_client: false,
+                    },
+                    session_ended: None,
+                })
+            }
+            other => panic!("nothing else is asked: {other:?}"),
+        });
+        assert_eq!(result.err(), Some(CoreError::Stopped));
+        assert!(!state.start_unconfirmed(), "the other client's Session settles it");
+        assert_eq!(state.status(), CorePaneStatus::Takeover);
+        assert!(state.starting_in_background(), "its place lasts until readiness");
+        assert!(state.settle_background([2; 32], sent + BACKGROUND_READY_LIMIT));
+        assert!(!state.starting_in_background());
+    }
+
+    /// A place a lost start held lets the queue go on once its time runs out, and the Pane then
+    /// waits for a new turn.
+    #[test]
+    fn a_lapsed_place_of_a_lost_start_waits_for_a_new_turn() {
+        let state = CorePaneState::new();
+        state.set(CorePaneStatus::Restored);
+        state.want_turn();
+        state.grant_turn();
+        assert!(state.take_turn());
+        state.unconfirmed_background(std::time::Instant::now());
+        assert!(!state.starting_in_background());
+        state.want_turn();
+        assert!(state.awaiting_turn());
     }
 
     #[test]
