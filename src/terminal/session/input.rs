@@ -40,6 +40,11 @@ impl PtyInput {
         }
     }
 
+    /// Bytes ever enqueued.
+    pub(super) const fn enqueued(&self) -> u64 {
+        self.enqueued
+    }
+
     /// Notes that a submitted line's bytes are all enqueued. It counts as written once the PTY
     /// accepted every one of them.
     pub(super) fn note_line(&mut self) {

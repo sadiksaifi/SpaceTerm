@@ -1686,9 +1686,16 @@ impl TerminalWorker {
         // The worker processes each submitted line once, in the order input accepted it. The
         // line counts as written once the PTY accepted all of its bytes.
         if !matches!(command, Command::Received(..)) && command.submits_line() {
+            let enqueued = self.input.enqueued();
             let result = self.process_command_once(command);
-            self.input.note_line();
-            self.note_lines_written();
+            // A submission that put no bytes in the PTY's queue, such as a Run the shell's
+            // prompt refused, submitted nothing, so no close waits for it.
+            if self.input.enqueued() == enqueued {
+                self.events.retract_submitted();
+            } else {
+                self.input.note_line();
+                self.note_lines_written();
+            }
             return result;
         }
         self.process_command_once(command)
@@ -1696,8 +1703,15 @@ impl TerminalWorker {
 
     /// Records each submitted line whose bytes the PTY has now accepted whole.
     fn note_lines_written(&mut self) {
-        for _ in 0..self.input.take_written_lines() {
-            self.events.note_written(self.emulator.prompt_progress());
+        let lines = self.input.take_written_lines();
+        if lines == 0 {
+            return;
+        }
+        // Whether the program holding the PTY reads keys itself decides who reads each line.
+        let canonical = self.native_pty.line_mode().ok().map(|mode| mode.canonical);
+        for _ in 0..lines {
+            self.events
+                .note_written(self.emulator.prompt_progress(), canonical);
         }
     }
 

@@ -5597,3 +5597,187 @@ fn a_line_written_while_the_shell_runs_waits_for_the_prompt_after_the_next() {
     assert!(!worker.events.running_work());
     worker.finish();
 }
+
+/// A program the kernel collects whole lines for, as `/bin/sleep` runs under a canonical PTY.
+const LINE_PROGRAM: LineMode = LineMode {
+    canonical: true,
+    echo: true,
+    signals: true,
+    shell_foreground: false,
+};
+
+/// A program that reads keys itself, as an editor runs with ICANON off.
+const KEY_PROGRAM: LineMode = LineMode {
+    canonical: false,
+    echo: false,
+    signals: false,
+    shell_foreground: false,
+};
+
+/// A line typed while `/bin/sleep 3` holds the foreground stays in the kernel's line buffer. Once
+/// `sleep` ends, the shell reads it and runs it in its own foreground, as with `read -t 3 answer`.
+/// The foreground's return answers only the line that started `sleep`, so a close admitted while
+/// the typed-ahead builtin runs still finds work, until the shell's own fresh prompt follows it.
+#[test]
+fn a_line_typed_ahead_of_a_line_program_stays_fenced_until_the_shell_answers_it() {
+    let records = ScriptedPtyRecords::default();
+    let probe = Arc::new(MovingForeground(AtomicBool::new(true)));
+    let mut worker = idle_worker_on(records.clone(), SHELL_FOREGROUND, Some(false));
+    worker.events.set_probe(Some(probe.clone()));
+    reads(&mut worker, FRESH_PROMPT);
+    assert!(!worker.events.running_work(), "an idle prompt");
+
+    // `/bin/sleep 3` at the prompt.
+    worker.events.note_submitted();
+    assert!(worker.process_command(Command::Key(enter_key())));
+    reads(&mut worker, b"\r\n\x1b]133;C;spaceterm=0f1e\x07");
+    probe.0.store(false, Ordering::Release);
+    records.update(|state| state.line_mode = LINE_PROGRAM);
+    reads(&mut worker, b"");
+    // `read -t 3 answer` typed while `sleep` holds the foreground.
+    worker.events.note_submitted();
+    assert!(worker.process_command(Command::Key(enter_key())));
+    reads(&mut worker, b"read -t 3 answer\r\n");
+
+    // `sleep` ends and gives the foreground back.
+    probe.0.store(true, Ordering::Release);
+    records.update(|state| state.line_mode = SHELL_FOREGROUND);
+    reads(&mut worker, b"\x1b]133;D;0;spaceterm=0f1e\x07");
+    assert!(
+        worker.events.running_work(),
+        "the typed-ahead line is the shell's to read"
+    );
+    // The shell draws its prompt, reads the typed-ahead line there, and runs the builtin in its
+    // own foreground.
+    reads(&mut worker, FRESH_PROMPT);
+    reads(&mut worker, b"\r\n\x1b]133;C;spaceterm=0f1e\x07");
+    assert!(
+        worker.events.running_work(),
+        "the builtin runs in the shell's own foreground"
+    );
+    reads(&mut worker, b"\x1b]133;D;1;spaceterm=0f1e\x07");
+    reads(&mut worker, FRESH_PROMPT);
+    assert!(
+        !worker.events.running_work(),
+        "the builtin's own fresh prompt answers it"
+    );
+    worker.finish();
+}
+
+/// Lines an editor reads itself are answered when it gives the foreground back, so the shell's
+/// idle prompt after it closes directly however many lines were typed into it.
+#[test]
+fn lines_a_key_reading_program_took_are_answered_by_its_return() {
+    let records = ScriptedPtyRecords::default();
+    let probe = Arc::new(MovingForeground(AtomicBool::new(true)));
+    let mut worker = idle_worker_on(records.clone(), SHELL_FOREGROUND, Some(false));
+    worker.events.set_probe(Some(probe.clone()));
+    reads(&mut worker, FRESH_PROMPT);
+    worker.events.note_submitted();
+    assert!(worker.process_command(Command::Key(enter_key())));
+    reads(&mut worker, b"\r\n\x1b]133;C;spaceterm=0f1e\x07");
+    probe.0.store(false, Ordering::Release);
+    records.update(|state| state.line_mode = KEY_PROGRAM);
+    reads(&mut worker, b"editor");
+    for _ in 0..5 {
+        worker.events.note_submitted();
+        assert!(worker.process_command(Command::Key(enter_key())));
+        reads(&mut worker, b"edit");
+    }
+    assert!(worker.events.running_work(), "the editor runs");
+    probe.0.store(true, Ordering::Release);
+    records.update(|state| state.line_mode = SHELL_FOREGROUND);
+    reads(&mut worker, b"\x1b]133;D;0;spaceterm=0f1e\x07");
+    reads(&mut worker, FRESH_PROMPT);
+    assert!(
+        !worker.events.running_work(),
+        "the editor read its lines and ended"
+    );
+    worker.finish();
+}
+
+/// Ctrl-C interrupts `sleep` while a typed-ahead line waits in the kernel's line buffer, and the
+/// shell draws its prompt again. That prompt answers the line that started `sleep`, but nothing
+/// says whether the shell will still read the typed-ahead line, so a close still asks.
+#[test]
+fn ctrl_c_after_typeahead_never_answers_the_typed_ahead_line() {
+    let records = ScriptedPtyRecords::default();
+    let probe = Arc::new(MovingForeground(AtomicBool::new(true)));
+    let mut worker = idle_worker_on(records.clone(), SHELL_FOREGROUND, Some(false));
+    worker.events.set_probe(Some(probe.clone()));
+    reads(&mut worker, FRESH_PROMPT);
+    worker.events.note_submitted();
+    assert!(worker.process_command(Command::Key(enter_key())));
+    reads(&mut worker, b"\r\n\x1b]133;C;spaceterm=0f1e\x07");
+    probe.0.store(false, Ordering::Release);
+    records.update(|state| state.line_mode = LINE_PROGRAM);
+    reads(&mut worker, b"");
+    worker.events.note_submitted();
+    assert!(worker.process_command(Command::Key(enter_key())));
+    reads(&mut worker, b"read -t 3 answer\r\n");
+    // Ctrl-C is no submitted line.
+    assert!(worker.process_command(Command::Key(KeyInput {
+        text: Some("\u{3}".to_owned()),
+        ..text_key(KeyAction::Press)
+    })));
+    probe.0.store(true, Ordering::Release);
+    records.update(|state| state.line_mode = SHELL_FOREGROUND);
+    reads(&mut worker, b"^C\x1b]133;D;130;spaceterm=0f1e\x07");
+    reads(&mut worker, FRESH_PROMPT);
+    // The same prompt redrawn is no fresh prompt.
+    reads(
+        &mut worker,
+        b"\x1b]133;A;spaceterm=0f1e\x07% \x1b]133;B;spaceterm=0f1e\x07",
+    );
+    assert!(
+        worker.events.running_work(),
+        "the typed-ahead line may still run"
+    );
+    worker.finish();
+}
+
+/// The shell's prompt refuses a CLI Run while it runs a command, so the Run put nothing in the
+/// PTY's queue and submitted no line: the idle prompt after the command closes directly. An
+/// admitted Run whose bytes the PTY has not all accepted stays fenced.
+#[test]
+fn only_a_run_the_pty_queued_is_a_submitted_line() {
+    let records = ScriptedPtyRecords::default();
+    let probe = Arc::new(MovingForeground(AtomicBool::new(true)));
+    let mut worker = idle_worker_on(records.clone(), SHELL_FOREGROUND, Some(false));
+    worker.events.set_probe(Some(probe.clone()));
+    reads(&mut worker, b"\x1b[?2004h");
+    reads(&mut worker, FRESH_PROMPT);
+    reads(&mut worker, b"\r\n\x1b]133;C;spaceterm=0f1e\x07");
+
+    // Refused: the shell is running a command.
+    let (reply, refused) = mpsc::sync_channel(1);
+    worker.events.note_submitted();
+    worker.process_command(Command::Run("make".to_owned(), reply));
+    assert!(refused.recv().unwrap().is_err(), "the prompt refuses it");
+    reads(&mut worker, b"\x1b]133;D;0;spaceterm=0f1e\x07");
+    reads(&mut worker, FRESH_PROMPT);
+    assert!(
+        !worker.events.running_work(),
+        "a refused Run submitted nothing"
+    );
+
+    // Admitted, but the PTY takes none of its bytes yet.
+    records.update(|state| state.write_blocked = true);
+    let (reply, admitted) = mpsc::sync_channel(1);
+    worker.events.note_submitted();
+    worker.process_command(Command::Run("make".to_owned(), reply));
+    assert!(admitted.recv().unwrap().is_ok(), "the prompt admits it");
+    reads(&mut worker, FRESH_PROMPT);
+    assert!(worker.events.running_work(), "its bytes wait in the queue");
+    records.update(|state| state.write_blocked = false);
+    assert!(worker.flush_input());
+    reads(&mut worker, b"\r\n\x1b]133;C;spaceterm=0f1e\x07");
+    assert!(worker.events.running_work(), "the Run's command runs");
+    reads(&mut worker, b"\x1b]133;D;0;spaceterm=0f1e\x07");
+    reads(&mut worker, FRESH_PROMPT);
+    assert!(
+        !worker.events.running_work(),
+        "the Run's own fresh prompt answers it"
+    );
+    worker.finish();
+}
