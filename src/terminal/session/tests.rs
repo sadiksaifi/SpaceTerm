@@ -5458,8 +5458,9 @@ fn reads(worker: &mut TerminalWorker, output: &[u8]) {
 
 /// Enter is accepted while the worker still processes output from before it: an earlier prompt,
 /// the shell's own echo of the line, and the shell ending the line all leave the input fenced.
-/// Only a program that took the foreground and gave it back, or a fresh prompt drawn after the
-/// worker wrote the line, answers it.
+/// Only a fresh prompt drawn after the worker wrote the line answers it. A program that took the
+/// foreground and gave it back answers nothing the shell read, since the line may go on in the
+/// shell.
 #[test]
 fn only_evidence_after_the_written_line_answers_a_submitted_line() {
     let probe = Arc::new(MovingForeground(AtomicBool::new(true)));
@@ -5489,17 +5490,19 @@ fn only_evidence_after_the_written_line_answers_a_submitted_line() {
     assert!(worker.events.running_work());
     probe.0.store(true, Ordering::Release);
     reads(&mut worker, b"\r\n");
-    assert!(!worker.events.running_work(), "the program ran and ended");
+    assert!(
+        worker.events.running_work(),
+        "the program's return leaves the line to the shell"
+    );
+    reads(&mut worker, FRESH_PROMPT);
+    assert!(!worker.events.running_work(), "the line ran and ended");
 
     // A builtin never leaves the shell's foreground, so its fresh prompt answers it.
     worker.events.note_submitted();
     assert!(worker.process_command(Command::Key(enter_key())));
     reads(&mut worker, b"\r\n");
     assert!(worker.events.running_work());
-    reads(
-        &mut worker,
-        b"\x1b]7;file://mac.local/initial\x07\x1b]133;A;spaceterm=0f1e\x07% \x1b]133;B;spaceterm=0f1e\x07",
-    );
+    reads(&mut worker, FRESH_PROMPT);
     assert!(
         !worker.events.running_work(),
         "a fresh prompt after the line"
@@ -5662,6 +5665,59 @@ fn a_line_typed_ahead_of_a_line_program_stays_fenced_until_the_shell_answers_it(
         "the builtin's own fresh prompt answers it"
     );
     worker.finish();
+}
+
+/// `/bin/sleep 3` and then `read -t 5 answer` both reach the PTY before `sleep` takes the
+/// foreground, while the shell starts or waits at its prompt, so the shell reads both. `sleep`
+/// taking the foreground and giving it back answers neither: the shell then reads the second line
+/// and runs the builtin in its own foreground with no other process, and a close admitted then
+/// still finds that work. Only the shell's fresh prompts answer each line, one per prompt.
+#[test]
+fn a_program_return_answers_no_line_the_shell_read() {
+    for starting in [true, false] {
+        let records = ScriptedPtyRecords::default();
+        let probe = Arc::new(MovingForeground(AtomicBool::new(true)));
+        let mut worker = idle_worker_on(records.clone(), SHELL_FOREGROUND, Some(false));
+        worker.events.set_probe(Some(probe.clone()));
+        if !starting {
+            reads(&mut worker, FRESH_PROMPT);
+            assert!(!worker.events.running_work(), "an idle prompt");
+        }
+        for _ in 0..2 {
+            worker.events.note_submitted();
+            assert!(worker.process_command(Command::Key(enter_key())));
+        }
+        if starting {
+            reads(&mut worker, FRESH_PROMPT);
+        }
+        // The shell reads `/bin/sleep 3` and runs it.
+        reads(&mut worker, b"\r\n\x1b]133;C;spaceterm=0f1e\x07");
+        probe.0.store(false, Ordering::Release);
+        records.update(|state| state.line_mode = LINE_PROGRAM);
+        reads(&mut worker, b"");
+        assert!(worker.events.running_work(), "starting={starting}");
+        probe.0.store(true, Ordering::Release);
+        records.update(|state| state.line_mode = SHELL_FOREGROUND);
+        reads(&mut worker, b"\x1b]133;D;0;spaceterm=0f1e\x07");
+        assert!(
+            worker.events.running_work(),
+            "starting={starting}: the return answers neither line"
+        );
+        // The shell reads `read -t 5 answer` at its next prompt and runs the builtin itself.
+        reads(&mut worker, FRESH_PROMPT);
+        reads(&mut worker, b"\r\n\x1b]133;C;spaceterm=0f1e\x07");
+        assert!(
+            worker.events.running_work(),
+            "starting={starting}: the builtin runs with no other process"
+        );
+        reads(&mut worker, b"\x1b]133;D;1;spaceterm=0f1e\x07");
+        reads(&mut worker, FRESH_PROMPT);
+        assert!(
+            !worker.events.running_work(),
+            "starting={starting}: the builtin's own fresh prompt answers it"
+        );
+        worker.finish();
+    }
 }
 
 /// Lines an editor reads itself are answered when it gives the foreground back, so the shell's

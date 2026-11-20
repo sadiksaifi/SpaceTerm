@@ -23,10 +23,13 @@ pub(super) struct ActivityState {
 
 /// The ordered evidence that answers each submitted line. Input reaches the worker in the order
 /// it was accepted, so the `n`th line the PTY accepts whole is the `n`th one accepted. Only
-/// evidence the worker observes after the PTY accepted a line answers it: the fresh prompt of
-/// the owning shell that follows the prompt the line is read at, or a program the line started
-/// that took the foreground and gave it back. Output alone answers nothing, since the shell
-/// itself echoes and ends the line before the program it runs takes the foreground.
+/// evidence the worker observes after the PTY accepted a line answers it. A line the owning shell
+/// reads is answered only by the fresh prompt that follows the prompt it is read at, since each
+/// fresh prompt follows exactly one line the shell read. A program's return to the shell answers
+/// none of them: the line that started the program, or a line typed ahead of it, may go on in the
+/// shell, as `sleep 3; read answer` does. That return answers only the lines the program read
+/// itself. Output alone answers nothing, since the shell itself echoes and ends the line before
+/// the program it runs takes the foreground.
 #[derive(Default)]
 struct Submissions {
     accepted: u64,
@@ -53,11 +56,16 @@ pub(crate) enum Reader {
 }
 
 struct Line {
-    /// The count of fresh prompts the owning shell must have drawn before one answers it.
-    needs: u64,
-    reader: Reader,
-    /// A program took the foreground after the shell read this line.
-    ran: bool,
+    /// The count of fresh prompts the owning shell must have drawn before one answers it. Only a
+    /// line the shell may read has one.
+    needs: Option<u64>,
+}
+
+impl Line {
+    /// The program holding the foreground reads this line itself.
+    const fn program(&self) -> bool {
+        self.needs.is_none()
+    }
 }
 
 impl Submissions {
@@ -69,68 +77,61 @@ impl Submissions {
     /// `reader` was to read it.
     fn written(&mut self, progress: PromptProgress, reader: Reader) {
         self.written = (self.written + 1).min(self.accepted);
-        // A line typed at a prompt is read there and answered by the next fresh prompt. A
-        // program that reads keys ends with a fresh prompt too. A line written while the shell
-        // runs a command, starts, or runs a program that may leave the line unread is read at a
-        // prompt yet to come, which may already wait unread, so only the fresh prompt after that
-        // one answers it.
+        // A line typed at a prompt is read there and answered by the next fresh prompt. A line
+        // written while the shell runs a command, starts, or runs a program that may leave the
+        // line unread is read at a prompt yet to come, which may already wait unread, so only the
+        // fresh prompt after that one answers it. A program that reads keys answers its lines
+        // itself by giving the foreground back.
         let reads_at = match reader {
-            Reader::Program => progress.fresh,
-            Reader::LineProgram => progress.fresh + 1,
+            Reader::Program => {
+                self.started = true;
+                self.awaiting.push_back(Line { needs: None });
+                return;
+            }
+            Reader::LineProgram => {
+                self.started = true;
+                progress.fresh + 1
+            }
             Reader::Shell => match progress.zone {
                 ShellZone::AtPrompt => progress.fresh,
                 ShellZone::Running | ShellZone::Starting => progress.fresh + 1,
             },
         };
-        // Each line is read at the prompt that answers the line before it, at the earliest.
+        // Each line the shell reads is read at the prompt that answers the one before it, at the
+        // earliest.
         let needs = self
             .awaiting
-            .back()
-            .map_or(reads_at + 1, |before| (reads_at + 1).max(before.needs + 1));
-        self.awaiting.push_back(Line {
-            needs,
-            reader,
-            ran: false,
-        });
+            .iter()
+            .rev()
+            .find_map(|before| before.needs)
+            .map_or(reads_at + 1, |before| (reads_at + 1).max(before + 1));
+        self.awaiting.push_back(Line { needs: Some(needs) });
     }
 
-    /// The owning shell has drawn `fresh` fresh prompts. Each answers at most one line.
+    /// Removes the awaiting lines `answers` says are answered.
+    fn answer(&mut self, answers: impl Fn(&Line) -> bool) {
+        let before = self.awaiting.len();
+        self.awaiting.retain(|line| !answers(line));
+        let answered = (before - self.awaiting.len()) as u64;
+        self.answered = (self.answered + answered).min(self.written);
+    }
+
+    /// The owning shell has drawn `fresh` fresh prompts. Each answers at most one line it read.
     fn prompted(&mut self, fresh: u64) {
-        while self.awaiting.front().is_some_and(|line| line.needs <= fresh) {
-            self.awaiting.pop_front();
-            self.answered = (self.answered + 1).min(self.written);
-        }
+        self.answer(|line| line.needs.is_some_and(|needs| needs <= fresh));
     }
 
-    /// A program other than the shell owns the foreground. Every line the shell read before it
-    /// may have started it.
+    /// A program other than the shell owns the foreground.
     fn program_running(&mut self) {
         self.started = true;
-        for line in &mut self.awaiting {
-            if line.reader == Reader::Shell {
-                line.ran = true;
-            }
-        }
     }
 
-    /// The program gave the foreground back to the shell. It answers, in order, the lines that
-    /// may have started it and the lines it read itself. A line the kernel held for a program
-    /// that never read it is the shell's to read now, so only the shell's evidence answers it.
+    /// The program gave the foreground back to the shell. It answers the lines it read itself.
+    /// A line the kernel held for a program that never read it is the shell's to read now, and
+    /// it already waits for the shell's fresh prompt.
     fn returned(&mut self) {
         self.started = false;
-        while self
-            .awaiting
-            .front()
-            .is_some_and(|line| line.ran || line.reader == Reader::Program)
-        {
-            self.awaiting.pop_front();
-            self.answered = (self.answered + 1).min(self.written);
-        }
-        for line in &mut self.awaiting {
-            if line.reader == Reader::LineProgram {
-                line.reader = Reader::Shell;
-            }
-        }
+        self.answer(Line::program);
     }
 }
 
@@ -292,11 +293,7 @@ impl TerminalEventPublisher {
     /// owning shell was as `progress` says. `canonical` is the PTY's ICANON mode then, which says
     /// whether a program holding the foreground reads keys itself. A mode that can't be read
     /// leaves who reads the line open.
-    pub(super) fn note_written(
-        &self,
-        progress: PromptProgress,
-        canonical: Option<bool>,
-    ) {
+    pub(super) fn note_written(&self, progress: PromptProgress, canonical: Option<bool>) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let activity = &mut state.activity;
         let program = activity
