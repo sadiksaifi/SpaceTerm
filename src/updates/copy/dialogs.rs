@@ -6,7 +6,9 @@ use spaceterm_core::update::facts::{CheckFailure, StartFailure};
 use super::{Platform, list_and, this_ends};
 use crate::updates::UpdateError;
 use crate::updates::confirm::{Explanation, Previewed};
-use crate::updates::machines::{ActionFailure, Checked, MachineAction, MachineId, ServiceOperation};
+use crate::updates::machines::{
+    ActionFailure, Checked, MachineAction, MachineId, ServiceOperation,
+};
 use crate::updates::state::{
     AppRow, AppStage, CheckFailed, Command, DesktopAction, DownloadCause, MachineRow, MachineStage,
     PUSH_FAILURE, STEPPING_STONE,

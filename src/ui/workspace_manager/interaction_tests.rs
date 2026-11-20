@@ -1112,7 +1112,11 @@ fn an_own_close_refused_for_running_work_names_the_command_not_another_client(
     assert!(tree.find("Command Running in Tab").is_some());
     assert!(tree.find("Tab Changed on Another Client").is_none());
     assert!(cx.debug_bounds("modal-action-close-review").is_some());
-    assert_eq!(harness.closes(), original, "nothing is closed without Review");
+    assert_eq!(
+        harness.closes(),
+        original,
+        "nothing is closed without Review"
+    );
 }
 
 #[gpui::test]

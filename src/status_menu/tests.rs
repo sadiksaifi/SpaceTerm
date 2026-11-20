@@ -296,7 +296,10 @@ fn an_approved_stop_shows_its_progress_and_offers_nothing_else_until_it_finishes
         row(&menu, LOCAL).status.as_deref(),
         Some(crate::updates::copy::rows::WAITING_FOR_OPERATION)
     );
-    assert!(row(&menu, LOCAL).items.is_empty(), "nothing else is offered");
+    assert!(
+        row(&menu, LOCAL).items.is_empty(),
+        "nothing else is offered"
+    );
 
     // The other operation settled and this Stop runs.
     fixture.machines.emit(MachineUpdatesEvent::Finished {

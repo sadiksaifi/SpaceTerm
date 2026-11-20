@@ -1571,7 +1571,9 @@ impl WorkspaceManager {
     /// returns `false`, while this computer's server cannot take what landing asks of it: a
     /// retained copy stands in for the server, or the server cannot accept a creation yet.
     fn land(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        use super::workspaces::{WorkspaceEditability, WorkspaceRefusalReason, WorkspaceSubmission};
+        use super::workspaces::{
+            WorkspaceEditability, WorkspaceRefusalReason, WorkspaceSubmission,
+        };
 
         let Some(binding) = self.binding.local() else {
             return false;
@@ -3905,8 +3907,7 @@ impl WorkspaceManager {
             }
             WorkspaceCloseState::Changed => {
                 self.present_close_changed(
-                    review.approval.changed_title(),
-                    false,
+                    (review.approval.changed_title(), false),
                     Some(target),
                     held_keyboard,
                     None,
@@ -3951,8 +3952,7 @@ impl WorkspaceManager {
             }
             _ => {
                 self.present_close_changed(
-                    review.approval.changed_title(),
-                    false,
+                    (review.approval.changed_title(), false),
                     Some(review.target),
                     held_keyboard,
                     None,
@@ -3969,10 +3969,11 @@ impl WorkspaceManager {
     /// keyboard when the person asked, so the approved fresh close moves it as the first would.
     /// Returns whether the alert was admitted. `notice` records the presentation of an unseen
     /// outcome.
+    /// `working` says running work in this client's own unchanged Panes refused the close, rather
+    /// than another client's change.
     fn present_close_changed(
         &mut self,
-        title: &'static str,
-        working: bool,
+        (title, working): (&'static str, bool),
         target: Option<CloseTarget>,
         held_keyboard: bool,
         notice: Option<&super::workspaces::OutcomeNotice>,
@@ -4115,15 +4116,7 @@ impl WorkspaceManager {
         } else {
             super::workspaces::close_changed_title(machine_target)
         };
-        self.present_close_changed(
-            title,
-            working,
-            local,
-            held_keyboard,
-            notice,
-            window,
-            cx,
-        )
+        self.present_close_changed((title, working), local, held_keyboard, notice, window, cx)
     }
 
     /// Explains that another client already removed what a close confirmation named.

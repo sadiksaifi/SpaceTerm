@@ -24,11 +24,11 @@ pub(crate) use core_workspaces::{
     DirectMachine, DrawnAnswer, OutcomeNotice, OutcomeOwner, OutcomeTicket, WorkspaceAcceptance,
     WorkspaceAttachmentFailure, WorkspaceCloseApproval, WorkspaceCloseIntent, WorkspaceCloseReview,
     WorkspaceCloseState, WorkspaceCloseUnavailable, WorkspaceConflict, WorkspaceEditSource,
-    WorkspaceEdits, WorkspaceFacts, WorkspaceHost, WorkspacePaneOpener, WorkspacePaneSessions,
-    WorkspacePaneSubscription, WorkspacePanes, WorkspacePlan, WorkspaceRefusal,
-    WorkspaceEditability, WorkspaceRefusalReason, WorkspaceRemoval, WorkspaceRowStatus,
-    WorkspaceSubmission,
-    WorkspaceTabs, Workspaces, close_changed_title, close_working_title, presenting_window,
+    WorkspaceEditability, WorkspaceEdits, WorkspaceFacts, WorkspaceHost, WorkspacePaneOpener,
+    WorkspacePaneSessions, WorkspacePaneSubscription, WorkspacePanes, WorkspacePlan,
+    WorkspaceRefusal, WorkspaceRefusalReason, WorkspaceRemoval, WorkspaceRowStatus,
+    WorkspaceSubmission, WorkspaceTabs, Workspaces, close_changed_title, close_working_title,
+    presenting_window,
 };
 #[cfg(test)]
 pub(crate) use core_workspaces::{WorkspaceOwner, testing};

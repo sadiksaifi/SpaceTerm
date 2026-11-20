@@ -1444,10 +1444,7 @@ mod tests {
         );
         let answered = std::time::Instant::now();
         state.prepared([3; 32], answered);
-        state.offered_take_over(
-            spaceterm_core::pane::control::Controller::Nobody,
-            None,
-        );
+        state.offered_take_over(spaceterm_core::pane::control::Controller::Nobody, None);
         assert!(!state.preparing());
         assert!(
             state.starting_in_background(),

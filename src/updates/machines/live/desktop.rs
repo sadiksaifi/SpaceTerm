@@ -717,7 +717,9 @@ impl MachineLane for CoreLane {
 }
 
 /// What a settled receipt says about its operation.
-fn receipt_outcome(receipt: &spaceterm_core::service::lane::LaneReceipt) -> Result<(), ActionFailure> {
+fn receipt_outcome(
+    receipt: &spaceterm_core::service::lane::LaneReceipt,
+) -> Result<(), ActionFailure> {
     match admin::receipt_verdict(receipt) {
         admin::Verdict::Done => Ok(()),
         admin::Verdict::Failed(Some(code)) => Err(failure_of_code(&code)),

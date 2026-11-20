@@ -1898,9 +1898,8 @@ pub(super) fn present(
                 // Graphics transfers continue one chunk per turn without waiting.
                 let mut busy = more_input;
                 // The published metadata is read again shortly while the quiet lasts.
-                let mut deadline = quiet.map(|until| {
-                    until.min(std::time::Instant::now() + STARTUP_QUIET_POLL)
-                });
+                let mut deadline =
+                    quiet.map(|until| until.min(std::time::Instant::now() + STARTUP_QUIET_POLL));
                 if ready && let Some((_, mapping)) = &mut latest_screen {
                     // Pages decode outside the reading lock, which the main thread takes for
                     // every key, pointer and wheel event; the lock is held only to add the rows.

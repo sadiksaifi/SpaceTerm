@@ -5463,11 +5463,17 @@ fn only_evidence_after_the_written_line_answers_a_submitted_line() {
     // The host accepts Enter. Before the worker writes it, it reads the earlier prompt again.
     worker.events.note_submitted();
     reads(&mut worker, OWNED_PROMPT);
-    assert!(worker.events.running_work(), "the earlier prompt answers nothing");
+    assert!(
+        worker.events.running_work(),
+        "the earlier prompt answers nothing"
+    );
 
     assert!(worker.process_command(Command::Key(enter_key())));
     reads(&mut worker, b"\r\n");
-    assert!(worker.events.running_work(), "the shell's echo answers nothing");
+    assert!(
+        worker.events.running_work(),
+        "the shell's echo answers nothing"
+    );
 
     // The program takes the foreground and gives it back.
     probe.0.store(false, Ordering::Release);
@@ -5486,6 +5492,9 @@ fn only_evidence_after_the_written_line_answers_a_submitted_line() {
         &mut worker,
         b"\x1b]7;file://mac.local/initial\x07\x1b]133;A;spaceterm=0f1e\x07% \x1b]133;B;spaceterm=0f1e\x07",
     );
-    assert!(!worker.events.running_work(), "a fresh prompt after the line");
+    assert!(
+        !worker.events.running_work(),
+        "a fresh prompt after the line"
+    );
     worker.finish();
 }

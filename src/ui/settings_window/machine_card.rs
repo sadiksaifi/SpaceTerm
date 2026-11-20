@@ -1098,7 +1098,9 @@ impl SettingsWindow {
                 .as_ref()
                 .is_some_and(|facts| facts.operation == Some(Operation::Stopping))
             {
-                return Some(SharedString::new_static(service_progress(ServiceAction::Stop)));
+                return Some(SharedString::new_static(service_progress(
+                    ServiceAction::Stop,
+                )));
             }
         }
         if let Some(update) = self.machine_update(choice, cx)
