@@ -26,6 +26,10 @@ struct StartReplyLoss {
     starts: AtomicUsize,
     accepted: Mutex<Option<[u8; 32]>>,
     observed: Mutex<Vec<[u8; 32]>>,
+    /// Loses the reply to the next background start once set, after the real host ran it.
+    lose_prepare: AtomicBool,
+    /// A background start's reply was lost.
+    prepare_lost: AtomicBool,
 }
 
 /// Frames and bytes on one connection, in each direction.
@@ -59,6 +63,7 @@ struct Counting {
     start_loss: Arc<StartReplyLoss>,
     requests: protocol::frame::Assembler,
     starting: Option<protocol::RequestId>,
+    preparing: Option<protocol::RequestId>,
 }
 
 impl Carrier for Counting {
@@ -68,6 +73,14 @@ impl Carrier for Counting {
         let raw = RawFrame::parse(frame)?;
         let attached = if raw.kind == protocol::frame::Kind::Reply as u8 {
             match protocol::frame::Assembler::default().core(raw)? {
+                Some(protocol::CoreMessage::Reply(reply))
+                    if self.preparing == Some(reply.id)
+                        && self.start_loss.lose_prepare.swap(false, Ordering::AcqRel) =>
+                {
+                    self.start_loss.prepare_lost.store(true, Ordering::Release);
+                    self.inner.close();
+                    return Err(CarrierError::Closed);
+                }
                 Some(protocol::CoreMessage::Reply(reply)) => match reply.result {
                     Ok(protocol::ReplyBody::Claim(protocol::ClaimReply::Attached { lease })) => {
                         if self.starting == Some(reply.id)
@@ -134,6 +147,13 @@ impl Carrier for Counting {
             {
                 self.start_loss.starts.fetch_add(1, Ordering::SeqCst);
                 self.starting = Some(request.id);
+            }
+            if let Some(protocol::ClientMessage::Request(request)) =
+                self.requests.client(frame.clone())?
+                && matches!(&request.operation, protocol::Operation::Claim(claim)
+                    if matches!(claim.claim, pane::AttachmentClaim::Prepare { .. }))
+            {
+                self.preparing = Some(request.id);
             }
             self.traffic.client_frames.fetch_add(1, Ordering::SeqCst);
             // The length prefix and the kind byte, then the body.
@@ -275,6 +295,7 @@ impl ConnectedPane {
                     start_loss: Arc::clone(&start_loss),
                     requests: protocol::frame::Assembler::default(),
                     starting: None,
+                    preparing: None,
                 };
                 let (waker, wake) = io::Waker::new().unwrap();
                 let outbox =
@@ -397,6 +418,16 @@ impl ConnectedPane {
         let bell = Arc::clone(&self.bell);
         service.ticker(Arc::new(move || ring(&bell)));
         ring(&self.bell);
+    }
+
+    /// Loses the reply to the next background start, after the real host ran it.
+    pub(crate) fn lose_next_prepare_reply(&self) {
+        self.start_loss.lose_prepare.store(true, Ordering::Release);
+    }
+
+    /// Whether a background start's reply was lost.
+    pub(crate) fn prepare_reply_lost(&self) -> bool {
+        self.start_loss.prepare_lost.load(Ordering::Acquire)
     }
 
     pub(crate) fn starts(&self) -> usize {
@@ -771,7 +802,9 @@ fn a_visible_idle_pane_sends_no_periodic_requests() {
         .unwrap();
     started.handle.set_presentable(true);
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // The shell this client started marks no prompt and never names itself, so it shows once
+    // its startup quiet runs out.
+    let deadline = Instant::now() + super::link::STARTUP_QUIET_LIMIT + Duration::from_secs(10);
     let shell_shown = || {
         while let Ok(event) = started.events.try_recv() {
             if let TerminalSessionEvent::Screen(screen) = event

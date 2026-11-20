@@ -1943,7 +1943,9 @@ pub(super) fn present(
                             paste_unconfirmed,
                         )?;
                     }
-                    deadline = turn.deadline;
+                    // The quiet keeps reading the published metadata and ends at its limit even
+                    // while nothing else is due.
+                    deadline = [deadline, turn.deadline].into_iter().flatten().min();
                     let requests = state
                         .reading
                         .lock()
