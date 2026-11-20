@@ -340,35 +340,39 @@ impl SettingsWindow {
         store::request(actions, always, Surface::Settings, ask, cx);
     }
 
-    /// Reads this computer's service again when this client's link to its SpaceTerm Core comes
-    /// back while the service row still says it does not run, as after a Start chosen in the
-    /// Workspace Window, the status menu or the CLI while this window stayed open.
+    /// The kind of this client's link to this computer's SpaceTerm Core in the shared Machine
+    /// updates, which follow its service manager and its process.
+    fn local_link_kind(
+        &self,
+        cx: &App,
+    ) -> Option<std::mem::Discriminant<crate::updates::machines::MachineLink>> {
+        self.machine_update(&super::machine_list::MachineChoice::Local, cx)
+            .map(|update| std::mem::discriminant(&update.link))
+    }
+
+    /// Reads this computer's service and connection again whenever this client's link to its
+    /// SpaceTerm Core changes kind, in either direction, as after a Stop or Start chosen in the
+    /// CLI, a Workspace Window or the status menu while this window stayed open. A read already
+    /// running is read again once it ends. Work Settings has underway keeps its own progress.
     fn follow_local_link(&mut self, cx: &mut Context<Self>) {
-        let live = self
-            .machine_update(&super::machine_list::MachineChoice::Local, cx)
-            .is_some_and(|update| {
-                matches!(
-                    update.link,
-                    crate::updates::machines::MachineLink::Connected
-                        | crate::updates::machines::MachineLink::Incompatible(_)
-                )
-            });
-        let returned = live && !std::mem::replace(&mut self.local_link_live, live);
-        let not_running = self
-            .core_service
-            .as_ref()
-            .and_then(|row| row.state.status)
-            .is_some_and(|status| !status.running || status.stopped);
-        if returned && not_running {
-            self.reread_core_service(cx);
-            self.check_local_core(cx);
+        let kind = self.local_link_kind(cx);
+        if kind == self.local_link {
+            return;
         }
+        let followed = std::mem::replace(&mut self.local_link, kind);
+        if followed.is_none() || kind.is_none() {
+            return;
+        }
+        self.reread_core_service(cx);
+        self.recheck_local_core(cx);
     }
 
     pub(super) fn observe_machine_updates(&mut self, cx: &mut Context<Self>) {
         let Some(store) = MachineUpdates::global(cx) else {
             return;
         };
+        // Settings reads the service as it opens, so only a later change reads it again.
+        self.local_link = self.local_link_kind(cx);
         cx.observe(&store, |settings, _, cx| {
             settings.follow_local_link(cx);
             cx.notify();

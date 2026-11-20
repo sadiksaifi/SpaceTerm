@@ -1564,7 +1564,15 @@ fn boot_wording_names_boot_and_logout_and_keeps_lingering_after_uninstall() {
         })
         .explanation
     };
-    for status in [not_installed(), running(), stopped()] {
+    // A stopped server reads the same short line either way: its Stopped state already says
+    // it doesn't run.
+    for startup in [ServiceStartup::AtBoot, ServiceStartup::AtLogin] {
+        assert_eq!(
+            presented(startup, stopped()).as_ref(),
+            "Opening SpaceTerm starts it again."
+        );
+    }
+    for status in [not_installed(), running()] {
         let linux = presented(ServiceStartup::AtBoot, status);
         let macos = presented(ServiceStartup::AtLogin, status);
         assert!(
@@ -1736,11 +1744,7 @@ fn cancelling_the_operating_systems_prompt_changes_nothing_and_keeps_the_stop(
         presented.actions,
         vec![ServiceAction::Start, ServiceAction::Uninstall]
     );
-    assert!(
-        presented
-            .explanation
-            .contains("even after the computer restarts")
-    );
+    assert_eq!(presented.explanation, "Opening SpaceTerm starts it again.");
 }
 
 #[gpui::test]

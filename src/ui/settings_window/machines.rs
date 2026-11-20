@@ -285,6 +285,9 @@ pub(super) struct LocalMachineRow {
     status: LocalCoreStatus,
     /// A check awaits its result.
     checking: bool,
+    /// The Core changed after the running check began, so its answer is set aside and the
+    /// connection is checked again once it ends.
+    check_outdated: bool,
     /// Returns the background result to GPUI. Dropping the window drops it, and a late result then
     /// has nowhere to land.
     _operation: Option<Task<()>>,
@@ -302,6 +305,7 @@ impl LocalMachineRow {
             control,
             status: LocalCoreStatus::NotChecked,
             checking: false,
+            check_outdated: false,
             _operation: None,
         }
     }
@@ -571,9 +575,9 @@ pub(crate) const INCOMPATIBLE_PROTOCOL: &str =
     "SpaceTerm and this SpaceTerm Core are incompatible.";
 
 /// The connection row's guidance once the person has stopped the server. A stopped server stays
-/// stopped through account login and computer startup alike.
-const STOPPED_GUIDANCE: &str = "You stopped SpaceTerm Core. It stays stopped, even after you \
-                                restart the computer, until you start it or open SpaceTerm.";
+/// stopped through account login and computer startup alike, until an explicit Start or the
+/// person's own launch of SpaceTerm.
+const STOPPED_GUIDANCE: &str = "Opening SpaceTerm starts it again.";
 
 pub(super) const SERVICE_CHECK_SELECTOR: &str = "settings-server-service-check";
 pub(super) const INSTALL_SELECTOR: &str = "settings-server-service-install";
@@ -1122,13 +1126,7 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
                 ServicePhase::Stopped => (
                     "Stopped",
                     "settings-server-service-state-stopped",
-                    guidance(if at_boot {
-                        "You stopped SpaceTerm Core. It stays stopped, even after the computer \
-                         restarts, until you start it or open SpaceTerm."
-                    } else {
-                        "You stopped SpaceTerm Core. It stays stopped, even after you log in again, \
-                         until you start it or open SpaceTerm."
-                    }),
+                    guidance(STOPPED_GUIDANCE),
                 ),
                 // Turning SpaceTerm Core off was the person's choice, so nothing warns.
                 ServicePhase::TurnedOff => (
@@ -1467,6 +1465,12 @@ impl SettingsWindow {
             let _ = settings.update(cx, |settings, cx| {
                 if let Some(row) = &mut settings.local_core {
                     row.checking = false;
+                    // An answer from before the Core changed describes nothing current.
+                    if std::mem::take(&mut row.check_outdated) {
+                        settings.check_local_core(cx);
+                        cx.notify();
+                        return;
+                    }
                     row.status = match result {
                         Ok(connection) => LocalCoreStatus::Connected(connection),
                         Err(error) => LocalCoreStatus::Failed(error),
@@ -1531,6 +1535,19 @@ impl SettingsWindow {
         self.core_service
             .as_ref()
             .is_some_and(MachineServiceRow::changing)
+    }
+
+    /// Checks the connection after the Core changed outside Settings. A check already running may
+    /// have reached it before the change, so its answer is set aside and the connection is
+    /// checked again once it ends.
+    pub(super) fn recheck_local_core(&mut self, cx: &mut Context<Self>) {
+        if let Some(row) = &mut self.local_core
+            && row.checking
+        {
+            row.check_outdated = true;
+            return;
+        }
+        self.check_local_core(cx);
     }
 
     /// Whether the connection row has an action running.
