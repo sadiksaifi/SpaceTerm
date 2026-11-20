@@ -17,6 +17,7 @@ use crate::storage::{Directory, Lock, LockWait};
 use crate::update::facts::UpdateFacts;
 use crate::update::ordering::Candidate;
 use base64::Engine;
+use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::time::{Duration, Instant};
 
@@ -57,7 +58,11 @@ pub fn wait(action: &LaneAction) -> Duration {
 /// The record of one route and identity's admitted operations, kept in `directory`.
 const PENDING: &str = "service-operations.json";
 const PENDING_FILE: &std::ffi::CStr = c"service-operations.json";
-/// Held across each read-modify-write of the pending operations.
+/// The outcomes one route and identity acknowledged, kept beside its pending operations so a
+/// surface that asks about one after SpaceTerm Core forgot its receipt still reads it.
+const OUTCOMES: &str = "service-outcomes.json";
+const OUTCOMES_FILE: &std::ffi::CStr = c"service-outcomes.json";
+/// Held across each read-modify-write of the pending operations or the kept outcomes.
 const RECORD_LOCK: &str = "service-operations.lock";
 /// Held shared by each flow that follows an operation it recorded, and exclusively while a lane
 /// connection settles the identity's leftovers, so that settlement never acknowledges a receipt
@@ -65,6 +70,8 @@ const RECORD_LOCK: &str = "service-operations.lock";
 const FOLLOWING: &str = "service-operations-following.lock";
 /// At most this many pending operations are kept. The server holds no more than 16.
 const MAX_PENDING: usize = 16;
+/// At most this many acknowledged outcomes are kept. The oldest goes first.
+const MAX_OUTCOMES: usize = 32;
 /// How long a caller that set no deadline of its own waits for another holder of the record.
 const RECORD_WAIT: Duration = REQUEST_LIMIT;
 
@@ -73,8 +80,53 @@ pub(crate) fn readable(value: &serde_json::Value) -> bool {
     crate::migration::strict::<Vec<String>>(value)
 }
 
+/// Whether `value` is a client's `service-outcomes.json` this build reads.
+pub(crate) fn readable_outcomes(value: &serde_json::Value) -> bool {
+    Vec::<KeptOutcome>::deserialize(value).is_ok_and(|kept| {
+        kept.len() <= MAX_OUTCOMES
+            && kept
+                .iter()
+                .all(|outcome| super::client::settled(&outcome.receipt()))
+    })
+}
+
+/// One acknowledged outcome as `service-outcomes.json` keeps it: the settled receipt of the
+/// operation it names.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeptOutcome {
+    operation: String,
+    action: LaneAction,
+    state: LaneOperationState,
+    code: Option<String>,
+    boot: String,
+}
+
+impl KeptOutcome {
+    fn of(receipt: &LaneReceipt) -> Self {
+        Self {
+            operation: receipt.operation.clone(),
+            action: receipt.action.clone(),
+            state: receipt.state,
+            code: receipt.code.clone(),
+            boot: receipt.boot.clone(),
+        }
+    }
+
+    fn receipt(&self) -> LaneReceipt {
+        LaneReceipt {
+            operation: self.operation.clone(),
+            action: self.action.clone(),
+            state: self.state,
+            code: self.code.clone(),
+            boot: self.boot.clone(),
+        }
+    }
+}
+
 /// The service operations one client identity admitted on one route and has not acknowledged,
-/// so the next lane connection settles them.
+/// so the next lane connection settles them, and the outcomes it acknowledged, so every surface
+/// that later asks about one of them reads the same outcome.
 pub struct PendingOperations {
     directory: Directory,
 }
@@ -153,6 +205,43 @@ impl PendingOperations {
         .map(drop)
     }
 
+    /// Keeps the outcome of each settled receipt in `receipts` before it is acknowledged, so a
+    /// reply lost after SpaceTerm Core forgot the receipt still leaves the outcome here.
+    pub(crate) fn keep_by(
+        &self,
+        receipts: &[LaneReceipt],
+        deadline: Instant,
+    ) -> Result<(), LaneError> {
+        if receipts.is_empty() {
+            return Ok(());
+        }
+        let _lock = self.lock_by(deadline)?;
+        let mut kept: Vec<KeptOutcome> = self.directory.read_json(OUTCOMES)?.unwrap_or_default();
+        for receipt in receipts {
+            kept.retain(|outcome| outcome.operation != receipt.operation);
+            kept.push(KeptOutcome::of(receipt));
+        }
+        let excess = kept.len().saturating_sub(MAX_OUTCOMES);
+        kept.drain(..excess);
+        self.directory.write_json(OUTCOMES_FILE, &kept)?;
+        Ok(())
+    }
+
+    /// The settled receipt of `operation` this route and identity acknowledged, read by
+    /// `deadline`.
+    pub fn kept_by(
+        &self,
+        operation: &str,
+        deadline: Instant,
+    ) -> Result<Option<LaneReceipt>, LaneError> {
+        let _lock = self.lock_by(deadline)?;
+        let kept: Vec<KeptOutcome> = self.directory.read_json(OUTCOMES)?.unwrap_or_default();
+        Ok(kept
+            .iter()
+            .find(|outcome| outcome.operation == operation)
+            .map(KeptOutcome::receipt))
+    }
+
     /// The claim of a flow that follows an operation it is about to record, held until the flow
     /// returns. It waits until `deadline` for a settlement that runs now.
     fn follow(&self, deadline: Instant) -> Result<Lock, LaneError> {
@@ -209,7 +298,10 @@ fn record_error(error: LaneError) -> CoreError {
 /// this identity follows an operation, because that flow reads its own receipt.
 ///
 /// Every leftover is resolved before any is acknowledged, so a failed read loses no outcome.
-/// A failed acknowledgement returns the receipts acknowledged before it in [`Unopened`].
+/// Each settled outcome is kept before its acknowledgement is sent, so an acknowledgement whose
+/// reply was lost after SpaceTerm Core forgot the receipt loses no outcome either: a later
+/// connection that finds the receipt gone returns the kept outcome instead. A failed
+/// acknowledgement returns the receipts acknowledged before it in [`Unopened`].
 pub fn open(
     lane: &Lane,
     pending: &PendingOperations,
@@ -220,19 +312,30 @@ pub fn open(
         return Ok((session, Vec::new()));
     };
     let mut settled = Vec::new();
+    let mut gone = Vec::new();
     for operation in pending.list_by(deadline)? {
         let Some(id) = OperationId::parse(&operation) else {
-            pending.remove_by(&operation, deadline)?;
+            gone.push(operation);
             continue;
         };
         let by = deadline.min(Instant::now() + REQUEST_LIMIT);
         match super::client::leftover(&mut session, &id, by)? {
             Leftover::Settled(receipt) => settled.push((id, receipt)),
-            Leftover::Gone => pending.remove_by(&operation, deadline)?,
+            Leftover::Gone => gone.push(operation),
             Leftover::Pending => {}
         }
     }
+    let receipts: Vec<_> = settled.iter().map(|(_, receipt)| receipt.clone()).collect();
+    pending.keep_by(&receipts, deadline)?;
+    // An operation SpaceTerm Core no longer holds was acknowledged by an earlier connection
+    // whose reply was lost, or its pairing was revoked. Only the first kept an outcome.
     let mut acknowledged = Vec::new();
+    for operation in gone {
+        if let Some(receipt) = pending.kept_by(&operation, deadline)? {
+            acknowledged.push(receipt);
+        }
+        pending.remove_by(&operation, deadline)?;
+    }
     for (id, receipt) in settled {
         let by = deadline.min(Instant::now() + REQUEST_LIMIT);
         if let Err(error) = super::client::acknowledge(&mut session, &id, by) {
@@ -246,6 +349,41 @@ pub fn open(
         acknowledged.push(receipt);
     }
     Ok((session, acknowledged))
+}
+
+/// Check Status: what became of `operation`, which this identity admitted on this route, read
+/// by `deadline`. It reads the outcome this identity kept when any of its surfaces acknowledged
+/// the receipt, and otherwise asks SpaceTerm Core. A settled receipt is kept before it is
+/// acknowledged. It is acknowledged only while no flow of this identity follows an operation,
+/// because such a flow reads its own receipt. It never repeats the action.
+pub fn check(
+    lane: &Lane,
+    pending: &PendingOperations,
+    operation: &OperationId,
+    deadline: Instant,
+) -> Result<Leftover, LaneError> {
+    let key = operation.to_string();
+    if let Some(receipt) = pending.kept_by(&key, deadline)? {
+        return Ok(Leftover::Settled(receipt));
+    }
+    let mut session = lane.session_by(deadline)?;
+    let by = deadline.min(Instant::now() + REQUEST_LIMIT);
+    match super::client::leftover(&mut session, operation, by)? {
+        Leftover::Settled(receipt) => {
+            pending.keep_by(std::slice::from_ref(&receipt), deadline)?;
+            if let Some(_settling) = pending.settle()?
+                && super::client::acknowledge(&mut session, operation, by).is_ok()
+            {
+                let _ = pending.remove_by(&key, deadline);
+            }
+            Ok(Leftover::Settled(receipt))
+        }
+        // Another surface of this identity may have kept and acknowledged it meanwhile.
+        Leftover::Gone => Ok(pending
+            .kept_by(&key, deadline)?
+            .map_or(Leftover::Gone, Leftover::Settled)),
+        Leftover::Pending => Ok(Leftover::Pending),
+    }
 }
 
 /// The server's own service facts.

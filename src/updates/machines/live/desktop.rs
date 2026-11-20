@@ -633,22 +633,22 @@ impl MachineLane for CoreLane {
         .map_err(lane_failure)
     }
 
+    /// Check Status reads the outcome any surface of this desktop kept for this Machine's route
+    /// when it acknowledged the receipt, including Settings, before it asks the Core.
     fn resolve(&self, operation: &str) -> Result<(), ActionFailure> {
+        let Some(id) = spaceterm_core::service::operations::OperationId::parse(operation) else {
+            return Err(ActionFailure::Unconfirmed);
+        };
         let lane = self
             .core
             .service_lane()
             .map_err(|_| ActionFailure::Unconfirmed)?;
-        let mut session = lane.session().map_err(|_| ActionFailure::Unconfirmed)?;
-        let Some(id) = spaceterm_core::service::operations::OperationId::parse(operation) else {
-            return Err(ActionFailure::Unconfirmed);
-        };
-        match lane_client::settle_leftover(&mut session, &id) {
-            Ok(lane_client::Leftover::Settled(receipt)) => {
-                if let Ok(pending) = self.core.service_operations() {
-                    let _ = pending.remove(operation);
-                }
-                receipt_outcome(&receipt)
-            }
+        let pending = self
+            .core
+            .service_operations()
+            .map_err(|_| ActionFailure::Unconfirmed)?;
+        match admin::check(&lane, &pending, &id, Instant::now() + admin::REQUEST_LIMIT) {
+            Ok(lane_client::Leftover::Settled(receipt)) => receipt_outcome(&receipt),
             _ => Err(ActionFailure::Unconfirmed),
         }
     }

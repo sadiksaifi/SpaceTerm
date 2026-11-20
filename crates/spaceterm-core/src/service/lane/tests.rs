@@ -1976,19 +1976,20 @@ mod flow {
             )
             .unwrap();
             assert!(matches!(outcome, Outcome::Shutdown { .. }), "{outcome:?}");
-            // A local Start brings the server back, and the next lane connection settles it.
+            // A local Start brings the server back, and Check Status settles it.
             switch.up(lane.restarted());
-            let mut session =
-                Session::open(switch.as_ref(), Instant::now() + Duration::from_secs(5)).unwrap();
-            let leftover = client::settle_leftover(&mut session, &admitted.unwrap()).unwrap();
-            let Leftover::Settled(receipt) = leftover else {
+            let route = client::Lane::over(switch.clone());
+            let pending = pending(&lane);
+            let id = admitted.unwrap();
+            let check = || admin::check(&route, &pending, &id, Instant::now() + REQUEST_LIMIT);
+            let leftover = check().unwrap();
+            let Leftover::Settled(receipt) = leftover.clone() else {
                 panic!("expected a settled stop, got {leftover:?}");
             };
             assert_eq!(receipt.state, LaneOperationState::Done);
-            assert_eq!(
-                client::settle_leftover(&mut session, &admitted.unwrap()).unwrap(),
-                Leftover::Gone
-            );
+            assert_eq!(lane.lane.ledger().unwrap().resolve(&id).unwrap(), None);
+            // SpaceTerm Core forgot the acknowledged receipt; the kept outcome still answers.
+            assert_eq!(check().unwrap(), leftover);
         });
     }
 
@@ -2799,15 +2800,18 @@ mod flow {
     type Cut = Arc<Mutex<Option<(fn(&LaneRequest) -> bool, usize)>>>;
 
     /// A server that answers like the lane and cuts its connection at the `nth` request that
-    /// `cut` matches.
+    /// `cut` matches: before the lane handles it, or once the lane handled it and before its
+    /// reply leaves when `answered`.
     struct Cutting {
         lane: Arc<LaneCore>,
         cut: Cut,
+        answered: bool,
     }
     impl Connector for Cutting {
         fn connect(&self, _: Instant) -> Result<client::Connected, CoreError> {
             let lane = self.lane.clone();
             let cut = self.cut.clone();
+            let answered = self.answered;
             let (client, mut core) = UnixStream::pair().map_err(|_| CoreError::Protocol)?;
             std::thread::spawn(move || {
                 loop {
@@ -2816,18 +2820,26 @@ mod flow {
                         return;
                     };
                     let request: LaneRequest = serde_json::from_slice(&bytes).unwrap();
-                    {
+                    let cutting = {
                         let mut cut = cut.lock().unwrap();
+                        let mut cutting = false;
                         if let Some((matches, nth)) = cut.as_mut()
                             && matches(&request)
                         {
                             *nth -= 1;
                             if *nth == 0 {
                                 *cut = None;
-                                let _ = core.shutdown(std::net::Shutdown::Both);
-                                return;
+                                cutting = true;
                             }
                         }
+                        cutting
+                    };
+                    if cutting {
+                        if answered {
+                            let _ = lane.answer(request, &LOCAL);
+                        }
+                        let _ = core.shutdown(std::net::Shutdown::Both);
+                        return;
                     }
                     let reply = lane.answer(request, &LOCAL);
                     let _ = core.send(&serde_json::to_vec(&reply).unwrap(), deadline);
@@ -2844,6 +2856,15 @@ mod flow {
     /// Records a Restart this client admitted earlier and the server settled as done, as a
     /// later lane connection finds it.
     fn settled_leftover(lane: &Lane, pending: &admin::PendingOperations) -> OperationId {
+        settled_leftover_as(lane, pending, State::Done)
+    }
+
+    /// [`settled_leftover`] that the server settled as `state`.
+    fn settled_leftover_as(
+        lane: &Lane,
+        pending: &admin::PendingOperations,
+        state: State,
+    ) -> OperationId {
         let id = OperationId::random().unwrap();
         let mut ledger = lane.lane.ledger().unwrap();
         ledger
@@ -2860,7 +2881,7 @@ mod flow {
                 orphaned: false,
             })
             .unwrap();
-        ledger.mark(&id, State::Done).unwrap();
+        ledger.mark(&id, state).unwrap();
         pending.add(&id).unwrap();
         id
     }
@@ -2885,6 +2906,7 @@ mod flow {
             let route = client::Lane::over(Arc::new(Cutting {
                 lane: lane.lane.clone(),
                 cut: cut.clone(),
+                answered: false,
             }));
             let open = || admin::open(&route, &pending, Instant::now() + REQUEST_LIMIT);
 
@@ -2910,6 +2932,199 @@ mod flow {
             assert_eq!(operations, vec![second.to_string()]);
             assert!(pending.list().unwrap().is_empty());
             assert!(lane.lane.ledger().unwrap().records().unwrap().is_empty());
+        });
+    }
+
+    fn cutting(lane: &Lane, answered: bool) -> (client::Lane, Cut) {
+        let cut = Arc::new(Mutex::new(None));
+        let route = client::Lane::over(Arc::new(Cutting {
+            lane: lane.lane.clone(),
+            cut: cut.clone(),
+            answered,
+        }));
+        (route, cut)
+    }
+
+    fn settled_receipt(leftover: Leftover) -> LaneReceipt {
+        match leftover {
+            Leftover::Settled(receipt) => receipt,
+            other => panic!("expected a settled receipt, got {other:?}"),
+        }
+    }
+
+    /// SpaceTerm Core forgets a receipt before its `Acknowledged` reply leaves. A reply lost after
+    /// that, on a recovering connection or on Check Status, still leaves the exact outcome for
+    /// the next Check Status and the next recovering connection.
+    #[test]
+    fn an_acknowledgement_lost_after_the_core_forgot_the_receipt_keeps_its_outcome() {
+        with_lane(|lane| {
+            let pending = pending(&lane);
+            let failed = State::Failed {
+                code: "startup_failed".into(),
+            };
+            let recovered = settled_leftover_as(&lane, &pending, failed.clone());
+            let (route, cut) = cutting(&lane, true);
+            let check = |id: &OperationId| {
+                admin::check(&route, &pending, id, Instant::now() + REQUEST_LIMIT)
+                    .map(settled_receipt)
+                    .unwrap()
+            };
+            let expected = |id: &OperationId| LaneReceipt {
+                operation: id.to_string(),
+                action: LaneAction::Restart,
+                state: LaneOperationState::Failed,
+                code: Some("startup_failed".into()),
+                boot: hex(&lane.lane.boot),
+            };
+
+            // A recovering connection's first acknowledgement reaches the Core, which forgets
+            // the receipt, and its reply is lost.
+            *cut.lock().unwrap() = Some((acknowledge as fn(&LaneRequest) -> bool, 1));
+            let unopened = admin::open(&route, &pending, Instant::now() + REQUEST_LIMIT)
+                .err()
+                .unwrap();
+            assert!(unopened.settled.is_empty());
+            assert_eq!(
+                lane.lane.ledger().unwrap().resolve(&recovered).unwrap(),
+                None
+            );
+            assert!(pending.list().unwrap().contains(&recovered.to_string()));
+            assert_eq!(check(&recovered), expected(&recovered));
+
+            // Check Status's own acknowledgement reaches the Core, and its reply is lost.
+            let checked = settled_leftover_as(&lane, &pending, failed);
+            *cut.lock().unwrap() = Some((acknowledge as fn(&LaneRequest) -> bool, 1));
+            assert_eq!(check(&checked), expected(&checked));
+            assert_eq!(lane.lane.ledger().unwrap().resolve(&checked).unwrap(), None);
+            assert_eq!(check(&checked), expected(&checked));
+
+            // The next recovering connection reports both from what this identity kept.
+            let (_, settled) =
+                admin::open(&route, &pending, Instant::now() + REQUEST_LIMIT).unwrap();
+            let mut operations: Vec<_> = settled.iter().map(|v| v.operation.clone()).collect();
+            operations.sort();
+            let mut both = vec![recovered.to_string(), checked.to_string()];
+            both.sort();
+            assert_eq!(operations, both);
+            assert!(
+                settled
+                    .iter()
+                    .all(|receipt| receipt.code.as_deref() == Some("startup_failed"))
+            );
+            assert!(pending.list().unwrap().is_empty());
+            assert_eq!(check(&recovered), expected(&recovered));
+        });
+    }
+
+    /// Settings' Check Now on a paired Machine opens the lane as the original surface's identity
+    /// and acknowledges its leftovers, whole or in part. The original surface's Check Status for
+    /// each operation then reads the same outcome.
+    #[test]
+    fn check_now_recovery_leaves_the_outcome_for_the_original_check_status() {
+        with_lane(|lane| {
+            let pending = pending(&lane);
+            let (route, cut) = cutting(&lane, false);
+            let check = |id: &OperationId| {
+                admin::check(&route, &pending, id, Instant::now() + REQUEST_LIMIT)
+                    .map(settled_receipt)
+                    .unwrap()
+            };
+
+            let done = settled_leftover(&lane, &pending);
+            let refused = settled_leftover_as(
+                &lane,
+                &pending,
+                State::Failed {
+                    code: "address_unavailable".into(),
+                },
+            );
+            let (_, settled) =
+                admin::open(&route, &pending, Instant::now() + REQUEST_LIMIT).unwrap();
+            assert_eq!(settled.len(), 2);
+            assert!(lane.lane.ledger().unwrap().records().unwrap().is_empty());
+            for receipt in &settled {
+                let id = OperationId::parse(&receipt.operation).unwrap();
+                assert_eq!(&check(&id), receipt);
+            }
+            assert_eq!(check(&done).state, LaneOperationState::Done);
+            assert_eq!(check(&refused).code.as_deref(), Some("address_unavailable"));
+
+            // A recovery that fails before its second acknowledgement reaches the Core.
+            let first = settled_leftover(&lane, &pending);
+            let second = settled_leftover(&lane, &pending);
+            *cut.lock().unwrap() = Some((acknowledge as fn(&LaneRequest) -> bool, 2));
+            let unopened = admin::open(&route, &pending, Instant::now() + REQUEST_LIMIT)
+                .err()
+                .unwrap();
+            assert_eq!(unopened.settled.len(), 1);
+            let acknowledged = &unopened.settled[0];
+            let id = OperationId::parse(&acknowledged.operation).unwrap();
+            assert!([first, second].contains(&id));
+            assert_eq!(&check(&id), acknowledged);
+            let other = if id == first { second } else { first };
+            assert_eq!(check(&other).state, LaneOperationState::Done);
+        });
+    }
+
+    /// Check Status for an operation a flow of the same identity still follows reads its
+    /// outcome and leaves the receipt for that flow, which still settles on its own receipt.
+    #[test]
+    fn check_status_never_acknowledges_a_receipt_a_running_flow_of_its_identity_follows() {
+        with_lane(|lane| {
+            let switch = Arc::new(Switch::default());
+            switch.up(lane.lane.clone());
+            let route = client::Lane::over(switch.clone());
+            let pending = Arc::new(pending(&lane));
+            let ledger_lane = lane.lane.clone();
+            *lane.hook.lock().unwrap() = Some(Box::new(move |op: &OperationId| {
+                let (old, op) = (ledger_lane.clone(), *op);
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(1500));
+                    let _helper = helper_lock(&old);
+                    let mut ledger = old.ledger().unwrap();
+                    ledger.claim(&op).unwrap();
+                    ledger.mark(&op, State::Done).unwrap();
+                });
+            }));
+            let (mut session, _) =
+                admin::open(&route, &pending, Instant::now() + REQUEST_LIMIT).unwrap();
+            let preview = admin::preview(&mut session, LaneAction::Restart).unwrap();
+            let (follow_route, follow_pending) = (route.clone(), pending.clone());
+            let follower = std::thread::spawn(move || {
+                admin::execute_approved(
+                    &follow_route,
+                    session,
+                    LaneAction::Restart,
+                    preview.token,
+                    Instant::now() + Duration::from_secs(20),
+                    Duration::from_secs(20),
+                    &follow_pending,
+                    &mut admin::Unshared,
+                    &mut || Ok(()),
+                    &|| None,
+                    &mut |_| {},
+                )
+            });
+            let began = Instant::now();
+            let followed = loop {
+                if let Some(operation) = pending.list().unwrap().first() {
+                    break OperationId::parse(operation).unwrap();
+                }
+                assert!(began.elapsed() < Duration::from_secs(5), "never journaled");
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            // The Restart settles at 1.5 s, and the follower reads it at its next poll.
+            std::thread::sleep(Duration::from_millis(1700));
+            let checked = settled_receipt(
+                admin::check(&route, &pending, &followed, Instant::now() + REQUEST_LIMIT).unwrap(),
+            );
+            assert_eq!(checked.state, LaneOperationState::Done);
+            let outcome = follower.join().unwrap().unwrap();
+            let Outcome::Settled { receipt, .. } = outcome else {
+                panic!("expected the follower's own settled receipt, got {outcome:?}");
+            };
+            assert_eq!(receipt, checked);
+            assert!(pending.list().unwrap().is_empty());
         });
     }
 

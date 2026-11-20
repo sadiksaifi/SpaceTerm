@@ -566,25 +566,12 @@ pub fn settled(receipt: &LaneReceipt) -> bool {
 /// What became of an operation an earlier command admitted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Leftover {
-    /// It settled, and this call acknowledged it.
+    /// It settled.
     Settled(LaneReceipt),
     /// It has not settled yet. A later command asks again.
     Pending,
     /// The server no longer holds it, for example after its pairing was revoked.
     Gone,
-}
-
-/// Resolves an operation an earlier command admitted, and acknowledges it once settled.
-pub fn settle_leftover(
-    session: &mut Session,
-    operation: &OperationId,
-) -> Result<Leftover, LaneError> {
-    let deadline = Instant::now() + REQUEST_LIMIT;
-    let leftover = leftover(session, operation, deadline)?;
-    if let Leftover::Settled(_) = &leftover {
-        acknowledge(session, operation, deadline)?;
-    }
-    Ok(leftover)
 }
 
 /// What became of an operation an earlier command admitted, read by `deadline` without
