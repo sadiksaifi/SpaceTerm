@@ -2929,8 +2929,13 @@ impl WorkspaceManager {
             .initial
             .filter(|_| !self.restores_remembered_view())
             .and_then(|core| self.binding.get(key)?.local(core));
-        let landed =
-            initial.is_some_and(|workspace_id| self.activate_workspace(workspace_id, window, cx));
+        // Input before the Workspaces arrived chose what the window shows. Unless the keyboard
+        // stayed with the content, the first view neither moves the view nor takes it.
+        let person_chose = self.launch.landing_owed() && !self.restoration.landing_pending();
+        let landed = initial.is_some_and(|workspace_id| {
+            (!person_chose || self.content_holds_keyboard(window, cx))
+                && self.activate_workspace(workspace_id, window, cx)
+        });
         if landed {
             self.focus(window, cx);
         }

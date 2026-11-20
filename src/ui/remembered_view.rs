@@ -341,6 +341,12 @@ impl Restoration {
         self.held.clear();
     }
 
+    /// Whether the person's launch still owes its landing, because the person has given the
+    /// window no input yet.
+    pub(crate) fn landing_pending(&self) -> bool {
+        matches!(self.selection, Selection::Landing)
+    }
+
     /// Whether the launch may open the selection a previous launch left, because the person has
     /// chosen nothing in the window yet. Either way, nothing waits for the launch afterwards.
     pub(crate) fn take_landing(&mut self) -> bool {

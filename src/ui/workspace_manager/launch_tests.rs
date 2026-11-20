@@ -3069,6 +3069,56 @@ fn a_late_landing_leaves_the_keyboard_where_early_input_put_it(cx: &mut TestAppC
     );
 }
 
+/// A first launch on this computer, whose attachments the server's first inventory initializes
+/// with a Workspace the server already holds: input that leaves the keyboard in the sidebar
+/// before that inventory arrives keeps it there, and the first view opens no Pane.
+#[gpui::test]
+fn a_first_view_leaves_the_keyboard_where_early_input_put_it(cx: &mut TestAppContext) {
+    let launch = ScriptedLaunch::default();
+    launch.answer(ready());
+    let (harness, cx) = foreground_harness_with(launch, ScriptedEdits::new(None), cx);
+    sync(&harness, cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.sidebar.update(cx, |sidebar, cx| {
+                sidebar.take_keyboard(true, window, cx);
+            });
+            manager.person_input(cx);
+        });
+    });
+    harness.edits.set_inventory(two_workspaces());
+    sync(&harness, cx);
+    assert!(
+        cx.update(|window, cx| harness.manager.read(cx).sidebar.read(cx).is_focused(window)),
+        "the sidebar keeps the keyboard"
+    );
+    for pane in [PANE, WORK_ROOT_PANE, WORK_TAB_ROOT, WORK_SPLIT] {
+        assert!(
+            harness.panes.opens(pane) == 0 || harness.panes.pane(pane).selections() == 0,
+            "{pane:?} is not selected"
+        );
+    }
+    assert!(harness.edits.submitted().is_empty(), "nothing is created");
+    sync(&harness, cx);
+    assert!(
+        cx.update(|window, cx| harness.manager.read(cx).sidebar.read(cx).is_focused(window)),
+        "a later reading leaves it there too"
+    );
+}
+
+/// Without early input, the same first view opens the server's first Workspace and its Pane.
+#[gpui::test]
+fn a_first_view_without_early_input_opens_the_first_workspace(cx: &mut TestAppContext) {
+    let launch = ScriptedLaunch::default();
+    launch.answer(ready());
+    let (harness, cx) = foreground_harness_with(launch, ScriptedEdits::new(None), cx);
+    sync(&harness, cx);
+    harness.edits.set_inventory(two_workspaces());
+    sync(&harness, cx);
+    assert_eq!(harness.panes.pane(PANE).selections(), 1);
+    assert!(harness.edits.submitted().is_empty(), "nothing is created");
+}
+
 /// Runs the window's start queue for a while.
 fn run_start_queue(cx: &mut VisualTestContext) {
     for _ in 0..20 {
