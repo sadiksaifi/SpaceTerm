@@ -543,17 +543,24 @@ fn storage(error: StoreError) -> CoreError {
 pub struct Runs {
     directory: Directory,
     live: Directory,
+    /// The opener's deadline. Every transaction waits for `runs.lock` no later than it.
+    until: Instant,
 }
 
 impl Runs {
+    /// Waits for `runs.lock` until the opener's deadline, or until `SIGINT` moves or ends that
+    /// wait. A transaction that runs out of time changes nothing, so its runs stay recorded for a
+    /// later command.
     fn lock(&self) -> Result<Lock, Failure> {
+        let limit = crate::interrupt::limit(self.until).saturating_duration_since(Instant::now());
         match self
             .directory
-            .wait_lock(RUNS_LOCK, std::time::Duration::from_secs(30), None)
+            .wait_lock(RUNS_LOCK, limit, Some(&crate::interrupt::interrupted))
             .map_err(from_core_error)?
         {
             LockWait::Locked(lock) => Ok(lock),
-            LockWait::Held | LockWait::Cancelled => Err(Failure::new(Code::IdentityBusy)),
+            LockWait::Held => Err(Failure::new(Code::IdentityBusy)),
+            LockWait::Cancelled => Err(Failure::new(Code::Interrupted)),
         }
     }
 
@@ -707,7 +714,8 @@ impl CliState {
         }
     }
 
-    /// Opens a run journal without retaining its transaction lock.
+    /// Opens a run journal without retaining its transaction lock. It and each later
+    /// transaction wait for the journal's lock until `deadline` at most.
     pub fn runs(
         &self,
         route: &RouteKey,
@@ -719,13 +727,12 @@ impl CliState {
             .map_err(|_| Code::StorageUnavailable)?;
         let live = Directory::open(&self.identity_path(route, agent).join("runs"), true)
             .map_err(|_| Code::StorageUnavailable)?;
-        let limit = deadline.saturating_duration_since(Instant::now());
-        let _lock = match directory.wait_lock(RUNS_LOCK, limit, None) {
-            Ok(LockWait::Locked(lock)) => lock,
-            Ok(LockWait::Held | LockWait::Cancelled) => return Err(Code::IdentityBusy),
-            Err(_) => return Err(Code::StorageUnavailable),
+        let runs = Runs {
+            directory,
+            live,
+            until: deadline,
         };
-        let runs = Runs { directory, live };
+        let _lock = runs.lock().map_err(|failure| failure.code)?;
         runs.read().map_err(|failure| failure.code)?;
         Ok(runs)
     }
@@ -1593,6 +1600,57 @@ mod tests {
         assert_eq!(before, after, "refused runs must not create lock files");
         assert_eq!(runs.pending().unwrap().len(), MAX_PENDING_RUNS);
         drop(live);
+        std::fs::remove_dir_all(&state.root).unwrap();
+    }
+
+    /// A confirmed action settles a pending Run after the journal opened by its deadline and
+    /// released `runs.lock`. Another command then holds that lock. Each transaction settlement
+    /// takes next ends at the opener's deadline instead of a fresh wait of its own, and the Run
+    /// stays recorded for a later command.
+    #[test]
+    fn run_settlement_waits_for_a_held_runs_lock_only_until_the_opener_deadline() {
+        use std::time::Duration;
+        let state = temporary("runs-deadline");
+        let run = PendingRun {
+            run: RunId([6; 16]),
+            pane: [2; 32],
+            session: [3; 32],
+            created_at: 0,
+        };
+        let far = Instant::now() + Duration::from_secs(5);
+        drop(
+            state
+                .runs(&RouteKey::Local, None, far)
+                .unwrap()
+                .add(run.clone())
+                .unwrap(),
+        );
+
+        let deadline = Instant::now() + Duration::from_millis(300);
+        let mut runs = state.runs(&RouteKey::Local, None, deadline).unwrap();
+        let held = state
+            .identity_dir(&RouteKey::Local, None)
+            .unwrap()
+            .lock(RUNS_LOCK, false)
+            .unwrap();
+        let busy = |result: Result<(), Failure>| matches!(result, Err(failure) if failure.code == Code::IdentityBusy);
+        assert!(busy(runs.pending().map(drop)));
+        assert!(busy(runs.try_run(run.run).map(drop)));
+        assert!(busy(runs.remove(run.run)));
+        let late = Instant::now().saturating_duration_since(deadline);
+        assert!(
+            late < Duration::from_millis(200),
+            "run settlement outlived its deadline by {late:?}"
+        );
+        drop(held);
+        assert_eq!(
+            state
+                .runs(&RouteKey::Local, None, far)
+                .unwrap()
+                .pending()
+                .unwrap(),
+            vec![run]
+        );
         std::fs::remove_dir_all(&state.root).unwrap();
     }
 
