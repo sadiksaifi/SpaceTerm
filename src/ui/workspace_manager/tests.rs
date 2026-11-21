@@ -8770,7 +8770,7 @@ fn a_blocked_pane_follows_the_cores_download_and_restarts_only_after_approval(
     };
     use spaceterm_core::protocol::version::Incompatible;
     use spaceterm_core::update::facts::{
-        Operation, PendingVersion, Platform, Protocols, UpdateCheck, UpdateFacts, Version,
+        Operation, PendingVersion, Protocols, UpdateCheck, UpdateFacts, Version,
     };
     use spaceterm_ui::a11y_testing::A11yTree;
     const MACHINE: [u8; 32] = [44; 32];

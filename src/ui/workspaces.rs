@@ -4764,7 +4764,7 @@ mod restart_tests {
         connection::link::CoreLink,
         hierarchy::{Axis, CloseTarget, Mutation},
         protocol::{self, CoreMessage, RawFrame},
-        update::facts::{Operation, Platform, UpdateCheck, UpdateFacts, Version},
+        update::facts::{Operation, UpdateCheck, UpdateFacts, Version},
     };
     use std::{rc::Rc, sync::Arc, time::Instant};
 
