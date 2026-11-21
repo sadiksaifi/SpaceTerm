@@ -9,9 +9,11 @@ use super::{Context, Reply};
 use crate::contract::{
     self, Code, Envelope, Failure, OutputError, Warning, WarningCode, WarningDetails,
 };
+use rustix::termios::{QueueSelector, tcflush};
 use spaceterm_core::MachineConnection;
 use spaceterm_core::direct::{ClaimId, PairingClaim};
 use std::io::Write;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::time::{Duration, Instant};
 
 const COMMAND: &str = "pair";
@@ -83,27 +85,35 @@ pub trait Person {
     fn show_link(&mut self, link: &str) -> Result<(), OutputError>;
     /// Says something on stderr.
     fn say(&mut self, text: &str) -> std::io::Result<()>;
-    /// Reads the answer before `deadline`. `None` means no complete answer was read.
-    fn answer(&mut self, deadline: Instant) -> Option<String>;
+    /// Discards queued input, shows the question and reads an answer before `deadline`.
+    fn ask(&mut self, question: &str, deadline: Instant) -> Result<Option<String>, Code>;
     fn interrupted(&self) -> bool;
     fn sleep(&mut self, duration: Duration);
 }
 
-struct Terminal<W> {
+struct Terminal<'a, W> {
+    input: BorrowedFd<'a>,
     output: W,
+    stderr: &'a mut dyn Write,
 }
 
-impl<W: Write> Person for Terminal<W> {
+impl<W: Write> Person for Terminal<'_, W> {
     fn show_link(&mut self, link: &str) -> Result<(), OutputError> {
         qr::write_invitation(&mut self.output, link, qr::terminal_size()).map_err(OutputError::from)
     }
     fn say(&mut self, text: &str) -> std::io::Result<()> {
-        let mut stderr = std::io::stderr().lock();
-        stderr.write_all(text.as_bytes())?;
-        stderr.flush()
+        self.stderr.write_all(text.as_bytes())?;
+        self.stderr.flush()
     }
-    fn answer(&mut self, deadline: Instant) -> Option<String> {
-        super::read_line_until(ANSWER_LIMIT, Some(deadline))
+    fn ask(&mut self, question: &str, deadline: Instant) -> Result<Option<String>, Code> {
+        // Clear typeahead before the question is visible so a prompt answer is kept.
+        tcflush(self.input, QueueSelector::IFlush).map_err(|_| Code::InteractionRequired)?;
+        self.say(question).map_err(|_| Code::OutputFailed)?;
+        Ok(super::read_line_until(
+            self.input,
+            ANSWER_LIMIT,
+            Some(deadline),
+        ))
     }
     fn interrupted(&self) -> bool {
         crate::interrupt::interrupted()
@@ -180,20 +190,18 @@ pub fn pair(
     let name = claim.device_name.as_str();
     let code = claim.comparison_code();
     if person
-        .say(&format!(
-            "{name}{DEVICE_NOTICE}\n{CODE_LABEL}{code}\n{CONFIRM_PROMPT}"
-        ))
+        .say(&format!("{name}{DEVICE_NOTICE}\n{CODE_LABEL}{code}\n"))
         .is_err()
     {
         return rejected(Code::OutputFailed);
     }
-    let answer = person.answer(deadline);
-    match answer.as_deref().map(str::trim) {
+    match person.ask(CONFIRM_PROMPT, deadline) {
         _ if person.interrupted() => return rejected(Code::Interrupted),
         _ if Instant::now() >= deadline => return rejected(Code::Timeout),
-        Some("y") => {}
-        Some(_) => return rejected(Code::ComparisonMismatch),
-        None => return rejected(Code::InteractionRequired),
+        Ok(Some(answer)) if answer.trim() == "y" => {}
+        Ok(Some(_)) => return rejected(Code::ComparisonMismatch),
+        Ok(None) => return rejected(Code::InteractionRequired),
+        Err(code) => return rejected(code),
     }
     match core.approve(&claim) {
         Ok(device) => Paired::Approved { device },
@@ -246,15 +254,18 @@ pub fn run(context: &Context<'_>, address: Option<&str>) -> Reply {
         Ok(cooperation) => cooperation,
         Err(failure) => return Reply::failure(COMMAND, core, failure),
     };
+    let mut stderr = std::io::stderr();
     let paired = pair(
         &connection,
         &mut Terminal {
+            input: std::io::stdin().as_fd(),
             output: std::io::stdout().lock(),
+            stderr: &mut stderr,
         },
         address,
         context.timeout(LIFETIME),
     );
-    reply(core, paired, &mut std::io::stderr().lock())
+    reply(core, paired, &mut stderr)
 }
 
 /// Paired devices need SpaceTerm Core to keep running after logout, which Linux allows only
@@ -362,11 +373,12 @@ mod tests {
             self.messages.push_str(text);
             Ok(())
         }
-        fn answer(&mut self, _: Instant) -> Option<String> {
+        fn ask(&mut self, question: &str, _: Instant) -> Result<Option<String>, Code> {
+            self.messages.push_str(question);
             if self.interrupt_on_answer {
                 self.interrupt_after = Some(self.sleeps);
             }
-            self.answer.take()
+            Ok(self.answer.take())
         }
         fn interrupted(&self) -> bool {
             self.interrupt_after
@@ -457,6 +469,79 @@ mod tests {
     }
 
     #[test]
+    fn terminal_accepts_only_the_answer_entered_after_the_prompt() {
+        use rustix::event::{PollFd, PollFlags, Timespec, poll};
+        use std::fs::File;
+        use std::io::{BufRead, BufReader};
+        use std::os::fd::FromRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (mut master, mut slave) = (-1, -1);
+        // SAFETY: Both descriptors have live storage and the optional arguments are null.
+        let opened = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(opened, 0);
+        // SAFETY: A successful openpty returns fresh, owned descriptors.
+        let (mut master, slave) = unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) };
+        master.write_all(b"y\ny").unwrap();
+        let mut ready = [PollFd::new(&slave, PollFlags::IN)];
+        let timeout = Timespec {
+            tv_sec: 2,
+            tv_nsec: 0,
+        };
+        assert_eq!(poll(&mut ready, Some(&timeout)).unwrap(), 1);
+
+        let core = Core {
+            claims: vec![claim()],
+            log: RefCell::default(),
+            withdrawal_fails: false,
+        };
+        let (mut stderr, reader) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        std::thread::scope(|scope| {
+            let response = scope.spawn(move || {
+                let mut shown = Vec::new();
+                BufReader::new(reader).read_until(b']', &mut shown).unwrap();
+                assert!(shown.ends_with(b"Does this code match the one on your device? [y/N]"));
+                master.write_all(b"\n").unwrap();
+                master
+            });
+            let paired = pair(
+                &core,
+                &mut Terminal {
+                    input: slave.as_fd(),
+                    output: Vec::new(),
+                    stderr: &mut stderr,
+                },
+                None,
+                Duration::from_secs(2),
+            );
+            // Keep the master open until the command has read the answer.
+            drop(response.join().unwrap());
+            assert_eq!(
+                paired,
+                Paired::Failed {
+                    failure: Failure::new(Code::ComparisonMismatch),
+                    withdrawn: true,
+                }
+            );
+            assert_eq!(
+                *core.log.borrow(),
+                ["invite -", "claims", "reject", "withdraw"]
+            );
+        });
+    }
+
+    #[test]
     fn a_closed_reader_attempts_withdrawal_and_exits_silently_with_141() {
         for withdrawal_fails in [false, true] {
             let core = Core {
@@ -466,7 +551,16 @@ mod tests {
             };
             let (writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
             drop(reader);
-            let paired = pair(&core, &mut Terminal { output: writer }, None, LIFETIME);
+            let paired = pair(
+                &core,
+                &mut Terminal {
+                    input: std::io::stdin().as_fd(),
+                    output: writer,
+                    stderr: &mut std::io::sink(),
+                },
+                None,
+                LIFETIME,
+            );
             assert_eq!(*core.log.borrow(), ["invite -", "withdraw"]);
             assert_eq!(paired, Paired::BrokenPipe);
             let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
