@@ -2,12 +2,12 @@ use crate::admission::{CONNECTION_LIMIT, Caller};
 use crate::connection::carrier::Carrier;
 use crate::connection::link::{CoreLink, LinkSink};
 use crate::connection::path::NetworkPath;
-use crate::direct::{DirectConnector, PairedDevice};
+use crate::direct::{DirectConnection, DirectConnector, PairedDevice};
 use crate::pane::control::ClientName;
 use crate::protocol::AgentName;
 use crate::service::lane::Lane;
 use crate::work::WorkConnection;
-use crate::{AuthenticatedStatus, CoreError};
+use crate::{AuthenticatedStatus, CoreError, WaitLimit};
 use std::sync::{Arc, Weak};
 use std::time::Instant;
 
@@ -98,17 +98,31 @@ impl PairedMachine {
             None => self.connector.connect()?,
         };
         check()?;
+        self.admit_connection(
+            connection,
+            &WaitLimit::new(deadline.unwrap_or_else(|| Instant::now() + CONNECTION_LIMIT)),
+        )
+    }
+
+    fn admit_connection(
+        &self,
+        connection: DirectConnection,
+        wait: &WaitLimit,
+    ) -> Result<Box<dyn Carrier>, CoreError> {
+        if wait.ended() {
+            return Err(CoreError::ServiceBusy);
+        }
         if connection.paired() != &self.paired {
             return Err(CoreError::AuthenticationRefused);
         }
         let name = (self.name)();
-        let admitted = connection.with_path(Arc::clone(&self.path)).admit_by(
+        let admitted = connection.with_path(Arc::clone(&self.path)).admit_with(
             Caller {
                 client: &self.paired.client,
                 name: &name,
                 agent: self.agent(),
             },
-            deadline.unwrap_or_else(|| Instant::now() + CONNECTION_LIMIT),
+            wait,
         );
         self.work.record_work(
             &admitted
@@ -138,6 +152,30 @@ impl PairedMachine {
             None,
             Some(deadline),
         )
+    }
+
+    /// Opens or reuses the single Work link while the caller is willing to wait. The limit
+    /// applies to the dial and admission as well as waiting behind another caller's attempt.
+    pub fn link_with_limit(&self, wait: &WaitLimit) -> Result<CoreLink, CoreError> {
+        if wait.ended() {
+            return Err(CoreError::ServiceBusy);
+        }
+        let link = self.work.link_with(
+            |events| {
+                let connection = self.connector.connect_with(wait)?;
+                let carrier = self.admit_connection(connection, wait)?;
+                if wait.ended() {
+                    return Err(CoreError::ServiceBusy);
+                }
+                self.work.start(carrier, events)
+            },
+            Some(&|| wait.is_cancelled()),
+            Some(wait.deadline()),
+        );
+        if wait.ended() {
+            return Err(CoreError::ServiceBusy);
+        }
+        link
     }
 
     /// Gives this pairing's Workspace edits their own durable writer. The journal is bound to

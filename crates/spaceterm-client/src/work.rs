@@ -186,7 +186,10 @@ impl WorkConnection {
                     if passed() {
                         return Err(CoreError::ServiceBusy);
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    let interval = crate::wait::CANCELLATION_POLL;
+                    std::thread::sleep(deadline.map_or(interval, |deadline| {
+                        interval.min(deadline.saturating_duration_since(std::time::Instant::now()))
+                    }));
                 }
             }
         };

@@ -300,18 +300,22 @@ pub fn dial_until(
     credential: &DeviceCredential,
     deadline: Option<Instant>,
 ) -> Result<QuicStream, DirectError> {
+    let ceiling = Instant::now() + HANDSHAKE_LIMIT;
+    let wait = WaitLimit::new(deadline.map_or(ceiling, |deadline| deadline.min(ceiling)));
+    dial_with(endpoint, pin, credential, &wait)
+}
+
+pub(super) fn dial_with(
+    endpoint: &str,
+    pin: &MachinePin,
+    credential: &DeviceCredential,
+    wait: &WaitLimit,
+) -> Result<QuicStream, DirectError> {
     let address = Endpoint::from_url(endpoint)?;
-    let deadline = deadline.map_or_else(
-        || Instant::now() + HANDSHAKE_LIMIT,
-        |deadline| deadline.min(Instant::now() + HANDSHAKE_LIMIT),
-    );
-    if Instant::now() >= deadline {
-        return Err(DirectError::Transport);
-    }
-    let addresses = address.resolve(deadline)?;
+    let addresses = address.resolve_with(wait)?;
     let seen = Arc::new(Verification::default());
     let config = client_config(pin, credential, Arc::clone(&seen))?;
-    QuicStream::connect(config, &addresses, deadline, &seen.verified).map_err(|error| {
+    QuicStream::connect_with(config, &addresses, wait, &seen.verified).map_err(|error| {
         if seen.mismatch.load(Ordering::Acquire) {
             DirectError::PinMismatch
         } else {

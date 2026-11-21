@@ -181,7 +181,9 @@ fn resolve(
             journal.abandon().map_err(from_core_error)?;
             Ok(Resolved::Missing)
         }
-        Err(EditError::Request(_) | EditError::Unconfirmed) => Ok(Resolved::Unknown),
+        Err(EditError::Request(_) | EditError::Unconfirmed | EditError::Cancelled) => {
+            Ok(Resolved::Unknown)
+        }
         Err(error) => Err(edit_failure(error)),
     }
 }
@@ -189,7 +191,9 @@ fn resolve(
 fn edit_failure(error: EditError) -> Failure {
     match error {
         EditError::Core(error) => from_core_error(error),
-        EditError::Request(_) | EditError::Unconfirmed => Failure::new(Code::OutcomeUnconfirmed),
+        EditError::Request(_) | EditError::Unconfirmed | EditError::Cancelled => {
+            Failure::new(Code::OutcomeUnconfirmed)
+        }
     }
 }
 

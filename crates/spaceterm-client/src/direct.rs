@@ -1,5 +1,5 @@
 //! Paired QUIC authentication, enrollment and revocation.
-use crate::{CoreError, pane::control::ClientName};
+use crate::{CoreError, WaitLimit, pane::control::ClientName};
 
 use crate::connection::path::NetworkPath;
 use serde::Serialize;
@@ -105,12 +105,16 @@ impl Invitation {
 /// The caller supplies native credential policy; construction and cloning open nothing.
 pub trait DirectConnector: Send + Sync {
     fn connect(&self) -> Result<DirectConnection, DirectError>;
-    /// Connects by `deadline`, the deadline of the request that needs the connection. A
-    /// connector that bounds its dials by a deadline of its own replaces it with this one, so a
-    /// dial that starts after a person answered a prompt follows the budget their answer began.
+    /// Connects by the requesting action's deadline. An implementation must bound all its
+    /// waits by it, including any credential or address lookup.
     fn connect_by(&self, deadline: std::time::Instant) -> Result<DirectConnection, DirectError> {
-        let _ = deadline;
-        self.connect()
+        self.connect_with(&WaitLimit::new(deadline))
+    }
+    /// Connects under a caller deadline and cancellation. Paired edit operations require
+    /// this contract. Adapters with a credential already available can call
+    /// [`DirectConnection::connect_with`].
+    fn connect_with(&self, _wait: &WaitLimit) -> Result<DirectConnection, DirectError> {
+        Err(DirectError::Transport)
     }
 }
 
@@ -142,7 +146,22 @@ impl DirectConnection {
         credential: &DeviceCredential,
         deadline: std::time::Instant,
     ) -> Result<Self, DirectError> {
-        client::connect(endpoint, paired, credential, Some(deadline))
+        client::connect(
+            endpoint,
+            paired,
+            credential,
+            Some(&WaitLimit::new(deadline)),
+        )
+    }
+
+    /// Resolves, dials and authenticates one saved pairing under the caller's wait limit.
+    pub fn connect_with(
+        endpoint: &str,
+        paired: &PairedDevice,
+        credential: &DeviceCredential,
+        wait: &WaitLimit,
+    ) -> Result<Self, DirectError> {
+        client::connect(endpoint, paired, credential, Some(wait))
     }
 }
 

@@ -27,8 +27,10 @@
 //!   next check of its preferred local address, from [`super::path`].
 use super::carrier::{Carrier, CarrierError, Flush, Offer, Priority, Readiness};
 use super::path::{PathSignal, PathWatch};
+use crate::WaitLimit;
 use crate::protocol::frame::FrameReader;
 use crate::protocol::{RawFrame, limits};
+use crate::wait::CANCELLATION_POLL;
 use bytes::BytesMut;
 use noq_proto::congestion::{Controller, ControllerFactory, CubicConfig};
 use noq_proto::{
@@ -838,15 +840,19 @@ impl Driver {
         }
     }
 
-    fn wait(&self, deadline: Instant) -> Result<(), QuicError> {
+    fn wait(&self, deadline: Instant, check_every: Option<Duration>) -> Result<(), QuicError> {
         let now = Instant::now();
         if now >= deadline {
             return Err(QuicError::TimedOut);
         }
-        let until = [self.connection.poll_timeout(), self.stash_deadline()]
-            .into_iter()
-            .flatten()
-            .fold(deadline, Instant::min);
+        let until = [
+            self.connection.poll_timeout(),
+            self.stash_deadline(),
+            check_every.map(|interval| now + interval),
+        ]
+        .into_iter()
+        .flatten()
+        .fold(deadline, Instant::min);
         let mut descriptors = vec![libc::pollfd {
             fd: self.descriptor(),
             events: libc::POLLIN,
@@ -933,6 +939,8 @@ pub struct QuicStream {
     read: Vec<u8>,
     /// Set by [`Self::sever`]'s handle. The carrier keeps it.
     severed: Arc<std::sync::atomic::AtomicBool>,
+    /// Only for the caller's preamble. It does not travel into the shared Work carrier.
+    cancellation: Option<Arc<AtomicBool>>,
 }
 
 impl QuicStream {
@@ -942,6 +950,7 @@ impl QuicStream {
             l0: None,
             read: Vec::new(),
             severed: Arc::default(),
+            cancellation: None,
         }
     }
 
@@ -971,8 +980,21 @@ impl QuicStream {
         deadline: Instant,
         core_verified: &AtomicBool,
     ) -> Result<Self, QuicError> {
+        Self::connect_with(config, addresses, &WaitLimit::new(deadline), core_verified)
+    }
+
+    pub(crate) fn connect_with(
+        config: ClientConfig,
+        addresses: &[SocketAddr],
+        wait: &WaitLimit,
+        core_verified: &AtomicBool,
+    ) -> Result<Self, QuicError> {
+        let deadline = wait.deadline();
         let mut last = QuicError::Transport;
         for (index, address) in addresses.iter().enumerate() {
+            if wait.ended() {
+                return Err(QuicError::TimedOut);
+            }
             core_verified.store(false, Ordering::Release);
             let until = if index + 1 == addresses.len() {
                 deadline
@@ -1000,6 +1022,7 @@ impl QuicStream {
                 state: DriverState::new(),
             };
             let mut stream = Self::new(driver);
+            stream.cancel_preamble_with(wait);
             match stream.open_l0(until) {
                 Ok(()) => return Ok(stream),
                 // A refusal counts only once this end verified the server: before that, the
@@ -1014,11 +1037,35 @@ impl QuicStream {
         Err(last)
     }
 
+    pub(crate) fn cancel_preamble_with(&mut self, wait: &WaitLimit) {
+        self.cancellation = wait.cancellation();
+    }
+
+    fn check_cancelled(&self) -> Result<(), QuicError> {
+        if self
+            .cancellation
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
+        {
+            return Err(QuicError::TimedOut);
+        }
+        Ok(())
+    }
+
+    fn wait_before(&self, deadline: Instant) -> Result<(), QuicError> {
+        self.check_cancelled()?;
+        self.driver.wait(
+            deadline,
+            self.cancellation.as_ref().map(|_| CANCELLATION_POLL),
+        )
+    }
+
     /// The server opens L0 once the handshake completes; the client accepts it when its first
     /// bytes arrive. Those bytes can arrive in the same read as the server's close, so L0 is
     /// taken before the close is reported, and the bytes are still read.
     fn open_l0(&mut self, deadline: Instant) -> Result<(), QuicError> {
         loop {
+            self.check_cancelled()?;
             self.driver.pump();
             if self.driver.state.connected {
                 let opened = match self.driver.connection.side() {
@@ -1036,7 +1083,7 @@ impl QuicStream {
                 }
             }
             self.driver.check()?;
-            self.driver.wait(deadline)?;
+            self.wait_before(deadline)?;
         }
     }
 
@@ -1058,7 +1105,7 @@ impl QuicStream {
             if self.driver.state.finished > 0 {
                 return Ok(());
             }
-            self.driver.wait(deadline)?;
+            self.driver.wait(deadline, None)?;
         }
     }
 
@@ -1093,6 +1140,7 @@ impl QuicStream {
     ) -> Result<(), QuicError> {
         let id = self.l0()?;
         loop {
+            self.check_cancelled()?;
             self.check_severed()?;
             if Instant::now() >= deadline {
                 return Err(QuicError::TimedOut);
@@ -1110,7 +1158,7 @@ impl QuicStream {
             if bytes.is_empty() {
                 return Ok(());
             }
-            self.driver.wait(deadline)?;
+            self.wait_before(deadline)?;
         }
     }
 
@@ -1120,6 +1168,7 @@ impl QuicStream {
     fn receive_exact(&mut self, count: usize, deadline: Instant) -> Result<Vec<u8>, QuicError> {
         let id = self.l0()?;
         loop {
+            self.check_cancelled()?;
             self.check_severed()?;
             if self.read.len() >= count {
                 let rest = self.read.split_off(count);
@@ -1140,7 +1189,7 @@ impl QuicStream {
             if ended {
                 return Err(QuicError::Closed);
             }
-            self.driver.wait(deadline)?;
+            self.wait_before(deadline)?;
         }
     }
 
@@ -1321,6 +1370,7 @@ impl QuicCarrier {
             l0,
             read,
             severed,
+            cancellation: _,
         } = stream;
         // Admission proved the peer, so the connection may now hold frames.
         driver

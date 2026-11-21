@@ -1087,7 +1087,7 @@ mod tests {
         let waiting = std::thread::spawn(move || {
             let _ = carrier
                 .driver
-                .wait(Instant::now() + Duration::from_millis(500));
+                .wait(Instant::now() + Duration::from_millis(500), None);
             carrier
         });
         assert_eq!(listener.widen(), Ok(()));

@@ -4,7 +4,7 @@ pub mod journal;
 pub use journal::{ClientJournal, ClientOperation, JournalStore};
 
 use crate::{
-    CoreError, PairedMachine,
+    CoreError, PairedMachine, WaitLimit,
     connection::link::{CoreLink, LinkError, RequestError},
     hierarchy::{Mutation, Outcome, RetainedOutcome},
     protocol::{InventoryRevision, Operation, Refusal, ReplyBody},
@@ -47,6 +47,8 @@ pub enum EditError {
     Request(#[from] RequestError),
     #[error("The Original Operation's outcome is unconfirmed.")]
     Unconfirmed,
+    #[error("The wait for the Workspace edit ended at the caller's request.")]
+    Cancelled,
 }
 
 impl From<LinkError> for EditError {
@@ -61,6 +63,7 @@ impl From<EditError> for CoreError {
             EditError::Core(error) => error,
             EditError::Request(error) => error.into(),
             EditError::Unconfirmed => Self::Protocol,
+            EditError::Cancelled => Self::ServiceBusy,
         }
     }
 }
@@ -192,44 +195,54 @@ impl WorkspaceEditor {
 
     /// Records and dispatches a new edit after work admission and initial inventory. A pending
     /// original must be resolved or retried before a new edit can be admitted.
+    /// The limit bounds network waits. The injected journal completes its writes synchronously.
+    /// Cancellation after journaling keeps the Original Operation available for recovery.
     pub fn submit(
         &mut self,
         mutation: Mutation,
-        deadline: Instant,
+        wait: impl Into<WaitLimit>,
     ) -> Result<RetainedOutcome, EditError> {
         if !mutation.is_bounded() {
             return Err(CoreError::Unsupported.into());
         }
+        let wait = wait.into();
         self.journal.verify_storage()?;
         if self.journal.pending().is_some() {
             return Err(EditError::Unconfirmed);
         }
-        let (link, inventory) = self.reconciled_link(deadline)?;
-        if Instant::now() >= deadline {
-            return Err(EditError::Unconfirmed);
-        }
+        let (link, inventory) = self.reconciled_link(&wait)?;
+        check_wait(&wait)?;
         self.journal.submit(inventory.next_sequence, mutation)?;
-        self.dispatch(&link, deadline)
+        self.dispatch(&link, &wait)
     }
 
     /// Retries exactly the pending Original Operation after reconciling current inventory.
-    pub fn retry(&mut self, deadline: Instant) -> Result<Option<RetainedOutcome>, EditError> {
-        let (link, _) = self.reconciled_link(deadline)?;
+    pub fn retry(
+        &mut self,
+        wait: impl Into<WaitLimit>,
+    ) -> Result<Option<RetainedOutcome>, EditError> {
+        let wait = wait.into();
+        let (link, _) = self.reconciled_link(&wait)?;
         if self.journal.pending().is_none() {
             return Ok(None);
         }
-        self.dispatch(&link, deadline).map(Some)
+        self.dispatch(&link, &wait).map(Some)
     }
 
-    /// Resolves a pending edit without dispatching it again.
-    pub fn resolve(&mut self, deadline: Instant) -> Result<Option<EditProgress>, EditError> {
-        let (link, _) = self.reconciled_link(deadline)?;
+    /// Resolves a pending edit without dispatching it again. Missing leaves the edit pending
+    /// and returns [`EditError::Unconfirmed`].
+    pub fn resolve(
+        &mut self,
+        wait: impl Into<WaitLimit>,
+    ) -> Result<Option<EditProgress>, EditError> {
+        let wait = wait.into();
+        let (link, _) = self.reconciled_link(&wait)?;
         if self.journal.pending().is_none() {
             return Ok(None);
         }
         match resolve_original(
             &mut self.journal,
-            |operation| request_by(&link, operation, deadline),
+            |operation| request_by(&link, operation, &wait),
             |_, outcome| {
                 let _ = link.acknowledge(outcome.sequence);
                 Ok(())
@@ -250,13 +263,20 @@ impl WorkspaceEditor {
 
     fn reconciled_link(
         &self,
-        deadline: Instant,
+        wait: &WaitLimit,
     ) -> Result<(CoreLink, Arc<InventoryRevision>), EditError> {
         self.journal.verify_storage()?;
-        let link = self.machine.link_by(deadline)?;
-        let (_, inventory) = link
-            .next_inventory_by(0, deadline)?
-            .ok_or(EditError::Unconfirmed)?;
+        check_wait(wait)?;
+        let link = self.machine.link_with_limit(wait);
+        check_wait(wait)?;
+        let link = link?;
+        let inventory = loop {
+            let incoming = link.next_inventory_by(0, wait.next_poll());
+            check_wait(wait)?;
+            if let Some((_, inventory)) = incoming? {
+                break inventory;
+            }
+        };
         if let Some(last) = self.journal.last() {
             link.acknowledge(last.sequence)?;
         }
@@ -266,11 +286,11 @@ impl WorkspaceEditor {
     fn dispatch(
         &mut self,
         link: &CoreLink,
-        deadline: Instant,
+        wait: &WaitLimit,
     ) -> Result<RetainedOutcome, EditError> {
         match dispatch_original(
             &mut self.journal,
-            |operation| request_by(link, operation, deadline),
+            |operation| request_by(link, operation, wait),
             || (),
             |_, outcome, ()| {
                 // The receipt is already durable. If this link cannot accept the ack,
@@ -288,29 +308,42 @@ impl WorkspaceEditor {
 fn request_by(
     link: &CoreLink,
     operation: Operation,
-    deadline: Instant,
+    wait: &WaitLimit,
 ) -> Result<ReplyBody, EditError> {
-    let remaining = || {
-        deadline
-            .checked_duration_since(Instant::now())
-            .ok_or(EditError::Unconfirmed)
-    };
-    remaining()?;
+    check_wait(wait)?;
     let pending = link.request(operation)?;
-    Ok(pending
-        .wait_for(remaining()?)
-        .ok_or(EditError::Unconfirmed)??)
+    loop {
+        if let Some(reply) = pending.wait_until(wait.next_poll()) {
+            return Ok(reply?);
+        }
+        check_wait(wait)?;
+    }
+}
+
+fn check_wait(wait: &WaitLimit) -> Result<(), EditError> {
+    if wait.is_cancelled() {
+        Err(EditError::Cancelled)
+    } else if Instant::now() >= wait.deadline() {
+        Err(EditError::Unconfirmed)
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::connection::link::LinkEvent;
-    use crate::direct::{DirectConnection, DirectConnector, DirectError, MachinePin, PairedDevice};
+    use crate::direct::{
+        DeviceCredential, DirectConnection, DirectConnector, DirectError, MachinePin, PairedDevice,
+    };
     use crate::hierarchy::{CreateControl, Inventory};
     use crate::protocol::{ClientMessage, CoreMessage, RawFrame, Reply, frame};
     use std::cell::Cell;
-    use std::sync::mpsc;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
 
     #[derive(Default)]
     struct JournalBytes(Cell<Option<Vec<u8>>>);
@@ -333,20 +366,24 @@ mod tests {
         }
     }
 
+    fn pairing() -> PairedDevice {
+        PairedDevice {
+            pin: MachinePin {
+                build: "spaceterm-test".into(),
+                core: [2; 32],
+                public_key: [3; 32],
+                certificate: [4; 32],
+            },
+            pairing: [5; 32],
+            client: [6; 32],
+        }
+    }
+
     fn machine(connector: impl DirectConnector + 'static) -> PairedMachine {
         PairedMachine::new(
             "spaceterm-test",
             [1; 32],
-            PairedDevice {
-                pin: MachinePin {
-                    build: "spaceterm-test".into(),
-                    core: [2; 32],
-                    public_key: [3; 32],
-                    certificate: [4; 32],
-                },
-                pairing: [5; 32],
-                client: [6; 32],
-            },
+            pairing(),
             Arc::new(connector),
             Arc::new(|| "Workspace Client".into()),
             None,
@@ -408,6 +445,110 @@ mod tests {
             directory: None,
             control: CreateControl::Creator,
         }
+    }
+
+    #[test]
+    fn default_bounded_dial_never_starts_an_unbounded_connector() {
+        assert_eq!(
+            NoConnector
+                .connect_by(Instant::now() + Duration::from_secs(1))
+                .err(),
+            Some(DirectError::Transport)
+        );
+    }
+
+    #[test]
+    fn mobile_cancels_an_active_quic_dial_before_journaling() {
+        struct Connector {
+            endpoint: String,
+            credential: DeviceCredential,
+        }
+        impl DirectConnector for Connector {
+            fn connect(&self) -> Result<DirectConnection, DirectError> {
+                panic!("expected the bounded dial");
+            }
+            fn connect_with(&self, wait: &WaitLimit) -> Result<DirectConnection, DirectError> {
+                DirectConnection::connect_with(&self.endpoint, &pairing(), &self.credential, wait)
+            }
+        }
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let machine = machine(Connector {
+            endpoint: format!("quic://{}", socket.local_addr().unwrap()),
+            credential: DeviceCredential::generate().unwrap(),
+        });
+        let mut editor = machine
+            .workspace_edits(Box::<JournalBytes>::default())
+            .unwrap();
+        let started = Instant::now();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let wait =
+            WaitLimit::new(started + Duration::from_secs(4)).with_cancellation(Arc::clone(&cancel));
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                socket.recv_from(&mut [0; 1500]).unwrap();
+                cancel.store(true, Ordering::Release);
+            });
+            assert_eq!(editor.submit(mutation(), wait), Err(EditError::Cancelled));
+        });
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(editor.journal().pending().is_none());
+    }
+
+    #[test]
+    fn mobile_cancels_the_inventory_wait_without_recording_or_sending_an_edit() {
+        let machine = machine(NoConnector);
+        let (link, _) = link(&machine);
+        let mut editor = machine
+            .workspace_edits(Box::<JournalBytes>::default())
+            .unwrap();
+        let started = Instant::now();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let wait =
+            WaitLimit::new(started + Duration::from_secs(4)).with_cancellation(Arc::clone(&cancel));
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(80));
+                cancel.store(true, Ordering::Release);
+            });
+            assert_eq!(editor.submit(mutation(), wait), Err(EditError::Cancelled));
+        });
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(editor.journal().pending().is_none());
+        assert!(link.next_frame().is_none());
+    }
+
+    #[test]
+    fn mobile_cancels_the_reply_wait_and_keeps_the_possibly_dispatched_original() {
+        let machine = machine(NoConnector);
+        let (link, wake) = link(&machine);
+        inventory(&link);
+        let mut editor = machine
+            .workspace_edits(Box::<JournalBytes>::default())
+            .unwrap();
+        let started = Instant::now();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let wait =
+            WaitLimit::new(started + Duration::from_secs(4)).with_cancellation(Arc::clone(&cancel));
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                let ClientMessage::Request(request) = sent(&link, &wake) else {
+                    panic!("expected the original mutation");
+                };
+                assert!(matches!(
+                    request.operation,
+                    Operation::Mutate { sequence: 1, .. }
+                ));
+                cancel.store(true, Ordering::Release);
+            });
+            assert_eq!(editor.submit(mutation(), wait), Err(EditError::Cancelled));
+        });
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let pending = editor.journal().pending().unwrap();
+        assert_eq!(pending.sequence, 1);
+        assert_eq!(pending.mutation, mutation());
     }
 
     #[test]

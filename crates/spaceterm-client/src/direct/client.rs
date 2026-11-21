@@ -45,16 +45,13 @@ fn exchange_checked(
     action: wire::Action,
     expected_name: Option<&str>,
     exchanges: Option<&mut Vec<[u8; 32]>>,
-    deadline: Option<std::time::Instant>,
+    wait: Option<&WaitLimit>,
 ) -> Result<(QuicStream, wire::Answer), DirectError> {
-    let deadline = Some(
-        deadline
-            .unwrap_or_else(|| std::time::Instant::now() + quic::HANDSHAKE_LIMIT)
-            .min(std::time::Instant::now() + quic::HANDSHAKE_LIMIT),
-    );
-    let mut stream = quic::dial_until(endpoint, pin, credential, deadline)?;
+    let ceiling = std::time::Instant::now() + quic::HANDSHAKE_LIMIT;
+    let wait = wait.map_or_else(|| WaitLimit::new(ceiling), |wait| wait.earlier(ceiling));
+    let mut stream = quic::dial_with(endpoint, pin, credential, &wait)?;
     let answer = exchange_on(
-        &mut quic::DeadlineMessages::new(&mut stream, deadline),
+        &mut quic::DeadlineMessages::new(&mut stream, Some(wait.deadline())),
         pin,
         credential,
         action,
@@ -122,7 +119,7 @@ pub fn connect(
     endpoint: &str,
     paired: &PairedDevice,
     credential: &DeviceCredential,
-    deadline: Option<std::time::Instant>,
+    wait: Option<&WaitLimit>,
 ) -> Result<DirectConnection, DirectError> {
     let (stream, answer) = exchange_checked(
         endpoint,
@@ -133,7 +130,7 @@ pub fn connect(
         },
         None,
         None,
-        deadline,
+        wait,
     )?;
     if !matches!(answer, wire::Answer::Connected) {
         return Err(DirectError::AuthenticationRefused);
@@ -183,7 +180,7 @@ pub fn submit(enrollment: &mut Enrollment) -> Result<ComparisonCode, DirectError
         },
         Some(&invitation.machine_name),
         Some(&mut enrollment.exchanges),
-        enrollment.deadline,
+        enrollment.deadline.map(WaitLimit::new).as_ref(),
     )?;
     match answer {
         wire::Answer::Claim(claim)
@@ -223,7 +220,7 @@ pub fn finish(enrollment: &Enrollment) -> Result<Option<PairedDevice>, DirectErr
         },
         None,
         None,
-        enrollment.deadline,
+        enrollment.deadline.map(WaitLimit::new).as_ref(),
     )?;
     match answer {
         wire::Answer::Enrollment(paired) => Ok(paired),
@@ -249,7 +246,7 @@ pub fn revoke(
         },
         None,
         None,
-        deadline,
+        deadline.map(WaitLimit::new).as_ref(),
     )?;
     match answer {
         wire::Answer::Revoked(receipt)
@@ -273,7 +270,7 @@ pub fn cancel(enrollment: &Enrollment) -> Result<Option<RevocationReceipt>, Dire
         },
         None,
         None,
-        enrollment.deadline,
+        enrollment.deadline.map(WaitLimit::new).as_ref(),
     )?;
     match answer {
         wire::Answer::Cancelled(receipt) => Ok(receipt),
@@ -328,6 +325,20 @@ impl DirectConnection {
             Box::new(stream.into_carrier_with_path(self.path.as_ref().and_then(|open| open()))),
             negotiated,
         ))
+    }
+    pub(crate) fn admit_with<'a>(
+        mut self,
+        client: impl Into<crate::admission::Caller<'a>>,
+        wait: &WaitLimit,
+    ) -> Result<
+        (
+            Box<dyn crate::connection::carrier::Carrier>,
+            crate::protocol::Negotiated,
+        ),
+        crate::admission::Refused,
+    > {
+        self.stream.cancel_preamble_with(wait);
+        self.admit_by(client, wait.deadline())
     }
     /// Admits this client to the service lane on the authenticated connection, which needs a
     /// shared service major whatever the work majors, and returns the stream the lane's JSON

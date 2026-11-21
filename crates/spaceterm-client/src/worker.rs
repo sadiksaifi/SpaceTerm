@@ -280,16 +280,14 @@ impl direct::DirectConnector for Connector {
         direct::DirectConnection::connect(&self.endpoint, &self.paired, &self.credential)
     }
 
-    fn connect_by(&self, deadline: Instant) -> Result<direct::DirectConnection, DirectError> {
+    fn connect_with(
+        &self,
+        wait: &crate::WaitLimit,
+    ) -> Result<direct::DirectConnection, DirectError> {
         if !self.gate.load(Ordering::Acquire) {
             return Err(DirectError::Revoked);
         }
-        direct::DirectConnection::connect_until(
-            &self.endpoint,
-            &self.paired,
-            &self.credential,
-            deadline,
-        )
+        direct::DirectConnection::connect_with(&self.endpoint, &self.paired, &self.credential, wait)
     }
 }
 

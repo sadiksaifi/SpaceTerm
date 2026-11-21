@@ -2595,6 +2595,45 @@ fn paired_administration_is_refused_without_changing_invitations_claims_or_devic
 }
 
 #[cfg(feature = "client")]
+fn paired_workspace_machine(fixture: &Fixture) -> spaceterm_client::PairedMachine {
+    struct Connector {
+        endpoint: String,
+        paired: PairedDevice,
+        credential: DeviceCredential,
+    }
+    impl DirectConnector for Connector {
+        fn connect(&self) -> Result<DirectConnection, DirectError> {
+            DirectConnection::connect(&self.endpoint, &self.paired, &self.credential)
+        }
+
+        fn connect_with(
+            &self,
+            wait: &spaceterm_client::WaitLimit,
+        ) -> Result<DirectConnection, DirectError> {
+            DirectConnection::connect_with(&self.endpoint, &self.paired, &self.credential, wait)
+        }
+    }
+
+    fixture.enable();
+    let credential = DeviceCredential::generate().unwrap();
+    let paired = fixture.enroll(&credential);
+    spaceterm_client::PairedMachine::new(
+        &fixture.paths.identity,
+        [1; 32],
+        paired.clone(),
+        Arc::new(Connector {
+            endpoint: fixture.endpoint(),
+            paired,
+            credential,
+        }),
+        Arc::new(|| "Paired Client".into()),
+        None,
+        Arc::new(|| None),
+    )
+    .unwrap()
+}
+
+#[cfg(feature = "client")]
 #[test]
 fn paired_workspace_retry_keeps_the_original_after_a_lost_reply_and_reconnect() {
     use crate::hierarchy::{CreateControl, Mutation, Outcome, State, journal_writer};
@@ -2656,44 +2695,8 @@ fn paired_workspace_retry_keeps_the_original_after_a_lost_reply_and_reconnect() 
         }
     }
 
-    struct Connector {
-        endpoint: String,
-        paired: PairedDevice,
-        credential: DeviceCredential,
-    }
-    impl DirectConnector for Connector {
-        fn connect(&self) -> Result<DirectConnection, DirectError> {
-            DirectConnection::connect(&self.endpoint, &self.paired, &self.credential)
-        }
-
-        fn connect_by(&self, deadline: Instant) -> Result<DirectConnection, DirectError> {
-            DirectConnection::connect_until(
-                &self.endpoint,
-                &self.paired,
-                &self.credential,
-                deadline,
-            )
-        }
-    }
-
     let fixture = Fixture::new();
-    fixture.enable();
-    let credential = DeviceCredential::generate().unwrap();
-    let paired = fixture.enroll(&credential);
-    let machine = spaceterm_client::PairedMachine::new(
-        &fixture.paths.identity,
-        [1; 32],
-        paired.clone(),
-        Arc::new(Connector {
-            endpoint: fixture.endpoint(),
-            paired,
-            credential,
-        }),
-        Arc::new(|| "Paired Client".into()),
-        None,
-        Arc::new(|| None),
-    )
-    .unwrap();
+    let machine = paired_workspace_machine(&fixture);
     let authority = Arc::new(Mutex::new(State::empty()));
     let runtime = service(Runtime {
         state: Arc::clone(&authority),
@@ -2745,6 +2748,63 @@ fn paired_workspace_retry_keeps_the_original_after_a_lost_reply_and_reconnect() 
     assert_eq!(editor.journal().last().unwrap(), &receipt);
     machine.disconnect();
     second.join().unwrap().unwrap();
+}
+
+#[cfg(feature = "client")]
+#[test]
+fn paired_workspace_cancels_a_stalled_admission_before_journaling() {
+    use crate::hierarchy::{CreateControl, Mutation, journal_writer};
+    use spaceterm_client::{WaitLimit, workspace::EditError};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+
+    let fixture = Fixture::new();
+    let machine = paired_workspace_machine(&fixture);
+    let directory = crate::Directory::open(&fixture.root.join("client"), true).unwrap();
+    let mut editor = machine
+        .workspace_edits(journal_writer(directory).unwrap())
+        .unwrap();
+    let (finish, hold_open) = mpsc::channel();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let started = Instant::now();
+    let wait =
+        WaitLimit::new(started + Duration::from_secs(4)).with_cancellation(Arc::clone(&cancel));
+    std::thread::scope(|scope| {
+        let state = &fixture.state;
+        scope.spawn(move || {
+            let mut stream = accept_raw(state);
+            let challenge = state.lock().unwrap().challenge().unwrap();
+            stream.send(&challenge).unwrap();
+            let authentication: wire::Authentication = stream.receive().unwrap();
+            let answer = state
+                .lock()
+                .unwrap()
+                .authenticate(&challenge, &authentication);
+            assert!(matches!(answer, Ok(wire::Answer::Connected)));
+            stream.send(&answer).unwrap();
+            let hello: spaceterm_client::protocol::admission::Hello =
+                spaceterm_client::admission::Wire::new(&mut stream)
+                    .read()
+                    .unwrap();
+            assert_eq!(hello.lane, crate::protocol::Lane::Work);
+            cancel.store(true, Ordering::Release);
+            let _ = hold_open.recv_timeout(Duration::from_secs(5));
+        });
+        let result = editor.submit(
+            Mutation::CreateWorkspace {
+                name: "Original".into(),
+                directory: None,
+                control: CreateControl::Creator,
+            },
+            wait,
+        );
+        let _ = finish.send(());
+        assert_eq!(result, Err(EditError::Cancelled));
+    });
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(editor.journal().pending().is_none());
 }
 
 #[test]

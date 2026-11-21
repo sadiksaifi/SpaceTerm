@@ -1,4 +1,5 @@
 use super::DirectError;
+use crate::WaitLimit;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::{OnceLock, mpsc};
 use std::time::Instant;
@@ -122,6 +123,13 @@ impl Endpoint {
     }
 
     pub fn resolve(&self, deadline: Instant) -> Result<Vec<SocketAddr>, DirectError> {
+        self.resolve_with(&WaitLimit::new(deadline))
+    }
+
+    pub(super) fn resolve_with(&self, wait: &WaitLimit) -> Result<Vec<SocketAddr>, DirectError> {
+        if wait.ended() {
+            return Err(DirectError::Transport);
+        }
         if let Ok(ip) = self.host.parse::<IpAddr>() {
             return Ok(vec![SocketAddr::new(ip, self.port)]);
         }
@@ -136,16 +144,19 @@ impl Endpoint {
             .try_send(Lookup {
                 host: self.host.clone(),
                 port: self.port,
-                deadline,
+                wait: wait.clone(),
                 reply,
             })
             .map_err(|_| DirectError::Transport)?;
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .ok_or(DirectError::Transport)?;
-        receive
-            .recv_timeout(remaining)
-            .map_err(|_| DirectError::Transport)?
+        while !wait.ended() {
+            let remaining = wait.next_poll().saturating_duration_since(Instant::now());
+            match receive.recv_timeout(remaining) {
+                Ok(result) => return result,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+        Err(DirectError::Transport)
     }
 }
 
@@ -164,7 +175,7 @@ impl From<Endpoint> for String {
 struct Lookup {
     host: String,
     port: u16,
-    deadline: Instant,
+    wait: WaitLimit,
     reply: mpsc::SyncSender<Result<Vec<SocketAddr>, DirectError>>,
 }
 struct Resolver {
@@ -178,7 +189,7 @@ impl Resolver {
             .name("spaceterm-dns".into())
             .spawn(move || {
                 while let Ok(request) = pending.recv() {
-                    if Instant::now() >= request.deadline {
+                    if request.wait.ended() {
                         continue;
                     }
                     let result = (request.host.as_str(), request.port)

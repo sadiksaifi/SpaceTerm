@@ -11,9 +11,11 @@ pub use spaceterm_protocol::{attachments, hierarchy, pane, protocol, update};
 pub mod admission;
 
 mod paired;
+mod wait;
 pub mod work;
 
 pub use paired::{DeviceName, PairedMachine};
+pub use wait::WaitLimit;
 
 pub mod credentials;
 pub mod enrollment;

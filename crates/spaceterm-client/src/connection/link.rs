@@ -859,7 +859,10 @@ impl PendingReply {
         &self,
         timeout: std::time::Duration,
     ) -> Option<Result<ReplyBody, RequestError>> {
-        let deadline = Instant::now() + timeout;
+        self.wait_until(Instant::now() + timeout)
+    }
+
+    pub(crate) fn wait_until(&self, deadline: Instant) -> Option<Result<ReplyBody, RequestError>> {
         let mut value = self.slot.value.lock().unwrap_or_else(|e| e.into_inner());
         loop {
             if let Some(result) = value.take() {
