@@ -23,7 +23,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
-pub use connections::credentials::CredentialProvider;
+pub use connections::enrollment::CredentialProvider;
+use connections::enrollment::SelectedCredentials;
 pub struct CliCredentials<'a> {
     identity: &'a str,
     private_file: std::cell::Cell<bool>,
@@ -45,27 +46,26 @@ impl<'a> CliCredentials<'a> {
     }
 }
 impl CredentialProvider for CliCredentials<'_> {
-    fn select(&self) -> Result<Arc<dyn CredentialStore>, CredentialError> {
-        self.notice(spaceterm_core::native_client::credentials::for_cli_enrollment(self.identity)?)
+    fn select(&self) -> Result<SelectedCredentials, CredentialError> {
+        let (kind, store) =
+            spaceterm_core::native_client::credentials::for_cli_enrollment(self.identity)?;
+        self.notice(kind);
+        Ok((kind, store))
     }
     fn open(
         &self,
         kind: connections::StoreKind,
     ) -> Result<Arc<dyn CredentialStore>, CredentialError> {
-        self.notice(spaceterm_core::native_client::credentials::for_cli_record(
-            self.identity,
-            kind,
-        )?)
+        let store =
+            spaceterm_core::native_client::credentials::for_cli_record(self.identity, kind)?;
+        self.notice(kind);
+        Ok(store)
     }
 }
 impl CliCredentials<'_> {
-    fn notice(
-        &self,
-        store: Arc<dyn CredentialStore>,
-    ) -> Result<Arc<dyn CredentialStore>, CredentialError> {
+    fn notice(&self, kind: connections::StoreKind) {
         self.private_file
-            .set(self.private_file.get() || store.kind() == connections::StoreKind::PrivateFile);
-        Ok(store)
+            .set(self.private_file.get() || kind == connections::StoreKind::PrivateFile);
     }
 }
 /// Reading held outcomes never admits a connection or settles a journal.

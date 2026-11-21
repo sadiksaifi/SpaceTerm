@@ -1,5 +1,4 @@
 //! Foreground enrollment and restricted recovery for the CLI's own connections.
-use crate::credentials::{CredentialProvider, StoreKind};
 use crate::direct::{
     self, ComparisonCode, DeviceCredential, DirectError, Enrollment, Invitation, PairedDevice,
     RevocationReceipt,
@@ -10,6 +9,8 @@ use crate::{
     ConnectionStore, CredentialError, Interaction, PendingEnrollment, PendingRevocation,
     SavedConnection, StoreError, UnpairState,
 };
+use crate::{CredentialStore, StoreKind};
+use std::sync::Arc;
 use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,6 +81,15 @@ impl PairingNetwork for NativeNetwork {
     }
 }
 
+/// The CLI records which native backend holds its exact immutable credential.
+pub type SelectedCredentials = (StoreKind, Arc<dyn CredentialStore>);
+
+/// Chooses a backend for a new CLI record and opens the exact backend of an existing record.
+pub trait CredentialProvider {
+    fn select(&self) -> Result<SelectedCredentials, CredentialError>;
+    fn open(&self, kind: StoreKind) -> Result<Arc<dyn CredentialStore>, CredentialError>;
+}
+
 pub struct PairingClient<'a> {
     pub store: &'a ConnectionStore,
     pub credentials: &'a dyn CredentialProvider,
@@ -107,7 +117,7 @@ impl<'a> PairingClient<'a> {
         if !crate::valid_name(&name) {
             return Err(StoreError::NameTaken.into());
         }
-        let credentials = self.credentials.select()?;
+        let (credential_store, credentials) = self.credentials.select()?;
         let route = crate::random_id()?;
         let credential_key = crate::random_id()?;
         let credential = DeviceCredential::generate()?;
@@ -120,7 +130,7 @@ impl<'a> PairingClient<'a> {
             pin: invitation.machine_pin().clone(),
             claim: enrollment.claim_id(),
             credential: credential_key,
-            credential_store: credentials.kind(),
+            credential_store,
             public_key: credential.public_key()?,
             offered: false,
             confirmed: false,

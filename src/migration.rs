@@ -142,12 +142,7 @@ pub(crate) fn state_store(data: PathBuf, state: PathBuf, clients: PathBuf) -> Di
 /// The credential stores the desktop's Saved Connections use.
 pub(crate) fn credentials(identity: &'static str) -> StoreCredentials {
     StoreCredentials::new(move |kind| {
-        let store = spaceterm_core::native_client::credentials::native(identity)?;
-        if store.kind() == kind {
-            Ok(store)
-        } else {
-            Err(spaceterm_client::CredentialError::Unavailable)
-        }
+        spaceterm_core::native_client::credentials::for_desktop_record(identity, kind)
     })
 }
 

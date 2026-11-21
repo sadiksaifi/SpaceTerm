@@ -698,9 +698,6 @@ impl ObservedCredentials {
     }
 }
 impl CredentialStore for ObservedCredentials {
-    fn kind(&self) -> spaceterm_client::StoreKind {
-        self.store.kind()
-    }
     fn read(
         &self,
         key: &[u8; 32],

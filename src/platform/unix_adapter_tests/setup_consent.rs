@@ -39,9 +39,6 @@ impl AskPassAttemptFactory for NoPrompt {
 
 struct NoCredentials;
 impl CredentialStore for NoCredentials {
-    fn kind(&self) -> spaceterm_client::StoreKind {
-        spaceterm_client::StoreKind::SecretService
-    }
     fn read(
         &self,
         _: &[u8; 32],

@@ -75,9 +75,6 @@ impl Keychain {
 }
 
 impl CredentialStore for Keychain {
-    fn kind(&self) -> spaceterm_client::StoreKind {
-        spaceterm_client::StoreKind::Keychain
-    }
     fn read(
         &self,
         key: &[u8; 32],

@@ -111,9 +111,6 @@ fn run(arguments: &[&str]) -> Result<Zeroizing<Vec<u8>>, Failure> {
 }
 
 impl CredentialStore for SecurityTool {
-    fn kind(&self) -> spaceterm_client::StoreKind {
-        spaceterm_client::StoreKind::Keychain
-    }
     fn read(
         &self,
         key: &[u8; 32],

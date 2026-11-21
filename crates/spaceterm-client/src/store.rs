@@ -8,6 +8,14 @@ use std::time::Instant;
 use crate::direct::{Endpoint, MachinePin, PairedDevice};
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StoreKind {
+    Keychain,
+    SecretService,
+    PrivateFile,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum UnpairState {
     Paired,
@@ -22,7 +30,7 @@ pub struct SavedConnection {
     pub endpoint: String,
     pub paired: PairedDevice,
     pub credential: [u8; 32],
-    pub credential_store: crate::StoreKind,
+    pub credential_store: StoreKind,
     pub unpair: UnpairState,
 }
 
@@ -46,7 +54,7 @@ pub struct PendingEnrollment {
     pub pin: MachinePin,
     pub claim: [u8; 32],
     pub credential: [u8; 32],
-    pub credential_store: crate::StoreKind,
+    pub credential_store: StoreKind,
     pub public_key: [u8; 32],
     pub offered: bool,
     pub confirmed: bool,
@@ -135,7 +143,7 @@ impl ConnectionStore {
 
     /// The credential item of every saved connection, pending revocation and pending enrollment,
     /// each once, from one read. Deleting this client's data removes these items too.
-    pub fn credential_items(&self) -> Result<Vec<(crate::StoreKind, [u8; 32])>, StoreError> {
+    pub fn credential_items(&self) -> Result<Vec<(StoreKind, [u8; 32])>, StoreError> {
         let document = self.read()?;
         let mut items = Vec::new();
         let connections = document

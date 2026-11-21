@@ -21,7 +21,7 @@ pub mod records;
 mod routes;
 mod store;
 
-pub use credentials::{CredentialError, CredentialStore, Interaction, StoreKind};
+pub use credentials::{CredentialError, CredentialStore, Interaction};
 pub(crate) use routes::random_id;
 #[cfg(any(test, feature = "test-support"))]
 pub use routes::tests;
@@ -33,5 +33,5 @@ pub use routes::{
 pub use store::{
     ConnectionStorage, ConnectionStore, ConnectionTransaction, PendingEnrollment,
     PendingRevocation, RecoveryGuard, RemovalConfirmation, SavedConnection, SavedConnectionChange,
-    StoreError, UnpairState, readable, valid_name,
+    StoreError, StoreKind, UnpairState, readable, valid_name,
 };

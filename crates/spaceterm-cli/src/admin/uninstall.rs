@@ -10,7 +10,8 @@
 use super::{Context, Reply};
 use crate::contract::{self, Code, Confirmation, Empty, Envelope, Failure, ServiceEffects};
 use spaceterm::installed_app::{Account, AppIdentity, InstalledApp};
-use spaceterm_client::credentials::{CredentialProvider, Interaction};
+use spaceterm_client::credentials::Interaction;
+use spaceterm_client::enrollment::CredentialProvider;
 use spaceterm_core::service::{CliUninstall, Data, Service};
 
 const COMMAND: &str = "uninstall";

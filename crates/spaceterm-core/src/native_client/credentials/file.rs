@@ -7,7 +7,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, PathBuf};
 
-use super::{CredentialError, CredentialStore, Interaction, StoreKind, account};
+use super::{CredentialError, CredentialStore, Interaction, account};
 use zeroize::Zeroizing;
 
 pub(super) struct PrivateFiles(pub(super) PathBuf);
@@ -84,10 +84,6 @@ impl PrivateFiles {
 }
 
 impl CredentialStore for PrivateFiles {
-    fn kind(&self) -> StoreKind {
-        StoreKind::PrivateFile
-    }
-
     fn read(
         &self,
         key: &[u8; 32],

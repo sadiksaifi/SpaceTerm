@@ -1,4 +1,5 @@
 use super::*;
+use spaceterm_client::StoreKind;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::sync::{Arc, Barrier};
 
@@ -184,11 +185,16 @@ fn refuses_file_directory_and_ancestor_symlinks() {
 #[test]
 fn cli_falls_back_only_when_native_is_unavailable() {
     let fixture = Fixture::new();
-    let fallback = || Ok(Arc::new(PrivateFiles(fixture.0.0.clone())) as Arc<dyn CredentialStore>);
-    let store =
+    let fallback = || {
+        Ok((
+            StoreKind::PrivateFile,
+            Arc::new(PrivateFiles(fixture.0.0.clone())) as Arc<dyn CredentialStore>,
+        ))
+    };
+    let (kind, _store) =
         crate::native_client::credentials::cli_store(Err(CredentialError::Unavailable), fallback)
             .unwrap();
-    assert_eq!(store.kind(), StoreKind::PrivateFile);
+    assert_eq!(kind, StoreKind::PrivateFile);
     assert_eq!(
         crate::native_client::credentials::cli_store(
             Err(CredentialError::InteractionRequired),
@@ -198,9 +204,10 @@ fn cli_falls_back_only_when_native_is_unavailable() {
         Some(CredentialError::InteractionRequired)
     );
     let native: Arc<dyn CredentialStore> = Arc::new(crate::native_client::credentials::Unavailable);
-    let selected = crate::native_client::credentials::cli_store(Ok(native.clone()), || {
-        panic!("native exists")
-    })
+    let (_, selected) = crate::native_client::credentials::cli_store(
+        Ok((StoreKind::Keychain, native.clone())),
+        || panic!("native exists"),
+    )
     .unwrap();
     assert!(Arc::ptr_eq(&native, &selected));
     assert_eq!(

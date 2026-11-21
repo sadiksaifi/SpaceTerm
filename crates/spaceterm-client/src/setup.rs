@@ -429,9 +429,6 @@ mod tests {
             release: Mutex<std::sync::mpsc::Receiver<()>>,
         }
         impl CredentialStore for WaitingCredentials {
-            fn kind(&self) -> crate::StoreKind {
-                crate::StoreKind::Keychain
-            }
             fn read(
                 &self,
                 key: &[u8; 32],

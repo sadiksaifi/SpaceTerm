@@ -12,8 +12,13 @@ mod linux;
 mod macos;
 
 pub use spaceterm_client::credentials::*;
+use spaceterm_client::{StoreKind, enrollment::SelectedCredentials};
 
 pub fn native(identity: &str) -> Result<Arc<dyn CredentialStore>, CredentialError> {
+    native_backend(identity).map(|(_, store)| store)
+}
+
+fn native_backend(identity: &str) -> Result<SelectedCredentials, CredentialError> {
     if !matches!(
         identity,
         "spaceterm" | "spaceterm-preflight" | "spaceterm-development"
@@ -24,15 +29,24 @@ pub fn native(identity: &str) -> Result<Arc<dyn CredentialStore>, CredentialErro
     {
         // Preflight is ad hoc signed. Its credentials must outlive each build's code identity.
         if identity == "spaceterm-preflight" {
-            return Ok(Arc::new(macos::SecurityTool::new(identity)));
+            return Ok((
+                StoreKind::Keychain,
+                Arc::new(macos::SecurityTool::new(identity)),
+            ));
         }
-        Ok(Arc::new(macos::Keychain::new(identity)))
+        Ok((
+            StoreKind::Keychain,
+            Arc::new(macos::Keychain::new(identity)),
+        ))
     }
     #[cfg(target_os = "linux")]
     {
         {
             linux::available()?;
-            Ok(Arc::new(linux::SecretService::new(identity)))
+            Ok((
+                StoreKind::SecretService,
+                Arc::new(linux::SecretService::new(identity)),
+            ))
         }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -40,11 +54,13 @@ pub fn native(identity: &str) -> Result<Arc<dyn CredentialStore>, CredentialErro
 }
 
 /// CLI policy only. Desktop callers continue to use `native` directly.
-pub fn for_cli_enrollment(identity: &str) -> Result<Arc<dyn CredentialStore>, CredentialError> {
-    let native = native(identity);
+pub fn for_cli_enrollment(identity: &str) -> Result<SelectedCredentials, CredentialError> {
+    let native = native_backend(identity);
     #[cfg(target_os = "linux")]
     {
-        cli_store(native, || private_files(identity))
+        cli_store(native, || {
+            private_files(identity).map(|store| (StoreKind::PrivateFile, store))
+        })
     }
     #[cfg(not(target_os = "linux"))]
     native
@@ -66,14 +82,19 @@ pub fn for_cli_record(
                 Err(CredentialError::Unavailable)
             }
         }
-        StoreKind::Keychain | StoreKind::SecretService => {
-            let store = native(identity)?;
-            if store.kind() != kind {
-                return Err(CredentialError::Unavailable);
-            }
-            Ok(store)
-        }
+        StoreKind::Keychain | StoreKind::SecretService => for_desktop_record(identity, kind),
     }
+}
+
+pub fn for_desktop_record(
+    identity: &str,
+    kind: StoreKind,
+) -> Result<Arc<dyn CredentialStore>, CredentialError> {
+    let (backend, store) = native_backend(identity)?;
+    if backend != kind {
+        return Err(CredentialError::Unavailable);
+    }
+    Ok(store)
 }
 
 #[cfg(target_os = "linux")]
@@ -93,9 +114,9 @@ fn private_files(identity: &str) -> Result<Arc<dyn CredentialStore>, CredentialE
 
 #[cfg(any(target_os = "linux", test))]
 fn cli_store(
-    native: Result<Arc<dyn CredentialStore>, CredentialError>,
-    fallback: impl FnOnce() -> Result<Arc<dyn CredentialStore>, CredentialError>,
-) -> Result<Arc<dyn CredentialStore>, CredentialError> {
+    native: Result<SelectedCredentials, CredentialError>,
+    fallback: impl FnOnce() -> Result<SelectedCredentials, CredentialError>,
+) -> Result<SelectedCredentials, CredentialError> {
     match native {
         Err(CredentialError::Unavailable) => fallback(),
         other => other,
@@ -120,16 +141,6 @@ fn hex(bytes: &[u8], text: &mut String) {
 pub struct Unavailable;
 
 impl CredentialStore for Unavailable {
-    fn kind(&self) -> StoreKind {
-        #[cfg(target_os = "macos")]
-        {
-            StoreKind::Keychain
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            StoreKind::SecretService
-        }
-    }
     fn read(
         &self,
         _: &[u8; 32],

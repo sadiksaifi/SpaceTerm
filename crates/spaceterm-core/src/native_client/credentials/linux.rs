@@ -194,9 +194,6 @@ impl SecretService {
 }
 
 impl CredentialStore for SecretService {
-    fn kind(&self) -> spaceterm_client::StoreKind {
-        spaceterm_client::StoreKind::SecretService
-    }
     fn read(
         &self,
         key: &[u8; 32],

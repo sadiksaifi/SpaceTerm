@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use crate::migration::{CredentialFailure, CredentialItem, Credentials};
 
-use super::credentials::{CredentialError, CredentialStore, Interaction, StoreKind};
+use super::credentials::{CredentialError, CredentialStore, Interaction};
+use spaceterm_client::StoreKind;
 
 /// Opens the store a credential reference names.
 pub type OpenStore = dyn Fn(StoreKind) -> Result<Arc<dyn CredentialStore>, CredentialError>;
@@ -72,9 +73,6 @@ mod tests {
     struct Memory(Mutex<BTreeMap<[u8; 32], Vec<u8>>>);
 
     impl CredentialStore for Memory {
-        fn kind(&self) -> StoreKind {
-            StoreKind::Keychain
-        }
         fn read(
             &self,
             key: &[u8; 32],

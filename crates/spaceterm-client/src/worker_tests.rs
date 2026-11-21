@@ -23,9 +23,6 @@ impl Records for MemoryRecords {
 #[derive(Default)]
 struct Credentials(Mutex<BTreeMap<[u8; 32], Zeroizing<Vec<u8>>>>);
 impl CredentialStore for Credentials {
-    fn kind(&self) -> crate::StoreKind {
-        crate::StoreKind::Keychain
-    }
     fn read(
         &self,
         key: &[u8; 32],

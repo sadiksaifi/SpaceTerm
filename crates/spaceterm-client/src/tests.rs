@@ -149,9 +149,6 @@ pub(super) struct Credentials {
     removals: Mutex<Vec<([u8; 32], Interaction)>>,
 }
 impl CredentialStore for Credentials {
-    fn kind(&self) -> crate::StoreKind {
-        crate::StoreKind::Keychain
-    }
     fn read(
         &self,
         key: &[u8; 32],

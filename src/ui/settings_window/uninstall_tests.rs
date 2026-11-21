@@ -367,9 +367,6 @@ struct Items {
 }
 
 impl CredentialStore for Items {
-    fn kind(&self) -> StoreKind {
-        StoreKind::Keychain
-    }
     fn read(
         &self,
         _: &[u8; 32],

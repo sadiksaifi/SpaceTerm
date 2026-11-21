@@ -148,16 +148,12 @@ fn add(name: &str) -> MachineCommand {
 }
 #[derive(Default)]
 struct Credentials {
-    kind: Option<StoreKind>,
     values: Mutex<BTreeMap<[u8; 32], Zeroizing<Vec<u8>>>>,
     locked: AtomicBool,
     reads: Mutex<Vec<Interaction>>,
     attempted: Mutex<Zeroizing<Vec<u8>>>,
 }
 impl CredentialStore for Credentials {
-    fn kind(&self) -> StoreKind {
-        self.kind.unwrap_or(StoreKind::Keychain)
-    }
     fn read(
         &self,
         key: &[u8; 32],
@@ -196,17 +192,17 @@ struct Provider {
     unavailable: bool,
 }
 impl CredentialProvider for Provider {
-    fn select(&self) -> Result<Arc<dyn CredentialStore>, CredentialError> {
+    fn select(&self) -> Result<SelectedCredentials, CredentialError> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         if self.unavailable {
             Err(CredentialError::Unavailable)
         } else {
-            Ok(self.store.clone())
+            Ok((StoreKind::Keychain, self.store.clone()))
         }
     }
     fn open(&self, kind: StoreKind) -> Result<Arc<dyn CredentialStore>, CredentialError> {
-        let store = self.select()?;
-        if store.kind() != kind {
+        let (selected, store) = self.select()?;
+        if selected != kind {
             return Err(CredentialError::Unavailable);
         }
         Ok(store)
@@ -1086,20 +1082,17 @@ impl ChangingProvider {
     fn new(native_available: bool) -> Self {
         Self {
             native: Arc::new(Credentials::default()),
-            files: Arc::new(Credentials {
-                kind: Some(StoreKind::PrivateFile),
-                ..Default::default()
-            }),
+            files: Arc::new(Credentials::default()),
             native_available: AtomicBool::new(native_available),
         }
     }
 }
 impl CredentialProvider for ChangingProvider {
-    fn select(&self) -> Result<Arc<dyn CredentialStore>, CredentialError> {
+    fn select(&self) -> Result<SelectedCredentials, CredentialError> {
         if self.native_available.load(Ordering::Relaxed) {
-            Ok(self.native.clone())
+            Ok((StoreKind::Keychain, self.native.clone()))
         } else {
-            Ok(self.files.clone())
+            Ok((StoreKind::PrivateFile, self.files.clone()))
         }
     }
     fn open(&self, kind: StoreKind) -> Result<Arc<dyn CredentialStore>, CredentialError> {

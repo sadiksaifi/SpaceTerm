@@ -349,9 +349,6 @@ mod tests {
     /// The one credential of a Saved Connection.
     struct OneCredential(zeroize::Zeroizing<Vec<u8>>);
     impl spaceterm_client::CredentialStore for OneCredential {
-        fn kind(&self) -> spaceterm_client::StoreKind {
-            spaceterm_client::StoreKind::Keychain
-        }
         fn read(
             &self,
             _: &[u8; 32],
