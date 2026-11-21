@@ -28,6 +28,8 @@ pub struct PairedMachine {
 
 impl PairedMachine {
     /// Binds the expected build and paired identity without opening a connection.
+    /// Workspace edits use [`DirectConnector::connect_with`] to open a cold link. A
+    /// [`SavedConnection::connector`](crate::SavedConnection::connector) supports that wait.
     pub fn new(
         build: &str,
         route: [u8; 32],

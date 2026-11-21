@@ -1,4 +1,5 @@
 //! Saved Connections and exact recovery requests.
+use crate::WaitLimit;
 use crate::credentials::{CredentialError, CredentialStore, Interaction};
 use crate::direct::{DeviceCredential, DirectConnection, DirectConnector, DirectError};
 use std::collections::BTreeSet;
@@ -517,59 +518,47 @@ fn validate(document: &Document) -> Result<(), StoreError> {
 }
 
 impl SavedConnection {
-    /// Opens exactly this Saved Connection with its already selected credential backend.
+    /// Loads this Saved Connection's credential from its selected backend. This synchronous
+    /// read may ask the person for access. The returned connector uses the loaded credential
+    /// for every dial, so a later deadline or cancellation governs the network waits alone.
     pub fn connector(
         &self,
-        credentials: Arc<dyn CredentialStore>,
+        credentials: &dyn CredentialStore,
         interaction: Interaction,
         deadline: Option<Instant>,
-    ) -> Arc<dyn DirectConnector> {
-        Arc::new(SavedConnector {
-            saved: self.clone(),
-            credentials,
-            interaction,
-            deadline,
-        })
-    }
-}
-struct SavedConnector {
-    saved: SavedConnection,
-    credentials: Arc<dyn CredentialStore>,
-    interaction: Interaction,
-    deadline: Option<Instant>,
-}
-impl SavedConnector {
-    fn dial(&self, deadline: Option<Instant>) -> Result<DirectConnection, DirectError> {
-        let secret = self
-            .credentials
-            .read(&self.saved.credential, self.interaction)
+    ) -> Result<Arc<dyn DirectConnector>, DirectError> {
+        let secret = credentials
+            .read(&self.credential, interaction)
             .map_err(|error| match error {
                 CredentialError::InteractionRequired => DirectError::InteractionRequired,
                 CredentialError::Unavailable => DirectError::CredentialUnavailable,
             })?
             .ok_or(DirectError::CredentialUnavailable)?;
-        let credential = DeviceCredential::from_bytes(&secret)?;
-        match deadline {
-            Some(deadline) => DirectConnection::connect_until(
-                &self.saved.endpoint,
-                &self.saved.paired,
-                &credential,
-                deadline,
-            ),
-            None => {
-                DirectConnection::connect(&self.saved.endpoint, &self.saved.paired, &credential)
-            }
-        }
+        Ok(Arc::new(SavedConnector {
+            endpoint: self.endpoint.clone(),
+            paired: self.paired.clone(),
+            credential: DeviceCredential::from_bytes(&secret)?,
+            deadline,
+        }))
     }
 }
+
+struct SavedConnector {
+    endpoint: String,
+    paired: PairedDevice,
+    credential: DeviceCredential,
+    deadline: Option<Instant>,
+}
+
 impl DirectConnector for SavedConnector {
     fn connect(&self) -> Result<DirectConnection, DirectError> {
-        self.dial(self.deadline)
+        match self.deadline {
+            Some(deadline) => self.connect_by(deadline),
+            None => DirectConnection::connect(&self.endpoint, &self.paired, &self.credential),
+        }
     }
-    /// A service-lane dial follows its request's deadline. After a confirmation prompt that is
-    /// the approved action's budget, which began when the person answered, so the deadline this
-    /// connector took before the prompt never ends it early.
-    fn connect_by(&self, deadline: Instant) -> Result<DirectConnection, DirectError> {
-        self.dial(Some(deadline))
+
+    fn connect_with(&self, wait: &WaitLimit) -> Result<DirectConnection, DirectError> {
+        DirectConnection::connect_with(&self.endpoint, &self.paired, &self.credential, wait)
     }
 }

@@ -102,7 +102,7 @@ impl Invitation {
     }
 }
 
-/// The caller supplies native credential policy; construction and cloning open nothing.
+/// Connectors use the caller's credential policy and open transport only when dialed.
 pub trait DirectConnector: Send + Sync {
     fn connect(&self) -> Result<DirectConnection, DirectError>;
     /// Connects by the requesting action's deadline. An implementation must bound all its

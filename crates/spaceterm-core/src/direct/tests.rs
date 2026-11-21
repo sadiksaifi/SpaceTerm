@@ -2596,36 +2596,58 @@ fn paired_administration_is_refused_without_changing_invitations_claims_or_devic
 
 #[cfg(feature = "client")]
 fn paired_workspace_machine(fixture: &Fixture) -> spaceterm_client::PairedMachine {
-    struct Connector {
-        endpoint: String,
-        paired: PairedDevice,
-        credential: DeviceCredential,
-    }
-    impl DirectConnector for Connector {
-        fn connect(&self) -> Result<DirectConnection, DirectError> {
-            DirectConnection::connect(&self.endpoint, &self.paired, &self.credential)
-        }
+    use spaceterm_client::{
+        CredentialError, CredentialStore, Interaction, SavedConnection, StoreKind, UnpairState,
+    };
+    use zeroize::Zeroizing;
 
-        fn connect_with(
+    struct Credential {
+        key: [u8; 32],
+        value: DeviceCredential,
+    }
+    impl CredentialStore for Credential {
+        fn read(
             &self,
-            wait: &spaceterm_client::WaitLimit,
-        ) -> Result<DirectConnection, DirectError> {
-            DirectConnection::connect_with(&self.endpoint, &self.paired, &self.credential, wait)
+            key: &[u8; 32],
+            interaction: Interaction,
+        ) -> Result<Option<Zeroizing<Vec<u8>>>, CredentialError> {
+            assert_eq!(interaction, Interaction::Quiet);
+            Ok((*key == self.key).then(|| Zeroizing::new(self.value.expose_bytes().to_vec())))
+        }
+        fn insert(&self, _: &[u8; 32], _: &[u8]) -> Result<(), CredentialError> {
+            Err(CredentialError::Unavailable)
+        }
+        fn remove(&self, _: &[u8; 32], _: Interaction) -> Result<(), CredentialError> {
+            Err(CredentialError::Unavailable)
         }
     }
 
     fixture.enable();
     let credential = DeviceCredential::generate().unwrap();
-    let paired = fixture.enroll(&credential);
+    let saved = SavedConnection {
+        name: "Paired Machine".into(),
+        route: [1; 32],
+        endpoint: fixture.endpoint(),
+        paired: fixture.enroll(&credential),
+        credential: [2; 32],
+        credential_store: StoreKind::PrivateFile,
+        unpair: UnpairState::Paired,
+    };
+    let connector = saved
+        .connector(
+            &Credential {
+                key: saved.credential,
+                value: credential,
+            },
+            Interaction::Quiet,
+            None,
+        )
+        .unwrap();
     spaceterm_client::PairedMachine::new(
         &fixture.paths.identity,
-        [1; 32],
-        paired.clone(),
-        Arc::new(Connector {
-            endpoint: fixture.endpoint(),
-            paired,
-            credential,
-        }),
+        saved.route,
+        saved.paired,
+        connector,
         Arc::new(|| "Paired Client".into()),
         None,
         Arc::new(|| None),
