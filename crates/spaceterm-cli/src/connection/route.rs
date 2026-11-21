@@ -6,11 +6,16 @@ use crate::contract::{
 };
 use crate::scope::IdPrefix;
 use crate::state::RouteKey;
-use spaceterm_client::{ConnectionStore, CredentialError, Interaction, SavedConnection};
+use spaceterm_client::{
+    ConnectionStore, CredentialError, CredentialStore, Interaction, SavedConnection, UnpairState,
+};
 use spaceterm_core::{
-    CliRoute, CoreError, MachineConnection, direct::DirectError, protocol::AgentName,
+    CliRoute, CoreError, MachineConnection,
+    direct::{DeviceCredential, DirectConnection, DirectConnector, DirectError},
+    protocol::AgentName,
 };
 use std::io::IsTerminal;
+use std::sync::Arc;
 use std::time::Instant;
 
 pub struct AdmittedRoute {
@@ -239,23 +244,74 @@ impl Route {
         let route = match self {
             Self::Local => CliRoute::Local,
             Self::Paired(saved) => {
-                let credentials = credentials.open(saved.credential_store).map_err(|error| {
-                    CoreError::Direct(match error {
-                        CredentialError::InteractionRequired => DirectError::InteractionRequired,
-                        CredentialError::Unavailable => DirectError::CredentialUnavailable,
-                    })
-                })?;
-                let connector = saved.connector(credentials, interaction, deadline);
+                if saved.unpair != UnpairState::Paired {
+                    return Err(DirectError::Revoked.into());
+                }
+                let credentials = credentials
+                    .open(saved.credential_store)
+                    .map_err(credential_error)?;
                 CliRoute::Paired {
                     route: saved.route,
                     paired: saved.paired.clone(),
-                    connector,
+                    connector: Arc::new(PairedRouteConnector {
+                        saved: saved.as_ref().clone(),
+                        credentials,
+                        interaction,
+                        deadline,
+                    }),
                 }
             }
         };
         MachineConnection::for_cli(identity, route, agent)
     }
 }
+
+/// The CLI reads a fresh native credential in the foreground so it can prompt the person.
+/// Only the network dial uses the action's transport deadline.
+struct PairedRouteConnector {
+    saved: SavedConnection,
+    credentials: Arc<dyn CredentialStore>,
+    interaction: Interaction,
+    deadline: Option<Instant>,
+}
+
+impl PairedRouteConnector {
+    fn dial(&self, deadline: Option<Instant>) -> Result<DirectConnection, DirectError> {
+        let secret = self
+            .credentials
+            .read(&self.saved.credential, self.interaction)
+            .map_err(credential_error)?
+            .ok_or(DirectError::CredentialUnavailable)?;
+        let credential = DeviceCredential::from_bytes(&secret)?;
+        let endpoint = &self.saved.endpoint;
+        let paired = &self.saved.paired;
+        match deadline {
+            Some(deadline) => {
+                DirectConnection::connect_until(endpoint, paired, &credential, deadline)
+            }
+            None => DirectConnection::connect(endpoint, paired, &credential),
+        }
+    }
+}
+
+impl DirectConnector for PairedRouteConnector {
+    fn connect(&self) -> Result<DirectConnection, DirectError> {
+        self.dial(self.deadline)
+    }
+
+    fn connect_by(&self, deadline: Instant) -> Result<DirectConnection, DirectError> {
+        // Service actions can start a new network budget after a confirmation prompt.
+        self.dial(Some(deadline))
+    }
+}
+
+fn credential_error(error: CredentialError) -> DirectError {
+    match error {
+        CredentialError::InteractionRequired => DirectError::InteractionRequired,
+        CredentialError::Unavailable => DirectError::CredentialUnavailable,
+    }
+}
+
 pub fn from_global(global: &Global, identity: &str) -> Result<Route, ResolutionError> {
     let selector = selector(global)?;
     let store = spaceterm_core::native_client::connection_store(
@@ -342,19 +398,23 @@ impl ResolutionError {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_command;
+    use super::{DirectConnector, PairedRouteConnector, validate_command};
     use crate::args::Cli;
     use clap::Parser;
 
     /// The one credential of a Saved Connection.
-    struct OneCredential(zeroize::Zeroizing<Vec<u8>>);
+    struct OneCredential {
+        bytes: zeroize::Zeroizing<Vec<u8>>,
+        caller: std::thread::ThreadId,
+    }
     impl spaceterm_client::CredentialStore for OneCredential {
         fn read(
             &self,
             _: &[u8; 32],
             _: super::Interaction,
         ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, super::CredentialError> {
-            Ok(Some(self.0.clone()))
+            assert_eq!(std::thread::current().id(), self.caller);
+            Ok(Some(self.bytes.clone()))
         }
         fn insert(&self, _: &[u8; 32], _: &[u8]) -> Result<(), super::CredentialError> {
             Err(super::CredentialError::Unavailable)
@@ -396,14 +456,16 @@ mod tests {
             credential_store: spaceterm_client::StoreKind::Keychain,
             unpair: spaceterm_client::UnpairState::Paired,
         };
-        let connector = saved.connector(
-            std::sync::Arc::new(OneCredential(zeroize::Zeroizing::new(
-                credential.expose_bytes().to_vec(),
-            ))),
-            super::Interaction::Quiet,
+        let connector = PairedRouteConnector {
+            saved,
+            credentials: std::sync::Arc::new(OneCredential {
+                bytes: zeroize::Zeroizing::new(credential.expose_bytes().to_vec()),
+                caller: std::thread::current().id(),
+            }),
+            interaction: super::Interaction::Quiet,
             // Taken when the command began; reading the confirmation used all of it.
-            Some(Instant::now()),
-        );
+            deadline: Some(Instant::now()),
+        };
         let began = Instant::now();
         assert!(connector.connect().is_err());
         assert!(

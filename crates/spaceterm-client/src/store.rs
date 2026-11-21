@@ -519,8 +519,8 @@ fn validate(document: &Document) -> Result<(), StoreError> {
 
 impl SavedConnection {
     /// Binds this Saved Connection to its selected credential store. Each dial reads the
-    /// credential with the requested interaction policy.
-    /// [`DirectConnector::connect_with`] bounds the credential wait as well as the dial.
+    /// credential with the requested interaction policy. Pending removals cannot dial.
+    /// A deadline bounds the credential wait as well as the dial.
     /// A store read already executing can finish after the wait ends. Its result is discarded.
     /// A bounded dial fails with [`DirectError::Transport`] if its store is already reading
     /// for another bounded dial or both bounded read slots are occupied.
@@ -534,6 +534,7 @@ impl SavedConnection {
             endpoint: self.endpoint.clone(),
             paired: self.paired.clone(),
             key: self.credential,
+            unpair: self.unpair,
             credentials,
             interaction,
             deadline,
@@ -545,35 +546,33 @@ struct SavedConnector {
     endpoint: String,
     paired: PairedDevice,
     key: [u8; 32],
+    unpair: UnpairState,
     credentials: Arc<dyn CredentialStore>,
     interaction: Interaction,
     deadline: Option<Instant>,
 }
 
 impl SavedConnector {
-    fn dial(&self, deadline: Option<Instant>) -> Result<DirectConnection, DirectError> {
-        let credential = read_credential(self.credentials.as_ref(), &self.key, self.interaction)?;
-        match deadline {
-            Some(deadline) => {
-                DirectConnection::connect_until(&self.endpoint, &self.paired, &credential, deadline)
-            }
-            None => DirectConnection::connect(&self.endpoint, &self.paired, &credential),
+    fn check_paired(&self) -> Result<(), DirectError> {
+        if self.unpair != UnpairState::Paired {
+            return Err(DirectError::Revoked);
         }
+        Ok(())
     }
 }
 
 impl DirectConnector for SavedConnector {
     fn connect(&self) -> Result<DirectConnection, DirectError> {
-        self.dial(self.deadline)
-    }
-
-    fn connect_by(&self, deadline: Instant) -> Result<DirectConnection, DirectError> {
-        // CLI lane dials take the foreground credential prompt and the current action's
-        // transport deadline, which can start after a confirmation prompt.
-        self.dial(Some(deadline))
+        if let Some(deadline) = self.deadline {
+            return self.connect_by(deadline);
+        }
+        self.check_paired()?;
+        let credential = read_credential(self.credentials.as_ref(), &self.key, self.interaction)?;
+        DirectConnection::connect(&self.endpoint, &self.paired, &credential)
     }
 
     fn connect_with(&self, wait: &WaitLimit) -> Result<DirectConnection, DirectError> {
+        self.check_paired()?;
         let credential = CredentialRead::within(self, wait)?;
         DirectConnection::connect_with(&self.endpoint, &self.paired, &credential, wait)
     }
@@ -804,6 +803,53 @@ mod tests {
     }
 
     #[test]
+    fn pending_removal_refuses_ordinary_dials_before_loading_the_credential() {
+        let (store, read) = blocked_store(None);
+        store.blocked.store(true, Ordering::Release);
+        read.release.send(()).unwrap();
+        let mut saved = saved_connection("quic://127.0.0.1:1".into());
+        saved.unpair = UnpairState::Pending;
+        let connector = saved.connector(store, Interaction::Requested, None);
+        let deadline = Instant::now() + Duration::from_secs(1);
+
+        assert_eq!(connector.connect().err(), Some(DirectError::Revoked));
+        assert_eq!(
+            connector.connect_by(deadline).err(),
+            Some(DirectError::Revoked)
+        );
+        assert_eq!(
+            connector.connect_with(&WaitLimit::new(deadline)).err(),
+            Some(DirectError::Revoked)
+        );
+        drop(connector);
+        assert_eq!(
+            read.started.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        );
+    }
+
+    fn saved_connection(endpoint: String) -> SavedConnection {
+        SavedConnection {
+            name: "Paired Machine".into(),
+            route: [1; 32],
+            endpoint,
+            paired: PairedDevice {
+                pin: MachinePin {
+                    build: "spaceterm-test".into(),
+                    core: [2; 32],
+                    public_key: [3; 32],
+                    certificate: [4; 32],
+                },
+                pairing: [5; 32],
+                client: [6; 32],
+            },
+            credential: [7; 32],
+            credential_store: StoreKind::PrivateFile,
+            unpair: UnpairState::Paired,
+        }
+    }
+
+    #[test]
     fn saved_connector_discards_credentials_after_cancel_or_deadline() {
         for cancelling in [true, false] {
             let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -813,24 +859,7 @@ mod tests {
             let credential = DeviceCredential::generate().unwrap();
             let (store, read) =
                 blocked_store(Some(Zeroizing::new(credential.expose_bytes().to_vec())));
-            let saved = SavedConnection {
-                name: "Paired Machine".into(),
-                route: [1; 32],
-                endpoint: format!("quic://{}", socket.local_addr().unwrap()),
-                paired: PairedDevice {
-                    pin: MachinePin {
-                        build: "spaceterm-test".into(),
-                        core: [2; 32],
-                        public_key: [3; 32],
-                        certificate: [4; 32],
-                    },
-                    pairing: [5; 32],
-                    client: [6; 32],
-                },
-                credential: [7; 32],
-                credential_store: StoreKind::PrivateFile,
-                unpair: UnpairState::Paired,
-            };
+            let saved = saved_connection(format!("quic://{}", socket.local_addr().unwrap()));
             let connector = saved.connector(store.clone(), Interaction::Quiet, None);
             store.blocked.store(true, Ordering::Release);
             let cancel = Arc::new(AtomicBool::new(false));
@@ -844,7 +873,12 @@ mod tests {
             let (finished, dial_finished) = mpsc::channel();
             let dialer = Arc::clone(&connector);
             let worker = std::thread::spawn(move || {
-                finished.send(dialer.connect_with(&wait).err()).unwrap();
+                let result = if cancelling {
+                    dialer.connect_with(&wait)
+                } else {
+                    dialer.connect_by(wait.deadline())
+                };
+                finished.send(result.err()).unwrap();
             });
             let entered_before_expiry = read.started.recv_timeout(Duration::from_secs(2));
             if cancelling {
