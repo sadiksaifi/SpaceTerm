@@ -73,8 +73,7 @@ impl ClientJournal {
     pub fn pending(&self) -> Option<&ClientOperation> {
         self.record.pending.as_ref()
     }
-    /// Drops the pending operation after the server said it recorded no such sequence, so it
-    /// never applied it. Nothing dispatches it again.
+    /// Drops a pending operation the client knows was never applied. Nothing dispatches it again.
     pub fn abandon(&mut self) -> Result<(), CoreError> {
         self.verify_storage()?;
         if self.record.pending.take().is_none() {
@@ -176,13 +175,17 @@ impl ClientJournal {
         if let Err(error) = self.store.replace(bytes) {
             // Re-read the durable result before issuing another operation from this journal.
             self.available = false;
-            let retained = read(self.store.read()?)?.ok_or(CoreError::StorageUnavailable)?;
+            let reread = self.store.read()?;
+            let installed = reread.as_deref() == Some(bytes);
+            let retained = read(reread)?.ok_or(CoreError::StorageUnavailable)?;
             if retained.core != self.record.core || retained.client != self.record.client {
                 return Err(CoreError::AuthenticationRefused);
             }
             self.record = retained;
             self.available = true;
-            return Err(error);
+            if !installed {
+                return Err(error);
+            }
         }
         Ok(())
     }

@@ -47,6 +47,8 @@ pub enum EditError {
     Request(#[from] RequestError),
     #[error("The Original Operation's outcome is unconfirmed.")]
     Unconfirmed,
+    #[error("The deadline expired before the Workspace request was sent.")]
+    Deadline,
     #[error("The wait for the Workspace edit ended at the caller's request.")]
     Cancelled,
 }
@@ -63,7 +65,7 @@ impl From<EditError> for CoreError {
             EditError::Core(error) => error,
             EditError::Request(error) => error.into(),
             EditError::Unconfirmed => Self::Protocol,
-            EditError::Cancelled => Self::ServiceBusy,
+            EditError::Deadline | EditError::Cancelled => Self::ServiceBusy,
         }
     }
 }
@@ -211,9 +213,13 @@ impl WorkspaceEditor {
             return Err(EditError::Unconfirmed);
         }
         let (link, inventory) = self.reconciled_link(&wait)?;
-        check_wait(&wait)?;
+        check_wait(&wait, EditError::Deadline)?;
         self.journal.submit(inventory.next_sequence, mutation)?;
-        self.dispatch(&link, &wait)
+        let result = self.dispatch(&link, &wait);
+        if matches!(result, Err(EditError::Deadline)) {
+            self.journal.abandon()?;
+        }
+        result
     }
 
     /// Retries exactly the pending Original Operation after reconciling current inventory.
@@ -266,13 +272,13 @@ impl WorkspaceEditor {
         wait: &WaitLimit,
     ) -> Result<(CoreLink, Arc<InventoryRevision>), EditError> {
         self.journal.verify_storage()?;
-        check_wait(wait)?;
+        check_wait(wait, EditError::Deadline)?;
         let link = self.machine.link_with_limit(wait);
-        check_wait(wait)?;
+        check_wait(wait, EditError::Deadline)?;
         let link = link?;
         let inventory = loop {
             let incoming = link.next_inventory_by(0, wait.next_poll());
-            check_wait(wait)?;
+            check_wait(wait, EditError::Deadline)?;
             if let Some((_, inventory)) = incoming? {
                 break inventory;
             }
@@ -310,21 +316,21 @@ fn request_by(
     operation: Operation,
     wait: &WaitLimit,
 ) -> Result<ReplyBody, EditError> {
-    check_wait(wait)?;
+    check_wait(wait, EditError::Deadline)?;
     let pending = link.request(operation)?;
     loop {
         if let Some(reply) = pending.wait_until(wait.next_poll()) {
             return Ok(reply?);
         }
-        check_wait(wait)?;
+        check_wait(wait, EditError::Unconfirmed)?;
     }
 }
 
-fn check_wait(wait: &WaitLimit) -> Result<(), EditError> {
+fn check_wait(wait: &WaitLimit, on_deadline: EditError) -> Result<(), EditError> {
     if wait.is_cancelled() {
         Err(EditError::Cancelled)
     } else if Instant::now() >= wait.deadline() {
-        Err(EditError::Unconfirmed)
+        Err(on_deadline)
     } else {
         Ok(())
     }
@@ -544,6 +550,19 @@ mod tests {
     }
 
     #[test]
+    fn workspace_deadline_before_dispatch_does_not_report_an_unconfirmed_edit() {
+        let machine = machine(NoConnector);
+        let (link, _) = link(&machine);
+        let mut editor = machine
+            .workspace_edits(Box::<JournalBytes>::default())
+            .unwrap();
+        let result = editor.submit(mutation(), Instant::now() + Duration::from_millis(20));
+        assert_eq!(result, Err(EditError::Deadline));
+        assert!(editor.journal().pending().is_none());
+        assert!(link.next_frame().is_none());
+    }
+
+    #[test]
     fn mobile_cancels_the_reply_wait_and_keeps_the_possibly_dispatched_original() {
         let machine = machine(NoConnector);
         let (link, wake) = link(&machine);
@@ -743,5 +762,40 @@ mod tests {
             result,
             Err(EditError::Core(CoreError::StorageUnavailable))
         ));
+    }
+
+    #[test]
+    fn journal_retirement_succeeds_when_reread_confirms_publication() {
+        struct PublishedOnError(JournalBytes);
+        impl JournalStore for PublishedOnError {
+            fn read(&self) -> Result<Option<Vec<u8>>, CoreError> {
+                self.0.read()
+            }
+            fn replace(&self, bytes: &[u8]) -> Result<(), CoreError> {
+                let replacing = self.0.read()?.is_some();
+                self.0.replace(bytes)?;
+                if replacing {
+                    Err(CoreError::StorageUnavailable)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        let mut journal = ClientJournal::open(
+            Box::new(PublishedOnError(JournalBytes::default())),
+            [1; 32],
+            [2; 32],
+        )
+        .unwrap();
+        journal.submit(1, mutation()).unwrap();
+        let receipt = RetainedOutcome {
+            sequence: 1,
+            mutation: mutation(),
+            outcome: Outcome::Accepted { target: [3; 32] },
+        };
+        journal.retire(receipt.clone()).unwrap();
+        assert_eq!(journal.last(), Some(&receipt));
+        assert!(journal.pending().is_none());
     }
 }
