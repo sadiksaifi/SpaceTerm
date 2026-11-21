@@ -3,7 +3,7 @@ use crate::WaitLimit;
 use crate::credentials::{CredentialError, CredentialStore, Interaction};
 use crate::direct::{DeviceCredential, DirectConnection, DirectConnector, DirectError};
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, mpsc};
 use std::time::Instant;
 
 use crate::direct::{Endpoint, MachinePin, PairedDevice};
@@ -518,47 +518,276 @@ fn validate(document: &Document) -> Result<(), StoreError> {
 }
 
 impl SavedConnection {
-    /// Loads this Saved Connection's credential from its selected backend. This synchronous
-    /// read may ask the person for access. The returned connector uses the loaded credential
-    /// for every dial, so a later deadline or cancellation governs the network waits alone.
+    /// Binds this Saved Connection to its selected credential store. Each dial reads the
+    /// credential with the requested interaction policy.
+    /// [`DirectConnector::connect_with`] bounds the credential wait as well as the dial.
+    /// A store read already executing can finish after the wait ends. Its result is discarded.
     pub fn connector(
         &self,
-        credentials: &dyn CredentialStore,
+        credentials: Arc<dyn CredentialStore>,
         interaction: Interaction,
         deadline: Option<Instant>,
-    ) -> Result<Arc<dyn DirectConnector>, DirectError> {
-        let secret = credentials
-            .read(&self.credential, interaction)
-            .map_err(|error| match error {
-                CredentialError::InteractionRequired => DirectError::InteractionRequired,
-                CredentialError::Unavailable => DirectError::CredentialUnavailable,
-            })?
-            .ok_or(DirectError::CredentialUnavailable)?;
-        Ok(Arc::new(SavedConnector {
+    ) -> Arc<dyn DirectConnector> {
+        Arc::new(SavedConnector {
             endpoint: self.endpoint.clone(),
             paired: self.paired.clone(),
-            credential: DeviceCredential::from_bytes(&secret)?,
+            key: self.credential,
+            credentials,
+            interaction,
             deadline,
-        }))
+        })
     }
 }
 
 struct SavedConnector {
     endpoint: String,
     paired: PairedDevice,
-    credential: DeviceCredential,
+    key: [u8; 32],
+    credentials: Arc<dyn CredentialStore>,
+    interaction: Interaction,
     deadline: Option<Instant>,
+}
+
+impl SavedConnector {
+    fn dial(&self, deadline: Option<Instant>) -> Result<DirectConnection, DirectError> {
+        let credential = read_credential(self.credentials.as_ref(), &self.key, self.interaction)?;
+        match deadline {
+            Some(deadline) => {
+                DirectConnection::connect_until(&self.endpoint, &self.paired, &credential, deadline)
+            }
+            None => DirectConnection::connect(&self.endpoint, &self.paired, &credential),
+        }
+    }
 }
 
 impl DirectConnector for SavedConnector {
     fn connect(&self) -> Result<DirectConnection, DirectError> {
-        match self.deadline {
-            Some(deadline) => self.connect_by(deadline),
-            None => DirectConnection::connect(&self.endpoint, &self.paired, &self.credential),
-        }
+        self.dial(self.deadline)
+    }
+
+    fn connect_by(&self, deadline: Instant) -> Result<DirectConnection, DirectError> {
+        // CLI lane dials take the foreground credential prompt and the current action's
+        // transport deadline, which can start after a confirmation prompt.
+        self.dial(Some(deadline))
     }
 
     fn connect_with(&self, wait: &WaitLimit) -> Result<DirectConnection, DirectError> {
-        DirectConnection::connect_with(&self.endpoint, &self.paired, &self.credential, wait)
+        let credential = CredentialRead::within(self, wait)?;
+        DirectConnection::connect_with(&self.endpoint, &self.paired, &credential, wait)
+    }
+}
+
+fn read_credential(
+    store: &dyn CredentialStore,
+    key: &[u8; 32],
+    interaction: Interaction,
+) -> Result<DeviceCredential, DirectError> {
+    let secret = store
+        .read(key, interaction)
+        .map_err(|error| match error {
+            CredentialError::InteractionRequired => DirectError::InteractionRequired,
+            CredentialError::Unavailable => DirectError::CredentialUnavailable,
+        })?
+        .ok_or(DirectError::CredentialUnavailable)?;
+    DeviceCredential::from_bytes(&secret)
+}
+
+struct CredentialRead {
+    store: Arc<dyn CredentialStore>,
+    key: [u8; 32],
+    interaction: Interaction,
+    wait: WaitLimit,
+    reply: mpsc::SyncSender<Result<DeviceCredential, DirectError>>,
+}
+
+impl CredentialRead {
+    fn within(
+        connector: &SavedConnector,
+        wait: &WaitLimit,
+    ) -> Result<DeviceCredential, DirectError> {
+        if wait.ended() {
+            return Err(DirectError::Transport);
+        }
+        static READS: OnceLock<Result<mpsc::SyncSender<CredentialRead>, DirectError>> =
+            OnceLock::new();
+        let requests = READS
+            .get_or_init(Self::start)
+            .as_ref()
+            .map_err(|error| *error)?;
+        let (reply, received) = mpsc::sync_channel(1);
+        requests
+            .try_send(Self {
+                store: Arc::clone(&connector.credentials),
+                key: connector.key,
+                interaction: connector.interaction,
+                wait: wait.clone(),
+                reply,
+            })
+            .map_err(|_| DirectError::Transport)?;
+        while !wait.ended() {
+            let remaining = wait.next_poll().saturating_duration_since(Instant::now());
+            match received.recv_timeout(remaining) {
+                Ok(result) if !wait.ended() => return result,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                _ => break,
+            }
+        }
+        Err(DirectError::Transport)
+    }
+
+    fn start() -> Result<mpsc::SyncSender<Self>, DirectError> {
+        // Bound native work to one executing read and eight queued requests. A native read
+        // already underway can outlive its caller. Only the waiting dial can use its result.
+        let (requests, pending) = mpsc::sync_channel::<Self>(8);
+        std::thread::Builder::new()
+            .name("spaceterm-credential-read".into())
+            .spawn(move || {
+                while let Ok(request) = pending.recv() {
+                    if request.wait.ended() {
+                        continue;
+                    }
+                    let result =
+                        read_credential(request.store.as_ref(), &request.key, request.interaction);
+                    if !request.wait.ended() {
+                        let _ = request.reply.send(result);
+                    }
+                }
+            })
+            .map_err(|_| DirectError::Transport)?;
+        Ok(requests)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::ErrorKind;
+    use std::net::UdpSocket;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+    use std::time::Duration;
+    use zeroize::Zeroizing;
+
+    struct BlockedStore {
+        credential: Zeroizing<Vec<u8>>,
+        blocked: AtomicBool,
+        entered: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+        returned: mpsc::Sender<()>,
+    }
+
+    impl CredentialStore for BlockedStore {
+        fn read(
+            &self,
+            _: &[u8; 32],
+            _: Interaction,
+        ) -> Result<Option<Zeroizing<Vec<u8>>>, CredentialError> {
+            if self.blocked.load(Ordering::Acquire) {
+                let _ = self.entered.send(());
+                let _ = self
+                    .release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5));
+                let _ = self.returned.send(());
+            }
+            Ok(Some(self.credential.clone()))
+        }
+
+        fn insert(&self, _: &[u8; 32], _: &[u8]) -> Result<(), CredentialError> {
+            Err(CredentialError::Unavailable)
+        }
+
+        fn remove(&self, _: &[u8; 32], _: Interaction) -> Result<(), CredentialError> {
+            Err(CredentialError::Unavailable)
+        }
+    }
+
+    #[test]
+    fn saved_connector_discards_credentials_after_cancel_or_deadline() {
+        for cancelling in [true, false] {
+            let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_millis(150)))
+                .unwrap();
+            let (entered, read_started) = mpsc::channel();
+            let (release_read, release) = mpsc::channel();
+            let (returned, read_returned) = mpsc::channel();
+            let store = Arc::new(BlockedStore {
+                credential: Zeroizing::new(
+                    DeviceCredential::generate()
+                        .unwrap()
+                        .expose_bytes()
+                        .to_vec(),
+                ),
+                blocked: AtomicBool::new(false),
+                entered,
+                release: Mutex::new(release),
+                returned,
+            });
+            let saved = SavedConnection {
+                name: "Paired Machine".into(),
+                route: [1; 32],
+                endpoint: format!("quic://{}", socket.local_addr().unwrap()),
+                paired: PairedDevice {
+                    pin: MachinePin {
+                        build: "spaceterm-test".into(),
+                        core: [2; 32],
+                        public_key: [3; 32],
+                        certificate: [4; 32],
+                    },
+                    pairing: [5; 32],
+                    client: [6; 32],
+                },
+                credential: [7; 32],
+                credential_store: StoreKind::PrivateFile,
+                unpair: UnpairState::Paired,
+            };
+            let connector = saved.connector(store.clone(), Interaction::Quiet, None);
+            store.blocked.store(true, Ordering::Release);
+            let cancel = Arc::new(AtomicBool::new(false));
+            let deadline = Instant::now()
+                + if cancelling {
+                    Duration::from_secs(4)
+                } else {
+                    Duration::from_millis(500)
+                };
+            let wait = WaitLimit::new(deadline).with_cancellation(Arc::clone(&cancel));
+            let (finished, dial_finished) = mpsc::channel();
+            let dialer = Arc::clone(&connector);
+            let worker = std::thread::spawn(move || {
+                finished.send(dialer.connect_with(&wait).err()).unwrap();
+            });
+            let entered_before_expiry = read_started.recv_timeout(Duration::from_secs(2));
+            if cancelling {
+                cancel.store(true, Ordering::Release);
+            }
+            let result = dial_finished.recv_timeout(Duration::from_secs(1));
+            if cancelling && entered_before_expiry.is_ok() && result.is_ok() {
+                let expired_while_queued =
+                    WaitLimit::new(Instant::now() + Duration::from_millis(60));
+                assert_eq!(
+                    connector.connect_with(&expired_while_queued).err(),
+                    Some(DirectError::Transport)
+                );
+            }
+            let _ = release_read.send(());
+            drop(release_read);
+            worker.join().unwrap();
+            assert!(
+                entered_before_expiry.is_ok(),
+                "the dial must read its credential"
+            );
+            assert_eq!(result, Ok(Some(DirectError::Transport)));
+            read_returned.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert!(matches!(
+                socket.recv_from(&mut [0; 1500]).unwrap_err().kind(),
+                ErrorKind::WouldBlock | ErrorKind::TimedOut
+            ));
+            assert_eq!(read_started.try_recv(), Err(mpsc::TryRecvError::Empty));
+        }
     }
 }

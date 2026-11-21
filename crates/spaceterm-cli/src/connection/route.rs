@@ -6,11 +6,11 @@ use crate::contract::{
 };
 use crate::scope::IdPrefix;
 use crate::state::RouteKey;
-use spaceterm_client::direct::{DirectConnection, DirectConnector, DirectError};
 use spaceterm_client::{ConnectionStore, CredentialError, Interaction, SavedConnection};
-use spaceterm_core::{CliRoute, CoreError, MachineConnection, protocol::AgentName};
+use spaceterm_core::{
+    CliRoute, CoreError, MachineConnection, direct::DirectError, protocol::AgentName,
+};
 use std::io::IsTerminal;
-use std::sync::Arc;
 use std::time::Instant;
 
 pub struct AdmittedRoute {
@@ -245,15 +245,11 @@ impl Route {
                         CredentialError::Unavailable => DirectError::CredentialUnavailable,
                     })
                 })?;
+                let connector = saved.connector(credentials, interaction, deadline);
                 CliRoute::Paired {
                     route: saved.route,
                     paired: saved.paired.clone(),
-                    connector: Arc::new(SavedRouteConnector {
-                        saved: saved.as_ref().clone(),
-                        credentials,
-                        interaction,
-                        deadline,
-                    }),
+                    connector,
                 }
             }
         };
@@ -266,33 +262,6 @@ pub fn from_global(global: &Global, identity: &str) -> Result<Route, ResolutionE
         spaceterm_core::cli_state_root(identity).map_err(crate::contract::from_core_error)?,
     );
     resolve(&selector, &store)
-}
-
-/// The CLI takes native credential access when the command opens a lane.
-struct SavedRouteConnector {
-    saved: SavedConnection,
-    credentials: Arc<dyn spaceterm_client::CredentialStore>,
-    interaction: Interaction,
-    deadline: Option<Instant>,
-}
-
-impl SavedRouteConnector {
-    fn dial(&self, deadline: Option<Instant>) -> Result<DirectConnection, DirectError> {
-        self.saved
-            .connector(self.credentials.as_ref(), self.interaction, deadline)?
-            .connect()
-    }
-}
-
-impl DirectConnector for SavedRouteConnector {
-    fn connect(&self) -> Result<DirectConnection, DirectError> {
-        self.dial(self.deadline)
-    }
-
-    fn connect_by(&self, deadline: Instant) -> Result<DirectConnection, DirectError> {
-        // A confirmed service action starts its own budget when the person answers.
-        self.dial(Some(deadline))
-    }
 }
 
 pub fn selector(global: &Global) -> Result<String, Failure> {
@@ -373,7 +342,7 @@ impl ResolutionError {
 
 #[cfg(test)]
 mod tests {
-    use super::{DirectConnector, SavedRouteConnector, validate_command};
+    use super::validate_command;
     use crate::args::Cli;
     use clap::Parser;
 
@@ -427,15 +396,14 @@ mod tests {
             credential_store: spaceterm_client::StoreKind::Keychain,
             unpair: spaceterm_client::UnpairState::Paired,
         };
-        let connector = SavedRouteConnector {
-            saved,
-            credentials: std::sync::Arc::new(OneCredential(zeroize::Zeroizing::new(
+        let connector = saved.connector(
+            std::sync::Arc::new(OneCredential(zeroize::Zeroizing::new(
                 credential.expose_bytes().to_vec(),
             ))),
-            interaction: super::Interaction::Quiet,
+            super::Interaction::Quiet,
             // Taken when the command began; reading the confirmation used all of it.
-            deadline: Some(Instant::now()),
-        };
+            Some(Instant::now()),
+        );
         let began = Instant::now();
         assert!(connector.connect().is_err());
         assert!(

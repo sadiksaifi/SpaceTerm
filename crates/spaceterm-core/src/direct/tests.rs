@@ -2595,32 +2595,47 @@ fn paired_administration_is_refused_without_changing_invitations_claims_or_devic
 }
 
 #[cfg(feature = "client")]
-fn paired_workspace_machine(fixture: &Fixture) -> spaceterm_client::PairedMachine {
-    use spaceterm_client::{
-        CredentialError, CredentialStore, Interaction, SavedConnection, StoreKind, UnpairState,
-    };
-    use zeroize::Zeroizing;
+struct WorkspaceCredential {
+    key: [u8; 32],
+    value: Mutex<Option<DeviceCredential>>,
+}
 
-    struct Credential {
-        key: [u8; 32],
-        value: DeviceCredential,
+#[cfg(feature = "client")]
+impl spaceterm_client::CredentialStore for WorkspaceCredential {
+    fn read(
+        &self,
+        key: &[u8; 32],
+        interaction: spaceterm_client::Interaction,
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, spaceterm_client::CredentialError> {
+        assert_eq!(interaction, spaceterm_client::Interaction::Quiet);
+        assert_eq!(*key, self.key);
+        Ok(self
+            .value
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|key| zeroize::Zeroizing::new(key.expose_bytes().to_vec())))
     }
-    impl CredentialStore for Credential {
-        fn read(
-            &self,
-            key: &[u8; 32],
-            interaction: Interaction,
-        ) -> Result<Option<Zeroizing<Vec<u8>>>, CredentialError> {
-            assert_eq!(interaction, Interaction::Quiet);
-            Ok((*key == self.key).then(|| Zeroizing::new(self.value.expose_bytes().to_vec())))
-        }
-        fn insert(&self, _: &[u8; 32], _: &[u8]) -> Result<(), CredentialError> {
-            Err(CredentialError::Unavailable)
-        }
-        fn remove(&self, _: &[u8; 32], _: Interaction) -> Result<(), CredentialError> {
-            Err(CredentialError::Unavailable)
-        }
+
+    fn insert(&self, _: &[u8; 32], _: &[u8]) -> Result<(), spaceterm_client::CredentialError> {
+        Err(spaceterm_client::CredentialError::Unavailable)
     }
+
+    fn remove(
+        &self,
+        _: &[u8; 32],
+        _: spaceterm_client::Interaction,
+    ) -> Result<(), spaceterm_client::CredentialError> {
+        self.value.lock().unwrap().take();
+        Ok(())
+    }
+}
+
+#[cfg(feature = "client")]
+fn paired_workspace_machine(
+    fixture: &Fixture,
+) -> (spaceterm_client::PairedMachine, Arc<WorkspaceCredential>) {
+    use spaceterm_client::{Interaction, SavedConnection, StoreKind, UnpairState};
 
     fixture.enable();
     let credential = DeviceCredential::generate().unwrap();
@@ -2633,17 +2648,12 @@ fn paired_workspace_machine(fixture: &Fixture) -> spaceterm_client::PairedMachin
         credential_store: StoreKind::PrivateFile,
         unpair: UnpairState::Paired,
     };
-    let connector = saved
-        .connector(
-            &Credential {
-                key: saved.credential,
-                value: credential,
-            },
-            Interaction::Quiet,
-            None,
-        )
-        .unwrap();
-    spaceterm_client::PairedMachine::new(
+    let credentials = Arc::new(WorkspaceCredential {
+        key: saved.credential,
+        value: Mutex::new(Some(credential)),
+    });
+    let connector = saved.connector(credentials.clone(), Interaction::Quiet, None);
+    let machine = spaceterm_client::PairedMachine::new(
         &fixture.paths.identity,
         saved.route,
         saved.paired,
@@ -2652,7 +2662,8 @@ fn paired_workspace_machine(fixture: &Fixture) -> spaceterm_client::PairedMachin
         None,
         Arc::new(|| None),
     )
-    .unwrap()
+    .unwrap();
+    (machine, credentials)
 }
 
 #[cfg(feature = "client")]
@@ -2718,7 +2729,8 @@ fn paired_workspace_retry_keeps_the_original_after_a_lost_reply_and_reconnect() 
     }
 
     let fixture = Fixture::new();
-    let machine = paired_workspace_machine(&fixture);
+    let (machine, credentials) = paired_workspace_machine(&fixture);
+    let retained = machine.clone();
     let authority = Arc::new(Mutex::new(State::empty()));
     let runtime = service(Runtime {
         state: Arc::clone(&authority),
@@ -2770,6 +2782,22 @@ fn paired_workspace_retry_keeps_the_original_after_a_lost_reply_and_reconnect() 
     assert_eq!(editor.journal().last().unwrap(), &receipt);
     machine.disconnect();
     second.join().unwrap().unwrap();
+
+    drop(editor);
+    drop(machine);
+    let key = credentials.value.lock().unwrap().take().unwrap();
+    let withdrawn = CoreError::from(DirectError::CredentialUnavailable);
+    let server = fixture.serve_next();
+    let bounded = retained.link_with_limit(&spaceterm_client::WaitLimit::new(until()));
+    retained.disconnect();
+    assert_eq!(bounded.err(), Some(withdrawn));
+    let ordinary = retained.link();
+    retained.disconnect();
+    assert_eq!(ordinary.err(), Some(withdrawn));
+
+    // The original pairing still admits work over QUIC if the credential is available.
+    connect(&fixture.endpoint(), retained.paired(), &key).close();
+    server.join().unwrap().unwrap();
 }
 
 #[cfg(feature = "client")]
@@ -2783,7 +2811,7 @@ fn paired_workspace_cancels_a_stalled_admission_before_journaling() {
     };
 
     let fixture = Fixture::new();
-    let machine = paired_workspace_machine(&fixture);
+    let (machine, _) = paired_workspace_machine(&fixture);
     let directory = crate::Directory::open(&fixture.root.join("client"), true).unwrap();
     let mut editor = machine
         .workspace_edits(journal_writer(directory).unwrap())
