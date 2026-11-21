@@ -242,9 +242,9 @@ backend = "npm:skills"
 specifiers = ["1.7.0"]
 
 [[tools."npm:tagsmith"]]
-version = "1.2.0"
+version = "1.2.1"
 backend = "npm:tagsmith"
-specifiers = ["1.2.0"]
+specifiers = ["1.2.1"]
 
 [[tools.python]]
 version = "3.13.15"

@@ -1,10 +1,11 @@
 #!/usr/bin/env python
-# MISE description="Build the mobile crates as Git dependencies in an external Cargo project"
+# MISE description="Build libspaceterm from one annotated Git tag in an external Cargo project"
 # USAGE arg "<target>" help="Mobile Rust target"
-# USAGE arg "<revision>" help="Candidate Git commit"
-"""Build the mobile crates as Git dependencies in an external Cargo project."""
+# USAGE arg "<tag>" help="Annotated libspaceterm Git tag"
+"""Build libspaceterm from one annotated Git tag in an external Cargo project."""
 
 import argparse
+import json
 import subprocess
 import tempfile
 import tomllib
@@ -16,18 +17,18 @@ CRATES = ("spaceterm-protocol", "spaceterm-client", "spaceterm-terminal-client")
 TARGETS = ("aarch64-apple-ios", "aarch64-linux-android")
 
 
-def build(target, revision):
-    candidate = subprocess.run(
-        ["git", "rev-parse", "--verify", "--end-of-options", f"{revision}^{{commit}}"],
+def build(target, tag):
+    tag_type = subprocess.run(
+        ["git", "cat-file", "-t", f"refs/tags/{tag}"],
         cwd=ROOT,
         capture_output=True,
         text=True,
     )
-    if candidate.returncode:
-        raise TaskError("Candidate commit is unavailable in this Git checkout")
+    if tag_type.returncode or tag_type.stdout.strip() != "tag":
+        raise TaskError("An annotated libspaceterm tag must exist in this Git checkout")
 
-    commit = candidate.stdout.strip()
     source = ROOT.as_uri()
+    cargo_tag = json.dumps(tag, ensure_ascii=False)
     with (ROOT / "rust-toolchain.toml").open("rb") as toolchain_file:
         toolchain = tomllib.load(toolchain_file)["toolchain"]["channel"]
 
@@ -35,7 +36,7 @@ def build(target, revision):
         consumer = Path(directory)
         # Keep Cargo's default features so the check matches a new mobile consumer.
         dependencies = "".join(
-            f'{crate} = {{ git = "{source}", rev = "{commit}" }}\n' for crate in CRATES
+            f'{crate} = {{ git = "{source}", tag = {cargo_tag} }}\n' for crate in CRATES
         )
         (consumer / "Cargo.toml").write_text(
             '[package]\nname = "spaceterm-mobile-consumer"\nversion = "0.0.0"\n'
@@ -53,6 +54,6 @@ def build(target, revision):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("target", choices=TARGETS)
-    parser.add_argument("revision")
+    parser.add_argument("tag")
     args = parser.parse_args()
-    main(lambda: build(args.target, args.revision))
+    main(lambda: build(args.target, args.tag))

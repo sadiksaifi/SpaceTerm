@@ -1,6 +1,7 @@
 """Every release job derives the same plan from a stable greenfield tag, exact source and
 public inputs."""
 
+import json
 import os
 import shutil
 import subprocess
@@ -206,6 +207,39 @@ class TagPolicyTests(unittest.TestCase):
     def test_the_deleted_0_10_0_fails_the_policy(self):
         with self.assertRaises(TaskError):
             release_plan.check_policy("0.10.0", root=self.root)
+
+    def test_targets_resolve_versions_from_their_own_history(self):
+        self.git(self.root, "tag", "-am", "Desktop release", "v0.12.0")
+        self.git(self.root, "push", "-q", "origin", "v0.12.0")
+        self.assert_preview("libspaceterm", "libspaceterm", "minor", "0.1.0", "libspaceterm@v0.1.0")
+
+        self.git(self.root, "tag", "-am", "libspaceterm release", "libspaceterm@v2.3.4")
+        self.git(self.root, "push", "-q", "origin", "libspaceterm@v2.3.4")
+        self.assert_preview("spaceterm", "stable", "patch", "0.12.1", "v0.12.1")
+        self.assert_preview("libspaceterm", "libspaceterm", "patch", "2.3.5", "libspaceterm@v2.3.5")
+
+    def assert_preview(self, target, channel, bump, version, tag):
+        result = subprocess.run(
+            [
+                "tagsmith",
+                "tag",
+                "--target",
+                target,
+                "--channel",
+                channel,
+                "--bump",
+                bump,
+                "--dry-run",
+                "--json",
+            ],
+            cwd=self.root,
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        plan = json.loads(result.stdout)
+        self.assertEqual(plan["version"], version)
+        self.assertEqual(plan["tag"], tag)
 
 
 if __name__ == "__main__":

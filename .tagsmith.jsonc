@@ -11,6 +11,13 @@
     "spaceterm": {
       "path": ".",
       "channels": [{ "name": "stable", "strategy": "stable" }]
+    },
+    "libspaceterm": {
+      "path": ".",
+      "tagPattern": "libspaceterm@v{version}",
+      "tagMessage": "Release libspaceterm {version}",
+      "initialVersion": "0.0.0",
+      "channels": [{ "name": "libspaceterm", "strategy": "stable" }]
     }
   }
 }

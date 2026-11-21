@@ -55,6 +55,8 @@ _Avoid_: server, host
 
 **SpaceTerm Client**: An application that controls, observes or presents SpaceTerm Core state.
 
+**libspaceterm**: The three Rust crates that SpaceTerm Clients share for the wire protocol, paired connections and terminal presentation.
+
 **SpaceTerm CLI**: The `spaceterm` program in SpaceTerm Core, which runs the Core's account service and acts as a command-line SpaceTerm Client.
 
 **Command Line Tool**: The link in the account's `~/.local/bin`, named for the build identity, that runs that identity's SpaceTerm CLI from any terminal.
