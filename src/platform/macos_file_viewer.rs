@@ -14,20 +14,25 @@ impl FileViewer for FinderViewer {
     /// NSWorkspace waits for Finder's reply in a nested event loop, and that loop runs queued UI
     /// work while the caller still holds the UI state, which aborts SpaceTerm.
     fn reveal(&self, path: &Path) -> Reveal {
-        let Some(path) = path.to_str().map(str::to_owned) else {
-            return Box::pin(std::future::ready(Err(RevealUnavailable)));
-        };
-        let (answer, settled) = async_channel::bounded(1);
-        let spawned = std::thread::Builder::new()
-            .name("finder-reveal".to_owned())
-            .spawn(move || {
-                let _ = answer.try_send(select(&path));
-            });
-        if spawned.is_err() {
-            return Box::pin(std::future::ready(Err(RevealUnavailable)));
+        match path.to_str() {
+            Some(path) => on_own_thread(path.to_owned(), select),
+            None => Box::pin(std::future::ready(Err(RevealUnavailable))),
         }
-        Box::pin(async move { settled.recv().await.unwrap_or(Err(RevealUnavailable)) })
     }
+}
+
+/// Runs `ask` with `path` on a new thread, and settles with its answer.
+fn on_own_thread(path: String, ask: fn(&str) -> Result<(), RevealUnavailable>) -> Reveal {
+    let (answer, settled) = async_channel::bounded(1);
+    let spawned = std::thread::Builder::new()
+        .name("finder-reveal".to_owned())
+        .spawn(move || {
+            let _ = answer.try_send(ask(&path));
+        });
+    if spawned.is_err() {
+        return Box::pin(std::future::ready(Err(RevealUnavailable)));
+    }
+    Box::pin(async move { settled.recv().await.unwrap_or(Err(RevealUnavailable)) })
 }
 
 fn select(path: &str) -> Result<(), RevealUnavailable> {
@@ -38,4 +43,27 @@ fn select(path: &str) -> Result<(), RevealUnavailable> {
             .then_some(())
             .ok_or(RevealUnavailable)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use std::thread::ThreadId;
+
+    static ASKED: Mutex<Option<(ThreadId, String)>> = Mutex::new(None);
+
+    fn record(path: &str) -> Result<(), RevealUnavailable> {
+        *ASKED.lock().unwrap() = Some((std::thread::current().id(), path.to_owned()));
+        Err(RevealUnavailable)
+    }
+
+    #[test]
+    fn finder_is_asked_from_another_thread_and_its_answer_settles_the_reveal() {
+        let answer = futures_lite::future::block_on(on_own_thread("/tmp/launcher".into(), record));
+        assert_eq!(answer, Err(RevealUnavailable));
+        let (thread, path) = ASKED.lock().unwrap().clone().expect("Finder was asked");
+        assert_ne!(thread, std::thread::current().id());
+        assert_eq!(path, "/tmp/launcher");
+    }
 }
