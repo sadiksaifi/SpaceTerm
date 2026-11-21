@@ -1,19 +1,19 @@
 //! `pair`: let another device pair with SpaceTerm Core on this machine.
 //!
 //! It prints a one-use Invitation Link and, when stdout supports it, the same link as a QR
-//! code, then waits for that invitation's claim and asks the person to type the Comparison
-//! Code the joining device shows. A match approves the claim. A mismatch rejects it.
-//! The invitation is withdrawn on end of input,
-//! interrupt, timeout and every failure, so no link outlives the command.
+//! code, then waits for that invitation's claim. It displays the claim's Comparison Code
+//! and asks the person to confirm it matches the one on the joining device.
 mod qr;
 
 use super::{Context, Reply};
 use crate::contract::{
     self, Code, Envelope, Failure, OutputError, Warning, WarningCode, WarningDetails,
 };
+use rustix::termios::{QueueSelector, tcflush};
 use spaceterm_core::MachineConnection;
 use spaceterm_core::direct::{ClaimId, PairingClaim};
 use std::io::Write;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::time::{Duration, Instant};
 
 const COMMAND: &str = "pair";
@@ -21,18 +21,24 @@ const COMMAND: &str = "pair";
 const LIFETIME: Duration = Duration::from_secs(5 * 60);
 /// How often the command asks for its invitation's claim.
 const POLL: Duration = Duration::from_secs(2);
-/// The longest Comparison Code line the command reads.
-const CODE_LIMIT: usize = 32;
+/// The longest answer the command reads.
+const ANSWER_LIMIT: usize = 32;
 const WAITING: &str = "Open this Invitation Link on the device that joins. Waiting for it. Ctrl-C withdraws the invitation.\n";
-const COMPARISON_PROMPT: &str = " wants to pair. Type the Comparison Code it shows: ";
+const DEVICE_NOTICE: &str = " wants to pair.";
+const CODE_LABEL: &str = "Comparison Code: ";
+const CONFIRM_PROMPT: &str = "Does this code match the one on your device? [y/N] ";
 
-/// Keep the QR visible through the waiting message, the longest device name and code entry.
+/// Keep the QR visible through the waiting message, the claim display and the answer.
 fn prompt_rows(columns: u16) -> usize {
     let columns = usize::from(columns).max(1);
     let name_columns = spaceterm_core::pane::control::MAX_CLIENT_NAME_CHARS * 2;
+    // A double-width character can wrap before the final column of an odd-width terminal.
+    let device_row_width = (columns - columns % 2).max(1);
     WAITING.trim_end().len().div_ceil(columns)
-        + (name_columns + COMPARISON_PROMPT.len() + CODE_LIMIT).div_ceil(columns)
-        + 1 // The cursor after the entered code's newline.
+        + (name_columns + DEVICE_NOTICE.len()).div_ceil(device_row_width)
+        + (CODE_LABEL.len() + 6).div_ceil(columns)
+        + (CONFIRM_PROMPT.len() + ANSWER_LIMIT).div_ceil(columns)
+        + 1 // The cursor after the answer's newline.
 }
 
 /// What pairing needs from SpaceTerm Core. Its account IPC provides it.
@@ -78,27 +84,36 @@ pub trait Person {
     /// Shows the Invitation Link and, when supported, its QR rendering on stdout.
     fn show_link(&mut self, link: &str) -> Result<(), OutputError>;
     /// Says something on stderr.
-    fn say(&mut self, text: &str);
-    /// Reads the typed Comparison Code before `deadline`. `None` is end of input, an
-    /// interrupt or the deadline.
-    fn comparison_code(&mut self, deadline: Instant) -> Option<String>;
+    fn say(&mut self, text: &str) -> std::io::Result<()>;
+    /// Discards queued input, shows the question and reads an answer before `deadline`.
+    fn ask(&mut self, question: &str, deadline: Instant) -> Result<Option<String>, Code>;
     fn interrupted(&self) -> bool;
     fn sleep(&mut self, duration: Duration);
 }
 
-struct Terminal<W> {
+struct Terminal<'a, W> {
+    input: BorrowedFd<'a>,
     output: W,
+    stderr: &'a mut dyn Write,
 }
 
-impl<W: Write> Person for Terminal<W> {
+impl<W: Write> Person for Terminal<'_, W> {
     fn show_link(&mut self, link: &str) -> Result<(), OutputError> {
         qr::write_invitation(&mut self.output, link, qr::terminal_size()).map_err(OutputError::from)
     }
-    fn say(&mut self, text: &str) {
-        let _ = write!(std::io::stderr().lock(), "{text}");
+    fn say(&mut self, text: &str) -> std::io::Result<()> {
+        self.stderr.write_all(text.as_bytes())?;
+        self.stderr.flush()
     }
-    fn comparison_code(&mut self, deadline: Instant) -> Option<String> {
-        super::read_line_until(CODE_LIMIT, Some(deadline))
+    fn ask(&mut self, question: &str, deadline: Instant) -> Result<Option<String>, Code> {
+        // Clear typeahead before the question is visible so a prompt answer is kept.
+        tcflush(self.input, QueueSelector::IFlush).map_err(|_| Code::InteractionRequired)?;
+        self.say(question).map_err(|_| Code::OutputFailed)?;
+        Ok(super::read_line_until(
+            self.input,
+            ANSWER_LIMIT,
+            Some(deadline),
+        ))
     }
     fn interrupted(&self) -> bool {
         crate::interrupt::interrupted()
@@ -147,7 +162,9 @@ pub fn pair(
         }
         Err(OutputError::Failed) => return failed(Failure::new(Code::OutputFailed)),
     }
-    person.say(WAITING);
+    if person.say(WAITING).is_err() {
+        return failed(Failure::new(Code::OutputFailed));
+    }
     let deadline = Instant::now() + limit.min(lifetime).min(LIFETIME);
     let claim = loop {
         if person.interrupted() {
@@ -166,26 +183,25 @@ pub fn pair(
         }
         person.sleep(POLL);
     };
-    person.say(&format!(
-        "{}{COMPARISON_PROMPT}",
-        claim.device_name.as_str()
-    ));
-    // The code is entered within the invitation's own lifetime.
-    let Some(typed) = person.comparison_code(deadline) else {
+    let rejected = |code| {
         let _ = core.reject(&claim.id);
-        let code = if person.interrupted() {
-            Code::Interrupted
-        } else if Instant::now() >= deadline {
-            Code::Timeout
-        } else {
-            Code::InteractionRequired
-        };
-        return failed(Failure::new(code));
+        failed(Failure::new(code))
     };
-    let typed: String = typed.chars().filter(|c| !c.is_whitespace()).collect();
-    if typed != claim.comparison_code().to_string() {
-        let _ = core.reject(&claim.id);
-        return failed(Failure::new(Code::ComparisonMismatch));
+    let name = claim.device_name.as_str();
+    let code = claim.comparison_code();
+    if person
+        .say(&format!("{name}{DEVICE_NOTICE}\n{CODE_LABEL}{code}\n"))
+        .is_err()
+    {
+        return rejected(Code::OutputFailed);
+    }
+    match person.ask(CONFIRM_PROMPT, deadline) {
+        _ if person.interrupted() => return rejected(Code::Interrupted),
+        _ if Instant::now() >= deadline => return rejected(Code::Timeout),
+        Ok(Some(answer)) if answer.trim() == "y" => {}
+        Ok(Some(_)) => return rejected(Code::ComparisonMismatch),
+        Ok(None) => return rejected(Code::InteractionRequired),
+        Err(code) => return rejected(code),
     }
     match core.approve(&claim) {
         Ok(device) => Paired::Approved { device },
@@ -238,15 +254,18 @@ pub fn run(context: &Context<'_>, address: Option<&str>) -> Reply {
         Ok(cooperation) => cooperation,
         Err(failure) => return Reply::failure(COMMAND, core, failure),
     };
+    let mut stderr = std::io::stderr();
     let paired = pair(
         &connection,
         &mut Terminal {
+            input: std::io::stdin().as_fd(),
             output: std::io::stdout().lock(),
+            stderr: &mut stderr,
         },
         address,
         context.timeout(LIFETIME),
     );
-    reply(core, paired, &mut std::io::stderr().lock())
+    reply(core, paired, &mut stderr)
 }
 
 /// Paired devices need SpaceTerm Core to keep running after logout, which Linux allows only
@@ -319,6 +338,7 @@ mod tests {
             Ok(self.claims.clone())
         }
         fn approve(&self, claim: &PairingClaim) -> Result<String, Failure> {
+            assert_eq!(claim, &self.claims[0]);
             self.log.borrow_mut().push("approve".into());
             Ok(claim.device_name.as_str().to_owned())
         }
@@ -337,19 +357,28 @@ mod tests {
     }
 
     struct Typist {
-        code: Option<String>,
+        answer: Option<String>,
         interrupt_after: Option<usize>,
+        interrupt_on_answer: bool,
         sleeps: usize,
         link: Option<String>,
+        messages: String,
     }
     impl Person for Typist {
         fn show_link(&mut self, link: &str) -> Result<(), OutputError> {
             self.link = Some(link.to_owned());
             Ok(())
         }
-        fn say(&mut self, _: &str) {}
-        fn comparison_code(&mut self, _: Instant) -> Option<String> {
-            self.code.clone()
+        fn say(&mut self, text: &str) -> std::io::Result<()> {
+            self.messages.push_str(text);
+            Ok(())
+        }
+        fn ask(&mut self, question: &str, _: Instant) -> Result<Option<String>, Code> {
+            self.messages.push_str(question);
+            if self.interrupt_on_answer {
+                self.interrupt_after = Some(self.sleeps);
+            }
+            Ok(self.answer.take())
         }
         fn interrupted(&self) -> bool {
             self.interrupt_after
@@ -361,6 +390,8 @@ mod tests {
     }
 
     fn claim() -> PairingClaim {
+        let mut exchange_hash = [0; 32];
+        exchange_hash[3] = 42;
         PairingClaim {
             id: [2; 32],
             invitation_id: [1; 32],
@@ -368,33 +399,38 @@ mod tests {
             device_public_key: [4; 32],
             device_name: "Laptop".into(),
             expires_at_unix_seconds: u64::MAX,
-            exchange_hash: [5; 32],
+            exchange_hash,
         }
     }
 
-    fn typist(code: Option<String>) -> Typist {
+    fn typist(answer: Option<String>) -> Typist {
         Typist {
-            code,
+            answer,
             interrupt_after: None,
+            interrupt_on_answer: false,
             sleeps: 0,
             link: None,
+            messages: String::new(),
         }
     }
 
     #[test]
-    fn a_matching_code_approves_the_invitations_own_claim() {
+    fn an_explicit_y_approves_the_displayed_claim() {
         let core = Core {
             claims: vec![claim()],
             log: RefCell::default(),
             withdrawal_fails: false,
         };
-        let mut person = typist(Some(format!(" {} ", claim().comparison_code())));
+        let mut person = typist(Some("y".into()));
         let paired = pair(
             &core,
             &mut person,
             Some("build.example.test:9300"),
             LIFETIME,
         );
+        assert!(person.messages.ends_with(
+            "Laptop wants to pair.\nComparison Code: 000042\nDoes this code match the one on your device? [y/N] "
+        ));
         assert_eq!(
             paired,
             Paired::Approved {
@@ -409,29 +445,100 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_code_rejects_the_claim_and_withdraws_the_invitation() {
+    fn blank_negative_and_invalid_answers_reject_and_withdraw() {
+        for answer in ["", "n", "yes", "Y", "000042"] {
+            let core = Core {
+                claims: vec![claim()],
+                log: RefCell::default(),
+                withdrawal_fails: false,
+            };
+            let paired = pair(&core, &mut typist(Some(answer.into())), None, LIFETIME);
+            assert_eq!(
+                paired,
+                Paired::Failed {
+                    failure: Failure::new(Code::ComparisonMismatch),
+                    withdrawn: true
+                },
+                "answer {answer:?}"
+            );
+            assert_eq!(
+                *core.log.borrow(),
+                ["invite -", "claims", "reject", "withdraw"]
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_accepts_only_the_answer_entered_after_the_prompt() {
+        use rustix::event::{PollFd, PollFlags, Timespec, poll};
+        use std::fs::File;
+        use std::io::{BufRead, BufReader};
+        use std::os::fd::FromRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (mut master, mut slave) = (-1, -1);
+        // SAFETY: Both descriptors have live storage and the optional arguments are null.
+        let opened = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(opened, 0);
+        // SAFETY: A successful openpty returns fresh, owned descriptors.
+        let (mut master, slave) = unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) };
+        master.write_all(b"y\ny").unwrap();
+        let mut ready = [PollFd::new(&slave, PollFlags::IN)];
+        let timeout = Timespec {
+            tv_sec: 2,
+            tv_nsec: 0,
+        };
+        assert_eq!(poll(&mut ready, Some(&timeout)).unwrap(), 1);
+
         let core = Core {
             claims: vec![claim()],
             log: RefCell::default(),
             withdrawal_fails: false,
         };
-        let wrong = if claim().comparison_code().to_string() == "000000" {
-            "111111"
-        } else {
-            "000000"
-        };
-        let paired = pair(&core, &mut typist(Some(wrong.into())), None, LIFETIME);
-        assert_eq!(
-            paired,
-            Paired::Failed {
-                failure: Failure::new(Code::ComparisonMismatch),
-                withdrawn: true
-            }
-        );
-        assert_eq!(
-            *core.log.borrow(),
-            ["invite -", "claims", "reject", "withdraw"]
-        );
+        let (mut stderr, reader) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        std::thread::scope(|scope| {
+            let response = scope.spawn(move || {
+                let mut shown = Vec::new();
+                BufReader::new(reader).read_until(b']', &mut shown).unwrap();
+                assert!(shown.ends_with(b"Does this code match the one on your device? [y/N]"));
+                master.write_all(b"\n").unwrap();
+                master
+            });
+            let paired = pair(
+                &core,
+                &mut Terminal {
+                    input: slave.as_fd(),
+                    output: Vec::new(),
+                    stderr: &mut stderr,
+                },
+                None,
+                Duration::from_secs(2),
+            );
+            // Keep the master open until the command has read the answer.
+            drop(response.join().unwrap());
+            assert_eq!(
+                paired,
+                Paired::Failed {
+                    failure: Failure::new(Code::ComparisonMismatch),
+                    withdrawn: true,
+                }
+            );
+            assert_eq!(
+                *core.log.borrow(),
+                ["invite -", "claims", "reject", "withdraw"]
+            );
+        });
     }
 
     #[test]
@@ -444,7 +551,16 @@ mod tests {
             };
             let (writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
             drop(reader);
-            let paired = pair(&core, &mut Terminal { output: writer }, None, LIFETIME);
+            let paired = pair(
+                &core,
+                &mut Terminal {
+                    input: std::io::stdin().as_fd(),
+                    output: writer,
+                    stderr: &mut std::io::sink(),
+                },
+                None,
+                LIFETIME,
+            );
             assert_eq!(*core.log.borrow(), ["invite -", "withdraw"]);
             assert_eq!(paired, Paired::BrokenPipe);
             let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
@@ -465,17 +581,38 @@ mod tests {
     }
 
     #[test]
-    fn a_code_not_entered_before_the_invitation_expires_rejects_and_withdraws() {
+    fn a_y_at_the_deadline_still_rejects_and_withdraws() {
         let core = Core {
             claims: vec![claim()],
             log: RefCell::default(),
             withdrawal_fails: false,
         };
-        // The claim arrives at the end of the invitation's lifetime, and no code follows.
         assert_eq!(
-            pair(&core, &mut typist(None), None, Duration::ZERO),
+            pair(&core, &mut typist(Some("y".into())), None, Duration::ZERO),
             Paired::Failed {
                 failure: Failure::new(Code::Timeout),
+                withdrawn: true
+            }
+        );
+        assert_eq!(
+            *core.log.borrow(),
+            ["invite -", "claims", "reject", "withdraw"]
+        );
+    }
+
+    #[test]
+    fn an_interrupt_as_y_arrives_still_rejects_and_withdraws() {
+        let core = Core {
+            claims: vec![claim()],
+            log: RefCell::default(),
+            withdrawal_fails: false,
+        };
+        let mut person = typist(Some("y".into()));
+        person.interrupt_on_answer = true;
+        assert_eq!(
+            pair(&core, &mut person, None, LIFETIME),
+            Paired::Failed {
+                failure: Failure::new(Code::Interrupted),
                 withdrawn: true
             }
         );

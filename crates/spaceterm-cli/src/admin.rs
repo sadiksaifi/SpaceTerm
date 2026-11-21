@@ -38,6 +38,7 @@ use spaceterm_core::service::lane::client::{Lane, LaneError, Session};
 use spaceterm_core::service::lane::{LaneOperationState, LaneReceipt};
 use spaceterm_core::{CliRoute, CoreError, MachineConnection};
 use std::io::Write;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::time::{Duration, Instant};
 
 /// One finished machine verb: its envelope and its operational text.
@@ -777,11 +778,15 @@ pub fn confirm(question: &str) -> bool {
 
 /// One line from stdin, at most `limit` bytes. `None` on end of input, interrupt or overflow.
 pub fn read_line(limit: usize) -> Option<String> {
-    read_line_until(limit, None)
+    read_line_until(std::io::stdin().as_fd(), limit, None)
 }
 
 /// [`read_line`] that also gives up at `deadline`.
-pub fn read_line_until(limit: usize, deadline: Option<std::time::Instant>) -> Option<String> {
+fn read_line_until(
+    input: BorrowedFd<'_>,
+    limit: usize,
+    deadline: Option<Instant>,
+) -> Option<String> {
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
     loop {
@@ -798,7 +803,7 @@ pub fn read_line_until(limit: usize, deadline: Option<std::time::Instant>) -> Op
         }
         // SIGINT restarts a blocking read, so the read waits for input in short polls.
         let mut ready = [libc::pollfd {
-            fd: libc::STDIN_FILENO,
+            fd: input.as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
         }];
@@ -807,7 +812,7 @@ pub fn read_line_until(limit: usize, deadline: Option<std::time::Instant>) -> Op
             continue;
         }
         // SAFETY: reads at most one byte into a live buffer.
-        let count = unsafe { libc::read(libc::STDIN_FILENO, byte.as_mut_ptr().cast(), 1) };
+        let count = unsafe { libc::read(input.as_raw_fd(), byte.as_mut_ptr().cast(), 1) };
         match count {
             1 if byte[0] == b'\n' => break,
             1 => {
