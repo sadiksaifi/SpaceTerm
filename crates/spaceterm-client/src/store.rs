@@ -3,7 +3,7 @@ use crate::WaitLimit;
 use crate::credentials::{CredentialError, CredentialStore, Interaction};
 use crate::direct::{DeviceCredential, DirectConnection, DirectConnector, DirectError};
 use std::collections::BTreeSet;
-use std::sync::{Arc, OnceLock, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
 
 use crate::direct::{Endpoint, MachinePin, PairedDevice};
@@ -522,6 +522,8 @@ impl SavedConnection {
     /// credential with the requested interaction policy.
     /// [`DirectConnector::connect_with`] bounds the credential wait as well as the dial.
     /// A store read already executing can finish after the wait ends. Its result is discarded.
+    /// A bounded dial fails with [`DirectError::Transport`] if its store is already reading
+    /// for another bounded dial or both bounded read slots are occupied.
     pub fn connector(
         &self,
         credentials: Arc<dyn CredentialStore>,
@@ -592,13 +594,10 @@ fn read_credential(
     DeviceCredential::from_bytes(&secret)
 }
 
-struct CredentialRead {
-    store: Arc<dyn CredentialStore>,
-    key: [u8; 32],
-    interaction: Interaction,
-    wait: WaitLimit,
-    reply: mpsc::SyncSender<Result<DeviceCredential, DirectError>>,
-}
+const MAX_ACTIVE_CREDENTIAL_READS: usize = 2;
+static ACTIVE_CREDENTIAL_READS: Mutex<Vec<Arc<dyn CredentialStore>>> = Mutex::new(Vec::new());
+
+struct CredentialRead(Arc<dyn CredentialStore>);
 
 impl CredentialRead {
     fn within(
@@ -608,20 +607,21 @@ impl CredentialRead {
         if wait.ended() {
             return Err(DirectError::Transport);
         }
-        static READS: OnceLock<Result<mpsc::SyncSender<CredentialRead>, DirectError>> =
-            OnceLock::new();
-        let requests = READS
-            .get_or_init(Self::start)
-            .as_ref()
-            .map_err(|error| *error)?;
+        let read = Self::reserve(&connector.credentials)?;
+        let key = connector.key;
+        let interaction = connector.interaction;
+        let worker_wait = wait.clone();
         let (reply, received) = mpsc::sync_channel(1);
-        requests
-            .try_send(Self {
-                store: Arc::clone(&connector.credentials),
-                key: connector.key,
-                interaction: connector.interaction,
-                wait: wait.clone(),
-                reply,
+        std::thread::Builder::new()
+            .name("spaceterm-credential-read".into())
+            .spawn(move || {
+                if !worker_wait.ended() {
+                    let result = read_credential(read.0.as_ref(), &key, interaction);
+                    drop(read);
+                    if !worker_wait.ended() {
+                        let _ = reply.send(result);
+                    }
+                }
             })
             .map_err(|_| DirectError::Transport)?;
         while !wait.ended() {
@@ -635,26 +635,27 @@ impl CredentialRead {
         Err(DirectError::Transport)
     }
 
-    fn start() -> Result<mpsc::SyncSender<Self>, DirectError> {
-        // Bound native work to one executing read and eight queued requests. A native read
-        // already underway can outlive its caller. Only the waiting dial can use its result.
-        let (requests, pending) = mpsc::sync_channel::<Self>(8);
-        std::thread::Builder::new()
-            .name("spaceterm-credential-read".into())
-            .spawn(move || {
-                while let Ok(request) = pending.recv() {
-                    if request.wait.ended() {
-                        continue;
-                    }
-                    let result =
-                        read_credential(request.store.as_ref(), &request.key, request.interaction);
-                    if !request.wait.ended() {
-                        let _ = request.reply.send(result);
-                    }
-                }
-            })
+    fn reserve(store: &Arc<dyn CredentialStore>) -> Result<Self, DirectError> {
+        // A native read can outlive its caller. Hold one slot per store for the whole read
+        // so retries cannot accumulate or prevent another store from running.
+        let mut active = ACTIVE_CREDENTIAL_READS
+            .lock()
             .map_err(|_| DirectError::Transport)?;
-        Ok(requests)
+        if active.len() >= MAX_ACTIVE_CREDENTIAL_READS
+            || active.iter().any(|reader| Arc::ptr_eq(reader, store))
+        {
+            return Err(DirectError::Transport);
+        }
+        active.push(Arc::clone(store));
+        Ok(Self(Arc::clone(store)))
+    }
+}
+
+impl Drop for CredentialRead {
+    fn drop(&mut self) {
+        if let Ok(mut active) = ACTIVE_CREDENTIAL_READS.lock() {
+            active.retain(|reader| !Arc::ptr_eq(reader, &self.0));
+        }
     }
 }
 
@@ -695,6 +696,26 @@ mod tests {
                 let _ = self.returned.send(());
             }
             Ok(Some(self.credential.clone()))
+        }
+
+        fn insert(&self, _: &[u8; 32], _: &[u8]) -> Result<(), CredentialError> {
+            Err(CredentialError::Unavailable)
+        }
+
+        fn remove(&self, _: &[u8; 32], _: Interaction) -> Result<(), CredentialError> {
+            Err(CredentialError::Unavailable)
+        }
+    }
+
+    struct EmptyStore;
+
+    impl CredentialStore for EmptyStore {
+        fn read(
+            &self,
+            _: &[u8; 32],
+            _: Interaction,
+        ) -> Result<Option<Zeroizing<Vec<u8>>>, CredentialError> {
+            Ok(None)
         }
 
         fn insert(&self, _: &[u8; 32], _: &[u8]) -> Result<(), CredentialError> {
@@ -766,14 +787,17 @@ mod tests {
                 cancel.store(true, Ordering::Release);
             }
             let result = dial_finished.recv_timeout(Duration::from_secs(1));
-            if cancelling && entered_before_expiry.is_ok() && result.is_ok() {
-                let expired_while_queued =
-                    WaitLimit::new(Instant::now() + Duration::from_millis(60));
-                assert_eq!(
-                    connector.connect_with(&expired_while_queued).err(),
-                    Some(DirectError::Transport)
-                );
-            }
+            let (same_store, independent_store) =
+                if cancelling && entered_before_expiry.is_ok() && result.is_ok() {
+                    let wait = WaitLimit::new(Instant::now() + Duration::from_secs(1));
+                    let retry = saved.connector(store.clone(), Interaction::Quiet, None);
+                    let same = retry.connect_with(&wait).err();
+                    let other = saved.connector(Arc::new(EmptyStore), Interaction::Quiet, None);
+                    let wait = WaitLimit::new(Instant::now() + Duration::from_secs(1));
+                    (same, other.connect_with(&wait).err())
+                } else {
+                    (None, None)
+                };
             let _ = release_read.send(());
             drop(release_read);
             worker.join().unwrap();
@@ -782,6 +806,14 @@ mod tests {
                 "the dial must read its credential"
             );
             assert_eq!(result, Ok(Some(DirectError::Transport)));
+            if cancelling {
+                assert_eq!(same_store, Some(DirectError::Transport));
+                assert_eq!(
+                    independent_store,
+                    Some(DirectError::CredentialUnavailable),
+                    "a different store must be read while the first is still blocked",
+                );
+            }
             read_returned.recv_timeout(Duration::from_secs(2)).unwrap();
             assert!(matches!(
                 socket.recv_from(&mut [0; 1500]).unwrap_err().kind(),
