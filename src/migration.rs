@@ -9,11 +9,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::platform::app_directories::AppDirectories;
-use spaceterm_connections::migration::StoreCredentials;
 use spaceterm_core::migration::{
     self, Admission, ArtifactRule, DataKind, DirectoryStore, FileRule, Mount, Outcome, Refusal,
     Registry, generations,
 };
+use spaceterm_core::native_client::migration::StoreCredentials;
 
 /// The Settings Document's file.
 pub(crate) const SETTINGS: &str = "settings.json";
@@ -46,7 +46,7 @@ const STATE_RULES: &[FileRule] = &[
     FileRule {
         name: crate::direct_connection_storage::FILE,
         kind: DataKind::SavedConnections,
-        read: spaceterm_connections::records::readable,
+        read: spaceterm_client::records::readable,
         stamp: None,
     },
     FileRule {
@@ -142,11 +142,11 @@ pub(crate) fn state_store(data: PathBuf, state: PathBuf, clients: PathBuf) -> Di
 /// The credential stores the desktop's Saved Connections use.
 pub(crate) fn credentials(identity: &'static str) -> StoreCredentials {
     StoreCredentials::new(move |kind| {
-        let store = spaceterm_connections::native(identity)?;
+        let store = spaceterm_core::native_client::credentials::native(identity)?;
         if store.kind() == kind {
             Ok(store)
         } else {
-            Err(spaceterm_connections::CredentialError::Unavailable)
+            Err(spaceterm_client::CredentialError::Unavailable)
         }
     })
 }

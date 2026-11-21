@@ -394,7 +394,7 @@ impl CredentialStore for Items {
 /// still adding, and the desktop's four directories.
 fn desktop_data(scratch: &Scratch, items: Arc<Items>) -> DesktopData {
     use crate::direct_connections::{PendingEnrollment, SavedConnection, UnpairState};
-    let cli = ConnectionStore::new(scratch.0.join("cli"));
+    let cli = spaceterm_core::native_client::connection_store(scratch.0.join("cli"));
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let route = |id: u8, key: u8| crate::direct_connections::tests::saved(id, key);
     let saved = route(1, 0x61);

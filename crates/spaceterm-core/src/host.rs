@@ -1322,7 +1322,12 @@ fn serve_local(
         protocol::Admission::Service(admitted) => {
             phase.store(2, Ordering::Release);
             let lane = environment.lane.as_ref().ok_or(CoreError::Unsupported)?;
-            return lane.serve(&mut stream, admitted, None, &|| Ok(()));
+            return lane.serve(
+                &mut protocol::LocalPreamble(&mut stream),
+                admitted,
+                None,
+                &|| Ok(()),
+            );
         }
     };
     phase.store(1, Ordering::Release);
@@ -2934,7 +2939,7 @@ mod startup_tests {
         let mut lane = loop {
             let mut stream = connect_when_ready(&fixture);
             if protocol::admit_service_lane(
-                &mut stream,
+                &mut protocol::LocalPreamble(&mut stream),
                 protocol::Caller {
                     client: &fixture.device,
                     name: &"Test".into(),
@@ -2956,8 +2961,9 @@ mod startup_tests {
         };
         let call = |lane: &mut UnixStream, request: &LaneRequest| {
             let deadline = Instant::now() + Duration::from_secs(30);
-            Preamble::send(lane, &serde_json::to_vec(request).unwrap(), deadline)?;
-            let reply = Preamble::receive(lane, MAX_FRAME, deadline)?;
+            let mut lane = protocol::LocalPreamble(lane);
+            Preamble::send(&mut lane, &serde_json::to_vec(request).unwrap(), deadline)?;
+            let reply = Preamble::receive(&mut lane, MAX_FRAME, deadline)?;
             Ok::<_, CoreError>(serde_json::from_slice::<LaneReply>(&reply).unwrap())
         };
         let Ok(LaneReply::Facts { boot, facts }) = call(&mut lane, &LaneRequest::Facts {}) else {

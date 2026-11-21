@@ -10,7 +10,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::cancellation::CancellationToken;
-use crate::direct_connections::credentials::{CredentialError, CredentialStore, Interaction};
 use crate::direct_connections::{DirectConnections, DirectRouteStatus};
 use crate::ssh::askpass::{
     AskPassAttempt, AskPassAttemptFactory, AskPassAttemptObservation, AskPassBrokerLease,
@@ -20,6 +19,7 @@ use crate::ssh::process::{
     ProcessExit, ProcessSignal, SpawnedSshProcess, SshProcessAdapter, SshProcessMechanismError,
     SshProcessSpawnRequest,
 };
+use spaceterm_core::native_client::credentials::{CredentialError, CredentialStore, Interaction};
 
 #[path = "../../../crates/spaceterm-cli/examples/support/repository.rs"]
 #[expect(
@@ -689,7 +689,7 @@ struct ObservedCredentials {
 impl ObservedCredentials {
     fn new(fail_insert: bool) -> Arc<Self> {
         Arc::new(Self {
-            store: crate::direct_connections::credentials::native(identity()).unwrap(),
+            store: spaceterm_core::native_client::credentials::native(identity()).unwrap(),
             keys: Mutex::default(),
             inserts: AtomicUsize::new(0),
             reads: AtomicUsize::new(0),
@@ -698,7 +698,7 @@ impl ObservedCredentials {
     }
 }
 impl CredentialStore for ObservedCredentials {
-    fn kind(&self) -> spaceterm_connections::StoreKind {
+    fn kind(&self) -> spaceterm_client::StoreKind {
         self.store.kind()
     }
     fn read(
@@ -777,11 +777,9 @@ impl NativeFixture {
         let credentials = ObservedCredentials::new(fail_credentials);
         let direct = DirectConnections::with_credentials(
             identity(),
-            Arc::new(spaceterm_connections::records::PrivateRecords::new(
-                Arc::new(crate::direct_connection_storage::DesktopRecordFile::new(
-                    Arc::clone(&paths),
-                )),
-            )),
+            Arc::new(spaceterm_client::records::PrivateRecords::new(Arc::new(
+                crate::direct_connection_storage::DesktopRecordFile::new(Arc::clone(&paths)),
+            ))),
             credentials.clone(),
         );
         direct.resume_retained();
@@ -1246,7 +1244,7 @@ fn setup_with_approvals(
 fn disconnecting_a_saved_route_closes_its_retained_machine_handle() {
     use spaceterm_core::connection::link::{CoreLink, Health, LinkError, LinkEvent};
 
-    let (connections, routes) = spaceterm_connections::tests::connected_routes(&["Setup"]);
+    let (connections, routes) = crate::direct_connections::tests::connected_routes(&["Setup"]);
     let route = routes[0];
     let core = connections.core(&route).unwrap();
     let link = CoreLink::new(Arc::new(|_: LinkEvent| {}), Arc::new(|| {}), Instant::now());
@@ -1408,11 +1406,9 @@ fn native_core_setup_acceptance() {
     fixture.direct.disconnect(&route);
     let relaunched = DirectConnections::with_credentials(
         identity(),
-        Arc::new(spaceterm_connections::records::PrivateRecords::new(
-            Arc::new(crate::direct_connection_storage::DesktopRecordFile::new(
-                Arc::clone(&fixture.paths),
-            )),
-        )),
+        Arc::new(spaceterm_client::records::PrivateRecords::new(Arc::new(
+            crate::direct_connection_storage::DesktopRecordFile::new(Arc::clone(&fixture.paths)),
+        ))),
         fixture.credentials.clone(),
     );
     relaunched.resume_retained();

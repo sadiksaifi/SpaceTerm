@@ -179,7 +179,7 @@ pub fn write_client_records(directory: &Path) {
             },
         )
         .unwrap();
-    let pending = crate::service::lane::admin::PendingOperations::new(open());
+    let pending = crate::service::lane::admin::pending_operations(open());
     pending
         .add(&crate::service::operations::OperationId([1; 16]))
         .unwrap();

@@ -202,3 +202,16 @@ pub(crate) mod tests {
         assert!(!reports_change(&[]));
     }
 }
+
+impl spaceterm_client::connection::path::PathSignal for RouteSignal {
+    fn descriptor(&self) -> RawFd {
+        self.descriptor()
+    }
+    fn changed(&self) -> bool {
+        self.changed()
+    }
+}
+
+pub(crate) fn client_signal() -> Option<Box<dyn spaceterm_client::connection::path::PathSignal>> {
+    RouteSignal::open().map(|signal| Box::new(signal) as _)
+}

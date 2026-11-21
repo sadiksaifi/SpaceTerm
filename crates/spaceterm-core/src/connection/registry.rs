@@ -167,3 +167,9 @@ mod tests {
         assert_eq!(severed.load(Ordering::Relaxed), 3);
     }
 }
+
+impl Sever for spaceterm_client::connection::quic::QuicSever {
+    fn sever(&self) {
+        self.sever();
+    }
+}

@@ -12,7 +12,7 @@ use crate::state::{CliState, RouteKey};
 use connections::enrollment::{self, PairingClient, PairingNetwork};
 use serde::Serialize;
 use serde_json::Value;
-use spaceterm_connections::{
+use spaceterm_client::{
     self as connections, ConnectionStore, CredentialError, CredentialStore, SavedConnection,
     StoreError,
 };
@@ -46,13 +46,13 @@ impl<'a> CliCredentials<'a> {
 }
 impl CredentialProvider for CliCredentials<'_> {
     fn select(&self) -> Result<Arc<dyn CredentialStore>, CredentialError> {
-        self.notice(connections::credentials::for_cli_enrollment(self.identity)?)
+        self.notice(spaceterm_core::native_client::credentials::for_cli_enrollment(self.identity)?)
     }
     fn open(
         &self,
         kind: connections::StoreKind,
     ) -> Result<Arc<dyn CredentialStore>, CredentialError> {
-        self.notice(connections::credentials::for_cli_record(
+        self.notice(spaceterm_core::native_client::credentials::for_cli_record(
             self.identity,
             kind,
         )?)
@@ -166,7 +166,7 @@ pub fn execute(command: &MachineCommand, global: &Global, identity: &str) -> Com
         Ok(root) => root,
         Err(error) => return CommandOutput::failure(path, contract::from_core_error(error)),
     };
-    let store = ConnectionStore::new(root);
+    let store = spaceterm_core::native_client::connection_store(root);
     let mut io = match terminal::Terminal::new(!global.json && !global.no_input) {
         Ok(io) => io,
         Err(failure) => return CommandOutput::failure(path, failure),

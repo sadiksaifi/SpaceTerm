@@ -1,4 +1,6 @@
-use crate::connection::link::{CoreLink, LinkEvent, LinkSink};
+#[cfg(test)]
+use crate::connection::link::LinkEvent;
+use crate::connection::link::{CoreLink, LinkSink};
 use crate::{
     AuthenticatedStatus, CoreError,
     host::{self, Paths},
@@ -130,96 +132,16 @@ pub struct MachineConnection {
     direct: Option<std::sync::Arc<DirectRoute>>,
     /// Present for a CLI handle, which keeps its state under `clients/cli`.
     cli: Option<Arc<CliIdentity>>,
-    shared: std::sync::Arc<SharedLink>,
+    shared: std::sync::Arc<WorkConnection>,
     client_cache: std::sync::Arc<ClientCache>,
 }
 
-/// The one live link that a handle and its clones share with their server, and the sinks that
-/// receive its pushed inventory and health.
-#[derive(Default)]
-struct SharedLink {
-    link: Mutex<Option<CoreLink>>,
-    subscribers: Mutex<Vec<Weak<dyn LinkSink>>>,
-    /// The latest admission on each lane, which the handle's capabilities follow.
-    admissions: Arc<Mutex<protocol::capability::Admissions>>,
-    /// The generation of the latest link connected, or 0 before the first.
-    generation: std::sync::atomic::AtomicU64,
-    /// The last facts a link received while the Core restarted, and when they arrived. They
-    /// outlast that link until another link's facts arrive, or for [`RESTART_FACTS_LIMIT`].
-    restart: Mutex<Option<RestartFacts>>,
-}
+use spaceterm_client::{PairedMachine, work::WorkConnection};
 
-/// The facts a link received while the Core restarted, when they arrived, and the detailed
-/// facts of the same revision from a Core of work
-/// [`crate::update::facts::MINOR_DETAILED_FACTS`] or later.
-type RestartFacts = (
-    std::time::Instant,
-    Arc<crate::update::facts::UpdateFacts>,
-    Option<Arc<crate::update::facts::DetailedUpdateFacts>>,
-);
-
-/// How long [`MachineConnection::update_facts`] keeps a restart's facts without a link that
-/// reports newer ones. It matches how long a client follows a Core that replaces itself.
-pub const RESTART_FACTS_LIMIT: std::time::Duration = std::time::Duration::from_secs(180);
-
-/// Whether `facts` say the Core is restarting, so its links are about to end.
-fn restarting(facts: &crate::update::facts::UpdateFacts) -> bool {
-    use crate::update::facts::Operation;
-    matches!(
-        facts.operation,
-        Some(Operation::Restarting { .. } | Operation::RestartingSameVersion)
-    )
-}
-
-/// Numbers every link this process connects, across all handles. A paired route's reconnect
-/// creates a new handle, so a count per handle would repeat a generation an earlier link had.
-static LINK_GENERATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Delivers a shared link's events to every live subscriber. It holds the shared state weakly, so
-/// the link it belongs to never keeps that state alive.
-struct Fanout(Weak<SharedLink>);
-impl LinkSink for Fanout {
-    fn deliver(&self, event: LinkEvent) {
-        let Some(shared) = self.0.upgrade() else {
-            return;
-        };
-        let subscribers: Vec<_> = {
-            let mut subscribers = shared.subscribers.lock().unwrap_or_else(|e| e.into_inner());
-            subscribers.retain(|sink| sink.strong_count() > 0);
-            subscribers.iter().filter_map(Weak::upgrade).collect()
-        };
-        match event {
-            LinkEvent::Inventory(revision) => {
-                for sink in subscribers {
-                    sink.deliver(LinkEvent::Inventory(Arc::clone(&revision)));
-                }
-            }
-            LinkEvent::Health(health) => {
-                for sink in subscribers {
-                    sink.deliver(LinkEvent::Health(health));
-                }
-            }
-            LinkEvent::UpdateFacts(facts) => {
-                // The link stores its detailed facts before it reports the facts in them.
-                let detailed = || {
-                    let link = shared.link.try_lock().ok()?;
-                    link.as_ref()?
-                        .detailed_update_facts()
-                        .filter(|detailed| detailed.facts == *facts)
-                };
-                *shared.restart.lock().unwrap_or_else(|e| e.into_inner()) = restarting(&facts)
-                    .then(|| (std::time::Instant::now(), Arc::clone(&facts), detailed()));
-                for sink in subscribers {
-                    sink.deliver(LinkEvent::UpdateFacts(Arc::clone(&facts)));
-                }
-            }
-        }
-    }
-}
 struct DirectRoute {
     id: [u8; 32],
     paired: crate::direct::PairedDevice,
-    connector: std::sync::Arc<dyn crate::direct::DirectConnector>,
+    machine: PairedMachine,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -379,7 +301,7 @@ impl MachineConnection {
         Ok(client)
     }
     /// What other clients call this one while it controls a Pane.
-    fn client_name(&self) -> crate::pane::control::ClientName {
+    pub(crate) fn client_name(&self) -> crate::pane::control::ClientName {
         if let Some(cli) = &self.cli {
             return crate::pane::control::ClientName::for_cli(
                 self.computer.computer_name().as_deref(),
@@ -683,33 +605,7 @@ impl MachineConnection {
         let admission =
             || deadline.unwrap_or_else(|| std::time::Instant::now() + protocol::CONNECTION_LIMIT);
         if let Some(direct) = &self.direct {
-            let connection = match deadline {
-                Some(deadline) => direct.connector.connect_by(deadline),
-                None => direct.connector.connect(),
-            }
-            .map_err(CoreError::from)?;
-            if cancelled.is_some_and(|cancelled| cancelled()) {
-                return Err(CoreError::ServiceBusy);
-            }
-            if connection.paired() != &direct.paired {
-                return Err(CoreError::AuthenticationRefused);
-            }
-            // `with_direct` fixed the pin's build to this handle's identity.
-            let admitted = connection.admit_by(
-                protocol::Caller {
-                    client: &direct.paired.client,
-                    name: &self.client_name(),
-                    agent: self.agent(),
-                },
-                admission(),
-            );
-            self.record_work(
-                &admitted
-                    .as_ref()
-                    .map(|(_, negotiated)| negotiated.clone())
-                    .map_err(Clone::clone),
-            );
-            let (carrier, _) = admitted?;
+            let carrier = direct.machine.admit_work(cancelled, deadline)?;
             return Ok((
                 carrier,
                 self.scope_for(
@@ -742,7 +638,7 @@ impl MachineConnection {
             &self.identity,
             admission(),
         );
-        self.record_work(&admitted);
+        self.shared.record_work(&admitted);
         admitted?;
         let carrier =
             crate::connection::unix::UnixCarrier::new(stream).map_err(|_| CoreError::Protocol)?;
@@ -751,61 +647,20 @@ impl MachineConnection {
             self.scope_for(self.effective_client(&base), core),
         ))
     }
-    fn record_work(&self, admitted: &Result<protocol::Negotiated, protocol::Refused>) {
-        self.admissions().record(protocol::Lane::Work, admitted);
-    }
-    fn admissions(&self) -> std::sync::MutexGuard<'_, protocol::capability::Admissions> {
-        self.shared
-            .admissions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
-    /// What this Machine's connections can do now, from the versions their latest admissions
-    /// negotiated: the shared live work connection, and the latest service-lane admission of
-    /// this handle and its clones.
     pub fn capabilities(&self) -> protocol::capability::Capabilities {
-        let live = self.live_link().is_some();
-        self.admissions().capabilities(live)
+        self.shared.capabilities()
     }
-    /// The versions the Core offered at the latest admission on either lane, also when it
-    /// refused this client. None before the first Offer.
+
     pub fn core_versions(&self) -> Option<protocol::CoreVersions> {
-        self.admissions().core().cloned()
+        self.shared.core_versions()
     }
-    /// The newest update facts the shared live connection received. While the Core restarts,
-    /// its link ends and the next one has no facts yet, so the facts that said it restarts
-    /// stay until another link's facts arrive, for at most [`RESTART_FACTS_LIMIT`]. Otherwise
-    /// None without a live connection or before its first facts. [`LinkEvent::UpdateFacts`]
-    /// reports each change.
+
     pub fn update_facts(&self) -> Option<Arc<crate::update::facts::UpdateFacts>> {
-        self.live_link()
-            .and_then(|link| link.update_facts())
-            .or_else(|| {
-                self.shared
-                    .restart
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .as_ref()
-                    .filter(|(at, _, _)| at.elapsed() < RESTART_FACTS_LIMIT)
-                    .map(|(_, facts, _)| Arc::clone(facts))
-            })
+        self.shared.update_facts()
     }
-    /// The newest detailed update facts the shared live connection received, kept through a
-    /// restart as [`Self::update_facts`] keeps the facts. `restart` in the facts that announced
-    /// a restart says why it began. None from a Core older than work
-    /// [`crate::update::facts::MINOR_DETAILED_FACTS`].
+
     pub fn detailed_update_facts(&self) -> Option<Arc<crate::update::facts::DetailedUpdateFacts>> {
-        self.live_link()
-            .and_then(|link| link.detailed_update_facts())
-            .or_else(|| {
-                self.shared
-                    .restart
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .as_ref()
-                    .filter(|(at, _, _)| at.elapsed() < RESTART_FACTS_LIMIT)
-                    .and_then(|(_, _, detailed)| detailed.clone())
-            })
+        self.shared.detailed_update_facts()
     }
     /// Opens a new connection of its own, separate from the shared one. `events` receives its
     /// pushed inventory and health. Dropping every handle of the link closes it.
@@ -820,12 +675,7 @@ impl MachineConnection {
     ) -> Result<CoreLink, CoreError> {
         let (carrier, scope) = self.connect_admitted(cancelled, deadline)?;
         self.bind_scope(scope)?;
-        let link =
-            crate::connection::io::spawn_link(carrier, events).map_err(|_| CoreError::Protocol)?;
-        if let Ok(work) = self.admissions().capabilities(true).work() {
-            link.select_work(work);
-        }
-        Ok(link)
+        self.shared.start(carrier, events)
     }
     /// The one live connection this handle and its clones share with the server. Connects when
     /// none is live. A link that ended is never reused; its pending requests already failed.
@@ -838,31 +688,12 @@ impl MachineConnection {
     pub fn link_by(&self, deadline: std::time::Instant) -> Result<CoreLink, CoreError> {
         self.link_with(None, Some(deadline))
     }
-    /// Reads the shared live connection without opening one or waiting for a pending dial.
-    /// Paired presentation follows its route owner's connection and backoff through this read.
     pub fn live_link(&self) -> Option<CoreLink> {
-        let saved = match self.shared.link.try_lock() {
-            Ok(saved) => saved,
-            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => return None,
-        };
-        saved
-            .as_ref()
-            .filter(|link| link.health() == crate::connection::link::Health::Live)
-            .cloned()
+        self.shared.live_link()
     }
-    /// Closes the shared connection, including links retained by this handle's clones.
-    /// The route owner must disable its connector before disconnecting to prevent reconnects.
+
     pub fn disconnect(&self) {
-        let link = self
-            .shared
-            .link
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        if let Some(link) = link {
-            link.close();
-        }
+        self.shared.disconnect();
     }
     /// [`Self::link`] for a worker that may stop while another caller connects or admission
     /// waits for a Restart or Update. `cancelled` ends those waits with ServiceBusy.
@@ -874,86 +705,24 @@ impl MachineConnection {
         cancelled: Option<&dyn Fn() -> bool>,
         deadline: Option<std::time::Instant>,
     ) -> Result<CoreLink, CoreError> {
-        let passed = || deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline);
-        // Callers share a successful connection. Paired presentation reads live_link instead
-        // of queuing behind a dial.
-        let mut saved = loop {
-            if cancelled.is_some_and(|cancelled| cancelled()) {
-                return Err(CoreError::ServiceBusy);
-            }
-            match self.shared.link.try_lock() {
-                Ok(saved) => break saved,
-                Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock)
-                    if cancelled.is_none() && deadline.is_none() =>
-                {
-                    break self.shared.link.lock().unwrap_or_else(|e| e.into_inner());
-                }
-                // The callback has no wake handle. A bounded wait lets a queued caller
-                // cancel without waiting for another caller's network deadline.
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    if passed() {
-                        return Err(CoreError::ServiceBusy);
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-            }
-        };
-        if cancelled.is_some_and(|cancelled| cancelled()) {
-            return Err(CoreError::ServiceBusy);
-        }
-        if let Some(link) = saved.as_ref()
-            && link.health() == crate::connection::link::Health::Live
-        {
-            return Ok(link.clone());
-        }
-        *saved = None;
-        // A dial that starts after the deadline could only outlive it.
-        if passed() {
-            return Err(CoreError::ServiceBusy);
-        }
-        let link = self.connect_cancellable(
-            Arc::new(Fanout(Arc::downgrade(&self.shared))),
+        self.shared.link_with(
+            |events| self.connect_cancellable(events, cancelled, deadline),
             cancelled,
             deadline,
-        )?;
-        *saved = Some(link.clone());
-        let generation = LINK_GENERATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        self.shared
-            .generation
-            .store(generation, std::sync::atomic::Ordering::Release);
-        Ok(link)
+        )
     }
-    /// Makes `link` this handle's shared connection while it stays live, admitted at this build's
-    /// work version by a Core of this build running [`crate::UNVERSIONED`]. Tests use it to serve
-    /// a handle in process, without a socket.
+
     #[cfg(feature = "test-support")]
     pub fn adopt(&self, link: CoreLink) {
-        let version = crate::update::facts::Version::parse(crate::UNVERSIONED)
-            .unwrap_or_else(|_| unreachable!("UNVERSIONED is a valid version"));
-        self.record_work(&Ok(protocol::Negotiated {
-            selected: protocol::version::WORK,
-            core: protocol::CoreVersions::current(version),
-        }));
-        link.select_work(protocol::version::WORK);
-        *self.shared.link.lock().unwrap_or_else(|e| e.into_inner()) = Some(link);
+        self.shared.adopt(link);
     }
-    /// Identifies the shared link: it changes each time [`Self::link`] connects a new one, and no
-    /// other handle's link in this process has the same generation. Facts read over an older link
-    /// may describe a server that has since restarted or updated.
+
     pub fn link_generation(&self) -> u64 {
-        self.shared
-            .generation
-            .load(std::sync::atomic::Ordering::Acquire)
+        self.shared.link_generation()
     }
-    /// Delivers the shared link's pushed inventory and health to `sink` while it lives, across
-    /// reconnects.
+
     pub fn subscribe(&self, sink: Weak<dyn LinkSink>) {
-        self.shared
-            .subscribers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(sink);
+        self.shared.subscribe(sink);
     }
     /// Checks an existing server through the shared connection, connecting only when none is
     /// live. Never sets up storage or starts it.
@@ -990,7 +759,7 @@ impl MachineConnection {
             self.machine_id()?;
         }
         self.link_with(cancelled, None)?;
-        let capabilities = self.admissions().capabilities(true);
+        let capabilities = self.shared.admissions().capabilities(true);
         Ok(AuthenticatedStatus {
             work: capabilities.work().map_err(|_| CoreError::Protocol)?,
         })
@@ -1046,21 +815,51 @@ impl MachineConnection {
         }
     }
     fn with_direct(
-        mut self,
+        self,
         route: [u8; 32],
         paired: crate::direct::PairedDevice,
         connector: std::sync::Arc<dyn crate::direct::DirectConnector>,
     ) -> Result<Self, CoreError> {
-        if route == [0; 32]
-            || paired.pin.build != self.identity
-            || paired.pin.core == [0; 32]
-            || paired.pin.public_key == [0; 32]
-            || paired.pin.certificate == [0; 32]
-            || paired.pairing == [0; 32]
-            || paired.client == [0; 32]
-        {
+        let computer = Arc::clone(&self.computer);
+        let development = self.development.clone();
+        let cli = self.cli.clone();
+        let name = Arc::new(move || {
+            let computer = computer.computer_name();
+            if let Some(cli) = &cli {
+                return crate::pane::control::ClientName::for_cli(
+                    computer.as_deref(),
+                    cli.agent.as_ref(),
+                );
+            }
+            crate::pane::control::ClientName::for_computer(
+                computer.as_deref(),
+                development.as_deref(),
+            )
+        });
+        let machine = PairedMachine::new(
+            &self.identity,
+            route,
+            paired,
+            connector,
+            name,
+            self.agent().cloned(),
+            Arc::new(crate::connection::route_signal::client_signal),
+        )?;
+        self.retain_paired(machine)
+    }
+
+    /// Gives the portable route its desktop-owned presentation and journal storage.
+    pub fn for_paired_client(identity: &str, machine: PairedMachine) -> Result<Self, CoreError> {
+        Self::for_identity(identity)?.retain_paired(machine)
+    }
+
+    fn retain_paired(mut self, machine: PairedMachine) -> Result<Self, CoreError> {
+        let route = *machine.route();
+        let paired = machine.paired().clone();
+        if paired.pin.build != self.identity || machine.agent() != self.agent() {
             return Err(CoreError::AuthenticationRefused);
         }
+        self.shared = Arc::clone(machine.work());
         self.account = match &self.cli {
             Some(cli) => cli.account(),
             None => direct_account(&self.account, &route),
@@ -1068,7 +867,7 @@ impl MachineConnection {
         self.direct = Some(std::sync::Arc::new(DirectRoute {
             id: route,
             paired,
-            connector,
+            machine,
         }));
         self.client_cache = std::sync::Arc::default();
         let direct = self
@@ -1136,27 +935,21 @@ impl MachineConnection {
         use crate::service::lane::client::LaneError;
         self.client_directory_until(Some(deadline))
             .map_err(LaneError::Core)?
-            .map(crate::service::lane::admin::PendingOperations::new)
+            .map(crate::service::lane::admin::pending_operations)
             .ok_or(LaneError::Deadline)
     }
     /// This handle's service lane, once its route's client records were checked.
     fn lane(&self) -> Result<crate::service::lane::client::Lane, CoreError> {
         if let Some(direct) = &self.direct {
-            return Ok(crate::service::lane::client::Lane::paired(
-                std::sync::Arc::clone(&direct.connector),
-                direct.paired.clone(),
-                self.client_name(),
-                self.agent().cloned(),
-                Arc::clone(&self.shared.admissions),
-            ));
+            return Ok(direct.machine.service_lane());
         }
-        Ok(crate::service::lane::client::Lane::local(
+        Ok(crate::service::lane::client::local(
             self.paths.clone(),
             self.machine_id()?,
             self.base_client_id()?,
             self.client_name(),
             self.agent().cloned(),
-            Arc::clone(&self.shared.admissions),
+            self.shared.admitted_lanes(),
         ))
     }
     /// The service operations this handle's Client Identity admitted over its lane and has not
@@ -1164,7 +957,7 @@ impl MachineConnection {
     pub fn service_operations(
         &self,
     ) -> Result<crate::service::lane::admin::PendingOperations, CoreError> {
-        Ok(crate::service::lane::admin::PendingOperations::new(
+        Ok(crate::service::lane::admin::pending_operations(
             self.client_directory()?,
         ))
     }

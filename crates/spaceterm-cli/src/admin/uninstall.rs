@@ -10,10 +10,7 @@
 use super::{Context, Reply};
 use crate::contract::{self, Code, Confirmation, Empty, Envelope, Failure, ServiceEffects};
 use spaceterm::installed_app::{Account, AppIdentity, InstalledApp};
-use spaceterm_connections::{
-    self as connections,
-    credentials::{CredentialProvider, Interaction},
-};
+use spaceterm_client::credentials::{CredentialProvider, Interaction};
 use spaceterm_core::service::{CliUninstall, Data, Service};
 
 const COMMAND: &str = "uninstall";
@@ -180,7 +177,7 @@ impl Removal for Native<'_> {
     fn forget_credentials(&self) -> Result<(), Failure> {
         let root = spaceterm_core::cli_state_root(self.context.identity)
             .map_err(contract::from_core_error)?;
-        let items = connections::ConnectionStore::new(root)
+        let items = spaceterm_core::native_client::connection_store(root)
             .credential_items()
             .map_err(crate::connection::store_failure)?;
         // A locked keyring asks to unlock when a person can answer.

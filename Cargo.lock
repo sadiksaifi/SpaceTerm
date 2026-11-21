@@ -6174,7 +6174,7 @@ dependencies = [
  "smallvec",
  "smol_str",
  "socket2",
- "spaceterm-connections",
+ "spaceterm-client",
  "spaceterm-core",
  "spaceterm-directories",
  "spaceterm-protocol",
@@ -6208,49 +6208,23 @@ dependencies = [
  "serde_json",
  "signal-hook",
  "spaceterm",
- "spaceterm-connections",
+ "spaceterm-client",
  "spaceterm-core",
  "spaceterm-directories",
  "zeroize",
 ]
 
 [[package]]
-name = "spaceterm-connections"
+name = "spaceterm-client"
 version = "0.0.0"
 dependencies = [
  "async-channel",
- "async-io",
  "base64 0.22.1",
- "core-foundation 0.10.1",
- "futures-lite",
- "getrandom 0.4.3",
- "libc",
- "pollster 0.4.0",
- "security-framework",
- "security-framework-sys",
- "serde",
- "serde_json",
- "spaceterm-core",
- "spaceterm-directories",
- "zbus",
- "zeroize",
-]
-
-[[package]]
-name = "spaceterm-core"
-version = "0.0.0"
-dependencies = [
- "base64 0.22.1",
- "block2 0.6.2",
  "bytes",
- "flate2",
- "jiff",
+ "getrandom 0.4.3",
  "libc",
  "noq-proto",
  "noq-udp",
- "objc2 0.6.4",
- "objc2-av-foundation",
- "objc2-foundation 0.3.2",
  "rcgen",
  "ring",
  "rustls",
@@ -6258,11 +6232,47 @@ dependencies = [
  "serde",
  "serde_json",
  "socket2",
+ "spaceterm-protocol",
+ "thiserror 2.0.19",
+ "zeroize",
+]
+
+[[package]]
+name = "spaceterm-core"
+version = "0.0.0"
+dependencies = [
+ "async-io",
+ "base64 0.22.1",
+ "block2 0.6.2",
+ "bytes",
+ "core-foundation 0.10.1",
+ "flate2",
+ "futures-lite",
+ "getrandom 0.4.3",
+ "jiff",
+ "libc",
+ "noq-proto",
+ "noq-udp",
+ "objc2 0.6.4",
+ "objc2-av-foundation",
+ "objc2-foundation 0.3.2",
+ "pollster 0.4.0",
+ "rcgen",
+ "ring",
+ "rustls",
+ "rustls-webpki",
+ "security-framework",
+ "security-framework-sys",
+ "serde",
+ "serde_json",
+ "socket2",
+ "spaceterm-client",
  "spaceterm-directories",
  "spaceterm-protocol",
  "tar",
  "thiserror 2.0.19",
  "ureq",
+ "zbus",
  "zeroize",
 ]
 

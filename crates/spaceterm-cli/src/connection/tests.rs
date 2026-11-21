@@ -29,12 +29,12 @@ impl Fixture {
         let root = std::fs::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!(
-                "spaceterm-connections-{}-{}",
+                "spaceterm-client-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
         std::fs::create_dir(&root).unwrap();
-        let store = ConnectionStore::new(root.join("core/clients/cli"));
+        let store = spaceterm_core::native_client::connection_store(root.join("core/clients/cli"));
         let interrupted = Arc::new(AtomicBool::new(false));
         Self {
             root,
@@ -771,7 +771,7 @@ fn connection_process_add() {
     let name = std::env::var("SPACETERM_TEST_CONNECTION_NAME").unwrap();
     let mut fixture = Fixture::new();
     let root = PathBuf::from(root);
-    fixture.store = ConnectionStore::new(root.join("core/clients/cli"));
+    fixture.store = spaceterm_core::native_client::connection_store(root.join("core/clients/cli"));
     fixture.network.barrier = Some((root, name.clone()));
     let output = fixture.run(&add(&name));
     assert_eq!(output.exit, 0, "{}", output.envelope);
@@ -780,8 +780,7 @@ fn connection_process_add() {
 #[test]
 fn concurrent_connection_add_processes_preserve_the_desktop_fixture() {
     let fixture = Fixture::new();
-    let bytes =
-        include_bytes!("../../../spaceterm-connections/tests/fixtures/desktop-connections.json");
+    let bytes = include_bytes!("../../../spaceterm-client/tests/fixtures/desktop-connections.json");
     let document: connections::records::Document = serde_json::from_slice(bytes).unwrap();
     assert_eq!(document.routes.len(), 1);
     let desktop = fixture.root.join("direct-device-connections.json");

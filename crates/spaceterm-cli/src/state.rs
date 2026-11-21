@@ -20,11 +20,11 @@ use crate::contract::{
     from_core_error,
 };
 use serde::{Deserialize, Serialize};
-use spaceterm_connections::migration::StoreCredentials;
 use spaceterm_core::hierarchy::{ClientJournal, Id};
 use spaceterm_core::migration::{
     self, DataKind, DirectoryStore, FileRule, Mount, Refusal, Registry, ResetReason, StoreError,
 };
+use spaceterm_core::native_client::migration::StoreCredentials;
 use spaceterm_core::protocol::{AgentName, RunId};
 use spaceterm_core::update::ordering::Floor;
 use spaceterm_core::{CoreError, Directory, Lock, LockWait, MachineConnection};
@@ -129,7 +129,7 @@ const RULES: &[FileRule] = &[
     FileRule {
         name: "connections.json",
         kind: DataKind::SavedConnections,
-        read: spaceterm_connections::readable,
+        read: spaceterm_client::readable,
         stamp: None,
     },
     FileRule {
@@ -169,7 +169,7 @@ fn store_at(root: PathBuf) -> DirectoryStore {
 fn credentials(identity: &str) -> StoreCredentials {
     let identity = identity.to_owned();
     StoreCredentials::new(move |kind| {
-        spaceterm_connections::credentials::for_cli_record(&identity, kind)
+        spaceterm_core::native_client::credentials::for_cli_record(&identity, kind)
     })
 }
 

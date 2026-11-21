@@ -3345,7 +3345,8 @@ mod tests {
             .unwrap();
             *supervisor.host.lock().unwrap() = Some(std::thread::spawn(move || {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut wire = protocol::Wire::new(&mut stream);
+                let mut transport = protocol::LocalPreamble(&mut stream);
+                let mut wire = protocol::Wire::new(&mut transport);
                 let hello: serde_json::Value = wire.read()?;
                 wire.write(&serde_json::json!({"selected":null, "versions":{"version":"9.0.0","work":{"major":protocol::MAJOR + 1,"minor":0},"service":{"major":1,"minor":0}}, "build":hello["build"], "core":hello["core"], "client":hello["client"]}))
             }));
