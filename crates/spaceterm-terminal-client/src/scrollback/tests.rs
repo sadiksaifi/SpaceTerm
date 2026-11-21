@@ -411,11 +411,27 @@ fn an_oversized_find_query_retires_the_previous_search() {
     let first = FindQueryGeneration::from_counter(1);
     assert!(scrollback.set_find_query(first, "line".into()));
     let generation = PresentationGeneration::from_counter(1);
-    assert!(scrollback.present(generation).unwrap().screen.state.find.is_some());
+    assert!(
+        scrollback
+            .present(generation)
+            .unwrap()
+            .screen
+            .state
+            .find
+            .is_some()
+    );
 
     let oversized = "é".repeat(crate::find::MAX_QUERY_BYTES / 2 + 1);
     assert!(scrollback.set_find_query(FindQueryGeneration::from_counter(2), oversized));
-    assert!(scrollback.present(generation).unwrap().screen.state.find.is_none());
+    assert!(
+        scrollback
+            .present(generation)
+            .unwrap()
+            .screen
+            .state
+            .find
+            .is_none()
+    );
     assert!(scrollback.requests().is_empty());
 }
 

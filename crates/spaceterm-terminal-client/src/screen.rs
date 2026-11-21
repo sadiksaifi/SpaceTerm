@@ -359,10 +359,9 @@ impl<L, C> DecodedScreen<L, C> {
         generation: PresentationGeneration,
     ) {
         screen.generation = generation;
-        screen.cell_pixels = self
-            .geometry
-            .cell_pixels
-            .map_or((0, 0), |(width, height)| (u32::from(width), u32::from(height)));
+        screen.cell_pixels = self.geometry.cell_pixels.map_or((0, 0), |(width, height)| {
+            (u32::from(width), u32::from(height))
+        });
         screen.history = HistorySnapshot {
             epoch: self.history.epoch,
             oldest: self.history.oldest,
