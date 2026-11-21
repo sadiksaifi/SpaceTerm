@@ -82,7 +82,7 @@ def check_policy(version, *, root=ROOT):
         command = ["tagsmith", "tag", "--target", "spaceterm", "--channel", "stable"]
         command += ["--version", version, "--dry-run", "--json"]
     else:
-        command = ["tagsmith", "validate", "--tag", tag]
+        command = ["tagsmith", "validate", "--tag", tag, "--json"]
     if subprocess.run(command, cwd=root).returncode:
         raise TaskError("the release version fails the Tagsmith release policy")
 

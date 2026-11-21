@@ -10,6 +10,24 @@ env:
   MISE_LOCKED: 'true'
 
 jobs:
+  tag-policy:
+    name: Check desktop and libspaceterm tag history
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: python node npm:tagsmith
+          version: 2026.10.4
+          cache: false
+      - name: Dry-run both release targets
+        run: |
+          mise run release:targets
+          mise run test:tools tests.test_release_plan.TagPolicyTests
+
   external-consumer:
     name: Build external consumer (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
@@ -23,7 +41,7 @@ jobs:
           - runner: ubuntu-26.04
             target: aarch64-linux-android
     env:
-      CANDIDATE_REVISION: ${{ github.event.pull_request.head.sha }}
+      LIBSPACETERM_TEST_TAG: libspaceterm@v0.1.0
       RUST_TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v7
@@ -51,5 +69,10 @@ jobs:
             printf 'AR_aarch64_linux_android=%s\n' "$ndk_bin/llvm-ar"
             printf 'CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=%s\n' "$clang"
           } >> "$GITHUB_ENV"
-      - name: Build crates from the candidate Git revision
-        run: mise run check:mobile-consumer "$RUST_TARGET" "$CANDIDATE_REVISION"
+      - name: Build crates from a local annotated libspaceterm tag
+        run: |
+          GIT_COMMITTER_DATE="$(git show -s --format=%cI HEAD)"
+          export GIT_COMMITTER_DATE
+          git -c user.name='SpaceTerm CI' -c user.email='ci@example.invalid' \
+            tag -a "$LIBSPACETERM_TEST_TAG" -m 'libspaceterm build test'
+          mise run check:mobile-consumer "$RUST_TARGET" "$LIBSPACETERM_TEST_TAG"
