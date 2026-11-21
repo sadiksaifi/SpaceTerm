@@ -1,10 +1,12 @@
 //! This client's position in the Scrollback and the screen it presents there.
+use super::Presented;
 use super::{History, Lines, Point};
-use crate::terminal::emulator::{
-    ContentDamageSnapshot, ScrollbarSnapshot, SnapshotDamage, ViewportSnapshot,
+use crate::find::TerminalFindSnapshot;
+use crate::snapshot::{
+    ContentDamageSnapshot, PresentationGeneration, RowSnapshot, ScreenState, ScrollbarSnapshot,
+    Snapshot, SnapshotDamage, ViewportSnapshot,
 };
-use crate::terminal::{PresentationGeneration, RowSnapshot, ScreenSnapshot, TerminalFindSnapshot};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Where the view starts. Following, it shows the screen and moves with output. Scrolled back,
@@ -58,30 +60,31 @@ impl Viewport {
 /// The presented snapshot of each cached history row in view, and its selected variant with the
 /// Selection revision it was marked at. History rows of one epoch never change, so a snapshot
 /// stays valid until the epoch ends.
-pub(super) type Shown = HashMap<u64, ShownRow>;
+pub(super) type Shown<L, C> = HashMap<u64, ShownRow<L, C>>;
 
-pub(super) struct ShownRow {
-    row: RowSnapshot,
+pub(super) struct ShownRow<L, C> {
+    row: RowSnapshot<L, C>,
     soft: bool,
-    selected: Option<(u64, RowSnapshot)>,
+    selected: Option<(u64, RowSnapshot<L, C>)>,
 }
 
 /// Builds the presented screen. A view following the screen with no Selection and no Find
 /// reuses the frame's rows as they are.
-pub(super) fn compose(
-    screen: &Arc<ScreenSnapshot>,
-    lines: Lines<'_>,
-    (placeholders, shown): (&BTreeMap<u64, (RowSnapshot, bool)>, &mut Shown),
+pub(super) fn compose<S: Snapshot>(
+    screen: &S,
+    lines: Lines<'_, S::Link, S::Color>,
+    (placeholders, shown): (&super::Placeholders<S>, &mut Shown<S::Link, S::Color>),
     top: u64,
     (selection, selection_revision): (Option<(Point, Point)>, u64),
     find: Option<Arc<TerminalFindSnapshot>>,
     generation: PresentationGeneration,
-) -> Arc<ScreenSnapshot> {
+) -> Presented<S> {
     let total = lines.total();
     let start = lines.range().start;
-    let rows = screen.rows.len();
+    let rows = screen.screen().rows.len();
     let offset = total - top;
-    let mut presented = ScreenSnapshot::clone(screen);
+    let mut snapshot = screen.clone();
+    let presented = snapshot.screen_mut();
     presented.generation = generation;
     presented.selection_present = selection.is_some();
     presented.selection_revision = selection_revision;
@@ -97,9 +100,12 @@ pub(super) fn compose(
         visible_rows: rows as u64,
     };
     if offset == 0 && selection.is_none() {
-        return Arc::new(presented);
+        return Presented {
+            screen: Arc::new(snapshot),
+            scrolled_rows: 0,
+        };
     }
-    let blank = blank_row(screen);
+    let blank = blank_row(screen.screen());
     let mut presented_rows = Vec::with_capacity(rows);
     let mut wrapped = Vec::with_capacity(rows);
     let shown_lines = top..top + rows as u64;
@@ -146,25 +152,6 @@ pub(super) fn compose(
     }
     presented.rows = presented_rows.into();
     presented.row_soft_wrapped = wrapped.into();
-    if offset > 0 {
-        presented.cursor.position = presented.cursor.position.and_then(|mut position| {
-            position.row = u16::try_from(u64::from(position.row) + offset)
-                .ok()
-                .filter(|row| usize::from(*row) < rows)?;
-            Some(position)
-        });
-        let shift = i32::try_from(offset).unwrap_or(i32::MAX);
-        presented.graphics.placements = presented
-            .graphics
-            .placements
-            .iter()
-            .map(|placement| {
-                let mut placement = placement.clone();
-                placement.viewport_row = placement.viewport_row.saturating_add(shift);
-                placement
-            })
-            .collect();
-    }
     presented.damage = SnapshotDamage {
         content: ContentDamageSnapshot::Full,
         cursor: ContentDamageSnapshot::Full,
@@ -172,14 +159,30 @@ pub(super) fn compose(
         viewport: true,
         selection_presence: true,
         search: true,
-        ..screen.damage.clone()
+        ..screen.screen().damage.clone()
     };
-    Arc::new(presented)
+    if offset > 0 {
+        let cursor = snapshot.cursor_mut();
+        cursor.position = cursor.position.and_then(|mut position| {
+            position.row = u16::try_from(u64::from(position.row) + offset)
+                .ok()
+                .filter(|row| usize::from(*row) < rows)?;
+            Some(position)
+        });
+    }
+    Presented {
+        screen: Arc::new(snapshot),
+        scrolled_rows: offset,
+    }
 }
 
 /// The row's cells with the Selection's columns marked. A wide character is selected with its
 /// spacer, as copying includes it whole.
-fn select(row: RowSnapshot, line: u64, (start, end): (Point, Point)) -> RowSnapshot {
+fn select<L: Clone, C: Copy>(
+    row: RowSnapshot<L, C>,
+    line: u64,
+    (start, end): (Point, Point),
+) -> RowSnapshot<L, C> {
     if line < start.line || line > end.line || row.is_empty() {
         return row;
     }
@@ -204,6 +207,6 @@ fn select(row: RowSnapshot, line: u64, (start, end): (Point, Point)) -> RowSnaps
     cells.into()
 }
 
-fn blank_row(screen: &ScreenSnapshot) -> RowSnapshot {
+fn blank_row<L: Clone, C: Copy>(screen: &ScreenState<L, C>) -> RowSnapshot<L, C> {
     vec![super::row::blank_cell(); usize::from(screen.size.cols)].into()
 }

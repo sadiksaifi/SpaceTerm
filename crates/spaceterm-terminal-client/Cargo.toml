@@ -4,4 +4,6 @@ edition = "2024"
 publish = false
 
 [dependencies]
+smol_str = "=0.3.6"
+spaceterm-protocol = { path = "../spaceterm-protocol" }
 unicode-bidi = "=0.3.18"

@@ -6,9 +6,7 @@
 //! history lines keep their matches until the cache drops one of their rows. A row that is not
 //! cached yet ends a line; its matches appear once its page arrives.
 use super::{Lines, Point, row::RowRef};
-use crate::terminal::{
-    FindDirection, FindHighlightSpan, FindQueryGeneration, TerminalFindSnapshot,
-};
+use crate::find::{FindDirection, FindHighlightSpan, FindQueryGeneration, TerminalFindSnapshot};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -61,11 +59,11 @@ impl LocalFind {
     }
 
     /// Selects the next or previous match and returns the view's new top line, which shows it.
-    pub(super) fn navigate(
+    pub(super) fn navigate<L: Clone + Eq, C: Copy + Eq>(
         &mut self,
         generation: FindQueryGeneration,
         direction: FindDirection,
-        lines: Lines<'_>,
+        lines: Lines<'_, L, C>,
         top: u64,
         rows: u16,
     ) -> Option<u64> {
@@ -114,9 +112,9 @@ impl LocalFind {
         })
     }
 
-    pub(super) fn snapshot(
+    pub(super) fn snapshot<L: Clone + Eq, C: Copy + Eq>(
         &mut self,
-        lines: Lines<'_>,
+        lines: Lines<'_, L, C>,
         top: u64,
         rows: u16,
     ) -> Option<Arc<TerminalFindSnapshot>> {
@@ -164,7 +162,7 @@ impl LocalFind {
     }
 
     /// Every match in readable lines, in order.
-    fn matches(&mut self, lines: Lines<'_>) -> Vec<Match> {
+    fn matches<L: Clone + Eq, C: Copy + Eq>(&mut self, lines: Lines<'_, L, C>) -> Vec<Match> {
         let Some((_, query)) = &self.query else {
             return Vec::new();
         };
@@ -223,7 +221,11 @@ impl LocalFind {
 }
 
 /// The line after the soft-wrapped run that starts at `line`, stopping at a missing row.
-fn logical_end(lines: Lines<'_>, mut line: u64, limit: u64) -> u64 {
+fn logical_end<L: Clone + Eq, C: Copy + Eq>(
+    lines: Lines<'_, L, C>,
+    mut line: u64,
+    limit: u64,
+) -> u64 {
     while line < limit {
         let Some(row) = lines.get(line) else {
             return line;
@@ -243,7 +245,10 @@ struct Corpus {
 }
 
 impl Corpus {
-    fn new(lines: Lines<'_>, range: std::ops::Range<u64>) -> Self {
+    fn new<L: Clone + Eq, C: Copy + Eq>(
+        lines: Lines<'_, L, C>,
+        range: std::ops::Range<u64>,
+    ) -> Self {
         let mut corpus = Self {
             bytes: Vec::new(),
             cells: Vec::new(),

@@ -6172,7 +6172,6 @@ dependencies = [
  "serde_json_lenient",
  "sha2",
  "smallvec",
- "smol_str",
  "socket2",
  "spaceterm-client",
  "spaceterm-core",
@@ -6302,6 +6301,8 @@ dependencies = [
 name = "spaceterm-terminal-client"
 version = "0.0.0"
 dependencies = [
+ "smol_str",
+ "spaceterm-protocol",
  "unicode-bidi",
 ]
 

@@ -48,7 +48,6 @@ desktop = [
     "dep:notify",
     "dep:gpui",
     "dep:gpui_platform",
-    "dep:spaceterm-terminal-client",
     "dep:spaceterm-ui",
     "spaceterm-core/client",
     "dep:image",
@@ -118,10 +117,9 @@ notify = { version = "=8.2.0", optional = true }
 portable-pty = "=0.9.0"
 pollster = "=0.4.0"
 smallvec = { version = "=1.15.2", optional = true }
-smol_str = "=0.3.6"
 rustc-hash = { version = "=2.1.3", optional = true }
 spaceterm-directories = { path = "crates/spaceterm-directories" }
-spaceterm-terminal-client = { path = "crates/spaceterm-terminal-client", optional = true }
+spaceterm-terminal-client = { path = "crates/spaceterm-terminal-client" }
 spaceterm-ui = { path = "crates/spaceterm-ui", optional = true }
 spaceterm-core = { path = "crates/spaceterm-core" }
 thiserror = "2.0.17"

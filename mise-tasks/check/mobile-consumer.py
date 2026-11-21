@@ -12,7 +12,7 @@ from pathlib import Path
 
 from spaceterm_tasks import ROOT, TaskError, main
 
-CRATES = ("spaceterm-protocol", "spaceterm-client")
+CRATES = ("spaceterm-protocol", "spaceterm-client", "spaceterm-terminal-client")
 TARGETS = ("aarch64-apple-ios", "aarch64-linux-android")
 
 

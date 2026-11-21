@@ -6,8 +6,10 @@
 //! the top or bottom edge scrolls one row per autoscroll tick. Rows that are not cached end words
 //! and lines; copying waits until every selected row is cached.
 use super::{CopyOutcome, Lines, Point, row::RowRef};
-use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions};
-use crate::terminal::{ScreenSnapshot, TerminalColor};
+use crate::selection::{SelectionCopy, SelectionCopyOptions};
+use crate::snapshot::{
+    CellSnapshot, ColorValue, TerminalColor, TerminalUnderlineSnapshot as Underline,
+};
 use std::fmt::Write as _;
 use std::ops::Range;
 use std::time::{Duration, Instant};
@@ -22,7 +24,7 @@ const WORD_BOUNDARIES: [char; 20] = [
 
 /// A left-button pointer event in surface pixels of the Pane's grid.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum PointerEvent {
+pub enum PointerEvent {
     Press { x: f32, y: f32 },
     Drag { x: f32, y: f32 },
     Release,
@@ -30,11 +32,11 @@ pub(crate) enum PointerEvent {
 
 /// The presented grid, in the same pixel units as [`PointerEvent`].
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Grid {
-    pub(crate) columns: u16,
-    pub(crate) rows: u16,
-    pub(crate) cell_width: f32,
-    pub(crate) cell_height: f32,
+pub struct Grid {
+    pub columns: u16,
+    pub rows: u16,
+    pub cell_width: f32,
+    pub cell_height: f32,
 }
 
 impl Grid {
@@ -127,12 +129,12 @@ impl LocalSelection {
         }
     }
 
-    pub(super) fn pointer(
+    pub(super) fn pointer<L: Clone + Eq, C: ColorValue>(
         &mut self,
         event: PointerEvent,
         grid: Grid,
         now: Instant,
-        lines: Lines<'_>,
+        lines: Lines<'_, L, C>,
         top: u64,
     ) -> bool {
         match event {
@@ -175,7 +177,12 @@ impl LocalSelection {
     }
 
     /// Extends the Selection to the latest drag position against the view's current top.
-    pub(super) fn continue_drag(&mut self, grid: Grid, lines: Lines<'_>, top: u64) -> bool {
+    pub(super) fn continue_drag<L: Clone + Eq, C: ColorValue>(
+        &mut self,
+        grid: Grid,
+        lines: Lines<'_, L, C>,
+        top: u64,
+    ) -> bool {
         let (Some(anchor), Some((x, y))) = (self.gesture.anchor, self.gesture.at) else {
             return false;
         };
@@ -190,13 +197,13 @@ impl LocalSelection {
         self.set(selection)
     }
 
-    fn press(
+    fn press<L: Clone + Eq, C: ColorValue>(
         &mut self,
         x: f32,
         y: f32,
         grid: Grid,
         now: Instant,
-        lines: Lines<'_>,
+        lines: Lines<'_, L, C>,
         top: u64,
     ) -> bool {
         if self.gesture.held {
@@ -248,10 +255,10 @@ impl LocalSelection {
     }
 
     /// Copies the selected text as plain text and HTML.
-    pub(super) fn copy(
+    pub(super) fn copy<L: Clone + Eq, C: ColorValue>(
         &self,
-        lines: Lines<'_>,
-        screen: &ScreenSnapshot,
+        lines: Lines<'_, L, C>,
+        palette: &[C; 256],
         options: SelectionCopyOptions,
     ) -> CopyOutcome {
         let Some((start, end)) = self.range else {
@@ -261,7 +268,7 @@ impl LocalSelection {
             return CopyOutcome::Pending;
         }
         let mut plain = Text::default();
-        let mut html = options.include_html.then(|| Html::new(screen));
+        let mut html = options.include_html.then(|| Html::new(palette));
         for line in start.line..=end.line {
             let Some(row) = lines.get(line) else {
                 return CopyOutcome::Pending;
@@ -307,7 +314,13 @@ impl LocalSelection {
 }
 
 /// The cell under a pointer position. A wide character's spacer resolves to the character.
-fn point_at(lines: Lines<'_>, top: u64, grid: Grid, x: f32, y: f32) -> Option<Point> {
+fn point_at<L: Clone + Eq, C: ColorValue>(
+    lines: Lines<'_, L, C>,
+    top: u64,
+    grid: Grid,
+    x: f32,
+    y: f32,
+) -> Option<Point> {
     let (column, row) = grid.cell(x, y);
     let line = top + u64::from(row);
     let column = match lines.get(line) {
@@ -322,8 +335,8 @@ fn point_at(lines: Lines<'_>, top: u64, grid: Grid, x: f32, y: f32) -> Option<Po
 
 /// Ghostty's cell drag: the pressed and current cells count once the pointer passes 60% of
 /// their width in the drag's direction.
-fn drag_cells(
-    lines: Lines<'_>,
+fn drag_cells<L: Clone + Eq, C: ColorValue>(
+    lines: Lines<'_, L, C>,
     grid: Grid,
     click: Point,
     drag: Point,
@@ -371,7 +384,11 @@ fn drag_cells(
     Some((start, end))
 }
 
-fn step_left(lines: Lines<'_>, grid: Grid, point: Point) -> Option<Point> {
+fn step_left<L: Clone + Eq, C: ColorValue>(
+    lines: Lines<'_, L, C>,
+    grid: Grid,
+    point: Point,
+) -> Option<Point> {
     if point.column > 0 {
         return Some(Point {
             column: point.column - 1,
@@ -384,7 +401,11 @@ fn step_left(lines: Lines<'_>, grid: Grid, point: Point) -> Option<Point> {
     })
 }
 
-fn step_right(lines: Lines<'_>, grid: Grid, point: Point) -> Option<Point> {
+fn step_right<L: Clone + Eq, C: ColorValue>(
+    lines: Lines<'_, L, C>,
+    grid: Grid,
+    point: Point,
+) -> Option<Point> {
     if point.column + 1 < grid.columns {
         return Some(Point {
             column: point.column + 1,
@@ -398,7 +419,7 @@ fn step_right(lines: Lines<'_>, grid: Grid, point: Point) -> Option<Point> {
 }
 
 /// The next cell of the same logical line, skipping wide-character spacers.
-fn next_cell(lines: Lines<'_>, point: Point) -> Option<Point> {
+fn next_cell<L: Clone + Eq, C: ColorValue>(lines: Lines<'_, L, C>, point: Point) -> Option<Point> {
     let row = lines.get(point.line)?;
     let mut column = point.column + 1;
     while column < row.columns() && row.spacer_tail(column) {
@@ -412,7 +433,10 @@ fn next_cell(lines: Lines<'_>, point: Point) -> Option<Point> {
 }
 
 /// The previous cell of the same logical line, skipping wide-character spacers.
-fn previous_cell(lines: Lines<'_>, point: Point) -> Option<Point> {
+fn previous_cell<L: Clone + Eq, C: ColorValue>(
+    lines: Lines<'_, L, C>,
+    point: Point,
+) -> Option<Point> {
     let (line, mut column) = if point.column > 0 {
         (point.line, point.column - 1)
     } else {
@@ -434,7 +458,10 @@ fn boundary(text: &str) -> bool {
 }
 
 /// The run of word characters, or of boundary characters, under `point`.
-fn word(lines: Lines<'_>, point: Point) -> Option<(Point, Point)> {
+fn word<L: Clone + Eq, C: ColorValue>(
+    lines: Lines<'_, L, C>,
+    point: Point,
+) -> Option<(Point, Point)> {
     let row = lines.get(point.line)?;
     if !row.has_text(point.column) {
         return None;
@@ -457,7 +484,11 @@ fn word(lines: Lines<'_>, point: Point) -> Option<(Point, Point)> {
 }
 
 /// The word nearest `from` among the cells from `from` toward `to`, both included.
-fn word_between(lines: Lines<'_>, from: Point, to: Point) -> Option<(Point, Point)> {
+fn word_between<L: Clone + Eq, C: ColorValue>(
+    lines: Lines<'_, L, C>,
+    from: Point,
+    to: Point,
+) -> Option<(Point, Point)> {
     let mut point = from;
     loop {
         if let Some(found) = word(lines, point) {
@@ -488,7 +519,11 @@ fn word_between(lines: Lines<'_>, from: Point, to: Point) -> Option<(Point, Poin
     }
 }
 
-fn drag_words(lines: Lines<'_>, click: Point, drag: Point) -> Option<(Point, Point)> {
+fn drag_words<L: Clone + Eq, C: ColorValue>(
+    lines: Lines<'_, L, C>,
+    click: Point,
+    drag: Point,
+) -> Option<(Point, Point)> {
     let at_click = word_between(lines, click, drag)?;
     let at_drag = word_between(lines, drag, click)?;
     Some(if drag < click {
@@ -499,7 +534,11 @@ fn drag_words(lines: Lines<'_>, click: Point, drag: Point) -> Option<(Point, Poi
 }
 
 /// The logical line under `point`, without its leading and trailing whitespace when `trim`.
-fn line(lines: Lines<'_>, point: Point, trim: bool) -> Option<(Point, Point)> {
+fn line<L: Clone + Eq, C: ColorValue>(
+    lines: Lines<'_, L, C>,
+    point: Point,
+    trim: bool,
+) -> Option<(Point, Point)> {
     lines.get(point.line)?;
     let mut first = point.line;
     while let Some(above) = first.checked_sub(1)
@@ -536,7 +575,11 @@ fn line(lines: Lines<'_>, point: Point, trim: bool) -> Option<(Point, Point)> {
     Some((trimmed_start, trimmed_end))
 }
 
-fn drag_lines(lines: Lines<'_>, click: Point, drag: Point) -> Option<(Point, Point)> {
+fn drag_lines<L: Clone + Eq, C: ColorValue>(
+    lines: Lines<'_, L, C>,
+    click: Point,
+    drag: Point,
+) -> Option<(Point, Point)> {
     let current = line(lines, drag, true)?;
     let (start, end) = line(lines, click, true).or_else(|| line(lines, click, false))?;
     Some(if drag < click {
@@ -577,16 +620,16 @@ impl Text {
 }
 
 /// HTML in the shape of Ghostty's formatter, with palette colors resolved to RGB.
-struct Html<'a> {
-    screen: &'a ScreenSnapshot,
+struct Html<'a, C> {
+    palette: &'a [C; 256],
     text: Text,
     style: Option<String>,
 }
 
-impl<'a> Html<'a> {
-    fn new(screen: &'a ScreenSnapshot) -> Self {
+impl<'a, C: ColorValue> Html<'a, C> {
+    fn new(palette: &'a [C; 256]) -> Self {
         Self {
-            screen,
+            palette,
             text: Text {
                 output: String::from("<div style=\"font-family: monospace; white-space: pre;\">"),
                 ..Text::default()
@@ -595,7 +638,7 @@ impl<'a> Html<'a> {
         }
     }
 
-    fn text(&mut self, row: RowRef<'_>, column: u16) {
+    fn text<L: Clone + Eq>(&mut self, row: RowRef<'_, L, C>, column: u16) {
         let css = row
             .style(column)
             .map(|cell| self.css(cell))
@@ -648,20 +691,16 @@ impl<'a> Html<'a> {
         self.text.output.into()
     }
 
-    fn css(&self, cell: &crate::terminal::CellSnapshot) -> String {
-        use crate::terminal::TerminalUnderlineSnapshot as Underline;
+    fn css<L>(&self, cell: &CellSnapshot<L, C>) -> String {
         let mut css = String::new();
-        let mut color = |property: &str, source: TerminalColor| {
+        let mut color = |property: &str, source: TerminalColor<C>| {
             let color = match source {
                 TerminalColor::Default => return,
-                TerminalColor::Palette(index) => self.screen.colors.palette[usize::from(index)],
+                TerminalColor::Palette(index) => self.palette[usize::from(index)],
                 TerminalColor::Rgb(color) => color,
             };
-            let _ = write!(
-                css,
-                "{property}: rgb({}, {}, {});",
-                color.r, color.g, color.b
-            );
+            let [r, g, b] = color.rgb();
+            let _ = write!(css, "{property}: rgb({r}, {g}, {b});");
         };
         color("color", cell.foreground_source);
         color("background-color", cell.background_source);

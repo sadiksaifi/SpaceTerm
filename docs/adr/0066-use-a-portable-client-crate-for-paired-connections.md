@@ -18,6 +18,12 @@ The registry also takes a `DeviceName` callback to supply the Client Name and a 
 
 The Workspace editor opens an injected `JournalStore` under an exclusive writer lease. The store replaces the journal atomically and reports durable bytes. The editor binds the journal to the paired Machine and effective Client Identity before sending an edit. The desktop publishes reconciled Workspace membership before acknowledgement. The CLI resolves pending edits without dispatching them during passive recovery.
 
+## Terminal presentation
+
+`spaceterm-terminal-client` decodes screen frames and owns the Scrollback Cache, Terminal Find, Predictive Echo, and recovery state for a Pane. It consumes `spaceterm-protocol` without depending on the desktop or a drawing library. The desktop supplies native graphics, diagnostics recording, and authority for local file links.
+
+The render model returns cell-space backgrounds, text fragments with an absolute start column, cell span, text and style, decorations, and cursor placement. The model takes cell and cursor spans from the Core frame. Each application owns shaping and drawing. The desktop keeps ligatures off and anchors each glyph to its absolute column.
+
 ## Released formats
 
 Move the released protocol encodings byte for byte, including the Invitation Link and pairing authentication exchange. [ADR 0035](0035-negotiate-protocol-versions-per-connection.md) governs changes to the negotiated protocols. Preserve the released Saved Connections, operation journal, Client View State, and selection formats under the Data Generation and Update Floor rules of [ADR 0064](0064-step-updates-through-update-floors-and-migrate-data-generations.md).

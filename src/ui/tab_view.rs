@@ -7664,7 +7664,7 @@ mod tests {
         });
 
         let snapshot = Arc::make_mut(&mut screen);
-        snapshot.generation = crate::terminal::PresentationGeneration::test(2);
+        snapshot.generation = crate::terminal::PresentationGeneration::from_counter(2);
         let metadata = Arc::make_mut(&mut snapshot.metadata);
         metadata.command = Some(CommandMetadata {
             line: Arc::from("π build"),
@@ -7690,7 +7690,7 @@ mod tests {
             "π build · new-place"
         );
         let snapshot = Arc::make_mut(&mut screen);
-        snapshot.generation = crate::terminal::PresentationGeneration::test(3);
+        snapshot.generation = crate::terminal::PresentationGeneration::from_counter(3);
         let metadata = Arc::make_mut(&mut snapshot.metadata);
         metadata.command.as_mut().unwrap().state = CommandState::Finished {
             exit_status: Some(0),

@@ -1,7 +1,7 @@
 //! The Scrollback rows one client holds for one Pane, keyed by absolute history position.
-use super::History;
 use super::row::CachedRow;
-use spaceterm_core::protocol::limits::{
+use super::{DecodedPage, History};
+use spaceterm_protocol::protocol::limits::{
     FIRST_PAGE_ROWS, MAX_CACHED_ROWS, MAX_PAGE_ROWS, MAX_PAGES_IN_FLIGHT,
 };
 use std::collections::BTreeMap;
@@ -9,10 +9,10 @@ use std::ops::Range;
 
 /// One `Operation::ScrollbackPage` this cache asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PageRequest {
-    pub(crate) epoch: u64,
-    pub(crate) start: u64,
-    pub(crate) rows: u16,
+pub struct PageRequest {
+    pub epoch: u64,
+    pub start: u64,
+    pub rows: u16,
 }
 
 impl PageRequest {
@@ -21,12 +21,11 @@ impl PageRequest {
     }
 }
 
-#[derive(Default)]
-pub(super) struct ScrollbackCache {
+pub(super) struct ScrollbackCache<L, C> {
     /// The Terminal Session whose history the rows belong to.
     session: Option<[u8; 32]>,
     history: History,
-    rows: BTreeMap<u64, CachedRow>,
+    rows: BTreeMap<u64, CachedRow<L, C>>,
     /// Pages asked for and not answered yet, of any epoch or connection. Every one counts toward
     /// the in-flight limit until its reply settles it; the link answers each exactly once.
     in_flight: Vec<PageRequest>,
@@ -40,7 +39,21 @@ pub(super) struct ScrollbackCache {
     revision: u64,
 }
 
-impl ScrollbackCache {
+impl<L, C> Default for ScrollbackCache<L, C> {
+    fn default() -> Self {
+        Self {
+            session: None,
+            history: History::default(),
+            rows: BTreeMap::new(),
+            in_flight: Vec::new(),
+            settled: Vec::new(),
+            requested: false,
+            revision: 0,
+        }
+    }
+}
+
+impl<L, C> ScrollbackCache<L, C> {
     /// Binds the cache to a channel's Terminal Session. Another session's rows are discarded.
     /// Returns whether the session is unchanged.
     pub(super) fn attach(&mut self, session: [u8; 32]) -> bool {
@@ -81,14 +94,14 @@ impl ScrollbackCache {
         self.revision
     }
 
-    pub(super) fn get(&self, position: u64) -> Option<&CachedRow> {
+    pub(super) fn get(&self, position: u64) -> Option<&CachedRow<L, C>> {
         self.rows.get(&position)
     }
 
     /// Adds rows the server reported for consecutive positions from `start`, keeping only
     /// retained positions. `focus` is the position the reader is closest to; rows farthest from
     /// it leave first when the cache is full.
-    fn insert(&mut self, start: u64, rows: impl IntoIterator<Item = CachedRow>, focus: u64) {
+    fn insert(&mut self, start: u64, rows: impl IntoIterator<Item = CachedRow<L, C>>, focus: u64) {
         let retained = self.history.oldest..self.history.total;
         let mut changed = false;
         for (position, row) in (start..).zip(rows) {
@@ -108,7 +121,7 @@ impl ScrollbackCache {
     pub(super) fn page(
         &mut self,
         request: PageRequest,
-        page: Option<(u64, u64, Vec<CachedRow>)>,
+        page: Option<DecodedPage<L, C>>,
         focus: u64,
     ) {
         if let Some(index) = self.in_flight.iter().position(|sent| *sent == request) {

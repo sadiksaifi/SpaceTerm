@@ -2,14 +2,13 @@
 use spaceterm_core::update::facts::{
     DetailedUpdateFacts, Operation, RestartCause, UpdateFacts, Version,
 };
-use std::time::Duration;
 
 pub(crate) type PaneRestartCauses =
     std::sync::Arc<std::sync::Mutex<Vec<spaceterm_core::client_view::PaneRestart>>>;
 
 /// How long an announced restart may keep a Machine's connections away before SpaceTerm treats
 /// it as an ordinary connection loss.
-pub(crate) const RECONNECT_LIMIT: Duration = Duration::from_secs(180);
+pub(crate) use spaceterm_terminal_client::recovery::RECONNECT_LIMIT;
 
 /// A restart the Machine's SpaceTerm Core announced in its update facts.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -1,8 +1,8 @@
 //! Compact Scrollback rows and one way to read cached and visible rows alike.
 //!
 //! A cached row stores its text once and each distinct cell style once, and it omits the blank
-//! cells after its last written cell. Presenting it builds the desktop row again.
-use crate::terminal::{
+//! cells after its last written cell. Presenting it builds the presentation row again.
+use crate::snapshot::{
     CellSemanticSnapshot, CellSnapshot, CellText, RowSnapshot, TerminalColor,
     TerminalUnderlineSnapshot,
 };
@@ -12,7 +12,7 @@ use std::sync::Arc;
 pub(super) const BLANK: &str = " ";
 
 /// A cell that holds nothing, in the default style. It presents a row the cache does not hold yet.
-pub(super) fn blank_cell() -> CellSnapshot {
+pub(super) fn blank_cell<L, C>() -> CellSnapshot<L, C> {
     CellSnapshot {
         text: CellText::new_inline(BLANK),
         foreground_source: TerminalColor::Default,
@@ -36,13 +36,13 @@ pub(super) fn blank_cell() -> CellSnapshot {
 
 /// One Scrollback row as the client caches it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CachedRow {
+pub struct CachedRow<L, C> {
     columns: u16,
     wrapped: bool,
     text: Box<str>,
     cells: Box<[Packed]>,
     /// Every field of a cell except its text, `selected` and `spacer_tail`.
-    styles: Box<[CellSnapshot]>,
+    styles: Box<[CellSnapshot<L, C>]>,
     /// The style of the blank cells after `cells`.
     fill: u16,
 }
@@ -55,9 +55,9 @@ struct Packed {
     spacer_tail: bool,
 }
 
-impl CachedRow {
-    pub(crate) fn new(cells: &[CellSnapshot], wrapped: bool) -> Self {
-        let template = |cell: &CellSnapshot| CellSnapshot {
+impl<L: Clone + Eq, C: Copy + Eq> CachedRow<L, C> {
+    pub fn new(cells: &[CellSnapshot<L, C>], wrapped: bool) -> Self {
+        let template = |cell: &CellSnapshot<L, C>| CellSnapshot {
             text: CellText::default(),
             selected: false,
             spacer_tail: false,
@@ -70,8 +70,8 @@ impl CachedRow {
                 cell.spacer_tail || cell.text != BLANK || template(cell) != fill_template
             })
             .map_or(0, |last| last + 1);
-        let mut styles: Vec<CellSnapshot> = Vec::new();
-        let mut style_of = |template: CellSnapshot| -> u16 {
+        let mut styles: Vec<CellSnapshot<L, C>> = Vec::new();
+        let mut style_of = |template: CellSnapshot<L, C>| -> u16 {
             let index = styles
                 .iter()
                 .position(|known| *known == template)
@@ -103,7 +103,7 @@ impl CachedRow {
     }
 
     /// The desktop row this cached row presents.
-    pub(crate) fn snapshot(&self) -> RowSnapshot {
+    pub fn snapshot(&self) -> RowSnapshot<L, C> {
         (0..self.columns)
             .map(|column| {
                 let mut cell = self.style(column).clone();
@@ -133,7 +133,7 @@ impl CachedRow {
             .is_some_and(|cell| cell.spacer_tail)
     }
 
-    fn style(&self, column: u16) -> &CellSnapshot {
+    fn style(&self, column: u16) -> &CellSnapshot<L, C> {
         let style = self
             .cells
             .get(usize::from(column))
@@ -143,13 +143,20 @@ impl CachedRow {
 }
 
 /// A cached or visible row, read the same way.
-#[derive(Clone, Copy)]
-pub(super) enum RowRef<'a> {
-    Cached(&'a CachedRow),
-    Visible(&'a RowSnapshot, bool),
+pub(super) enum RowRef<'a, L, C> {
+    Cached(&'a CachedRow<L, C>),
+    Visible(&'a RowSnapshot<L, C>, bool),
 }
 
-impl<'a> RowRef<'a> {
+impl<L, C> Copy for RowRef<'_, L, C> {}
+
+impl<L, C> Clone for RowRef<'_, L, C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'a, L: Clone + Eq, C: Copy + Eq> RowRef<'a, L, C> {
     pub(super) fn columns(self) -> u16 {
         match self {
             Self::Cached(row) => row.columns,
@@ -188,7 +195,7 @@ impl<'a> RowRef<'a> {
     }
 
     /// The cell's colors and attributes. Its text is not meaningful.
-    pub(super) fn style(self, column: u16) -> Option<&'a CellSnapshot> {
+    pub(super) fn style(self, column: u16) -> Option<&'a CellSnapshot<L, C>> {
         match self {
             Self::Cached(row) => (column < row.columns).then(|| row.style(column)),
             Self::Visible(cells, _) => cells.get(usize::from(column)),
@@ -196,7 +203,7 @@ impl<'a> RowRef<'a> {
     }
 
     /// Whether both present the same cells and soft wrap.
-    pub(super) fn same(self, other: RowRef<'_>) -> bool {
+    pub(super) fn same(self, other: RowRef<'_, L, C>) -> bool {
         if self.wrapped() != other.wrapped() {
             return false;
         }
@@ -207,7 +214,7 @@ impl<'a> RowRef<'a> {
         }
     }
 
-    pub(super) fn snapshot(self) -> RowSnapshot {
+    pub(super) fn snapshot(self) -> RowSnapshot<L, C> {
         match self {
             Self::Cached(row) => row.snapshot(),
             Self::Visible(cells, _) => Arc::clone(cells),
