@@ -1,10 +1,8 @@
 //! `pair`: let another device pair with SpaceTerm Core on this machine.
 //!
 //! It prints a one-use Invitation Link and, when stdout supports it, the same link as a QR
-//! code, then waits for that invitation's claim and asks the person to type the Comparison
-//! Code the joining device shows. A match approves the claim. A mismatch rejects it.
-//! The invitation is withdrawn on end of input,
-//! interrupt, timeout and every failure, so no link outlives the command.
+//! code, then waits for that invitation's claim. It displays the claim's Comparison Code
+//! and asks the person to confirm it matches the one on the joining device.
 mod qr;
 
 use super::{Context, Reply};
@@ -21,18 +19,24 @@ const COMMAND: &str = "pair";
 const LIFETIME: Duration = Duration::from_secs(5 * 60);
 /// How often the command asks for its invitation's claim.
 const POLL: Duration = Duration::from_secs(2);
-/// The longest Comparison Code line the command reads.
-const CODE_LIMIT: usize = 32;
+/// The longest answer the command reads.
+const ANSWER_LIMIT: usize = 32;
 const WAITING: &str = "Open this Invitation Link on the device that joins. Waiting for it. Ctrl-C withdraws the invitation.\n";
-const COMPARISON_PROMPT: &str = " wants to pair. Type the Comparison Code it shows: ";
+const DEVICE_NOTICE: &str = " wants to pair.";
+const CODE_LABEL: &str = "Comparison Code: ";
+const CONFIRM_PROMPT: &str = "Does this code match the one on your device? [y/N] ";
 
-/// Keep the QR visible through the waiting message, the longest device name and code entry.
+/// Keep the QR visible through the waiting message, the claim display and the answer.
 fn prompt_rows(columns: u16) -> usize {
     let columns = usize::from(columns).max(1);
     let name_columns = spaceterm_core::pane::control::MAX_CLIENT_NAME_CHARS * 2;
+    // A double-width character can wrap before the final column of an odd-width terminal.
+    let device_row_width = (columns - columns % 2).max(1);
     WAITING.trim_end().len().div_ceil(columns)
-        + (name_columns + COMPARISON_PROMPT.len() + CODE_LIMIT).div_ceil(columns)
-        + 1 // The cursor after the entered code's newline.
+        + (name_columns + DEVICE_NOTICE.len()).div_ceil(device_row_width)
+        + (CODE_LABEL.len() + 6).div_ceil(columns)
+        + (CONFIRM_PROMPT.len() + ANSWER_LIMIT).div_ceil(columns)
+        + 1 // The cursor after the answer's newline.
 }
 
 /// What pairing needs from SpaceTerm Core. Its account IPC provides it.
@@ -78,10 +82,9 @@ pub trait Person {
     /// Shows the Invitation Link and, when supported, its QR rendering on stdout.
     fn show_link(&mut self, link: &str) -> Result<(), OutputError>;
     /// Says something on stderr.
-    fn say(&mut self, text: &str);
-    /// Reads the typed Comparison Code before `deadline`. `None` is end of input, an
-    /// interrupt or the deadline.
-    fn comparison_code(&mut self, deadline: Instant) -> Option<String>;
+    fn say(&mut self, text: &str) -> std::io::Result<()>;
+    /// Reads the answer before `deadline`. `None` means no complete answer was read.
+    fn answer(&mut self, deadline: Instant) -> Option<String>;
     fn interrupted(&self) -> bool;
     fn sleep(&mut self, duration: Duration);
 }
@@ -94,11 +97,13 @@ impl<W: Write> Person for Terminal<W> {
     fn show_link(&mut self, link: &str) -> Result<(), OutputError> {
         qr::write_invitation(&mut self.output, link, qr::terminal_size()).map_err(OutputError::from)
     }
-    fn say(&mut self, text: &str) {
-        let _ = write!(std::io::stderr().lock(), "{text}");
+    fn say(&mut self, text: &str) -> std::io::Result<()> {
+        let mut stderr = std::io::stderr().lock();
+        stderr.write_all(text.as_bytes())?;
+        stderr.flush()
     }
-    fn comparison_code(&mut self, deadline: Instant) -> Option<String> {
-        super::read_line_until(CODE_LIMIT, Some(deadline))
+    fn answer(&mut self, deadline: Instant) -> Option<String> {
+        super::read_line_until(ANSWER_LIMIT, Some(deadline))
     }
     fn interrupted(&self) -> bool {
         crate::interrupt::interrupted()
@@ -147,7 +152,9 @@ pub fn pair(
         }
         Err(OutputError::Failed) => return failed(Failure::new(Code::OutputFailed)),
     }
-    person.say(WAITING);
+    if person.say(WAITING).is_err() {
+        return failed(Failure::new(Code::OutputFailed));
+    }
     let deadline = Instant::now() + limit.min(lifetime).min(LIFETIME);
     let claim = loop {
         if person.interrupted() {
@@ -166,26 +173,27 @@ pub fn pair(
         }
         person.sleep(POLL);
     };
-    person.say(&format!(
-        "{}{COMPARISON_PROMPT}",
-        claim.device_name.as_str()
-    ));
-    // The code is entered within the invitation's own lifetime.
-    let Some(typed) = person.comparison_code(deadline) else {
+    let rejected = |code| {
         let _ = core.reject(&claim.id);
-        let code = if person.interrupted() {
-            Code::Interrupted
-        } else if Instant::now() >= deadline {
-            Code::Timeout
-        } else {
-            Code::InteractionRequired
-        };
-        return failed(Failure::new(code));
+        failed(Failure::new(code))
     };
-    let typed: String = typed.chars().filter(|c| !c.is_whitespace()).collect();
-    if typed != claim.comparison_code().to_string() {
-        let _ = core.reject(&claim.id);
-        return failed(Failure::new(Code::ComparisonMismatch));
+    let name = claim.device_name.as_str();
+    let code = claim.comparison_code();
+    if person
+        .say(&format!(
+            "{name}{DEVICE_NOTICE}\n{CODE_LABEL}{code}\n{CONFIRM_PROMPT}"
+        ))
+        .is_err()
+    {
+        return rejected(Code::OutputFailed);
+    }
+    let answer = person.answer(deadline);
+    match answer.as_deref().map(str::trim) {
+        _ if person.interrupted() => return rejected(Code::Interrupted),
+        _ if Instant::now() >= deadline => return rejected(Code::Timeout),
+        Some("y") => {}
+        Some(_) => return rejected(Code::ComparisonMismatch),
+        None => return rejected(Code::InteractionRequired),
     }
     match core.approve(&claim) {
         Ok(device) => Paired::Approved { device },
@@ -319,6 +327,7 @@ mod tests {
             Ok(self.claims.clone())
         }
         fn approve(&self, claim: &PairingClaim) -> Result<String, Failure> {
+            assert_eq!(claim, &self.claims[0]);
             self.log.borrow_mut().push("approve".into());
             Ok(claim.device_name.as_str().to_owned())
         }
@@ -337,19 +346,27 @@ mod tests {
     }
 
     struct Typist {
-        code: Option<String>,
+        answer: Option<String>,
         interrupt_after: Option<usize>,
+        interrupt_on_answer: bool,
         sleeps: usize,
         link: Option<String>,
+        messages: String,
     }
     impl Person for Typist {
         fn show_link(&mut self, link: &str) -> Result<(), OutputError> {
             self.link = Some(link.to_owned());
             Ok(())
         }
-        fn say(&mut self, _: &str) {}
-        fn comparison_code(&mut self, _: Instant) -> Option<String> {
-            self.code.clone()
+        fn say(&mut self, text: &str) -> std::io::Result<()> {
+            self.messages.push_str(text);
+            Ok(())
+        }
+        fn answer(&mut self, _: Instant) -> Option<String> {
+            if self.interrupt_on_answer {
+                self.interrupt_after = Some(self.sleeps);
+            }
+            self.answer.take()
         }
         fn interrupted(&self) -> bool {
             self.interrupt_after
@@ -361,6 +378,8 @@ mod tests {
     }
 
     fn claim() -> PairingClaim {
+        let mut exchange_hash = [0; 32];
+        exchange_hash[3] = 42;
         PairingClaim {
             id: [2; 32],
             invitation_id: [1; 32],
@@ -368,33 +387,38 @@ mod tests {
             device_public_key: [4; 32],
             device_name: "Laptop".into(),
             expires_at_unix_seconds: u64::MAX,
-            exchange_hash: [5; 32],
+            exchange_hash,
         }
     }
 
-    fn typist(code: Option<String>) -> Typist {
+    fn typist(answer: Option<String>) -> Typist {
         Typist {
-            code,
+            answer,
             interrupt_after: None,
+            interrupt_on_answer: false,
             sleeps: 0,
             link: None,
+            messages: String::new(),
         }
     }
 
     #[test]
-    fn a_matching_code_approves_the_invitations_own_claim() {
+    fn an_explicit_y_approves_the_displayed_claim() {
         let core = Core {
             claims: vec![claim()],
             log: RefCell::default(),
             withdrawal_fails: false,
         };
-        let mut person = typist(Some(format!(" {} ", claim().comparison_code())));
+        let mut person = typist(Some("y".into()));
         let paired = pair(
             &core,
             &mut person,
             Some("build.example.test:9300"),
             LIFETIME,
         );
+        assert!(person.messages.ends_with(
+            "Laptop wants to pair.\nComparison Code: 000042\nDoes this code match the one on your device? [y/N] "
+        ));
         assert_eq!(
             paired,
             Paired::Approved {
@@ -409,29 +433,27 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_code_rejects_the_claim_and_withdraws_the_invitation() {
-        let core = Core {
-            claims: vec![claim()],
-            log: RefCell::default(),
-            withdrawal_fails: false,
-        };
-        let wrong = if claim().comparison_code().to_string() == "000000" {
-            "111111"
-        } else {
-            "000000"
-        };
-        let paired = pair(&core, &mut typist(Some(wrong.into())), None, LIFETIME);
-        assert_eq!(
-            paired,
-            Paired::Failed {
-                failure: Failure::new(Code::ComparisonMismatch),
-                withdrawn: true
-            }
-        );
-        assert_eq!(
-            *core.log.borrow(),
-            ["invite -", "claims", "reject", "withdraw"]
-        );
+    fn blank_negative_and_invalid_answers_reject_and_withdraw() {
+        for answer in ["", "n", "yes", "Y", "000042"] {
+            let core = Core {
+                claims: vec![claim()],
+                log: RefCell::default(),
+                withdrawal_fails: false,
+            };
+            let paired = pair(&core, &mut typist(Some(answer.into())), None, LIFETIME);
+            assert_eq!(
+                paired,
+                Paired::Failed {
+                    failure: Failure::new(Code::ComparisonMismatch),
+                    withdrawn: true
+                },
+                "answer {answer:?}"
+            );
+            assert_eq!(
+                *core.log.borrow(),
+                ["invite -", "claims", "reject", "withdraw"]
+            );
+        }
     }
 
     #[test]
@@ -465,17 +487,38 @@ mod tests {
     }
 
     #[test]
-    fn a_code_not_entered_before_the_invitation_expires_rejects_and_withdraws() {
+    fn a_y_at_the_deadline_still_rejects_and_withdraws() {
         let core = Core {
             claims: vec![claim()],
             log: RefCell::default(),
             withdrawal_fails: false,
         };
-        // The claim arrives at the end of the invitation's lifetime, and no code follows.
         assert_eq!(
-            pair(&core, &mut typist(None), None, Duration::ZERO),
+            pair(&core, &mut typist(Some("y".into())), None, Duration::ZERO),
             Paired::Failed {
                 failure: Failure::new(Code::Timeout),
+                withdrawn: true
+            }
+        );
+        assert_eq!(
+            *core.log.borrow(),
+            ["invite -", "claims", "reject", "withdraw"]
+        );
+    }
+
+    #[test]
+    fn an_interrupt_as_y_arrives_still_rejects_and_withdraws() {
+        let core = Core {
+            claims: vec![claim()],
+            log: RefCell::default(),
+            withdrawal_fails: false,
+        };
+        let mut person = typist(Some("y".into()));
+        person.interrupt_on_answer = true;
+        assert_eq!(
+            pair(&core, &mut person, None, LIFETIME),
+            Paired::Failed {
+                failure: Failure::new(Code::Interrupted),
                 withdrawn: true
             }
         );

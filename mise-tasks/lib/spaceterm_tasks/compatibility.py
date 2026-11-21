@@ -448,8 +448,7 @@ def pair_with_self(environment, timeout=60):
     """Pair this account's CLI with its own Core over Network Access, as another device would.
 
     `pair` needs a terminal, so it runs on a pseudo-terminal. `machine add` reads the
-    Invitation Link from a pipe and reports the Comparison Code as a JSON event, which this
-    types into `pair`.
+    Invitation Link from a pipe and reports the Comparison Code as a JSON event.
     """
     deadline = time.monotonic() + timeout
     primary, secondary = pty.openpty()
@@ -466,7 +465,7 @@ def pair_with_self(environment, timeout=60):
     try:
         link = _read_until(
             primary, re.compile(rb"spaceterm://pair/[^\s\x1b]+(?=[\s\x1b])"), deadline
-        )
+        ).group(0)
         joining = subprocess.Popen(
             [str(LAUNCHER), "--json", "machine", "add", SAVED_MACHINE, "--trust"],
             stdin=subprocess.PIPE,
@@ -482,8 +481,7 @@ def pair_with_self(environment, timeout=60):
         event = json.loads(stdout.readline())
         if event.get("event") != "comparison_code":
             raise TaskError("machine add reported no Comparison Code")
-        _read_until(primary, re.compile(rb"Comparison Code it shows: "), deadline)
-        os.write(primary, event["data"]["code"].encode() + b"\n")
+        _confirm_pairing(primary, event["data"]["code"].encode(), deadline)
         lines = stdout.read().splitlines()
         added = json.loads(lines[-1] if lines else b"{}")
         if joining.wait(timeout=max(deadline - time.monotonic(), 1)) or added.get("status") != "ok":
@@ -498,6 +496,19 @@ def pair_with_self(environment, timeout=60):
                 process.kill()
                 process.wait()
         os.close(primary)
+
+
+def _confirm_pairing(descriptor, joining_code, deadline):
+    # The Update Floor can still ask for the code to be typed.
+    prompt = re.compile(
+        rb"Comparison Code it shows: "
+        rb"|Comparison Code: ([0-9]{6})\r?\nDoes this code match the one on your device\? \[y/N\] "
+    )
+    displayed_code = _read_until(descriptor, prompt, deadline).group(1)
+    if displayed_code is not None and displayed_code != joining_code:
+        raise TaskError("the devices showed different Comparison Codes")
+    answer = joining_code if displayed_code is None else b"y"
+    os.write(descriptor, answer + b"\n")
 
 
 def _read_until(descriptor, pattern, deadline):
@@ -515,7 +526,7 @@ def _read_until(descriptor, pattern, deadline):
             if not chunk:
                 raise TaskError("pair ended before the pairing finished")
             output += chunk
-    return found.group(0)
+    return found
 
 
 def _envelope(client, arguments, environment, status="ok", timeout=COMMAND):

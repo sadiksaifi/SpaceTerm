@@ -154,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn the_qr_leaves_room_for_waiting_and_comparison_code_entry() {
+    fn the_qr_leaves_room_for_waiting_device_code_and_confirmation() {
         let link = invitation();
         let output = render(
             &link,
@@ -169,7 +169,7 @@ mod tests {
                 &link,
                 Some(Size {
                     columns: 240,
-                    rows: qr_rows + 2
+                    rows: qr_rows + 4
                 })
             ),
             format!("{link}\n")
@@ -179,7 +179,7 @@ mod tests {
                 &link,
                 Some(Size {
                     columns: 240,
-                    rows: qr_rows + 3
+                    rows: qr_rows + 5
                 })
             ),
             output
@@ -193,8 +193,8 @@ mod tests {
             render(
                 link,
                 Some(Size {
-                    columns: 40,
-                    rows: 25
+                    columns: 37,
+                    rows: 28
                 })
             ),
             format!("{link}\n")
@@ -203,8 +203,8 @@ mod tests {
             render(
                 link,
                 Some(Size {
-                    columns: 40,
-                    rows: 26
+                    columns: 37,
+                    rows: 29
                 })
             )
             .contains('█')
