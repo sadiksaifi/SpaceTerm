@@ -2,6 +2,7 @@ use crate::ui::appearance::gpui_color;
 use std::sync::Arc;
 
 mod presentation;
+mod render_input;
 pub(crate) use presentation::TerminalGridPresentation;
 
 use gpui::{
@@ -11,16 +12,22 @@ use gpui::{
     UnderlineStyle, Window, fill, outline, point, px, relative, rgba, size,
 };
 use spaceterm_core::diagnostics::TerminalCounters;
-use unicode_bidi::{BidiClass, bidi_class};
+use spaceterm_terminal_client::render::{
+    self, BackgroundSpan, Cursor, CursorShape, DecorationKind, DecorationSpan, RowPadding,
+    SymbolSpan as SymbolPaintInput, Underline, visible_in_phase,
+};
 
-use crate::appearance::{Color, ResolvedTerminalAppearance, TerminalColors};
+use crate::appearance::{Color, ResolvedTerminalAppearance};
 use crate::terminal::geometry::{
     CellGridPosition, CellGridSize, LogicalCellSize, LogicalSize, TerminalGeometry,
 };
 use crate::terminal::{
-    CellSemanticSnapshot, CellSnapshot, CursorPositionSnapshot, CursorShapeSnapshot,
-    CursorSnapshot, FindHighlightSpan, RowSnapshot, ScreenSnapshot, TerminalColor,
-    TerminalColorsSnapshot, TerminalDefaultColorSource, TerminalUnderlineSnapshot,
+    CellSnapshot, FindHighlightSpan, RowSnapshot, ScreenSnapshot, TerminalColorsSnapshot,
+};
+#[cfg(test)]
+use crate::terminal::{
+    CursorPositionSnapshot, CursorShapeSnapshot, CursorSnapshot, TerminalColor,
+    TerminalDefaultColorSource, TerminalUnderlineSnapshot,
 };
 
 use super::appearance::TerminalFonts;
@@ -29,9 +36,7 @@ use super::terminal_graphics::{
 };
 use super::terminal_ime::PreeditLayout;
 use super::terminal_pane::{OperationToken, PresentedInputGeometry, TerminalPane};
-use super::terminal_symbols::{
-    DevicePoint, SymbolPlanCache, SymbolPrimitive, TerminalSymbol, terminal_symbol,
-};
+use super::terminal_symbols::{DevicePoint, SymbolPlanCache, SymbolPrimitive};
 use super::workspace_frame::WorkspaceFrame;
 
 #[derive(Clone, Copy)]
@@ -251,6 +256,8 @@ impl TerminalGridCache {
             return Arc::clone(&self.prepared_rows);
         }
 
+        let render_colors = render_input::colors(colors);
+        let render_find_spans = render_input::find_spans(find_spans);
         let previous = if style_changed {
             Vec::new()
         } else {
@@ -271,10 +278,10 @@ impl TerminalGridCache {
             } else {
                 Arc::new(prepare_row_cached(
                     row,
-                    colors,
+                    &render_colors,
                     terminal_fonts,
                     index,
-                    find_spans,
+                    &render_find_spans,
                 ))
             };
             prepared_rows.push(Arc::clone(&prepared));
@@ -556,9 +563,7 @@ pub(crate) struct TerminalGridElement {
     cell_width: Pixels,
     nominal_line_height: Pixels,
     nominal_cell_width: Pixels,
-    cursor: Option<(CursorPositionSnapshot, CellSnapshot)>,
-    cursor_style: CursorSnapshot,
-    cursor_preparation_style: CursorSnapshot,
+    cursor: Option<Cursor>,
     terminal_fonts: TerminalFonts,
     preedit: Option<PreeditLayout>,
     focus_handle: FocusHandle,
@@ -680,18 +685,11 @@ impl TerminalGridElement {
         let cursor = screen.cursor.position.and_then(|position| {
             screen
                 .rows
-                .get(usize::from(position.row))
-                .and_then(|row| row.get(usize::from(position.column)))
-                .cloned()
-                .map(|cell| (position, cell))
+                .get(usize::from(position.row))?
+                .get(usize::from(position.column))?;
+            render_input::cursor(position, screen.cursor)
+                .map(|cursor| cursor.with_input_focus(configuration.terminal_input_focused))
         });
-        let cursor_style = presented_cursor_style(
-            screen.cursor,
-            configuration.terminal_input_focused,
-            configuration.blink_phase_visible,
-        );
-        let cursor_preparation_style =
-            presented_cursor_style(screen.cursor, configuration.terminal_input_focused, true);
         let rows = cache.update(cx, |cache, _| {
             cache.prepare(
                 &screen.rows,
@@ -721,8 +719,6 @@ impl TerminalGridElement {
             nominal_line_height: configuration.line_height,
             nominal_cell_width: configuration.cell_width,
             cursor,
-            cursor_style,
-            cursor_preparation_style,
             terminal_fonts: configuration.terminal_fonts,
             preedit: configuration.preedit,
             focus_handle: configuration.focus_handle,
@@ -744,20 +740,6 @@ impl TerminalGridElement {
             counters: configuration.counters,
         }
     }
-}
-
-fn presented_cursor_style(
-    mut negotiated: CursorSnapshot,
-    terminal_input_focused: bool,
-    blink_phase_visible: bool,
-) -> CursorSnapshot {
-    if negotiated.visible && !terminal_input_focused {
-        negotiated.shape = CursorShapeSnapshot::BlockHollow;
-        negotiated.blinking = false;
-    } else if negotiated.visible && negotiated.blinking && !blink_phase_visible {
-        negotiated.visible = false;
-    }
-    negotiated
 }
 
 #[derive(Clone)]
@@ -1177,7 +1159,7 @@ fn paint_prepared_row_text(
         .stable
         .text
         .iter()
-        .filter(|text| text_fragment_visible(text.blinking, blink_phase_visible))
+        .filter(|text| visible_in_phase(text.blinking, blink_phase_visible))
     {
         paint_terminal_text(text, line_height, cursor_paint, window)
             .map_err(|_| PaintBatchFailure::Presentation)?;
@@ -1388,17 +1370,14 @@ impl TerminalGridCache {
         rows: &Arc<[Arc<RowPaintInput>]>,
         visible_rows: usize,
         layout: PreparedGridLayout,
-        cursor: Option<&(CursorPositionSnapshot, CellSnapshot)>,
-        cursor_style: CursorSnapshot,
+        cursor: Option<Cursor>,
         window: &mut Window,
     ) -> (PreparedRows, Option<(usize, PreparedDecorations)>) {
         let stable_rows = self.prepare_visible_geometry(rows, visible_rows, layout, window);
         let cursor_symbols = cursor
-            .filter(|_| {
-                cursor_style.visible && matches!(cursor_style.shape, CursorShapeSnapshot::Block)
-            })
+            .filter(|cursor| cursor.recolors_text())
             .and_then(|cursor| {
-                let row_index = usize::from(cursor.0.row);
+                let row_index = usize::from(cursor.row);
                 if row_index >= visible_rows {
                     return None;
                 }
@@ -1410,7 +1389,6 @@ impl TerminalGridCache {
                     prepare_cursor_symbols(
                         row,
                         cursor,
-                        cursor_style.text_color,
                         row_top,
                         row_bottom,
                         layout.grid_bounds.left(),
@@ -1806,8 +1784,7 @@ fn prepare_stable_row(
 #[allow(clippy::too_many_arguments)]
 fn prepare_cursor_symbols(
     row: &RowPaintInput,
-    cursor: &(CursorPositionSnapshot, CellSnapshot),
-    text_color: Color,
+    cursor: Cursor,
     row_top: Pixels,
     row_bottom: Pixels,
     grid_left: Pixels,
@@ -1815,19 +1792,15 @@ fn prepare_cursor_symbols(
     scale_factor: f32,
     symbol_plans: &mut SymbolPlanCache,
 ) -> PreparedDecorations {
-    let (position, cell) = cursor;
-    if cell.spacer_tail || cell.invisible {
-        return PreparedDecorations::default();
-    }
     let Some(symbol) = row
         .symbols
         .iter()
-        .find(|symbol| symbol.start == usize::from(position.column))
+        .find(|symbol| symbol.start == usize::from(cursor.column))
     else {
         return PreparedDecorations::default();
     };
-    let mut symbol = symbol.clone();
-    symbol.color = text_color;
+    let mut symbol = *symbol;
+    symbol.color = cursor.text_color;
     prepare_symbol_geometry(
         &[symbol],
         row_top,
@@ -1848,7 +1821,7 @@ fn paint_prepared_decorations(
     for prepared in prepared
         .quads
         .iter()
-        .filter(|prepared| text_fragment_visible(prepared.blinking, blink_phase_visible))
+        .filter(|prepared| visible_in_phase(prepared.blinking, blink_phase_visible))
     {
         record_quad_paint(
             #[cfg(test)]
@@ -1859,7 +1832,7 @@ fn paint_prepared_decorations(
     for prepared in prepared
         .underlines
         .iter()
-        .filter(|prepared| text_fragment_visible(prepared.blinking, blink_phase_visible))
+        .filter(|prepared| visible_in_phase(prepared.blinking, blink_phase_visible))
     {
         window.paint_underline(prepared.origin, prepared.width, &prepared.style);
     }
@@ -1876,7 +1849,7 @@ fn paint_prepared_symbols_excluding_region(
     for prepared in prepared
         .quads
         .iter()
-        .filter(|prepared| text_fragment_visible(prepared.blinking, blink_phase_visible))
+        .filter(|prepared| visible_in_phase(prepared.blinking, blink_phase_visible))
     {
         record_quad_paint(
             #[cfg(test)]
@@ -1973,8 +1946,7 @@ impl Element for TerminalGridElement {
             window.scale_factor(),
         );
         let rows = Arc::clone(&self.rows);
-        let cursor = self.cursor.as_ref();
-        let cursor_preparation_style = self.cursor_preparation_style;
+        let cursor = self.cursor;
         let terminal_fonts = self.terminal_fonts.clone();
         let (stable_rows, preedit_rows, cursor_symbols) = self.cache.update(_cx, |cache, _| {
             let (stable_rows, cursor_symbols) = cache.prepare_frame_geometry(
@@ -1989,7 +1961,6 @@ impl Element for TerminalGridElement {
                     decoration_metrics,
                 },
                 cursor,
-                cursor_preparation_style,
                 window,
             );
             let preedit_rows = cache.prepare_preedit(
@@ -2002,7 +1973,7 @@ impl Element for TerminalGridElement {
                 self.line_height,
                 self.foreground,
                 self.background,
-                self.cursor_style.color,
+                self.presentation.cursor.color,
                 self.scale_factor,
                 window,
             );
@@ -2011,14 +1982,17 @@ impl Element for TerminalGridElement {
         let active_hyperlink_occurrence =
             hyperlink_occurrence(&self.presentation, self.active_hyperlink);
         let mut batch_cursor_text_overlay = None;
+        let render_colors = render_input::colors(&self.presentation.colors);
+        let find_spans = render_input::find_spans(&self.find_spans);
 
         for (row_index, stable) in stable_rows.iter().cloned().enumerate() {
             let row_top = grid_bounds.top() + self.line_height * row_index as f32;
             let find_backgrounds = prepare_background_geometry(
-                &find_background_spans(
+                &render::find_backgrounds(
                     row_index,
-                    &self.find_spans,
-                    &self.presentation.colors.configured,
+                    &find_spans,
+                    render_colors.find_match,
+                    render_colors.active_match,
                 ),
                 Bounds::new(
                     point(grid_bounds.left(), row_top),
@@ -2035,31 +2009,29 @@ impl Element for TerminalGridElement {
                 .as_ref()
                 .and_then(|rows| rows.get(row_index))
                 .is_none()
-                && self.cursor_style.visible
-                && let Some((position, _)) = &self.cursor
-                && usize::from(position.row) == row_index
+                && let Some(cursor) = cursor
+                && visible_in_phase(cursor.blinking, self.blink_phase_visible)
+                && usize::from(cursor.row) == row_index
             {
-                let plan = frame_cursor_paint_plan(
+                let plan = cursor_paint_geometry(
+                    cursor,
                     grid_left,
                     row_top,
                     self.cell_width,
                     self.line_height,
-                    *position,
-                    self.cursor_style,
-                )
-                .expect("a visible cursor always produces a paint plan");
+                );
                 cursor_background = Some(match plan.paint {
-                    CursorPaint::Fill => fill(plan.bounds, gpui_color(self.cursor_style.color)),
+                    CursorPaint::Fill => fill(plan.bounds, gpui_color(cursor.color.into())),
                     CursorPaint::Outline => outline(
                         plan.bounds,
-                        gpui_color(self.cursor_style.color),
+                        gpui_color(cursor.color.into()),
                         BorderStyle::default(),
                     ),
                 });
-                cursor_text_overlay = plan.recolor_text.then_some(CursorTextOverlay {
+                cursor_text_overlay = cursor.recolors_text().then_some(CursorTextOverlay {
                     row_index,
                     bounds: plan.bounds.intersect(&grid_bounds),
-                    color: gpui_color(self.cursor_style.text_color).into(),
+                    color: gpui_color(cursor.text_color.into()).into(),
                 });
             }
 
@@ -2119,8 +2091,7 @@ impl Element for TerminalGridElement {
             quad_paint_calls: None,
         };
         let cursor = self.cursor_layer.as_ref().and_then(|_| {
-            let position = self.cursor.as_ref()?.0;
-            let row = candidate.rows.get_mut(usize::from(position.row))?;
+            let row = candidate.rows.get_mut(usize::from(cursor?.row))?;
             let cursor_row = row.clone();
             let cursor_bounds = cursor_row
                 .cursor_background
@@ -2273,16 +2244,6 @@ struct RowPaintInput {
     padding: RowPadding,
 }
 
-/// What one row lends to the terminal padding beside and below the cell grid.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct RowPadding {
-    leading: Option<Color>,
-    trailing: Option<Color>,
-    /// Whether this row may extend its backgrounds below the grid when it is the last row. Follows
-    /// Ghostty's `neverExtendBg`.
-    extends_below: bool,
-}
-
 /// Extends edge-cell backgrounds across the padding between `grid_bounds` and `bounds`.
 fn prepare_padding_background_geometry(
     rows: &[Arc<RowPaintInput>],
@@ -2293,14 +2254,15 @@ fn prepare_padding_background_geometry(
     line_height: Pixels,
 ) -> Vec<PaintQuad> {
     let mut quads = Vec::new();
-    let mut push = |left: Pixels, top: Pixels, right: Pixels, bottom: Pixels, color: Color| {
-        if right > left && bottom > top {
-            quads.push(fill(
-                Bounds::from_corners(point(left, top), point(right, bottom)),
-                gpui_color(color),
-            ));
-        }
-    };
+    let mut push =
+        |left: Pixels, top: Pixels, right: Pixels, bottom: Pixels, color: render::Color| {
+            if right > left && bottom > top {
+                quads.push(fill(
+                    Bounds::from_corners(point(left, top), point(right, bottom)),
+                    gpui_color(color.into()),
+                ));
+            }
+        };
     for (row_index, row) in rows.iter().enumerate() {
         // Both edges come from cumulative offsets, like the row backgrounds, so adjacent strips
         // snap to the same device pixel.
@@ -2347,25 +2309,6 @@ fn prepare_padding_background_geometry(
     quads
 }
 
-/// Ghostty's perfect-fit Powerline range, which never extends into the padding.
-fn is_perfect_fit_powerline(cell: &CellSnapshot) -> bool {
-    cell.text.chars().next().is_some_and(|character| {
-        matches!(
-            u32::from(character),
-            0xe0b0..=0xe0c8 | 0xe0ca | 0xe0cc..=0xe0d2 | 0xe0d4
-        )
-    })
-}
-
-#[derive(Clone, Debug)]
-struct SymbolPaintInput {
-    start: usize,
-    width_cells: u8,
-    color: Color,
-    blinking: bool,
-    symbol: TerminalSymbol,
-}
-
 struct TextFragment {
     start: usize,
     text: SharedString,
@@ -2376,73 +2319,52 @@ struct TextFragment {
     blinking: bool,
 }
 
-struct FragmentBuilder {
-    start: usize,
-    blinking: bool,
-    text: String,
-    runs: Vec<TextRun>,
-    paint_runs: Vec<TextPaintRun>,
-}
+impl TextFragment {
+    fn for_gpui(fragment: render::TextFragment, fonts: &TerminalFonts) -> Self {
+        let mut runs: Vec<TextRun> = Vec::new();
+        let mut paint_runs: Vec<TextPaintRun> = Vec::new();
+        let mut start = 0;
+        for run in fragment.styles {
+            let len = run.end - start;
+            start = run.end;
 
-impl FragmentBuilder {
-    fn new(start: usize, blinking: bool) -> Self {
+            let color = gpui_color(run.style.color.into()).into();
+            if let Some(previous) = paint_runs.last_mut()
+                && previous.color == color
+            {
+                previous.end = run.end;
+            } else {
+                paint_runs.push(TextPaintRun {
+                    end: run.end,
+                    color,
+                });
+            }
+
+            let font = fonts.cell(run.style.bold, run.style.italic);
+            if let Some(previous) = runs.last_mut()
+                && previous.font == *font
+            {
+                previous.len += len;
+            } else {
+                runs.push(TextRun {
+                    len,
+                    font: font.clone(),
+                    // GPUI splits font runs on color changes. Paint these separately so
+                    // Selection and Find cannot change glyph positioning.
+                    color: rgba(0).into(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                });
+            }
+        }
         Self {
-            start,
-            blinking,
-            text: String::new(),
-            runs: Vec::new(),
-            paint_runs: Vec::new(),
-        }
-    }
-
-    fn push(&mut self, cell: &CellSnapshot, foreground: Color, terminal_fonts: &TerminalFonts) {
-        let start = self.text.len();
-        self.text.push_str(&cell.text);
-        let len = self.text.len() - start;
-        if len == 0 {
-            return;
-        }
-
-        let color = gpui_color(foreground).into();
-        let font = terminal_fonts.cell(cell.bold, cell.italic);
-
-        if let Some(previous) = self.paint_runs.last_mut()
-            && previous.color == color
-        {
-            previous.end = self.text.len();
-        } else {
-            self.paint_runs.push(TextPaintRun {
-                end: self.text.len(),
-                color,
-            });
-        }
-
-        if let Some(previous) = self.runs.last_mut()
-            && previous.font == *font
-        {
-            previous.len += len;
-        } else {
-            self.runs.push(TextRun {
-                len,
-                font: font.clone(),
-                // GPUI also splits font runs on color changes. Keep selection and Find
-                // colors in paint_runs so they cannot change glyph positioning.
-                color: rgba(0).into(),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            });
-        }
-    }
-
-    fn finish(self, simple_cells: bool) -> TextFragment {
-        TextFragment {
-            start: self.start,
-            text: self.text.into(),
-            runs: self.runs,
-            paint_runs: Arc::from(self.paint_runs),
-            simple_cells,
-            blinking: self.blinking,
+            start: fragment.start,
+            text: fragment.text.into(),
+            runs,
+            paint_runs: Arc::from(paint_runs),
+            simple_cells: fragment.simple_cells,
+            blinking: fragment.blinking,
         }
     }
 }
@@ -2470,41 +2392,6 @@ fn test_terminal_fonts(family: &SharedString) -> TerminalFonts {
     })
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct BackgroundSpan {
-    start: usize,
-    len: usize,
-    color: Color,
-}
-
-fn find_background_spans(
-    row_index: usize,
-    find_spans: &[FindHighlightSpan],
-    configured: &TerminalColors,
-) -> Vec<BackgroundSpan> {
-    [false, true]
-        .into_iter()
-        .flat_map(|current| {
-            find_spans
-                .iter()
-                .filter(move |span| usize::from(span.row) == row_index && span.current == current)
-                .map(move |span| BackgroundSpan {
-                    start: usize::from(span.start_column),
-                    len: usize::from(
-                        span.end_column
-                            .saturating_sub(span.start_column)
-                            .saturating_add(1),
-                    ),
-                    color: if current {
-                        configured.find_active_match_background
-                    } else {
-                        configured.find_match_background
-                    },
-                })
-        })
-        .collect()
-}
-
 fn prepare_background_geometry(
     spans: &[BackgroundSpan],
     row_bounds: Bounds<Pixels>,
@@ -2521,26 +2408,10 @@ fn prepare_background_geometry(
                     point(left, row_bounds.top()),
                     size((right - left).max(px(0.0)), row_bounds.size.height),
                 ),
-                gpui_color(span.color),
+                gpui_color(span.color.into()),
             )
         })
         .collect()
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DecorationKind {
-    Underline(TerminalUnderlineSnapshot),
-    Overline,
-    Strikethrough,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct DecorationSpan {
-    start: usize,
-    len: usize,
-    kind: DecorationKind,
-    color: Color,
-    blinking: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2599,21 +2470,21 @@ fn prepare_decoration_geometry(
             prepared.quads.push(PreparedQuad {
                 quad: fill(
                     Bounds::new(point(left, row_top + y), size(width, metrics.thickness)),
-                    gpui_color(span.color),
+                    gpui_color(span.color.into()),
                 ),
                 blinking: span.blinking,
             });
         };
 
         match span.kind {
-            DecorationKind::Underline(TerminalUnderlineSnapshot::Single) => {
+            DecorationKind::Underline(Underline::Single) => {
                 push_line(metrics.underline_y);
             }
-            DecorationKind::Underline(TerminalUnderlineSnapshot::Double) => {
+            DecorationKind::Underline(Underline::Double) => {
                 push_line(metrics.underline_y);
                 push_line(metrics.double_underline_y);
             }
-            DecorationKind::Underline(TerminalUnderlineSnapshot::Dotted) => {
+            DecorationKind::Underline(Underline::Dotted) => {
                 let mut x = left;
                 while x < right {
                     let dot_width = metrics.thickness.min(right - x);
@@ -2623,14 +2494,14 @@ fn prepare_decoration_geometry(
                                 point(x, row_top + metrics.underline_y),
                                 size(dot_width, metrics.thickness),
                             ),
-                            gpui_color(span.color),
+                            gpui_color(span.color.into()),
                         ),
                         blinking: span.blinking,
                     });
                     x += metrics.device_pixel * 2.0;
                 }
             }
-            DecorationKind::Underline(TerminalUnderlineSnapshot::Dashed) => {
+            DecorationKind::Underline(Underline::Dashed) => {
                 let dash_width = metrics.device_pixel * 3.0;
                 let mut x = left;
                 while x < right {
@@ -2641,26 +2512,26 @@ fn prepare_decoration_geometry(
                                 point(x, row_top + metrics.underline_y),
                                 size(width, metrics.thickness),
                             ),
-                            gpui_color(span.color),
+                            gpui_color(span.color.into()),
                         ),
                         blinking: span.blinking,
                     });
                     x += dash_width + metrics.device_pixel * 2.0;
                 }
             }
-            DecorationKind::Underline(TerminalUnderlineSnapshot::Curly) => {
+            DecorationKind::Underline(Underline::Curly) => {
                 prepared.underlines.push(PreparedUnderline {
                     origin: point(left, row_top + metrics.underline_y),
                     width,
                     style: UnderlineStyle {
                         thickness: metrics.thickness,
-                        color: Some(gpui_color(span.color).into()),
+                        color: Some(gpui_color(span.color.into()).into()),
                         wavy: true,
                     },
                     blinking: span.blinking,
                 });
             }
-            DecorationKind::Underline(TerminalUnderlineSnapshot::None) => {}
+            DecorationKind::Underline(Underline::None) => {}
             DecorationKind::Overline => push_line(metrics.overline_y),
             DecorationKind::Strikethrough => push_line(metrics.strikethrough_y),
         }
@@ -2716,7 +2587,7 @@ fn prepare_symbol_geometry(
                                 px(f32::from(*height) / bounds.scale_factor),
                             ),
                         ),
-                        gpui_color(symbol_color_with_alpha(symbol.color, *alpha)),
+                        gpui_color(symbol_color_with_alpha(symbol.color.into(), *alpha)),
                     ),
                     blinking: symbol.blinking,
                 }),
@@ -2726,7 +2597,7 @@ fn prepare_symbol_geometry(
                         cell_height: plan.height_device,
                         origin,
                         scale: bounds.scale_factor,
-                        color: symbol_color_with_alpha(symbol.color, *alpha),
+                        color: symbol_color_with_alpha(symbol.color.into(), *alpha),
                         blinking: symbol.blinking,
                     };
                     push_device_polygon_quads(&mut prepared, points, &context);
@@ -2741,7 +2612,7 @@ fn prepare_symbol_geometry(
                         cell_height: plan.height_device,
                         origin,
                         scale: bounds.scale_factor,
-                        color: symbol_color_with_alpha(symbol.color, *alpha),
+                        color: symbol_color_with_alpha(symbol.color.into(), *alpha),
                         blinking: symbol.blinking,
                     };
                     push_device_stroke_quads(&mut prepared, points, *thickness, &context);
@@ -2968,20 +2839,6 @@ fn symbol_color_with_alpha(mut color: Color, primitive_alpha: u8) -> Color {
     color
 }
 
-fn push_decoration(spans: &mut Vec<DecorationSpan>, mut span: DecorationSpan) {
-    if let Some(previous) = spans.last_mut()
-        && previous.start + previous.len == span.start
-        && previous.kind == span.kind
-        && previous.color == span.color
-        && previous.blinking == span.blinking
-    {
-        previous.len += span.len;
-        return;
-    }
-    span.len = span.len.max(1);
-    spans.push(span);
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct HyperlinkOccurrence {
     identity: u64,
@@ -3093,35 +2950,12 @@ fn hyperlink_hover_underline_spans(
     } else {
         row.len().saturating_sub(1)
     };
-    let mut spans = Vec::new();
-    for (column, cell) in row
-        .iter()
-        .enumerate()
-        .skip(start_column)
-        .take(end_column.saturating_sub(start_column) + 1)
-    {
-        if cell.invisible
-            || is_kitty_placeholder(cell)
-            || cell.underline != TerminalUnderlineSnapshot::None
-            || cell
-                .hyperlink
-                .as_ref()
-                .is_none_or(|link| link.identity != occurrence.identity)
-        {
-            continue;
-        }
-        push_decoration(
-            &mut spans,
-            DecorationSpan {
-                start: column,
-                len: 1,
-                kind: DecorationKind::Underline(TerminalUnderlineSnapshot::Single),
-                color,
-                blinking: false,
-            },
-        );
-    }
-    spans
+    render::hyperlink_hover(
+        row.iter().map(render_input::cell),
+        start_column..=end_column,
+        occurrence.identity,
+        color.into(),
+    )
 }
 
 #[cfg(test)]
@@ -3131,342 +2965,52 @@ fn prepare_row(
     font_family: &SharedString,
 ) -> RowPaintInput {
     let terminal_fonts = test_terminal_fonts(font_family);
-    prepare_row_cached(row, colors, &terminal_fonts, 0, &[])
+    prepare_row_cached(row, &render_input::colors(colors), &terminal_fonts, 0, &[])
 }
 
 fn prepare_row_cached(
     row: &RowSnapshot,
-    colors: &TerminalColorsSnapshot,
+    colors: &render::Colors<'_, Color>,
     terminal_fonts: &TerminalFonts,
     row_index: usize,
-    find_spans: &[FindHighlightSpan],
+    find_spans: &[render::FindHighlight],
 ) -> RowPaintInput {
-    let mut fragments = Vec::new();
-    let mut symbols = Vec::new();
-    let mut regular_fragment: Option<FragmentBuilder> = None;
-    let mut backgrounds: Vec<BackgroundSpan> = Vec::new();
-    let mut selections: Vec<BackgroundSpan> = Vec::new();
-    let mut underlines = Vec::new();
-    let mut overlines = Vec::new();
-    let mut strikethroughs = Vec::new();
-    let mut extends_below = !row.is_empty();
-
-    for (column, cell) in row.iter().enumerate() {
-        let placeholder = is_kitty_placeholder(cell);
-        let (_, background) = effective_colors(cell, colors);
-        extends_below &= background != colors.effective_background()
-            && cell.semantic_content == CellSemanticSnapshot::Output
-            && !is_perfect_fit_powerline(cell);
-        // Source identity matters even when a program's explicit RGB matches the default tint.
-        // Reverse video turns foreground colors into cell backgrounds, which remain opaque.
-        if cell.inverse
-            || (!colors.reversed && cell.background_source != TerminalColor::Default)
-            || (colors.reversed && cell.foreground_source != TerminalColor::Default)
-            || background != colors.effective_background()
-        {
-            if let Some(previous) = backgrounds.last_mut()
-                && previous.color == background
-                && previous.start + previous.len == column
-            {
-                previous.len += 1;
-            } else {
-                backgrounds.push(BackgroundSpan {
-                    start: column,
-                    len: 1,
-                    color: background,
-                });
-            }
-        }
-
-        if cell.selected {
-            let selection = colors.configured.selection_background;
-            if let Some(previous) = selections.last_mut()
-                && previous.start + previous.len == column
-            {
-                previous.len += 1;
-            } else {
-                selections.push(BackgroundSpan {
-                    start: column,
-                    len: 1,
-                    color: selection,
-                });
-            }
-        }
-
-        let foreground = presented_cell_foreground(
-            cell,
-            colors,
-            find_foreground_for_cell(row_index, column, find_spans, &colors.configured),
-        );
-        if !cell.invisible && !placeholder {
-            if cell.underline != TerminalUnderlineSnapshot::None {
-                push_decoration(
-                    &mut underlines,
-                    DecorationSpan {
-                        start: column,
-                        len: 1,
-                        kind: DecorationKind::Underline(cell.underline),
-                        color: effective_underline_color(cell, colors, foreground),
-                        blinking: cell.blinking,
-                    },
-                );
-            }
-            if cell.overline {
-                push_decoration(
-                    &mut overlines,
-                    DecorationSpan {
-                        start: column,
-                        len: 1,
-                        kind: DecorationKind::Overline,
-                        color: foreground,
-                        blinking: cell.blinking,
-                    },
-                );
-            }
-            if cell.strikethrough {
-                push_decoration(
-                    &mut strikethroughs,
-                    DecorationSpan {
-                        start: column,
-                        len: 1,
-                        kind: DecorationKind::Strikethrough,
-                        color: foreground,
-                        blinking: cell.blinking,
-                    },
-                );
-            }
-        }
-
-        if cell.spacer_tail || cell.invisible || placeholder {
-            if let Some(fragment) = regular_fragment.take() {
-                fragments.push(fragment.finish(true));
-            }
-            continue;
-        }
-
-        let is_wide_head = row.get(column + 1).is_some_and(|next| next.spacer_tail);
-        let width_cells = if is_wide_head { 2 } else { 1 };
-        if let Some(symbol) = terminal_symbol(&cell.text) {
-            if let Some(fragment) = regular_fragment.take() {
-                fragments.push(fragment.finish(true));
-            }
-            symbols.push(SymbolPaintInput {
-                start: column,
-                width_cells,
-                color: foreground,
-                blinking: cell.blinking,
-                symbol,
-            });
-            continue;
-        }
-
-        if regular_fragment
-            .as_ref()
-            .is_some_and(|fragment| fragment.blinking != cell.blinking)
-            && let Some(fragment) = regular_fragment.take()
-        {
-            fragments.push(fragment.finish(true));
-        }
-
-        let requires_whole_cell_shaping = !is_simple_cell(&cell.text, width_cells);
-        if requires_whole_cell_shaping {
-            if let Some(fragment) = regular_fragment.take() {
-                fragments.push(fragment.finish(true));
-            }
-            let mut fragment = FragmentBuilder::new(column, cell.blinking);
-            fragment.push(cell, foreground, terminal_fonts);
-            fragments.push(fragment.finish(false));
-        } else {
-            regular_fragment
-                .get_or_insert_with(|| FragmentBuilder::new(column, cell.blinking))
-                .push(cell, foreground, terminal_fonts);
-        }
-    }
-
-    if let Some(fragment) = regular_fragment {
-        fragments.push(fragment.finish(true));
-    }
-
-    underlines.extend(overlines);
-    let padding = RowPadding {
-        leading: backgrounds
-            .first()
-            .filter(|span| span.start == 0)
-            .map(|span| span.color),
-        trailing: backgrounds
-            .last()
-            .filter(|span| span.start + span.len == row.len())
-            .map(|span| span.color),
-        extends_below,
-    };
+    let plan = render::plan_row(
+        row.iter().map(render_input::cell),
+        colors,
+        row_index,
+        find_spans,
+    );
     RowPaintInput {
         font_resolution_identity: terminal_fonts.resolution_identity.clone(),
-        fragments,
-        symbols,
-        backgrounds,
-        selections,
-        under_text_decorations: underlines,
-        over_text_decorations: strikethroughs,
-        padding,
+        fragments: plan
+            .fragments
+            .into_iter()
+            .map(|fragment| TextFragment::for_gpui(fragment, terminal_fonts))
+            .collect(),
+        symbols: plan.symbols,
+        backgrounds: plan.backgrounds,
+        selections: plan.selections,
+        under_text_decorations: plan.under_text_decorations,
+        over_text_decorations: plan.over_text_decorations,
+        padding: plan.padding,
     }
 }
 
-fn is_kitty_placeholder(cell: &CellSnapshot) -> bool {
-    // The entire grapheme encodes image placement, including its diacritics.
-    // It must remain blank even when its image is missing or has been deleted.
-    cell.text.starts_with('\u{10eeee}')
-}
-
-fn is_bidi_sensitive(character: char) -> bool {
-    matches!(
-        bidi_class(character),
-        BidiClass::R
-            | BidiClass::AL
-            | BidiClass::AN
-            | BidiClass::NSM
-            | BidiClass::RLE
-            | BidiClass::RLO
-            | BidiClass::RLI
-            | BidiClass::LRE
-            | BidiClass::LRO
-            | BidiClass::LRI
-            | BidiClass::FSI
-            | BidiClass::PDI
-            | BidiClass::PDF
-    )
-}
-
-fn is_simple_cell(text: &str, width_cells: u8) -> bool {
-    width_cells == 1 && text.chars().count() == 1 && !text.chars().any(is_bidi_sensitive)
-}
-
-fn text_fragment_visible(blinking: bool, blink_phase_visible: bool) -> bool {
-    !blinking || blink_phase_visible
-}
-
-/// A cell's foreground and background as the terminal paints them.
 pub(super) fn effective_colors(
     cell: &CellSnapshot,
     colors: &TerminalColorsSnapshot,
 ) -> (Color, Color) {
-    let foreground_source = match (cell.foreground_source, cell.bold && colors.bold_as_bright) {
-        (TerminalColor::Palette(index @ 0..=7), true) => TerminalColor::Palette(index + 8),
-        (source, _) => source,
-    };
-    let mut foreground = if colors.bold_as_bright
-        && cell.bold
-        && !cell.faint
-        && foreground_source == TerminalColor::Default
-        && colors.foreground_source == TerminalDefaultColorSource::HostDefault
-    {
-        colors.configured.bright_foreground
-    } else {
-        resolve_color_source(foreground_source, colors, colors.foreground)
-    };
-    let mut background = resolve_color_source(cell.background_source, colors, colors.background);
-    if cell.inverse ^ colors.reversed {
-        std::mem::swap(&mut foreground, &mut background);
-    }
-    if cell.faint {
-        let source = if cell.inverse ^ colors.reversed {
-            cell.background_source
-        } else {
-            foreground_source
-        };
-        foreground = dim_color(
-            foreground,
-            source,
-            colors,
-            !(cell.inverse ^ colors.reversed),
-        );
-    }
-    (foreground, background)
-}
-
-fn presented_cell_foreground(
-    cell: &CellSnapshot,
-    colors: &TerminalColorsSnapshot,
-    find_foreground: Option<Color>,
-) -> Color {
-    let foreground = effective_colors(cell, colors).0;
-    if cell.selected {
-        colors.configured.selection_foreground.unwrap_or(foreground)
-    } else {
-        find_foreground.unwrap_or(foreground)
-    }
-}
-
-fn find_foreground_for_cell(
-    row_index: usize,
-    column: usize,
-    find_spans: &[FindHighlightSpan],
-    configured: &TerminalColors,
-) -> Option<Color> {
-    let matching = find_spans.iter().filter(|span| {
-        usize::from(span.row) == row_index
-            && (usize::from(span.start_column)..=usize::from(span.end_column)).contains(&column)
-    });
-    let current = matching.clone().any(|span| span.current);
-    if current {
-        configured.find_active_match_foreground
-    } else if matching.count() > 0 {
-        configured.find_match_foreground
-    } else {
-        None
-    }
-}
-
-fn dim_color(
-    color: Color,
-    source: TerminalColor,
-    colors: &TerminalColorsSnapshot,
-    default_is_foreground: bool,
-) -> Color {
-    match source {
-        TerminalColor::Default
-            if default_is_foreground
-                && colors.foreground_source == TerminalDefaultColorSource::HostDefault =>
-        {
-            colors.configured.dim_foreground
-        }
-        TerminalColor::Palette(index @ 0..=15) if !colors.palette_overrides[usize::from(index)] => {
-            colors.configured.dim[usize::from(index % 8)]
-        }
-        _ => Color {
-            a: color.a.div_ceil(2),
-            ..color
-        },
-    }
-}
-
-fn effective_underline_color(
-    cell: &CellSnapshot,
-    colors: &TerminalColorsSnapshot,
-    effective_foreground: Color,
-) -> Color {
-    let mut color = resolve_color_source(cell.underline_source, colors, effective_foreground);
-    if cell.faint && cell.underline_source != TerminalColor::Default {
-        color.a = color.a.div_ceil(2);
-    }
-    color
-}
-
-fn resolve_color_source(
-    source: TerminalColor,
-    colors: &TerminalColorsSnapshot,
-    default: Color,
-) -> Color {
-    match source {
-        TerminalColor::Default => default,
-        TerminalColor::Palette(index) => colors.palette[usize::from(index)],
-        TerminalColor::Rgb(color) => color,
-    }
+    let (foreground, background) = render::effective_colors(
+        render_input::cell_style(cell),
+        &render_input::colors(colors),
+    );
+    (foreground.into(), background.into())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct CursorPaintPlan {
     bounds: Bounds<Pixels>,
-    recolor_text: bool,
     paint: CursorPaint,
 }
 
@@ -3476,71 +3020,40 @@ enum CursorPaint {
     Outline,
 }
 
-fn cursor_paint_plan(
-    visible: bool,
-    shape: CursorShapeSnapshot,
-    origin: gpui::Point<Pixels>,
+fn cursor_paint_geometry(
+    cursor: Cursor,
+    grid_left: Pixels,
+    row_top: Pixels,
     cell_width: Pixels,
     line_height: Pixels,
-    width_cells: u8,
-) -> Option<CursorPaintPlan> {
-    if !visible {
-        return None;
-    }
-
-    let cursor_width = cell_width * f32::from(width_cells.max(1));
-    let (bounds, recolor_text, paint) = match shape {
-        CursorShapeSnapshot::Block => (
+) -> CursorPaintPlan {
+    let origin = point(grid_left + cell_width * f32::from(cursor.column), row_top);
+    let cursor_width = cell_width * f32::from(cursor.width_cells);
+    let (bounds, paint) = match cursor.shape {
+        CursorShape::Block => (
             Bounds::new(origin, size(cursor_width, line_height)),
-            true,
             CursorPaint::Fill,
         ),
-        CursorShapeSnapshot::Bar => (
+        CursorShape::Bar => (
             Bounds::new(origin, size((cell_width * 0.12).max(px(1.0)), line_height)),
-            false,
             CursorPaint::Fill,
         ),
-        CursorShapeSnapshot::Underline => {
+        CursorShape::Underline => {
             let thickness = (line_height * 0.10).max(px(1.0));
             (
                 Bounds::new(
                     point(origin.x, origin.y + line_height - thickness),
                     size(cursor_width, thickness),
                 ),
-                false,
                 CursorPaint::Fill,
             )
         }
-        CursorShapeSnapshot::BlockHollow => (
+        CursorShape::BlockHollow => (
             Bounds::new(origin, size(cursor_width, line_height)),
-            false,
             CursorPaint::Outline,
         ),
     };
-    Some(CursorPaintPlan {
-        bounds,
-        recolor_text,
-        paint,
-    })
-}
-
-fn frame_cursor_paint_plan(
-    grid_left: Pixels,
-    row_top: Pixels,
-    cell_width: Pixels,
-    line_height: Pixels,
-    position: CursorPositionSnapshot,
-    style: CursorSnapshot,
-) -> Option<CursorPaintPlan> {
-    let cursor_left = grid_left + cell_width * f32::from(position.column);
-    cursor_paint_plan(
-        style.visible,
-        style.shape,
-        point(cursor_left, row_top),
-        cell_width,
-        line_height,
-        position.width_cells,
-    )
+    CursorPaintPlan { bounds, paint }
 }
 
 #[cfg(test)]
@@ -3559,6 +3072,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::appearance::TerminalColors;
     use crate::ui::terminal_ime::layout_preedit;
     use gpui::Styled as _;
 
@@ -4993,101 +4507,50 @@ mod tests {
 
     #[test]
     fn cursor_shape_geometry_and_text_layering_are_shape_specific() {
-        let origin = point(px(10.0), px(20.0));
-
-        let block = cursor_paint_plan(
-            true,
-            crate::terminal::CursorShapeSnapshot::Block,
-            origin,
-            px(9.0),
-            px(20.0),
-            2,
-        )
-        .unwrap();
-        assert_eq!(block.bounds, Bounds::new(origin, size(px(18.0), px(20.0))));
-        assert!(block.recolor_text);
-
-        let bar = cursor_paint_plan(
-            true,
-            crate::terminal::CursorShapeSnapshot::Bar,
-            origin,
-            px(9.0),
-            px(20.0),
-            2,
-        )
-        .unwrap();
-        assert_eq!(bar.bounds.size, size(px(9.0) * 0.12, px(20.0)));
-        assert!(!bar.recolor_text);
-
-        let underline = cursor_paint_plan(
-            true,
-            crate::terminal::CursorShapeSnapshot::Underline,
-            origin,
-            px(9.0),
-            px(20.0),
-            2,
-        )
-        .unwrap();
-        assert_eq!(underline.bounds.size, size(px(18.0), px(2.0)));
-        assert_eq!(underline.bounds.bottom(), px(40.0));
-        assert!(!underline.recolor_text);
-
-        assert!(
-            cursor_paint_plan(
-                false,
-                crate::terminal::CursorShapeSnapshot::Block,
-                origin,
-                px(9.0),
-                px(20.0),
-                1,
-            )
-            .is_none()
-        );
-        {
-            let plan = cursor_paint_plan(
-                true,
-                crate::terminal::CursorShapeSnapshot::BlockHollow,
-                point(px(0.0), px(0.0)),
-                px(9.0),
-                px(20.0),
-                2,
-            )
-            .unwrap();
-
-            assert_eq!(plan.paint, CursorPaint::Outline);
-            assert_eq!(plan.bounds.size, size(px(18.0), px(20.0)));
-            assert!(!plan.recolor_text);
-        }
-    }
-
-    #[test]
-    fn frame_cursor_plan_preserves_requested_cell_geometry() {
-        let grid = Bounds::new(point(px(0.0), px(0.0)), size(px(95.0), px(45.0)));
-        let position = CursorPositionSnapshot {
-            column: 9,
+        let cursor = Cursor {
             row: 1,
-            width_cells: 1,
+            column: 0,
+            width_cells: 2,
+            shape: CursorShape::Block,
+            blinking: false,
+            color: Color::WHITE.into(),
+            text_color: Color::BLACK.into(),
         };
-        let style = CursorSnapshot {
-            visible: true,
-            shape: CursorShapeSnapshot::Bar,
-            ..CursorSnapshot::default()
-        };
+        let origin = point(px(10.0), px(20.0));
+        let geometry =
+            |cursor| cursor_paint_geometry(cursor, origin.x, origin.y, px(9.0), px(20.0));
 
-        let actual =
-            frame_cursor_paint_plan(grid.left(), px(20.0), px(9.0), px(20.0), position, style)
-                .unwrap();
-        let expected = CursorPaintPlan {
-            bounds: Bounds::new(point(px(81.0), px(20.0)), size(px(1.08), px(20.0))),
-            recolor_text: false,
-            paint: CursorPaint::Fill,
-        };
+        let block = geometry(cursor);
+        assert_eq!(block.bounds, Bounds::new(origin, size(px(18.0), px(20.0))));
+        assert!(cursor.recolors_text());
 
-        assert_eq!(actual.bounds.origin, expected.bounds.origin);
-        assert!((f32::from(actual.bounds.size.width) - 1.08).abs() < 0.000001);
-        assert_eq!(actual.bounds.size.height, expected.bounds.size.height);
-        assert_eq!(actual.recolor_text, expected.recolor_text);
-        assert_eq!(actual.paint, expected.paint);
+        let bar = Cursor {
+            column: 9,
+            shape: CursorShape::Bar,
+            ..cursor
+        };
+        let bar_plan = cursor_paint_geometry(bar, px(0.0), origin.y, px(9.0), px(20.0));
+        assert_eq!(bar_plan.bounds.origin, point(px(81.0), origin.y));
+        assert_eq!(bar_plan.bounds.size, size(px(9.0) * 0.12, px(20.0)));
+        assert!(!bar.recolors_text());
+
+        let underline = Cursor {
+            shape: CursorShape::Underline,
+            ..cursor
+        };
+        let underline_plan = geometry(underline);
+        assert_eq!(underline_plan.bounds.size, size(px(18.0), px(2.0)));
+        assert_eq!(underline_plan.bounds.bottom(), px(40.0));
+        assert!(!underline.recolors_text());
+
+        let hollow = Cursor {
+            shape: CursorShape::BlockHollow,
+            ..cursor
+        };
+        let hollow_plan = geometry(hollow);
+        assert_eq!(hollow_plan.paint, CursorPaint::Outline);
+        assert_eq!(hollow_plan.bounds.size, size(px(18.0), px(20.0)));
+        assert!(!hollow.recolors_text());
     }
 
     #[test]
@@ -5479,33 +4942,37 @@ mod tests {
         let negotiated = CursorSnapshot {
             visible: true,
             blinking: true,
-            shape: crate::terminal::CursorShapeSnapshot::Bar,
+            shape: CursorShapeSnapshot::Bar,
             ..CursorSnapshot::default()
         };
+        let position = CursorPositionSnapshot {
+            row: 1,
+            column: 7,
+            width_cells: 2,
+        };
 
-        assert_eq!(presented_cursor_style(negotiated, true, true), negotiated);
+        let cursor = render_input::cursor(position, negotiated).unwrap();
+        assert_eq!(cursor.with_input_focus(true), cursor);
+        assert_eq!((cursor.row, cursor.column, cursor.width_cells), (1, 7, 2));
+        assert!(visible_in_phase(cursor.blinking, true));
+        assert!(!visible_in_phase(cursor.blinking, false));
+
+        let unfocused = cursor.with_input_focus(false);
         assert_eq!(
-            presented_cursor_style(negotiated, false, false),
-            CursorSnapshot {
+            unfocused,
+            Cursor {
+                shape: CursorShape::BlockHollow,
                 blinking: false,
-                shape: crate::terminal::CursorShapeSnapshot::BlockHollow,
-                ..negotiated
+                ..cursor
             }
         );
-
-        assert_eq!(
-            presented_cursor_style(negotiated, true, false),
-            CursorSnapshot {
-                visible: false,
-                ..negotiated
-            }
-        );
+        assert!(visible_in_phase(unfocused.blinking, false));
 
         let hidden = CursorSnapshot {
             visible: false,
             ..negotiated
         };
-        assert_eq!(presented_cursor_style(hidden, false, false), hidden);
+        assert!(render_input::cursor(position, hidden).is_none());
     }
 
     #[test]
@@ -5569,13 +5036,13 @@ mod tests {
                 [BackgroundSpan {
                     start: 0,
                     len: 1,
-                    color: Color::rgb(0x65_43_21),
+                    color: Color::rgb(0x65_43_21).into(),
                 }]
                 .as_slice(),
                 [BackgroundSpan {
                     start: 0,
                     len: 1,
-                    color: TerminalColors::default().selection_background,
+                    color: TerminalColors::default().selection_background.into(),
                 }]
                 .as_slice(),
             )
@@ -5623,8 +5090,7 @@ mod tests {
     fn text_runs_preserve_font_and_color_transitions() {
         let colors = colors();
         let family: SharedString = "JetBrains Mono".into();
-        let terminal_fonts = test_terminal_fonts(&family);
-        let mut fragment = FragmentBuilder::new(0, false);
+        let mut cells = Vec::new();
         let styles = [(false, false), (true, false), (true, true), (false, true)];
         let mut expected_fonts = Vec::new();
         let mut expected_paint = Vec::new();
@@ -5663,9 +5129,8 @@ mod tests {
                 subject.bold = bold;
                 subject.italic = italic;
                 subject.foreground_source = TerminalColor::Rgb(foreground);
-                let foreground = effective_colors(&subject, &colors).0;
-                fragment.push(&subject, foreground, &terminal_fonts);
-                fragment.push(&subject, foreground, &terminal_fonts);
+                cells.push(subject.clone());
+                cells.push(subject);
                 expected_paint.push(TextPaintRun {
                     end: (expected_paint.len() + 1) * 4,
                     color: expected_color,
@@ -5673,7 +5138,10 @@ mod tests {
             }
         }
 
-        let fragment = fragment.finish(true);
+        let input = prepare_row(&Arc::from(cells), &colors, &family);
+        let [fragment] = input.fragments.as_slice() else {
+            panic!("expected one narrow shaping fragment");
+        };
 
         assert_eq!(fragment.runs, expected_fonts);
         assert_eq!(fragment.paint_runs.as_ref(), expected_paint);
@@ -5681,61 +5149,29 @@ mod tests {
     }
 
     #[test]
-    fn text_runs_keep_family_changes_and_ignore_empty_cells() {
-        let colors = colors();
-        let first_family: SharedString = "Menlo".into();
-        let second_family: SharedString = "JetBrains Mono".into();
-        let first_fonts = test_terminal_fonts(&first_family);
-        let second_fonts = test_terminal_fonts(&second_family);
-        let mut fragment = FragmentBuilder::new(0, false);
-        fragment.push(&cell("a"), colors.foreground, &first_fonts);
+    fn text_runs_keep_family_changes_across_empty_cells() {
+        let mut fonts = test_terminal_fonts(&"Menlo".into());
+        fonts.bold.family = "JetBrains Mono".into();
         let mut empty = cell("");
-        empty.bold = true;
         empty.italic = true;
-        fragment.push(&empty, colors.foreground, &second_fonts);
-        fragment.push(&cell("b"), colors.foreground, &first_fonts);
-        fragment.push(&cell("é"), colors.foreground, &second_fonts);
-        fragment.push(&cell("c"), colors.foreground, &second_fonts);
+        let mut bold = cell("é");
+        bold.bold = true;
+        let row = Arc::from([cell("a"), empty, bold.clone(), bold]);
 
-        let fragment = fragment.finish(true);
+        let input = prepare_row_cached(&row, &render_input::colors(&colors()), &fonts, 0, &[]);
 
-        assert_eq!(fragment.text.as_ref(), "abéc");
-        assert_eq!(fragment.runs.len(), 2);
-        assert_eq!(fragment.runs[0].len, 2);
         assert_eq!(
-            fragment.runs[0].font,
-            Font {
-                family: "Menlo".into(),
-                features: gpui::FontFeatures(Arc::new(vec![
-                    ("liga".to_owned(), 0),
-                    ("clig".to_owned(), 0),
-                    ("calt".to_owned(), 0),
-                ])),
-                fallbacks: Some(gpui::FontFallbacks::from_fonts(vec![
-                    "fixture-emoji".to_owned(),
-                    "fixture-monospace".to_owned(),
-                ])),
-                weight: gpui::FontWeight(400.0),
-                style: gpui::FontStyle::Normal,
-            }
-        );
-        assert_eq!(fragment.runs[1].len, 3);
-        assert_eq!(
-            fragment.runs[1].font,
-            Font {
-                family: "JetBrains Mono".into(),
-                features: gpui::FontFeatures(Arc::new(vec![
-                    ("liga".to_owned(), 0),
-                    ("clig".to_owned(), 0),
-                    ("calt".to_owned(), 0),
-                ])),
-                fallbacks: Some(gpui::FontFallbacks::from_fonts(vec![
-                    "fixture-emoji".to_owned(),
-                    "fixture-monospace".to_owned(),
-                ])),
-                weight: gpui::FontWeight(400.0),
-                style: gpui::FontStyle::Normal,
-            }
+            input
+                .fragments
+                .iter()
+                .map(|fragment| (
+                    fragment.start,
+                    fragment.text.as_ref(),
+                    fragment.runs[0].len,
+                    fragment.runs[0].font.family.as_ref(),
+                ))
+                .collect::<Vec<_>>(),
+            [(0, "a", 1, "Menlo"), (2, "éé", 4, "JetBrains Mono")],
         );
     }
 
@@ -5746,7 +5182,7 @@ mod tests {
         let family: SharedString = "Menlo".into();
         let fonts = test_terminal_fonts(&family);
 
-        let input = prepare_row_cached(&row, &colors, &fonts, 0, &[]);
+        let input = prepare_row_cached(&row, &render_input::colors(&colors), &fonts, 0, &[]);
 
         assert_eq!(input.fragments.len(), 1);
         assert_eq!(input.fragments[0].runs.len(), 1);
@@ -5769,7 +5205,7 @@ mod tests {
             vec![BackgroundSpan {
                 start: 0,
                 len: 2,
-                color: accent,
+                color: accent.into(),
             }]
         );
     }
@@ -5786,7 +5222,7 @@ mod tests {
             vec![BackgroundSpan {
                 start: 1,
                 len: 1,
-                color: colors.background
+                color: colors.background.into()
             }]
         );
     }
@@ -6343,7 +5779,14 @@ mod tests {
         ];
 
         let configured = TerminalColors::default();
-        let find_backgrounds = find_background_spans(0, &spans, &configured);
+        let colors = colors();
+        let render_colors = render_input::colors(&colors);
+        let find_backgrounds = render::find_backgrounds(
+            0,
+            &render_input::find_spans(&spans),
+            render_colors.find_match,
+            render_colors.active_match,
+        );
         let stable = Arc::new(PreparedRow {
             text: Vec::new(),
             symbols: PreparedDecorations::default(),
@@ -6375,7 +5818,7 @@ mod tests {
             (
                 find_backgrounds
                     .iter()
-                    .map(|background| background.color)
+                    .map(|background| Color::from(background.color))
                     .collect::<Vec<_>>(),
                 prepared
                     .backgrounds_in_paint_order()
@@ -6424,7 +5867,13 @@ mod tests {
         ]);
         let fonts = test_terminal_fonts(&"Menlo".into());
 
-        let input = prepare_row_cached(&row, &colors, &fonts, 0, &find_spans);
+        let input = prepare_row_cached(
+            &row,
+            &render_input::colors(&colors),
+            &fonts,
+            0,
+            &render_input::find_spans(&find_spans),
+        );
         let run_colors = input
             .fragments
             .iter()
@@ -6457,7 +5906,7 @@ mod tests {
             vec![BackgroundSpan {
                 start: 0,
                 len: 1,
-                color: accent,
+                color: accent.into(),
             }]
         );
     }
@@ -6483,17 +5932,15 @@ mod tests {
                 DecorationSpan {
                     start: 0,
                     len: 2,
-                    kind: DecorationKind::Underline(
-                        crate::terminal::TerminalUnderlineSnapshot::Double,
-                    ),
-                    color: accent,
+                    kind: DecorationKind::Underline(Underline::Double),
+                    color: accent.into(),
                     blinking: false,
                 },
                 DecorationSpan {
                     start: 0,
                     len: 2,
                     kind: DecorationKind::Overline,
-                    color: colors().foreground,
+                    color: colors().foreground.into(),
                     blinking: false,
                 },
             ]
@@ -6504,7 +5951,7 @@ mod tests {
                 start: 0,
                 len: 2,
                 kind: DecorationKind::Strikethrough,
-                color: colors().foreground,
+                color: colors().foreground.into(),
                 blinking: false,
             }]
         );
@@ -6540,15 +5987,15 @@ mod tests {
                 DecorationSpan {
                     start: 0,
                     len: 1,
-                    kind: DecorationKind::Underline(TerminalUnderlineSnapshot::Single),
-                    color: hyperlink,
+                    kind: DecorationKind::Underline(Underline::Single),
+                    color: hyperlink.into(),
                     blinking: false,
                 },
                 DecorationSpan {
                     start: 2,
                     len: 1,
-                    kind: DecorationKind::Underline(TerminalUnderlineSnapshot::Single),
-                    color: hyperlink,
+                    kind: DecorationKind::Underline(Underline::Single),
+                    color: hyperlink.into(),
                     blinking: false,
                 },
             ]
@@ -6582,8 +6029,8 @@ mod tests {
             [DecorationSpan {
                 start: 2,
                 len: 1,
-                kind: DecorationKind::Underline(TerminalUnderlineSnapshot::Single),
-                color: TerminalColors::default().hyperlink,
+                kind: DecorationKind::Underline(Underline::Single),
+                color: TerminalColors::default().hyperlink.into(),
                 blinking: false,
             }]
         );
@@ -6606,7 +6053,7 @@ mod tests {
         assert_eq!(input.under_text_decorations.len(), 2);
         assert_eq!(
             input.under_text_decorations[0].kind,
-            DecorationKind::Underline(crate::terminal::TerminalUnderlineSnapshot::Single)
+            DecorationKind::Underline(Underline::Single)
         );
         assert_eq!(input.over_text_decorations.len(), 1);
         assert!(
@@ -6626,7 +6073,7 @@ mod tests {
                 .under_text_decorations
                 .iter()
                 .chain(&input.over_text_decorations)
-                .all(|span| span.color == colors().background && span.blinking)
+                .all(|span| span.color == colors().background.into() && span.blinking)
         );
         let metrics = decoration_metrics(px(15.0), px(11.0), px(4.0), px(8.0), px(20.0), 2.0);
         let prepared = prepare_decoration_geometry(
@@ -6680,17 +6127,17 @@ mod tests {
             start: 0,
             len: 2,
             kind: DecorationKind::Underline(kind),
-            color: Color::rgb(0x12_34_56),
+            color: Color::rgb(0x12_34_56).into(),
             blinking: false,
         };
         let prepare =
             |kind| prepare_decoration_geometry(&[span(kind)], px(0.0), px(0.0), px(8.0), metrics);
 
-        let single = prepare(crate::terminal::TerminalUnderlineSnapshot::Single);
-        let double = prepare(crate::terminal::TerminalUnderlineSnapshot::Double);
-        let curly = prepare(crate::terminal::TerminalUnderlineSnapshot::Curly);
-        let dotted = prepare(crate::terminal::TerminalUnderlineSnapshot::Dotted);
-        let dashed = prepare(crate::terminal::TerminalUnderlineSnapshot::Dashed);
+        let single = prepare(Underline::Single);
+        let double = prepare(Underline::Double);
+        let curly = prepare(Underline::Curly);
+        let dotted = prepare(Underline::Dotted);
+        let dashed = prepare(Underline::Dashed);
 
         for prepared in [&single, &double, &curly, &dotted, &dashed] {
             assert!(!prepared.quads.is_empty() || !prepared.underlines.is_empty());
@@ -6750,7 +6197,7 @@ mod tests {
             vec![BackgroundSpan {
                 start: 0,
                 len: 2,
-                color: TerminalColors::default().selection_background,
+                color: TerminalColors::default().selection_background.into(),
             }]
         );
     }
@@ -6775,10 +6222,10 @@ mod tests {
 
     #[test]
     fn text_blink_phase_hides_only_blinking_fragments() {
-        assert!(text_fragment_visible(false, false));
-        assert!(text_fragment_visible(false, true));
-        assert!(!text_fragment_visible(true, false));
-        assert!(text_fragment_visible(true, true));
+        assert!(visible_in_phase(false, false));
+        assert!(visible_in_phase(false, true));
+        assert!(!visible_in_phase(true, false));
+        assert!(visible_in_phase(true, true));
     }
 
     #[test]
@@ -6822,7 +6269,10 @@ mod tests {
                 .iter()
                 .map(|symbol| (symbol.start, symbol.width_cells, symbol.color))
                 .collect::<Vec<_>>(),
-            vec![(0, 1, colors().foreground), (2, 2, colors().background)]
+            vec![
+                (0, 1, colors().foreground.into()),
+                (2, 2, colors().background.into())
+            ]
         );
         assert_eq!(
             input
@@ -6857,7 +6307,7 @@ mod tests {
         );
 
         assert!(prepared.quads[0].blinking);
-        assert!(!text_fragment_visible(prepared.quads[0].blinking, false));
+        assert!(!visible_in_phase(prepared.quads[0].blinking, false));
         assert_eq!(prepared.quads.len(), 1);
         assert_eq!(
             prepared.quads[0].quad.bounds,
@@ -6974,16 +6424,6 @@ mod tests {
                 .iter()
                 .all(|fragment| !fragment.simple_cells)
         );
-    }
-
-    #[test]
-    fn only_simple_narrow_cells_share_shaping_fragments() {
-        assert!(is_simple_cell("a", 1));
-        assert!(!is_simple_cell("界", 2));
-        assert!(!is_simple_cell("e\u{301}", 1));
-        assert!(!is_simple_cell("\u{2764}\u{fe0f}", 2));
-        assert!(!is_simple_cell("👩\u{200d}💻", 2));
-        assert!(!is_simple_cell("א", 1));
     }
 
     #[test]
@@ -7537,7 +6977,6 @@ mod tests {
                     rows.len(),
                     prepared_grid_layout(&fonts, px(14.0), px(8.375)),
                     None,
-                    CursorSnapshot::default(),
                     window,
                 );
                 let baseline_positions = baseline
@@ -7561,17 +7000,19 @@ mod tests {
                         };
                         let inputs =
                             cache.prepare(&rows, &colors(), &fonts, &Arc::from([]), grid_metrics());
-                        let cursor = (position, cells[usize::from(column)].clone());
-                        let (prepared, _) = cache.prepare_frame_geometry(
-                            &inputs,
-                            rows.len(),
-                            prepared_grid_layout(&fonts, px(14.0), px(8.375)),
-                            Some(&cursor),
+                        let cursor = render_input::cursor(
+                            position,
                             CursorSnapshot {
                                 visible: true,
                                 shape,
                                 ..CursorSnapshot::default()
                             },
+                        );
+                        let (prepared, _) = cache.prepare_frame_geometry(
+                            &inputs,
+                            rows.len(),
+                            prepared_grid_layout(&fonts, px(14.0), px(8.375)),
+                            cursor,
                             window,
                         );
 

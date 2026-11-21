@@ -86,7 +86,7 @@ pub(crate) use attention::AttentionFacts;
 #[cfg(test)]
 pub(crate) use emulator::ScrollbarSnapshot;
 pub(crate) use emulator::{
-    ActiveScreenSnapshot, CellSemanticSnapshot, CellSnapshot, CellText, CursorPositionSnapshot,
+    ActiveScreenSnapshot, CellSemanticSnapshot, CellSnapshot, CursorPositionSnapshot,
     CursorShapeSnapshot, CursorSnapshot, PresentationGeneration, RowSnapshot, ScreenSnapshot,
     TerminalColor, TerminalColorsSnapshot, TerminalDefaultColorSource, TerminalUnderlineSnapshot,
 };
@@ -96,7 +96,9 @@ pub(crate) use failure::{
     DiagnosticBundle, DiagnosticKeyEventKind, PaneTerminalState, TerminalFailure,
     UnhandledKeyDiagnostic,
 };
-pub(crate) use find::{FindHighlightSpan, FindQueryGeneration, TerminalFindSnapshot};
+#[cfg(test)]
+pub(crate) use find::TerminalFindSnapshot;
+pub(crate) use find::{FindHighlightSpan, FindQueryGeneration};
 pub(crate) use graphics::{GraphicsSnapshot, ImageKey, ImagePlacementSnapshot, ImageSnapshot};
 pub(crate) use hyperlink::HyperlinkTarget;
 pub(crate) use key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};

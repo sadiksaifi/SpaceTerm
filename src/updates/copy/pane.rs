@@ -184,12 +184,12 @@ pub(crate) fn blocked(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spaceterm_core::update::facts::{Platform, UpdateCheck};
+    use spaceterm_core::update::facts::UpdateCheck;
 
     fn facts(sessions: u32) -> UpdateFacts {
         UpdateFacts {
             revision: 1,
-            platform: Platform::HOST,
+            platform: spaceterm_core::update::facts::HOST_PLATFORM,
             running: Version::parse("0.11.4").unwrap(),
             pending: None,
             sessions,

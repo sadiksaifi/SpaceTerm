@@ -111,6 +111,35 @@ fn through_wire(frame: u64, base: Option<u64>, update: ScreenUpdate) -> ScreenUp
     }
 }
 
+#[test]
+fn scrolling_back_moves_a_live_image_with_its_row() {
+    let _graphics = crate::terminal::graphics::test_lock();
+    let mut session = Session::new(8, 2);
+    session.emulator.feed(b"old\r\nlive\r\nnext\x1b[H");
+    session
+        .emulator
+        .feed(b"\x1b_Ga=T,t=d,f=32,i=1,s=1,v=1,C=1;AQIDBA==\x1b\\");
+    let (capture, frame, update) = session.next_against(None).unwrap();
+    let decoded = session.decoder.apply(frame, None, update, None).unwrap();
+    let generation = PresentationGeneration::from_counter(1);
+    let mut screen = session
+        .presenter
+        .snapshot(decoded, generation, &session.appearance);
+    screen.graphics = capture.screen.graphics.clone();
+
+    let mut scrollback = super::scrollback::Scrollback::default();
+    scrollback.attach([1; 32]);
+    scrollback.screen(Arc::new(screen));
+    let live = scrollback.present(generation).unwrap();
+    assert_eq!(live.graphics.placements.len(), 1);
+    assert_eq!(live.graphics.placements[0].viewport_row, 0);
+
+    assert!(scrollback.wheel(1));
+    let scrolled = scrollback.present(generation.next()).unwrap();
+    assert_eq!(scrolled.rows[1], live.rows[0]);
+    assert_eq!(scrolled.graphics.placements[0].viewport_row, 1);
+}
+
 /// What the wire carries of one cell. File links need local authority, which these tests do not
 /// grant, so they arrive without a target.
 #[derive(Debug, PartialEq)]
@@ -201,7 +230,7 @@ fn assert_same(
         (history.epoch, history.oldest, history.total)
     );
     assert_eq!(decoded.generation, capture.generation);
-    let rendered = presenter.snapshot(decoded, PresentationGeneration::test(1), appearance);
+    let rendered = presenter.snapshot(decoded, PresentationGeneration::from_counter(1), appearance);
     assert!(Arc::ptr_eq(&rendered.rows, &decoded.rows));
     assert_eq!(rendered.cursor.position, screen.cursor.position);
     assert_eq!(rendered.cursor.visible, screen.cursor.visible);
@@ -866,8 +895,11 @@ fn snapshots_keep_program_colors_and_project_client_defaults() {
         crate::runtime::HyperlinkKind::Url
     );
     assert!(decoded.rows[0][1].hyperlink.is_none());
-    let screen =
-        Presenter::default().snapshot(decoded, PresentationGeneration::test(1), &appearance);
+    let screen = Presenter::default().snapshot(
+        decoded,
+        PresentationGeneration::from_counter(1),
+        &appearance,
+    );
     assert_eq!(
         screen.colors.foreground,
         crate::appearance::Color::rgb(0x0a141e)
@@ -980,7 +1012,7 @@ fn consecutive_screens_share_the_projected_palette_until_its_inputs_change() {
         },
         ..ScreenUpdate::default()
     };
-    let generation = PresentationGeneration::test;
+    let generation = PresentationGeneration::from_counter;
     let mut appearance = crate::terminal::test_terminal_appearance_update();
     let mut decoder = ScreenDecoder::new(Arc::default());
     let mut presenter = Presenter::default();
@@ -1057,7 +1089,7 @@ fn a_new_appearance_reaches_the_next_screen() {
         }),
         ..ScreenUpdate::default()
     };
-    let generation = PresentationGeneration::test;
+    let generation = PresentationGeneration::from_counter;
     let mut decoder = ScreenDecoder::new(Arc::default());
     let mut presenter = Presenter::default();
     let decoded = decoder.apply(1, None, keyframe, None).unwrap();
@@ -1091,7 +1123,7 @@ fn a_program_that_changes_one_palette_entry_again_shows_its_new_color() {
         let decoded = session.decoder.apply(frame, base, update, None).unwrap();
         let rendered = session.presenter.snapshot(
             decoded,
-            PresentationGeneration::test(frame),
+            PresentationGeneration::from_counter(frame),
             &session.appearance,
         );
         assert!(rendered.colors.palette_overrides[2]);

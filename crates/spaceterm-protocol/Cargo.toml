@@ -1,0 +1,17 @@
+[package]
+name = "spaceterm-protocol"
+publish = false
+edition = "2024"
+
+[features]
+developer-tools = []
+
+[dependencies]
+base64 = "=0.22.1"
+postcard = { version = "=1.1.3", default-features = false, features = ["alloc"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_bytes = "=0.11.19"
+serde_json = "1.0"
+sha2-const-stable = "=0.1.0"
+thiserror = "2.0.17"
+zeroize = "=1.9.0"

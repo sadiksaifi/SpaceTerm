@@ -5,11 +5,12 @@
 //! acknowledgement that retires the outcome needs no reply. Nothing here polls.
 use crate::machine_connection::{CoreError, MachineConnection};
 use crate::terminal::core_session::PaneControls;
+use spaceterm_client::workspace::{EditError, EditJournal, EditProgress, dispatch_original};
 use spaceterm_core::{
     attachments::Attachments,
     connection::link::{CoreLink, Health, LinkEvent, LinkSink},
-    hierarchy::{ClientJournal, ClientOperation, Inventory, Mutation, RetainedOutcome},
-    protocol::{InventoryRevision, Operation, ReplyBody},
+    hierarchy::{ClientJournal, Inventory, Mutation, RetainedOutcome},
+    protocol::InventoryRevision,
 };
 use std::sync::{
     Arc, Mutex, Weak,
@@ -24,7 +25,7 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 /// What the edit loop needs from the owning server. Production reaches it through
 /// [`MachineConnection`].
 trait EditCore: Send + 'static {
-    type Journal: EditJournal;
+    type Journal: PresentationJournal;
     /// The shared link. Paired followers read only their owner's admitted connection;
     /// account-local followers may connect. `cancelled` ends a server-operation wait early.
     fn link(&self, cancelled: &dyn Fn() -> bool) -> Result<CoreLink, CoreError>;
@@ -37,15 +38,12 @@ trait EditCore: Send + 'static {
 
 /// This client's durable record of the Original Operation in flight, the last one retired, and
 /// the retired outcomes it has not presented yet.
-trait EditJournal {
-    fn pending(&self) -> Option<&ClientOperation>;
+trait PresentationJournal: EditJournal {
     fn last(&self) -> Option<&RetainedOutcome>;
     fn unseen(&self) -> &[RetainedOutcome];
     /// How many unseen outcomes the bound forgot in total, and how many of those the client has
     /// said went unseen.
     fn forgotten(&self) -> (u64, u64);
-    fn submit(&mut self, sequence: u64, mutation: Mutation) -> Result<(), CoreError>;
-    fn retire(&mut self, result: RetainedOutcome) -> Result<(), CoreError>;
     fn presented(&mut self, sequence: u64) -> Result<(), CoreError>;
     fn forgotten_presented(&mut self, total: u64) -> Result<(), CoreError>;
 }
@@ -74,10 +72,7 @@ impl EditCore for MachineConnection {
     }
 }
 
-impl EditJournal for ClientJournal {
-    fn pending(&self) -> Option<&ClientOperation> {
-        ClientJournal::pending(self)
-    }
+impl PresentationJournal for ClientJournal {
     fn last(&self) -> Option<&RetainedOutcome> {
         ClientJournal::last(self)
     }
@@ -86,12 +81,6 @@ impl EditJournal for ClientJournal {
     }
     fn forgotten(&self) -> (u64, u64) {
         ClientJournal::forgotten(self)
-    }
-    fn submit(&mut self, sequence: u64, mutation: Mutation) -> Result<(), CoreError> {
-        ClientJournal::submit(self, sequence, mutation)
-    }
-    fn retire(&mut self, result: RetainedOutcome) -> Result<(), CoreError> {
-        ClientJournal::retire(self, result)
     }
     fn presented(&mut self, sequence: u64) -> Result<(), CoreError> {
         ClientJournal::presented(self, sequence)
@@ -166,7 +155,7 @@ pub(crate) struct WorkspaceSnapshot {
 }
 impl WorkspaceSnapshot {
     /// Publishes the journal's unseen outcomes, except those already presented.
-    fn unseen_from(&mut self, journal: &impl EditJournal) {
+    fn unseen_from(&mut self, journal: &impl PresentationJournal) {
         self.unseen = journal
             .unseen()
             .iter()
@@ -365,47 +354,42 @@ struct FinishedOperation {
 /// repeats the edit, and its reply waits for any Worktree write the outcome depends on.
 fn finish(
     link: &CoreLink,
-    journal: &mut impl EditJournal,
+    journal: &mut impl PresentationJournal,
     controls: &PaneControls,
     state: &PublishedSnapshot,
     seen: u64,
 ) -> Result<FinishedOperation, CoreError> {
-    let Some(pending) = journal.pending().cloned() else {
+    if journal.pending().is_none() {
         return Ok(FinishedOperation {
             outcome: journal.last().cloned(),
             reconciled: None,
         });
-    };
-    let ReplyBody::Outcome(result) = link
-        .request(Operation::Mutate {
-            sequence: pending.sequence,
-            mutation: pending.mutation.clone(),
-        })?
-        .wait()?
+    }
+    let EditProgress::Outcome {
+        outcome,
+        reconciled: Some(reconciled),
+    } = dispatch_original(
+        journal,
+        |operation| Ok(link.request(operation)?.wait()?),
+        || newer(link, seen, controls),
+        |journal, result, reconciled| {
+            // Present committed membership before acknowledgement. This replaces provisional
+            // presentation without displaying both identities or waiting through a reconnect.
+            state.publish(|snapshot| {
+                if let Some((_, revision)) = reconciled {
+                    snapshot.inventory = Some(revision.inventory.clone());
+                }
+                snapshot.outcome = Some(result.clone());
+                snapshot.unseen_from(journal);
+            });
+            link.acknowledge(result.sequence).map_err(EditError::from)
+        },
+    )?
     else {
         return Err(CoreError::Protocol);
     };
-    // Validation precedes acknowledgement.
-    if result.sequence != pending.sequence || result.mutation != pending.mutation {
-        return Err(CoreError::Protocol);
-    }
-    // The revision that holds the outcome arrived before its reply. Reconcile that membership
-    // before retiring the operation identity.
-    let reconciled = newer(link, seen, controls);
-    journal.retire(result.clone())?;
-    // Publish validated membership before acknowledgement. A lost acknowledgement is repeated
-    // after reconnecting, and the committed creation replaces a provisional presentation without
-    // displaying both identities or waiting through a reconnect.
-    state.publish(|snapshot| {
-        if let Some((_, revision)) = &reconciled {
-            snapshot.inventory = Some(revision.inventory.clone());
-        }
-        snapshot.outcome = Some(result.clone());
-        snapshot.unseen_from(&*journal);
-    });
-    link.acknowledge(pending.sequence)?;
     Ok(FinishedOperation {
-        outcome: Some(result),
+        outcome: Some(*outcome),
         reconciled,
     })
 }
@@ -593,6 +577,8 @@ fn reject(state: &PublishedSnapshot, mutation: Mutation) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spaceterm_client::workspace::ClientOperation;
+    use spaceterm_core::protocol::{Operation, ReplyBody};
 
     #[test]
     fn a_paired_inventory_follower_leaves_reachability_probes_to_its_route_owner() {
@@ -740,10 +726,7 @@ mod tests {
             binding: Arc<Mutex<Record>>,
         }
 
-        impl EditJournal for MemoryJournal {
-            fn pending(&self) -> Option<&ClientOperation> {
-                self.record.pending.as_ref()
-            }
+        impl PresentationJournal for MemoryJournal {
             fn last(&self) -> Option<&RetainedOutcome> {
                 self.record.last.as_ref()
             }
@@ -766,6 +749,27 @@ mod tests {
                     .unseen
                     .retain(|unseen| unseen.sequence != sequence);
                 Ok(())
+            }
+        }
+
+        impl EditJournal for MemoryJournal {
+            fn verify_storage(&self) -> Result<(), CoreError> {
+                Ok(())
+            }
+            fn pending(&self) -> Option<&ClientOperation> {
+                self.record.pending.as_ref()
+            }
+            fn settled(&mut self, sequence: u64) -> Result<(), CoreError> {
+                if self
+                    .record
+                    .last
+                    .as_ref()
+                    .is_some_and(|last| last.sequence == sequence)
+                {
+                    self.record.last = None;
+                    self.binding.lock().unwrap().last = None;
+                }
+                self.presented(sequence)
             }
             fn submit(&mut self, sequence: u64, mutation: Mutation) -> Result<(), CoreError> {
                 let operation = ClientOperation { sequence, mutation };

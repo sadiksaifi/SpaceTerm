@@ -6,7 +6,7 @@ fn fill_local_admission(fixture: &Fixture) -> (ChildGuard, Vec<UnixStream>) {
     for _ in 0..64 {
         let mut stream = connect_when_ready(fixture);
         protocol::admit_service_lane(
-            &mut stream,
+            &mut protocol::LocalPreamble(&mut stream),
             (&fixture.device, &"Capacity test".into()).into(),
             &fixture.pin,
             "spaceterm-development",
@@ -77,7 +77,8 @@ fn local_capacity_does_not_turn_other_protocol_failures_into_retries() {
         let (done, finished) = std::sync::mpsc::channel();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut wire = protocol::Wire::new(&mut stream);
+            let mut transport = protocol::LocalPreamble(&mut stream);
+            let mut wire = protocol::Wire::new(&mut transport);
             let _: serde_json::Value = wire.read().unwrap();
             // Capacity can change after Hello. Partial and malformed replies still fail.
             let marker = (kind != 0).then(|| runtime.lock(capacity::MARKER, false).unwrap());
@@ -131,7 +132,9 @@ fn capacity_rejection_after_hello(release_before_reply: bool) {
     let (done, finished) = std::sync::mpsc::channel();
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        let _: serde_json::Value = protocol::Wire::new(&mut stream).read().unwrap();
+        let _: serde_json::Value = protocol::Wire::new(&mut protocol::LocalPreamble(&mut stream))
+            .read()
+            .unwrap();
         // Reading Hello proves that the caller passed its first capacity probe.
         let marker = runtime.lock(capacity::MARKER, false).unwrap();
         let last = CAPACITY_REJECTION.len() - 1;

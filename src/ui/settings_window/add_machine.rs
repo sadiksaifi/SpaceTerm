@@ -43,7 +43,6 @@ use crate::cancellation::CancellationToken;
 use crate::direct_connections::{DirectConnections, DirectRouteId, JoinId, JoinStatus};
 use crate::domain::SshDestination;
 use crate::machine_connection::direct::{DirectError, Endpoint, Invitation, default_port};
-use crate::machine_connection::pane::control::ClientName;
 use spaceterm_core::provisioning::RestoredAccess;
 
 use crate::ssh::provisioning::{
@@ -1300,7 +1299,7 @@ impl AddMachineSheet {
         let request = SetupRequest {
             destination: setup.destination.clone(),
             address: setup.address.clone(),
-            name: ClientName::this_computer(),
+            name: spaceterm_core::pane::control::this_computer(),
             prompts,
             approvals,
         };
@@ -1515,7 +1514,7 @@ impl AddMachineSheet {
         };
         // The name this device gives the server, as every other client connection gives it. It
         // labels the device and proves nothing.
-        let name = ClientName::this_computer();
+        let name = spaceterm_core::pane::control::this_computer();
         let cleanup = direct.clone();
         cx.spawn_in(window, async move |sheet, cx| {
             let joined = cx

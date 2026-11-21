@@ -29,12 +29,12 @@ impl Fixture {
         let root = std::fs::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!(
-                "spaceterm-connections-{}-{}",
+                "spaceterm-client-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
         std::fs::create_dir(&root).unwrap();
-        let store = ConnectionStore::new(root.join("core/clients/cli"));
+        let store = spaceterm_core::native_client::connection_store(root.join("core/clients/cli"));
         let interrupted = Arc::new(AtomicBool::new(false));
         Self {
             root,
@@ -148,16 +148,12 @@ fn add(name: &str) -> MachineCommand {
 }
 #[derive(Default)]
 struct Credentials {
-    kind: Option<StoreKind>,
     values: Mutex<BTreeMap<[u8; 32], Zeroizing<Vec<u8>>>>,
     locked: AtomicBool,
     reads: Mutex<Vec<Interaction>>,
     attempted: Mutex<Zeroizing<Vec<u8>>>,
 }
 impl CredentialStore for Credentials {
-    fn kind(&self) -> StoreKind {
-        self.kind.unwrap_or(StoreKind::Keychain)
-    }
     fn read(
         &self,
         key: &[u8; 32],
@@ -196,17 +192,17 @@ struct Provider {
     unavailable: bool,
 }
 impl CredentialProvider for Provider {
-    fn select(&self) -> Result<Arc<dyn CredentialStore>, CredentialError> {
+    fn select(&self) -> Result<SelectedCredentials, CredentialError> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         if self.unavailable {
             Err(CredentialError::Unavailable)
         } else {
-            Ok(self.store.clone())
+            Ok((StoreKind::Keychain, self.store.clone()))
         }
     }
     fn open(&self, kind: StoreKind) -> Result<Arc<dyn CredentialStore>, CredentialError> {
-        let store = self.select()?;
-        if store.kind() != kind {
+        let (selected, store) = self.select()?;
+        if selected != kind {
             return Err(CredentialError::Unavailable);
         }
         Ok(store)
@@ -771,7 +767,7 @@ fn connection_process_add() {
     let name = std::env::var("SPACETERM_TEST_CONNECTION_NAME").unwrap();
     let mut fixture = Fixture::new();
     let root = PathBuf::from(root);
-    fixture.store = ConnectionStore::new(root.join("core/clients/cli"));
+    fixture.store = spaceterm_core::native_client::connection_store(root.join("core/clients/cli"));
     fixture.network.barrier = Some((root, name.clone()));
     let output = fixture.run(&add(&name));
     assert_eq!(output.exit, 0, "{}", output.envelope);
@@ -780,8 +776,7 @@ fn connection_process_add() {
 #[test]
 fn concurrent_connection_add_processes_preserve_the_desktop_fixture() {
     let fixture = Fixture::new();
-    let bytes =
-        include_bytes!("../../../spaceterm-connections/tests/fixtures/desktop-connections.json");
+    let bytes = include_bytes!("../../../spaceterm-client/tests/fixtures/desktop-connections.json");
     let document: connections::records::Document = serde_json::from_slice(bytes).unwrap();
     assert_eq!(document.routes.len(), 1);
     let desktop = fixture.root.join("direct-device-connections.json");
@@ -1087,20 +1082,17 @@ impl ChangingProvider {
     fn new(native_available: bool) -> Self {
         Self {
             native: Arc::new(Credentials::default()),
-            files: Arc::new(Credentials {
-                kind: Some(StoreKind::PrivateFile),
-                ..Default::default()
-            }),
+            files: Arc::new(Credentials::default()),
             native_available: AtomicBool::new(native_available),
         }
     }
 }
 impl CredentialProvider for ChangingProvider {
-    fn select(&self) -> Result<Arc<dyn CredentialStore>, CredentialError> {
+    fn select(&self) -> Result<SelectedCredentials, CredentialError> {
         if self.native_available.load(Ordering::Relaxed) {
-            Ok(self.native.clone())
+            Ok((StoreKind::Keychain, self.native.clone()))
         } else {
-            Ok(self.files.clone())
+            Ok((StoreKind::PrivateFile, self.files.clone()))
         }
     }
     fn open(&self, kind: StoreKind) -> Result<Arc<dyn CredentialStore>, CredentialError> {

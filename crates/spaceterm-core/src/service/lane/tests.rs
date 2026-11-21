@@ -1,7 +1,7 @@
 use super::*;
 use crate::service::runtime::test_support::{COMMIT, VERSION, target, with_artifact};
 use crate::service::{ServiceStartup, Supervisor};
-use std::os::unix::net::UnixStream;
+
 use std::path::Path;
 use std::sync::atomic::AtomicUsize;
 
@@ -1373,7 +1373,7 @@ fn a_restart_the_core_decides_on_waits_for_zero_sessions_and_leaves_no_record() 
 #[test]
 fn a_service_lane_hello_reaches_the_lane_as_its_agent() {
     with_lane(|lane| {
-        let (mut client, mut core) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (mut client, mut core) = lane_pair().unwrap();
         let identity = lane.lane.service.identity.clone();
         let machine_id = lane.lane.core;
         let agent: crate::protocol::AgentName = "agent-1".parse().unwrap();
@@ -1405,10 +1405,10 @@ fn a_service_lane_hello_reaches_the_lane_as_its_agent() {
         });
         // Admission hands the lane connection to the caller with its actor.
         let admitted = crate::protocol::admit_core(
-            &mut core,
+            &mut core.0,
             &lane.lane.core,
             &lane.lane.service.identity,
-            &crate::protocol::CoreVersions::for_tests(),
+            &crate::protocol::versions_for_tests(),
         )
         .unwrap();
         let crate::protocol::Admission::Service(actor) = admitted else {
@@ -1466,7 +1466,7 @@ fn an_unsettled_operation_never_keeps_a_stopping_core_alive() {
 #[test]
 fn a_stopping_machine_closes_a_polling_lane_connection() {
     with_lane(|lane| {
-        let (mut client, mut core) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (mut client, mut core) = lane_pair().unwrap();
         let host = lane.host.clone();
         let peer = std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -1492,7 +1492,7 @@ fn a_stopping_machine_closes_a_polling_lane_connection() {
 #[test]
 fn the_lane_answers_until_the_peer_closes_and_refuses_malformed_requests() {
     with_lane(|lane| {
-        let (mut client, mut core) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (mut client, mut core) = lane_pair().unwrap();
         // Fixture trust is per thread, so the lane serves on this one.
         let peer = std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -1526,13 +1526,12 @@ mod flow {
     use super::*;
     use crate::service::lane::admin;
     use crate::service::lane::client::{self, Connector, LaneError, Leftover, Outcome, Session};
-    use std::os::unix::net::UnixStream;
 
     /// Connects to whichever run of the server is up. `None` means no server runs.
     #[derive(Default)]
     struct Switch {
         lane: Mutex<Option<Arc<LaneCore>>>,
-        open: Mutex<Vec<UnixStream>>,
+        open: Mutex<Vec<LaneStream>>,
     }
     impl Switch {
         fn up(&self, lane: Arc<LaneCore>) {
@@ -1542,7 +1541,7 @@ mod flow {
         fn down(&self) {
             *self.lane.lock().unwrap() = None;
             for stream in self.open.lock().unwrap().drain(..) {
-                let _ = stream.shutdown(std::net::Shutdown::Both);
+                let _ = stream.0.shutdown(std::net::Shutdown::Both);
             }
         }
     }
@@ -1554,11 +1553,13 @@ mod flow {
                 .unwrap()
                 .clone()
                 .ok_or(CoreError::NotRunning)?;
-            let (client, mut core) = UnixStream::pair().map_err(|_| CoreError::Protocol)?;
+            let (client, mut core) = lane_pair().map_err(|_| CoreError::Protocol)?;
             self.open
                 .lock()
                 .unwrap()
-                .push(core.try_clone().map_err(|_| CoreError::Protocol)?);
+                .push(crate::protocol::LocalPreamble(
+                    core.0.try_clone().map_err(|_| CoreError::Protocol)?,
+                ));
             // The fixture's signing trust is per thread, so the serving thread holds it too.
             std::thread::spawn(move || {
                 crate::service::runtime::test_support::with_fixture_trust(|| {
@@ -1665,7 +1666,7 @@ mod flow {
                 session,
                 LaneAction::Restart,
                 token,
-                OperationId::random().unwrap(),
+                crate::service::operations::random_operation_id().unwrap(),
                 Duration::from_secs(20),
                 &mut |op| {
                     admitted.push(*op);
@@ -1693,7 +1694,7 @@ mod flow {
             session,
             LaneAction::Uninstall,
             token,
-            OperationId::random().unwrap(),
+            crate::service::operations::random_operation_id().unwrap(),
             Duration::from_secs(20),
             &mut |_| Ok(()),
             &|| None,
@@ -1794,7 +1795,7 @@ mod flow {
     }
 
     fn pending(lane: &Lane) -> admin::PendingOperations {
-        admin::PendingOperations::new(
+        admin::pending_operations(
             Directory::open(&lane.service.paths.data.with_extension("pending"), true).unwrap(),
         )
     }
@@ -1966,7 +1967,7 @@ mod flow {
                 session,
                 LaneAction::Stop,
                 token,
-                OperationId::random().unwrap(),
+                crate::service::operations::random_operation_id().unwrap(),
                 Duration::from_secs(20),
                 &mut |op| {
                     admitted = Some(*op);
@@ -2022,7 +2023,7 @@ mod flow {
                 session,
                 LaneAction::Restart,
                 token,
-                OperationId::random().unwrap(),
+                crate::service::operations::random_operation_id().unwrap(),
                 Duration::from_secs(20),
                 &mut |_| Ok(()),
                 &|| None,
@@ -2054,7 +2055,7 @@ mod flow {
                 .unwrap()
                 .clone()
                 .ok_or(CoreError::NotRunning)?;
-            let (client, mut core) = UnixStream::pair().map_err(|_| CoreError::Protocol)?;
+            let (client, mut core) = lane_pair().map_err(|_| CoreError::Protocol)?;
             let lose = self.lose.clone();
             let drop = self.drop.clone();
             std::thread::spawn(move || {
@@ -2066,12 +2067,12 @@ mod flow {
                     let request: LaneRequest = serde_json::from_slice(&bytes).unwrap();
                     let execute = matches!(request, LaneRequest::Execute { .. });
                     if execute && drop.swap(false, Ordering::SeqCst) {
-                        let _ = core.shutdown(std::net::Shutdown::Both);
+                        let _ = core.0.shutdown(std::net::Shutdown::Both);
                         return;
                     }
                     let reply = lane.answer(request, &LOCAL);
                     if execute && lose.swap(false, Ordering::SeqCst) {
-                        let _ = core.shutdown(std::net::Shutdown::Both);
+                        let _ = core.0.shutdown(std::net::Shutdown::Both);
                         return;
                     }
                     let _ = core.send(&serde_json::to_vec(&reply).unwrap(), deadline);
@@ -2129,7 +2130,7 @@ mod flow {
                 session,
                 LaneAction::Restart,
                 token,
-                OperationId::random().unwrap(),
+                crate::service::operations::random_operation_id().unwrap(),
                 Duration::from_secs(20),
                 &mut |op| {
                     admitted = Some(*op);
@@ -2168,7 +2169,7 @@ mod flow {
                 std::thread::sleep(Duration::from_millis(2500));
                 settle();
             });
-            let id = OperationId::random().unwrap();
+            let id = crate::service::operations::random_operation_id().unwrap();
             let mut admitted = Vec::new();
             let outcome = client::perform(
                 &(lossy.clone() as Arc<dyn Connector>),
@@ -2213,7 +2214,7 @@ mod flow {
                 session,
                 LaneAction::Restart,
                 token,
-                OperationId::random().unwrap(),
+                crate::service::operations::random_operation_id().unwrap(),
                 Duration::from_secs(60),
                 &mut |_| Ok(()),
                 &|| Some(interrupted),
@@ -2238,7 +2239,7 @@ mod flow {
     impl Connector for Stalling {
         fn connect(&self, _: Instant) -> Result<client::Connected, CoreError> {
             let lane = self.lane.lock().unwrap().clone().unwrap();
-            let (client, mut core) = UnixStream::pair().map_err(|_| CoreError::Protocol)?;
+            let (client, mut core) = lane_pair().map_err(|_| CoreError::Protocol)?;
             let stalled = self.stalled.clone();
             std::thread::spawn(move || {
                 let deadline = Instant::now() + Duration::from_secs(60);
@@ -2318,7 +2319,7 @@ mod flow {
                 session,
                 LaneAction::Restart,
                 token,
-                OperationId::random().unwrap(),
+                crate::service::operations::random_operation_id().unwrap(),
                 Duration::from_secs(60),
                 &mut |_| Ok(()),
                 &|| (Instant::now() >= at).then_some(at + Duration::from_secs(5)),
@@ -2352,7 +2353,7 @@ mod flow {
                 session,
                 LaneAction::Stop,
                 token,
-                OperationId::random().unwrap(),
+                crate::service::operations::random_operation_id().unwrap(),
                 Duration::from_secs(20),
                 &mut |_| Ok(()),
                 &|| None,
@@ -2365,7 +2366,7 @@ mod flow {
 
     /// One route's pending record, beside the fixture server's own state.
     fn pending_record(lane: &Lane) -> crate::service::lane::admin::PendingOperations {
-        crate::service::lane::admin::PendingOperations::new(
+        crate::service::lane::admin::pending_operations(
             Directory::open(&lane.service.paths.data.join("client-pending"), true).unwrap(),
         )
     }
@@ -2592,7 +2593,7 @@ mod flow {
                 session,
                 LaneAction::Stop,
                 approved.token,
-                OperationId::random().unwrap(),
+                crate::service::operations::random_operation_id().unwrap(),
                 Duration::ZERO,
                 &mut |_| {
                     admitted += 1;
@@ -2804,7 +2805,7 @@ mod flow {
             });
             let session =
                 Session::open(connector.as_ref(), Instant::now() + Duration::from_secs(5)).unwrap();
-            let id = OperationId::random().unwrap();
+            let id = crate::service::operations::random_operation_id().unwrap();
             let outcome = client::perform(
                 &connector,
                 session,
@@ -2846,7 +2847,7 @@ mod flow {
             let lane = self.lane.clone();
             let cut = self.cut.clone();
             let answered = self.answered;
-            let (client, mut core) = UnixStream::pair().map_err(|_| CoreError::Protocol)?;
+            let (client, mut core) = lane_pair().map_err(|_| CoreError::Protocol)?;
             std::thread::spawn(move || {
                 loop {
                     let deadline = Instant::now() + Duration::from_secs(5);
@@ -2872,7 +2873,7 @@ mod flow {
                         if answered {
                             let _ = lane.answer(request, &LOCAL);
                         }
-                        let _ = core.shutdown(std::net::Shutdown::Both);
+                        let _ = core.0.shutdown(std::net::Shutdown::Both);
                         return;
                     }
                     let reply = lane.answer(request, &LOCAL);
@@ -2899,7 +2900,7 @@ mod flow {
         pending: &admin::PendingOperations,
         state: State,
     ) -> OperationId {
-        let id = OperationId::random().unwrap();
+        let id = crate::service::operations::random_operation_id().unwrap();
         let mut ledger = lane.lane.ledger().unwrap();
         ledger
             .admit(Record {
@@ -3353,7 +3354,7 @@ mod flow {
     #[test]
     fn the_lane_answers_a_request_its_selected_version_lacks_as_unsupported() {
         with_lane(|lane| {
-            let (mut client, mut core) = UnixStream::pair().unwrap();
+            let (mut client, mut core) = lane_pair().unwrap();
             let peer = std::thread::spawn(move || {
                 let deadline = Instant::now() + Duration::from_secs(5);
                 let mut replies = Vec::new();
@@ -3390,7 +3391,7 @@ mod flow {
         struct Newer(ProtocolVersion);
         impl Connector for Newer {
             fn connect(&self, _: Instant) -> Result<client::Connected, CoreError> {
-                let (client, mut core) = UnixStream::pair().map_err(|_| CoreError::Protocol)?;
+                let (client, mut core) = lane_pair().map_err(|_| CoreError::Protocol)?;
                 std::thread::spawn(move || {
                     let deadline = Instant::now() + Duration::from_secs(5);
                     while core.receive(MAX_FRAME, deadline).is_ok() {
@@ -3424,10 +3425,10 @@ mod flow {
     fn a_session_sends_nothing_its_selected_version_lacks() {
         /// Admits at [`OLDER`] and keeps the Core's end of the connection.
         #[derive(Default)]
-        struct Older(Mutex<Option<UnixStream>>);
+        struct Older(Mutex<Option<LaneStream>>);
         impl Connector for Older {
             fn connect(&self, _: Instant) -> Result<client::Connected, CoreError> {
-                let (client, core) = UnixStream::pair().map_err(|_| CoreError::Protocol)?;
+                let (client, core) = lane_pair().map_err(|_| CoreError::Protocol)?;
                 *self.0.lock().unwrap() = Some(core);
                 Ok((Box::new(client), OLDER, OLDER))
             }
@@ -3443,7 +3444,7 @@ mod flow {
         drop(session);
         let mut core = older.0.lock().unwrap().take().unwrap();
         let mut sent = Vec::new();
-        std::io::Read::read_to_end(&mut core, &mut sent).unwrap();
+        std::io::Read::read_to_end(&mut core.0, &mut sent).unwrap();
         assert!(sent.is_empty(), "the Core received {} bytes", sent.len());
     }
 
@@ -3458,7 +3459,7 @@ mod flow {
         selected: crate::protocol::version::ProtocolVersion,
         requests: Vec<LaneRequest>,
     ) -> Vec<LaneReply> {
-        let (mut client, mut core) = UnixStream::pair().unwrap();
+        let (mut client, mut core) = lane_pair().unwrap();
         let peer = std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(5);
             let mut replies = Vec::new();
@@ -3491,7 +3492,9 @@ mod flow {
                     &lane,
                     crate::protocol::version::ProtocolVersion { major: 1, minor: 2 },
                     vec![LaneRequest::GrantStop {
-                        operation: OperationId::random().unwrap().to_string(),
+                        operation: crate::service::operations::random_operation_id()
+                            .unwrap()
+                            .to_string(),
                         boot: hex(&lane.lane.boot),
                         candidate: hex(&[7; 32]),
                     }],
@@ -3565,10 +3568,10 @@ mod flow {
     fn a_client_asks_a_service_1_1_core_for_no_detailed_update_facts() {
         /// Admits at service 1.1 and keeps the Core's end of the connection.
         #[derive(Default)]
-        struct Older(Mutex<Option<UnixStream>>);
+        struct Older(Mutex<Option<LaneStream>>);
         impl Connector for Older {
             fn connect(&self, _: Instant) -> Result<client::Connected, CoreError> {
-                let (client, core) = UnixStream::pair().map_err(|_| CoreError::Protocol)?;
+                let (client, core) = lane_pair().map_err(|_| CoreError::Protocol)?;
                 *self.0.lock().unwrap() = Some(core);
                 Ok((Box::new(client), BEFORE_DETAILED, BEFORE_DETAILED))
             }
@@ -3580,7 +3583,7 @@ mod flow {
         drop(session);
         let mut core = older.0.lock().unwrap().take().unwrap();
         let mut sent = Vec::new();
-        std::io::Read::read_to_end(&mut core, &mut sent).unwrap();
+        std::io::Read::read_to_end(&mut core.0, &mut sent).unwrap();
         assert!(sent.is_empty(), "the Core received {} bytes", sent.len());
     }
 
@@ -3907,15 +3910,15 @@ fn a_service_1_3_helper_and_handler_complete_the_encoded_stop_grant() {
             orphaned: false,
         };
         *lane.host.grant_target.lock().unwrap() = Some((record.id, candidate, record.boot));
-        let (mut helper, mut core) = UnixStream::pair().unwrap();
+        let (mut helper, mut core) = lane_pair().unwrap();
         let identity = lane.service.identity.clone();
         let caller = std::thread::spawn(move || {
             super::super::helper::grant_stop_over(&mut helper, &identity, &record)
         });
-        let mut versions = crate::protocol::CoreVersions::for_tests();
+        let mut versions = crate::protocol::versions_for_tests();
         versions.service = crate::protocol::version::ProtocolVersion { major: 1, minor: 3 };
         let admitted = crate::protocol::admit_core(
-            &mut core,
+            &mut core.0,
             &lane.lane.core,
             &lane.service.identity,
             &versions,
@@ -3951,15 +3954,15 @@ fn a_service_1_2_helper_sends_no_stop_grant_request_bytes() {
             updated_at: 0,
             orphaned: false,
         };
-        let (mut helper, mut core) = UnixStream::pair().unwrap();
+        let (mut helper, mut core) = lane_pair().unwrap();
         let identity = lane.service.identity.clone();
         let caller = std::thread::spawn(move || {
             super::super::helper::grant_stop_over(&mut helper, &identity, &record)
         });
-        let mut versions = crate::protocol::CoreVersions::for_tests();
+        let mut versions = crate::protocol::versions_for_tests();
         versions.service = crate::protocol::version::ProtocolVersion { major: 1, minor: 2 };
         let admitted = crate::protocol::admit_core(
-            &mut core,
+            &mut core.0,
             &lane.lane.core,
             &lane.service.identity,
             &versions,
@@ -4332,4 +4335,14 @@ fn a_settlement_write_failure_thaws_abandoned_sessions_without_repairing_storage
             );
         }
     });
+}
+
+type LaneStream = crate::protocol::LocalPreamble<std::os::unix::net::UnixStream>;
+
+fn lane_pair() -> std::io::Result<(LaneStream, LaneStream)> {
+    let (client, core) = std::os::unix::net::UnixStream::pair()?;
+    Ok((
+        crate::protocol::LocalPreamble(client),
+        crate::protocol::LocalPreamble(core),
+    ))
 }

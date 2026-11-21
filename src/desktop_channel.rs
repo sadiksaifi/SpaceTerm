@@ -16,16 +16,15 @@
 //! The client's request carries the instant it stops waiting, on the host's monotonic clock that
 //! every process on the machine reads alike. The desktop performs no effect after that instant,
 //! however long the request waited in its queue, so a request the client gave up on never acts.
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use spaceterm_core::protocol::version::{
-    self as versions, Incompatible, ProtocolVersion, negotiate,
+use spaceterm_protocol::desktop_channel::{
+    ChannelHello, ChannelOffer, InvalidMessage, MAX_MESSAGE_BYTES, ReplyEnvelope, RequestEnvelope,
+    decode, encode, offered,
 };
+use spaceterm_protocol::version::{self as versions, Incompatible, ProtocolVersion, negotiate};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-/// The largest message, which bounds a request's local path of 4 KiB with its envelope.
-const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 /// How long the desktop gives a connected client to deliver its whole request, and itself to
 /// deliver its whole reply.
 pub const TRANSFER_WINDOW: Duration = Duration::from_secs(2);
@@ -55,84 +54,8 @@ impl Clock for HostClock {
     }
 }
 
-pub type Id = [u8; 32];
-
-/// The Terminal Session `spaceterm` runs in, from its Session context.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SessionContext {
-    pub core: Id,
-    pub pane: Id,
-    pub session: Id,
-}
-
-impl std::fmt::Debug for SessionContext {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("SessionContext { .. }")
-    }
-}
-
-/// What the client asks of the desktop.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum Request {
-    /// Opens an absolute local file with its default application, or presents its File
-    /// Preview, for the Session's Pane.
-    Open {
-        session: SessionContext,
-        path: PathBuf,
-        preview: bool,
-    },
-    /// Brings the desktop's own view to a Workspace, and to a Tab and Pane within it when given.
-    Show {
-        core: Id,
-        workspace: Id,
-        tab: Option<Id>,
-        pane: Option<Id>,
-    },
-    /// Reads the desktop's Terminal Diagnostics counters. It changes nothing and needs no
-    /// presented Workspace, Pane or server connection.
-    Diagnostics,
-}
-
-impl std::fmt::Debug for Request {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::Open { preview: false, .. } => "Request::Open { .. }",
-            Self::Open { preview: true, .. } => "Request::Preview { .. }",
-            Self::Show { .. } => "Request::Show { .. }",
-            Self::Diagnostics => "Request::Diagnostics",
-        })
-    }
-}
-
-/// The desktop's answer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum Reply {
-    Done,
-    Refused(Refusal),
-    /// The desktop's Terminal Diagnostics counters, totals since it started.
-    Diagnostics(spaceterm_core::diagnostics::TerminalCounterSnapshot),
-}
-
-/// Why the desktop refused a request. Each names a fixed classification only.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Refusal {
-    /// This desktop presents no such live Terminal Session, Workspace, Tab or Pane.
-    NotShown,
-    /// The Session's Pane is Remote, so its paths grant no local file access.
-    RemoteSession,
-    /// The path names no regular file that this account can read.
-    FileUnavailable,
-    /// This desktop has no File Preview.
-    PreviewUnavailable,
-    /// The desktop is still checking as many earlier files as it checks at once.
-    Busy,
-    /// The desktop belongs to another application identity.
-    OtherIdentity,
-}
+pub use spaceterm_protocol::desktop_channel::{Refusal, Reply, Request, SessionContext};
+pub use spaceterm_protocol::hierarchy::Id;
 
 /// Why the client reached no answer. Each names a fixed classification only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,50 +76,6 @@ pub enum ChannelError {
     /// The client and the desktop share no Desktop Channel major. It names the older side: the
     /// desktop is the listener, `spaceterm` the caller. Nothing was requested.
     Incompatible(Incompatible),
-}
-
-/// The client's first message. Frozen.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ChannelHello {
-    identity: String,
-    /// The client's current version and, when one exists, its previous major at that major's
-    /// last minor. 1 or 2 entries, highest first.
-    versions: Vec<ProtocolVersion>,
-}
-
-/// The desktop's answer to the Hello. Frozen.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ChannelOffer {
-    identity: String,
-    /// `negotiate(hello.versions, desktop)`. None when no major is shared or the identities
-    /// differ; the desktop then closes the connection.
-    selected: Option<ProtocolVersion>,
-    desktop: ProtocolVersion,
-}
-
-/// The client's request, only after the Offer selected a version, encoded at that version.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RequestEnvelope<T> {
-    /// When the client stops waiting, in nanoseconds on the host's monotonic clock.
-    expires_at: u64,
-    body: T,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReplyEnvelope {
-    body: Reply,
-}
-
-/// The Desktop Channel versions this build speaks as a caller: the current one, then the
-/// previous major when one exists.
-fn offered() -> Vec<ProtocolVersion> {
-    std::iter::once(versions::DESKTOP_CHANNEL)
-        .chain(versions::PREVIOUS_DESKTOP_CHANNEL)
-        .collect()
 }
 
 /// A connected stream whose waits the exchange bounds.
@@ -353,21 +232,10 @@ fn serve_on(
     )
 }
 
-/// One message: its JSON with a big-endian `u32` length before it, at most
-/// [`MAX_MESSAGE_BYTES`] of JSON.
-fn encode(value: &impl Serialize) -> Result<Vec<u8>, ChannelError> {
-    let json = serde_json::to_vec(value).map_err(|_| ChannelError::Protocol)?;
-    if json.len() > MAX_MESSAGE_BYTES {
-        return Err(ChannelError::Protocol);
+impl From<InvalidMessage> for ChannelError {
+    fn from(_: InvalidMessage) -> Self {
+        Self::Protocol
     }
-    let mut message = Vec::with_capacity(4 + json.len());
-    message.extend_from_slice(&(json.len() as u32).to_be_bytes());
-    message.extend_from_slice(&json);
-    Ok(message)
-}
-
-fn decode<T: DeserializeOwned>(json: &[u8]) -> Result<T, ChannelError> {
-    serde_json::from_slice(json).map_err(|_| ChannelError::Protocol)
 }
 
 /// A connection from a peer the desktop authenticated as its own account.

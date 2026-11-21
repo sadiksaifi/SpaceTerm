@@ -196,12 +196,12 @@ mod tests {
         });
         assert!(
             !lifecycle
-                .observe_snapshot(PresentationGeneration::test(1))
+                .observe_snapshot(PresentationGeneration::from_counter(1))
                 .request_redraw
         );
         assert!(
             !lifecycle
-                .observe_snapshot(PresentationGeneration::test(2))
+                .observe_snapshot(PresentationGeneration::from_counter(2))
                 .request_redraw
         );
 
@@ -209,22 +209,22 @@ mod tests {
         assert!(restored.request_redraw);
         assert_eq!(
             lifecycle.take_frame(),
-            Some(PresentationGeneration::test(2))
+            Some(PresentationGeneration::from_counter(2))
         );
-        lifecycle.mark_presented(PresentationGeneration::test(2));
+        lifecycle.mark_presented(PresentationGeneration::from_counter(2));
         assert!(!lifecycle.update_visibility(visible()).request_redraw);
         {
             let mut lifecycle = RenderLifecycle::new(SurfaceVisibility {
                 minimized: true,
                 ..visible()
             });
-            lifecycle.observe_snapshot(PresentationGeneration::test(1));
-            lifecycle.observe_snapshot(PresentationGeneration::test(5));
+            lifecycle.observe_snapshot(PresentationGeneration::from_counter(1));
+            lifecycle.observe_snapshot(PresentationGeneration::from_counter(5));
             assert!(lifecycle.update_visibility(visible()).request_redraw);
             assert!(!lifecycle.update_visibility(visible()).request_redraw);
             assert_eq!(
                 lifecycle.take_frame(),
-                Some(PresentationGeneration::test(5))
+                Some(PresentationGeneration::from_counter(5))
             );
         }
     }
@@ -232,27 +232,27 @@ mod tests {
     #[test]
     fn session_reset_accepts_a_successor_generation_before_the_old_presented_value() {
         let mut lifecycle = RenderLifecycle::new(visible());
-        lifecycle.observe_snapshot(PresentationGeneration::test(90));
-        lifecycle.mark_presented(PresentationGeneration::test(90));
+        lifecycle.observe_snapshot(PresentationGeneration::from_counter(90));
+        lifecycle.mark_presented(PresentationGeneration::from_counter(90));
 
         lifecycle.reset_session_presentations();
-        lifecycle.observe_snapshot(PresentationGeneration::test(1));
+        lifecycle.observe_snapshot(PresentationGeneration::from_counter(1));
 
         assert_eq!(
             lifecycle.take_frame(),
-            Some(PresentationGeneration::test(1))
+            Some(PresentationGeneration::from_counter(1))
         );
     }
 
     #[test]
     fn product_visibility_updates_unrendered_zoomed_panes() {
         let mut lifecycle = RenderLifecycle::new(visible());
-        lifecycle.observe_snapshot(PresentationGeneration::test(1));
-        lifecycle.mark_presented(PresentationGeneration::test(1));
+        lifecycle.observe_snapshot(PresentationGeneration::from_counter(1));
+        lifecycle.mark_presented(PresentationGeneration::from_counter(1));
         lifecycle.update_product_visibility(true, false);
         assert!(
             !lifecycle
-                .observe_snapshot(PresentationGeneration::test(2))
+                .observe_snapshot(PresentationGeneration::from_counter(2))
                 .request_redraw
         );
         assert!(lifecycle.take_frame().is_none());
@@ -264,7 +264,7 @@ mod tests {
         );
         assert_eq!(
             lifecycle.take_frame(),
-            Some(PresentationGeneration::test(2))
+            Some(PresentationGeneration::from_counter(2))
         );
     }
 
@@ -283,7 +283,7 @@ mod tests {
             let presentable = mask & (4 | 8) == 0 && mask & (32 | 64) == (32 | 64);
             let animating = presentable && mask & (1 | 2 | 16) == (1 | 2);
             let mut lifecycle = RenderLifecycle::new(visibility);
-            let effects = lifecycle.observe_snapshot(PresentationGeneration::test(1));
+            let effects = lifecycle.observe_snapshot(PresentationGeneration::from_counter(1));
             assert_eq!(lifecycle.can_present(), presentable, "mask={mask}");
             assert_eq!(effects.request_redraw, presentable, "mask={mask}");
             assert_eq!(effects.animations_active, animating, "mask={mask}");
@@ -333,11 +333,11 @@ mod tests {
     #[test]
     fn stale_presented_completion_never_regresses_committed_generation() {
         let mut lifecycle = RenderLifecycle::new(visible());
-        lifecycle.observe_snapshot(PresentationGeneration::test(3));
-        lifecycle.mark_presented(PresentationGeneration::test(3));
-        lifecycle.mark_presented(PresentationGeneration::test(2));
-        lifecycle.observe_snapshot(PresentationGeneration::test(1));
-        assert!(lifecycle.is_presented(PresentationGeneration::test(3)));
+        lifecycle.observe_snapshot(PresentationGeneration::from_counter(3));
+        lifecycle.mark_presented(PresentationGeneration::from_counter(3));
+        lifecycle.mark_presented(PresentationGeneration::from_counter(2));
+        lifecycle.observe_snapshot(PresentationGeneration::from_counter(1));
+        assert!(lifecycle.is_presented(PresentationGeneration::from_counter(3)));
         assert_eq!(lifecycle.take_frame(), None);
     }
 
@@ -346,7 +346,7 @@ mod tests {
         let mut lifecycle = RenderLifecycle::new(visible());
         assert_eq!(lifecycle.update_scale(2.0), ScaleChange::ScaleResources);
         assert_eq!(lifecycle.update_scale(2.0), ScaleChange::Unchanged);
-        let pending = PresentationGeneration::test(1);
+        let pending = PresentationGeneration::from_counter(1);
         lifecycle.observe_snapshot(pending);
         assert_eq!(lifecycle.take_frame(), Some(pending));
         lifecycle.release();
@@ -356,7 +356,7 @@ mod tests {
 
     #[test]
     fn visible_retry_authorizes_the_same_presented_generation_without_resetting_it() {
-        let generation = PresentationGeneration::test(4);
+        let generation = PresentationGeneration::from_counter(4);
         let mut lifecycle = RenderLifecycle::new(visible());
         lifecycle.observe_snapshot(generation);
         lifecycle.mark_presented(generation);
@@ -369,10 +369,13 @@ mod tests {
 
     #[test]
     fn retry_initializes_only_the_current_generation_and_refuses_hidden_or_released_surfaces() {
-        let generation = PresentationGeneration::test(3);
+        let generation = PresentationGeneration::from_counter(3);
         let mut initial = RenderLifecycle::new(visible());
         assert_eq!(initial.retry_frame(generation), Some(generation));
-        assert_eq!(initial.retry_frame(PresentationGeneration::test(4)), None);
+        assert_eq!(
+            initial.retry_frame(PresentationGeneration::from_counter(4)),
+            None
+        );
 
         let mut hidden = RenderLifecycle::new(SurfaceVisibility {
             occluded: true,

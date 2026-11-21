@@ -191,49 +191,31 @@ fn reconcile(workspace: &mut Workspace, snapshot: &Snapshot) -> bool {
     changed
 }
 
-impl Workspace {
-    /// The shell in `pane` changed directory. From here on an only Tab takes its unpinned
-    /// Workspace along, whatever kept it in its Worktree before. A repaired Tab still joins no
-    /// other Worktree under [ADR 0044](../../../../docs/adr/0044-restore-panes-in-their-last-confirmed-directory.md).
-    pub(super) fn shell_moved(&mut self, pane: Id) {
-        if self.pinned_directory.is_none()
-            && let [tab] = self.tabs.as_mut_slice()
-            && tab.root_pane == pane
-            && tab.worktree_membership == WorktreeMembership::Opened
-        {
-            tab.worktree_membership = WorktreeMembership::Following;
-        }
+/// The shell in `pane` changed directory. From here on an only Tab takes its unpinned
+/// Workspace along, whatever kept it in its Worktree before. A repaired Tab still joins no
+/// other Worktree under [ADR 0044](../../../../docs/adr/0044-restore-panes-in-their-last-confirmed-directory.md).
+pub(super) fn shell_moved(workspace: &mut Workspace, pane: Id) {
+    if workspace.pinned_directory.is_none()
+        && let [tab] = workspace.tabs.as_mut_slice()
+        && tab.root_pane == pane
+        && tab.worktree_membership == WorktreeMembership::Opened
+    {
+        tab.worktree_membership = WorktreeMembership::Following;
     }
+}
 
-    /// The Main Worktree of the repository this Workspace is in.
-    pub fn repository(&self) -> Option<&Path> {
-        self.placed_tab()?.worktree_repository.as_deref()
-    }
-
-    /// The directory this Workspace's repository is named for: its Main Worktree, or that
-    /// directory's parent when the Main Worktree is a bare repository kept in `.bare` or `.git`,
-    /// as `git clone --bare <url> project/.bare` leaves it. The saved membership does not say
-    /// whether the Main Worktree is bare, so the two conventional names stand for it.
-    pub(super) fn repository_name_directory(&self) -> Option<&Path> {
-        let main = self.repository()?;
-        let kept_inside = main
-            .file_name()
-            .is_some_and(|name| name == ".bare" || name == ".git");
-        main.parent()
-            .filter(|parent| kept_inside && parent.file_name().is_some())
-            .or(Some(main))
-    }
-
-    /// The Tab whose saved membership names this Workspace's repository: the Root Tab when it
-    /// has a Worktree, else the first Tab that does.
-    fn placed_tab(&self) -> Option<&Tab> {
-        let placed = |tab: &&Tab| tab.worktree.is_some() && tab.worktree_repository.is_some();
-        self.tabs
-            .iter()
-            .find(|tab| tab.id == self.root_tab)
-            .filter(placed)
-            .or_else(|| self.tabs.iter().find(placed))
-    }
+/// The directory this Workspace's repository is named for: its Main Worktree, or that
+/// directory's parent when the Main Worktree is a bare repository kept in `.bare` or `.git`,
+/// as `git clone --bare <url> project/.bare` leaves it. The saved membership does not say
+/// whether the Main Worktree is bare, so the two conventional names stand for it.
+pub(super) fn repository_name_directory(workspace: &Workspace) -> Option<&Path> {
+    let main = workspace.repository()?;
+    let kept_inside = main
+        .file_name()
+        .is_some_and(|name| name == ".bare" || name == ".git");
+    main.parent()
+        .filter(|parent| kept_inside && parent.file_name().is_some())
+        .or(Some(main))
 }
 
 impl State {

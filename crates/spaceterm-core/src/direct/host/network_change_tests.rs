@@ -424,6 +424,13 @@ mod flow {
         fn connect(&self) -> Result<DirectConnection, DirectError> {
             DirectConnection::connect(&self.endpoint, &self.paired, &self.credential)
         }
+
+        fn connect_with(
+            &self,
+            wait: &spaceterm_client::WaitLimit,
+        ) -> Result<DirectConnection, DirectError> {
+            DirectConnection::connect_with(&self.endpoint, &self.paired, &self.credential, wait)
+        }
     }
 
     fn paired_lane(endpoint: String, paired: &PairedDevice, credential: DeviceCredential) -> Lane {

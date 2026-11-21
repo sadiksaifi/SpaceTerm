@@ -1233,10 +1233,10 @@ const LOCAL_MACHINE: crate::updates::machines::MachineId = [41; 32];
 fn too_old_core(
     configure: impl FnOnce(&mut spaceterm_core::update::facts::UpdateFacts),
 ) -> crate::updates::machines::MachineUpdate {
-    use spaceterm_core::update::facts::{Platform, UpdateCheck, UpdateFacts, Version};
+    use spaceterm_core::update::facts::{UpdateCheck, UpdateFacts, Version};
     let mut facts = UpdateFacts {
         revision: 1,
-        platform: Platform::HOST,
+        platform: spaceterm_core::update::facts::HOST_PLATFORM,
         running: Version::parse("0.11.4").unwrap(),
         pending: None,
         sessions: 2,

@@ -69,7 +69,7 @@ MAX_EXPANDED = 512 * 1024 * 1024
 MAX_MEMBERS = 128
 # The file that owns the protocol versions. `crates/spaceterm-cli/build.rs` stamps the same
 # versions into Core build documents as `protocols`.
-PROTOCOL_SOURCE = "crates/spaceterm-core/src/protocol/version.rs"
+PROTOCOL_SOURCE = "crates/spaceterm-protocol/src/version.rs"
 PROTOCOL_NAMES = {"work": "WORK", "service": "SERVICE", "desktop_channel": "DESKTOP_CHANNEL"}
 
 

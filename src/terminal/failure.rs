@@ -501,11 +501,11 @@ mod tests {
     fn resource_failure_state_retains_generation_and_recovery_guidance() {
         let state = PaneTerminalState::failed(
             TerminalFailure::resource("atlas"),
-            Some(PresentationGeneration::test(42)),
+            Some(PresentationGeneration::from_counter(42)),
         );
         assert_eq!(
             state.last_valid_frame(),
-            Some(PresentationGeneration::test(42))
+            Some(PresentationGeneration::from_counter(42))
         );
         assert_eq!(
             state.failure().map(TerminalFailure::recoverability),

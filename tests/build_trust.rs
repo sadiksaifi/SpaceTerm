@@ -18,12 +18,7 @@ fn inherited_environment_cannot_replace_tracked_core_or_desktop_trust() {
     let fixture =
         Fixture(std::env::temp_dir().join(format!("spaceterm-trust-build-{}", std::process::id())));
     fs::create_dir(&fixture.0).unwrap();
-    for directory in [
-        "build",
-        "src",
-        "packaging",
-        "crates/spaceterm-core/src/protocol",
-    ] {
+    for directory in ["build", "src", "packaging", "crates/spaceterm-protocol/src"] {
         fs::create_dir_all(fixture.0.join(directory)).unwrap();
     }
     for path in [
@@ -31,7 +26,7 @@ fn inherited_environment_cannot_replace_tracked_core_or_desktop_trust() {
         "build/identity.rs",
         "build/release_notes.rs",
         "packaging/update-trust.json",
-        "crates/spaceterm-core/src/protocol/version.rs",
+        "crates/spaceterm-protocol/src/version.rs",
     ] {
         fs::copy(root.join(path), fixture.0.join(path)).unwrap();
     }

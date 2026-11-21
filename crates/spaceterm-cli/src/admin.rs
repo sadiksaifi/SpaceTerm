@@ -528,7 +528,7 @@ impl Pending {
             .identity_dir(route, context.agent().as_ref())
             .map_err(contract::from_core_error)?;
         Ok(Self {
-            operations: PendingOperations::new(directory),
+            operations: admin::pending_operations(directory),
         })
     }
 

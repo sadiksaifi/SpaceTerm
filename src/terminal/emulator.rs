@@ -4,13 +4,47 @@ mod compression;
 mod history;
 pub(crate) use history::HistoryPage;
 mod run;
-pub use history::HistorySnapshot;
+
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::mem;
+use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+#[cfg(feature = "desktop")]
+pub use spaceterm_terminal_client::snapshot::ScrollbackMovement;
+pub use spaceterm_terminal_client::snapshot::{
+    ActiveScreenSnapshot, CellSemanticSnapshot, CellText, ContentDamageSnapshot,
+    CursorPositionSnapshot, CursorShapeSnapshot, HistorySnapshot, PresentationGeneration,
+    ScreenSizeSnapshot, ScrollbarSnapshot, SnapshotDamage, TerminalUnderlineSnapshot,
+    ViewportSnapshot,
+};
+use spaceterm_terminal_client::snapshot::{ColorValue, Rgb, ScreenState, Snapshot};
+
+pub type CellSnapshot = spaceterm_terminal_client::snapshot::CellSnapshot<HyperlinkTarget, Color>;
+pub type RowSnapshot = spaceterm_terminal_client::snapshot::RowSnapshot<HyperlinkTarget, Color>;
+pub type CursorSnapshot = spaceterm_terminal_client::snapshot::CursorSnapshot<Color>;
+pub type TerminalColor = spaceterm_terminal_client::snapshot::TerminalColor<Color>;
+
+impl ColorValue for Color {
+    fn from_rgb([r, g, b]: Rgb) -> Self {
+        Self::from_rgb_components(r, g, b)
+    }
+
+    fn rgb(self) -> Rgb {
+        [self.r, self.g, self.b]
+    }
+
+    fn default_cursor_colors() -> (Self, Self) {
+        let colors = TerminalColors::default();
+        (
+            colors.cursor,
+            colors.cursor_text.unwrap_or(colors.background),
+        )
+    }
+}
 
 use libghostty_vt::accessibility as ghostty_accessibility;
 use libghostty_vt::fmt::Format;
@@ -38,7 +72,6 @@ use crate::appearance::{
     Appearance, AppearanceGeneration, Color, ResolvedTerminalAppearance, TerminalColors,
 };
 use crate::terminal::TerminalAppearanceUpdate;
-use crate::terminal::TerminalFindSnapshot;
 use crate::terminal::accessibility::{
     AccessibilityCell, AccessibilityCellRef, AccessibilityRowId, AccessibilityRowUpdate,
     AccessibilityScreen, AccessibilitySelectionRefs, AccessibilityUpdate,
@@ -79,89 +112,31 @@ impl From<RgbColor> for Color {
     }
 }
 
-/// A cell's grapheme cluster. Clusters of up to 23 bytes are stored inline; longer ones share
-/// one heap allocation among clones.
-pub type CellText = smol_str::SmolStr;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CellSnapshot {
-    pub text: CellText,
-    pub foreground_source: TerminalColor,
-    pub background_source: TerminalColor,
-    pub inverse: bool,
-    pub bold: bool,
-    pub faint: bool,
-    pub italic: bool,
-    pub blinking: bool,
-    pub invisible: bool,
-    pub underline: TerminalUnderlineSnapshot,
-    pub underline_source: TerminalColor,
-    pub strikethrough: bool,
-    pub overline: bool,
-    pub selected: bool,
-    pub spacer_tail: bool,
-    pub semantic_content: CellSemanticSnapshot,
-    pub hyperlink: Option<Arc<crate::terminal::HyperlinkTarget>>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum CellSemanticSnapshot {
-    #[default]
-    Output,
-    Input,
-    Prompt,
-}
-
-impl From<CellSemanticContent> for CellSemanticSnapshot {
-    fn from(value: CellSemanticContent) -> Self {
-        match value {
-            CellSemanticContent::Output => Self::Output,
-            CellSemanticContent::Input => Self::Input,
-            CellSemanticContent::Prompt => Self::Prompt,
-        }
+fn cell_semantic(value: CellSemanticContent) -> CellSemanticSnapshot {
+    match value {
+        CellSemanticContent::Output => CellSemanticSnapshot::Output,
+        CellSemanticContent::Input => CellSemanticSnapshot::Input,
+        CellSemanticContent::Prompt => CellSemanticSnapshot::Prompt,
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum TerminalUnderlineSnapshot {
-    #[default]
-    None,
-    Single,
-    Double,
-    Curly,
-    Dotted,
-    Dashed,
-}
-
-impl From<Underline> for TerminalUnderlineSnapshot {
-    fn from(underline: Underline) -> Self {
-        match underline {
-            Underline::None => Self::None,
-            Underline::Single => Self::Single,
-            Underline::Double => Self::Double,
-            Underline::Curly => Self::Curly,
-            Underline::Dotted => Self::Dotted,
-            Underline::Dashed => Self::Dashed,
-            _ => Self::None,
-        }
+fn terminal_underline(underline: Underline) -> TerminalUnderlineSnapshot {
+    match underline {
+        Underline::None => TerminalUnderlineSnapshot::None,
+        Underline::Single => TerminalUnderlineSnapshot::Single,
+        Underline::Double => TerminalUnderlineSnapshot::Double,
+        Underline::Curly => TerminalUnderlineSnapshot::Curly,
+        Underline::Dotted => TerminalUnderlineSnapshot::Dotted,
+        Underline::Dashed => TerminalUnderlineSnapshot::Dashed,
+        _ => TerminalUnderlineSnapshot::None,
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum TerminalColor {
-    #[default]
-    Default,
-    Palette(u8),
-    Rgb(Color),
-}
-
-impl From<StyleColor> for TerminalColor {
-    fn from(color: StyleColor) -> Self {
-        match color {
-            StyleColor::None => Self::Default,
-            StyleColor::Palette(PaletteIndex(index)) => Self::Palette(index),
-            StyleColor::Rgb(color) => Self::Rgb(color.into()),
-        }
+fn terminal_color(color: StyleColor) -> TerminalColor {
+    match color {
+        StyleColor::None => TerminalColor::Default,
+        StyleColor::Palette(PaletteIndex(index)) => TerminalColor::Palette(index),
+        StyleColor::Rgb(color) => TerminalColor::Rgb(color.into()),
     }
 }
 
@@ -214,101 +189,20 @@ impl TerminalColorsSnapshot {
     }
 }
 
-pub type RowSnapshot = Arc<[CellSnapshot]>;
-
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub struct PresentationGeneration(u64);
-
-impl PresentationGeneration {
-    pub(crate) fn next(self) -> Self {
-        Self(self.0.saturating_add(1))
-    }
-
-    #[cfg(test)]
-    pub const fn test(value: u64) -> Self {
-        Self(value)
+fn active_screen_snapshot(screen: Screen) -> ActiveScreenSnapshot {
+    match screen {
+        Screen::Primary => ActiveScreenSnapshot::Primary,
+        Screen::Alternate => ActiveScreenSnapshot::Alternate,
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ActiveScreenSnapshot {
-    #[default]
-    Primary,
-    Alternate,
-}
-
-impl From<Screen> for ActiveScreenSnapshot {
-    fn from(screen: Screen) -> Self {
-        match screen {
-            Screen::Primary => Self::Primary,
-            Screen::Alternate => Self::Alternate,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ScreenSizeSnapshot {
-    pub cols: u16,
-    pub rows: u16,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ViewportSnapshot {
-    pub offset_rows: u64,
-    pub visible_rows: u64,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum CursorShapeSnapshot {
-    Bar,
-    #[default]
-    Block,
-    Underline,
-    BlockHollow,
-}
-
-impl From<CursorVisualStyle> for CursorShapeSnapshot {
-    fn from(style: CursorVisualStyle) -> Self {
-        match style {
-            CursorVisualStyle::Bar => Self::Bar,
-            CursorVisualStyle::Block => Self::Block,
-            CursorVisualStyle::Underline => Self::Underline,
-            CursorVisualStyle::BlockHollow => Self::BlockHollow,
-            _ => Self::Block,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct CursorPositionSnapshot {
-    pub column: u16,
-    pub row: u16,
-    pub width_cells: u8,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CursorSnapshot {
-    pub position: Option<CursorPositionSnapshot>,
-    pub visible: bool,
-    pub blinking: bool,
-    pub password_input: bool,
-    pub shape: CursorShapeSnapshot,
-    pub color: Color,
-    pub text_color: Color,
-}
-
-impl Default for CursorSnapshot {
-    fn default() -> Self {
-        let configured = TerminalColors::default();
-        Self {
-            position: None,
-            visible: false,
-            blinking: false,
-            password_input: false,
-            shape: CursorShapeSnapshot::default(),
-            color: configured.cursor,
-            text_color: configured.cursor_text.unwrap_or(configured.background),
-        }
+fn cursor_shape_snapshot(style: CursorVisualStyle) -> CursorShapeSnapshot {
+    match style {
+        CursorVisualStyle::Bar => CursorShapeSnapshot::Bar,
+        CursorVisualStyle::Block => CursorShapeSnapshot::Block,
+        CursorVisualStyle::Underline => CursorShapeSnapshot::Underline,
+        CursorVisualStyle::BlockHollow => CursorShapeSnapshot::BlockHollow,
+        _ => CursorShapeSnapshot::Block,
     }
 }
 
@@ -369,139 +263,62 @@ fn cursor_damage(
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub enum ContentDamageSnapshot {
-    #[default]
-    Clean,
-    Rows(Arc<[u16]>),
-    Full,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct SnapshotDamage {
-    pub content: ContentDamageSnapshot,
-    pub cursor: ContentDamageSnapshot,
-    pub title: bool,
-    pub metadata: bool,
-    pub scrollbar: bool,
-    pub viewport: bool,
-    pub active_screen: bool,
-    pub resize: bool,
-    pub mouse_tracking: bool,
-    pub selection_presence: bool,
-    pub search: bool,
-    pub graphics_content: bool,
-    pub graphics_geometry: bool,
-    pub appearance: bool,
-}
-
-impl SnapshotDamage {
-    fn initial() -> Self {
-        Self {
-            content: ContentDamageSnapshot::Full,
-            cursor: ContentDamageSnapshot::Full,
-            title: true,
-            metadata: true,
-            scrollbar: true,
-            viewport: true,
-            active_screen: true,
-            resize: true,
-            mouse_tracking: true,
-            selection_presence: true,
-            search: false,
-            graphics_content: true,
-            graphics_geometry: true,
-            appearance: true,
-        }
-    }
-
-    #[cfg(test)]
-    fn cursor(row: u16) -> Self {
-        Self {
-            cursor: ContentDamageSnapshot::Rows(Arc::from([row])),
-            ..Self::default()
-        }
-    }
-
-    fn is_clean(&self) -> bool {
-        self == &Self::default()
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ScrollbarSnapshot {
-    pub total_rows: u64,
-    pub offset_rows: u64,
-    pub visible_rows: u64,
-}
-
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScreenSnapshot {
-    pub generation: PresentationGeneration,
+    frame: ScreenState<HyperlinkTarget, Color>,
     pub appearance_generation: AppearanceGeneration,
     pub terminal_appearance: Appearance,
     pub configured_colors: Arc<TerminalColors>,
     pub bold_as_bright: bool,
-    pub rows: Arc<[RowSnapshot]>,
-    /// Soft-wrap markers corresponding one-to-one with the published viewport rows.
-    pub row_soft_wrapped: Arc<[bool]>,
     pub background: Color,
     pub colors: TerminalColorsSnapshot,
-    pub size: ScreenSizeSnapshot,
-    pub cell_pixels: (u32, u32),
-    pub viewport: ViewportSnapshot,
-    pub scrollbar: ScrollbarSnapshot,
-    pub active_screen: ActiveScreenSnapshot,
     pub cursor: CursorSnapshot,
-    pub text_blinking: bool,
-    pub mouse_tracking: bool,
-    pub alternate_scroll: bool,
-    pub selection_present: bool,
-    pub selection_revision: u64,
     pub title: Arc<str>,
     pub metadata: Arc<TerminalMetadataSnapshot>,
-    pub find: Option<Arc<TerminalFindSnapshot>>,
     pub graphics: GraphicsSnapshot,
-    pub damage: SnapshotDamage,
-    pub history: HistorySnapshot,
     /// The highest client Input serial written to the PTY before this state was captured.
     /// Zero before any, and in screens a client builds.
     pub input_serial: u32,
 }
 
-impl PartialEq for ScreenSnapshot {
-    fn eq(&self, other: &Self) -> bool {
-        self.rows == other.rows
-            && self.row_soft_wrapped == other.row_soft_wrapped
-            && self.generation == other.generation
-            && self.appearance_generation == other.appearance_generation
-            && self.terminal_appearance == other.terminal_appearance
-            && self.configured_colors == other.configured_colors
-            && self.bold_as_bright == other.bold_as_bright
-            && self.background == other.background
-            && self.colors == other.colors
-            && self.size == other.size
-            && self.cell_pixels == other.cell_pixels
-            && self.viewport == other.viewport
-            && self.scrollbar == other.scrollbar
-            && self.active_screen == other.active_screen
-            && self.cursor == other.cursor
-            && self.text_blinking == other.text_blinking
-            && self.mouse_tracking == other.mouse_tracking
-            && self.alternate_scroll == other.alternate_scroll
-            && self.selection_present == other.selection_present
-            && self.selection_revision == other.selection_revision
-            && self.title == other.title
-            && self.metadata == other.metadata
-            && self.find == other.find
-            && self.graphics == other.graphics
-            && self.damage == other.damage
-            && self.history == other.history
-            && self.input_serial == other.input_serial
+impl Deref for ScreenSnapshot {
+    type Target = ScreenState<HyperlinkTarget, Color>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.frame
     }
 }
 
-impl Eq for ScreenSnapshot {}
+impl DerefMut for ScreenSnapshot {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.frame
+    }
+}
+
+impl Snapshot for ScreenSnapshot {
+    type Link = HyperlinkTarget;
+    type Color = Color;
+
+    fn screen(&self) -> &ScreenState<HyperlinkTarget, Color> {
+        &self.frame
+    }
+
+    fn screen_mut(&mut self) -> &mut ScreenState<HyperlinkTarget, Color> {
+        &mut self.frame
+    }
+
+    fn cursor(&self) -> &CursorSnapshot {
+        &self.cursor
+    }
+
+    fn cursor_mut(&mut self) -> &mut CursorSnapshot {
+        &mut self.cursor
+    }
+
+    fn palette(&self) -> &[Color; 256] {
+        &self.colors.palette
+    }
+}
 
 impl ScreenSnapshot {
     pub fn empty_with_appearance(
@@ -512,20 +329,13 @@ impl ScreenSnapshot {
         let colors =
             TerminalColorsSnapshot::configured(&appearance.colors, appearance.bold_as_bright);
         Arc::new(Self {
-            generation: PresentationGeneration::default(),
+            frame: ScreenState::default(),
             appearance_generation: initial_appearance.generation,
             terminal_appearance: appearance.appearance,
             configured_colors: Arc::new(appearance.colors.clone()),
             bold_as_bright: appearance.bold_as_bright,
-            rows: Arc::from([]),
-            row_soft_wrapped: Arc::from([]),
             background: appearance.colors.background,
             colors,
-            size: ScreenSizeSnapshot::default(),
-            cell_pixels: (0, 0),
-            viewport: ViewportSnapshot::default(),
-            scrollbar: ScrollbarSnapshot::default(),
-            active_screen: ActiveScreenSnapshot::default(),
             cursor: CursorSnapshot {
                 color: appearance.colors.cursor,
                 text_color: appearance
@@ -534,18 +344,10 @@ impl ScreenSnapshot {
                     .unwrap_or(appearance.colors.background),
                 ..CursorSnapshot::default()
             },
-            text_blinking: false,
-            mouse_tracking: false,
-            alternate_scroll: false,
-            selection_present: false,
-            selection_revision: 0,
             title: Arc::from(""),
             metadata: MetadataTracker::new(paths, "", "", Default::default(), Instant::now())
                 .snapshot(),
-            find: None,
             graphics: GraphicsSnapshot::default(),
-            damage: SnapshotDamage::initial(),
-            history: HistorySnapshot::default(),
             input_serial: 0,
         })
     }
@@ -622,12 +424,15 @@ impl ScreenSnapshot {
         let text_blinking = rows_have_visible_blinking_text(&rows);
         let selection_present = rows_have_selection(&rows);
         Arc::new(Self {
-            row_soft_wrapped: Arc::from(vec![false; rows.len()]),
-            rows,
-            text_blinking,
-            selection_present,
-            selection_revision: 0,
-            scrollbar,
+            frame: ScreenState {
+                row_soft_wrapped: Arc::from(vec![false; rows.len()]),
+                rows,
+                text_blinking,
+                selection_present,
+                selection_revision: 0,
+                scrollbar,
+                ..ScreenState::default()
+            },
             title: title.into(),
             ..Self::empty_value()
         })
@@ -643,13 +448,16 @@ impl ScreenSnapshot {
         let text_blinking = rows_have_visible_blinking_text(&rows);
         let selection_present = rows_have_selection(&rows);
         Arc::new(Self {
-            generation: PresentationGeneration(generation),
-            row_soft_wrapped: Arc::from(vec![false; rows.len()]),
-            rows,
-            text_blinking,
-            selection_present,
-            selection_revision: 0,
-            scrollbar,
+            frame: ScreenState {
+                generation: PresentationGeneration::from_counter(generation),
+                row_soft_wrapped: Arc::from(vec![false; rows.len()]),
+                rows,
+                text_blinking,
+                selection_present,
+                selection_revision: 0,
+                scrollbar,
+                ..ScreenState::default()
+            },
             title: title.into(),
             ..Self::empty_value()
         })
@@ -659,26 +467,14 @@ impl ScreenSnapshot {
     fn empty_value() -> Self {
         let configured = TerminalColors::default();
         Self {
-            generation: PresentationGeneration::default(),
+            frame: ScreenState::default(),
             appearance_generation: AppearanceGeneration::INITIAL,
             terminal_appearance: Appearance::Dark,
             configured_colors: Arc::new(TerminalColors::default()),
             bold_as_bright: true,
-            rows: Arc::from([]),
-            row_soft_wrapped: Arc::from([]),
             background: configured.background,
             colors: TerminalColorsSnapshot::configured(&configured, true),
-            size: ScreenSizeSnapshot::default(),
-            cell_pixels: (0, 0),
-            viewport: ViewportSnapshot::default(),
-            scrollbar: ScrollbarSnapshot::default(),
-            active_screen: ActiveScreenSnapshot::default(),
             cursor: CursorSnapshot::default(),
-            text_blinking: false,
-            mouse_tracking: false,
-            alternate_scroll: false,
-            selection_present: false,
-            selection_revision: 0,
             title: Arc::from(""),
             metadata: MetadataTracker::new(
                 crate::local_path::LocalPathSemantics::Posix,
@@ -688,10 +484,7 @@ impl ScreenSnapshot {
                 Instant::now(),
             )
             .snapshot(),
-            find: None,
             graphics: GraphicsSnapshot::default(),
-            damage: SnapshotDamage::initial(),
-            history: HistorySnapshot::default(),
             input_serial: 0,
         }
     }
@@ -862,16 +655,6 @@ struct MouseModeState {
     sgr: bool,
     urxvt: bool,
     sgr_pixels: bool,
-}
-
-/// A keyboard movement through the Scrollback viewport, as the Scroll Commands request it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg(feature = "desktop")]
-pub enum ScrollbackMovement {
-    PageUp,
-    PageDown,
-    Top,
-    Bottom,
 }
 
 #[derive(Debug)]
@@ -2318,7 +2101,7 @@ impl TerminalEmulator {
         let cursor_visible = snapshot.cursor_visible()?;
         let cursor_blinking = snapshot.cursor_blinking()?;
         let cursor_password_input = snapshot.cursor_password_input()?;
-        let cursor_shape: CursorShapeSnapshot = snapshot.cursor_visual_style()?.into();
+        let cursor_shape = cursor_shape_snapshot(snapshot.cursor_visual_style()?);
         let cursor_color: Color = snapshot.cursor_color()?.unwrap_or(colors.foreground).into();
         let scrollbar = self.terminal.scrollbar()?;
         let scrollbar = ScrollbarSnapshot {
@@ -2331,7 +2114,7 @@ impl TerminalEmulator {
             visible_rows: scrollbar.visible_rows,
         };
         let size = ScreenSizeSnapshot { cols, rows };
-        let active_screen: ActiveScreenSnapshot = self.terminal.active_screen()?.into();
+        let active_screen = active_screen_snapshot(self.terminal.active_screen()?);
         if self.graphics_reservation.is_some() {
             let resident = self.terminal.kitty_image_storage_bytes()?;
             // Reset can destroy the inactive screen without presenting it again.
@@ -2507,7 +2290,7 @@ impl TerminalEmulator {
                             CellContentTag::BgColorRgb => {
                                 TerminalColor::Rgb(raw_cell.bg_color_rgb()?.into())
                             }
-                            _ => style.bg_color.into(),
+                            _ => terminal_color(style.bg_color),
                         };
                         let spacer_tail = matches!(raw_cell.wide()?, CellWide::SpacerTail);
                         let mut selected = selection.is_some_and(|range| {
@@ -2574,7 +2357,7 @@ impl TerminalEmulator {
 
                         rendered_cells.push(CellSnapshot {
                             text,
-                            foreground_source: style.fg_color.into(),
+                            foreground_source: terminal_color(style.fg_color),
                             background_source,
                             inverse: style.inverse,
                             bold: style.bold,
@@ -2582,13 +2365,13 @@ impl TerminalEmulator {
                             italic: style.italic,
                             blinking: style.blink,
                             invisible: style.invisible,
-                            underline: style.underline.into(),
-                            underline_source: style.underline_color.into(),
+                            underline: terminal_underline(style.underline),
+                            underline_source: terminal_color(style.underline_color),
                             strikethrough: style.strikethrough,
                             overline: style.overline,
                             selected,
                             spacer_tail,
-                            semantic_content: raw_cell.semantic_content()?.into(),
+                            semantic_content: cell_semantic(raw_cell.semantic_content()?),
                             hyperlink,
                         });
                         column_index = column_index.saturating_add(1);
@@ -2678,35 +2461,37 @@ impl TerminalEmulator {
         let text_blinking = rows_have_visible_blinking_text(row_cache);
         let history = self.history.update(&mut self.terminal)?;
         let screen = Arc::new(ScreenSnapshot {
-            generation: self.presentation_generation,
+            frame: ScreenState {
+                generation: self.presentation_generation,
+                rows: Arc::from(row_cache.clone()),
+                row_soft_wrapped: Arc::from(row_soft_wrapped),
+                size,
+                cell_pixels: (
+                    self.geometry.backing_cell_size().width,
+                    self.geometry.backing_cell_size().height,
+                ),
+                viewport,
+                scrollbar,
+                active_screen,
+                text_blinking,
+                mouse_tracking,
+                alternate_scroll,
+                selection_present,
+                selection_revision: self.selection_revision,
+                find: None,
+                damage,
+                history,
+            },
             appearance_generation: self.applied_appearance.generation,
             terminal_appearance: self.applied_appearance.appearance.appearance,
             configured_colors,
             bold_as_bright: self.applied_appearance.appearance.bold_as_bright,
-            rows: Arc::from(row_cache.clone()),
-            row_soft_wrapped: Arc::from(row_soft_wrapped),
             background: terminal_colors.effective_background(),
             colors: terminal_colors,
-            size,
-            cell_pixels: (
-                self.geometry.backing_cell_size().width,
-                self.geometry.backing_cell_size().height,
-            ),
-            viewport,
-            scrollbar,
-            active_screen,
             cursor,
-            text_blinking,
-            mouse_tracking,
-            alternate_scroll,
-            selection_present,
-            selection_revision: self.selection_revision,
             title,
             metadata,
-            find: None,
             graphics,
-            damage,
-            history,
             input_serial: self.input_serial,
         });
         Ok(Some(screen))

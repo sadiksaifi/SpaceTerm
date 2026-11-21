@@ -18,7 +18,7 @@
 //! The client later reads the outcome with `Resolve` and deletes it with `Acknowledge`.
 //! [`network`] describes how a Network Access change differs.
 use super::operations::{
-    Action, Actor, Admission, Evidence, HELPER_LOCK, Ledger, OperationId, Record, State,
+    Action, Admission, Evidence, HELPER_LOCK, Ledger, Record, State, random_operation_id,
 };
 use super::tokens::Tokens;
 use super::updates::{InstallError, Updates};
@@ -26,12 +26,9 @@ use super::{RetainedInstallation, Service, runtime};
 use crate::CoreError;
 use crate::diagnostics::TerminalCounterSnapshot;
 use crate::hierarchy::Id;
-use crate::permissions::{
-    PermissionError, PermissionsReport, RequestOutcome, SetupReadiness, SystemPermission,
-    SystemPermissions,
-};
+use crate::permissions::{PermissionError, SystemPermissions};
 use crate::protocol::Preamble;
-use crate::protocol::capability::{Capabilities, Capability, Unavailable};
+use crate::protocol::capability::{Capabilities, Unavailable};
 use crate::storage::Directory;
 use crate::update::facts::{UpdateFacts, Version};
 use crate::update::ordering::{Candidate, Floor};
@@ -39,10 +36,15 @@ use crate::update::source::FactsSource;
 use crate::update::sources::{FeedCheck, Pushes, Received, SourceError};
 use base64::Engine;
 use network::{
-    Followed, LISTEN_LIMIT, LaneNetworkEffects, ListenerProgress, ListenerView, NetworkAccess,
-    NetworkCaller, NetworkPlan,
+    Followed, LISTEN_LIMIT, ListenerProgress, ListenerView, NetworkAccess, NetworkCaller,
+    NetworkPlan,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+pub use spaceterm_protocol::service::lane::{
+    Actor, CLOCK_BEHIND, LOCAL_ONLY, LaneAction, LaneActivation, LaneDevice, LaneEffects,
+    LaneNetwork, LaneOperationState, LaneReceipt, LaneReply, LaneRequest, LaneStatus, LaneVersion,
+    MAX_CHUNK, MAX_FRAME, OperationId, WAIT_FACTS_LIMIT,
+};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -55,329 +57,10 @@ fn setup_name_valid(setup: &str) -> bool {
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// The contract code for an action only the server's own machine takes.
-pub const LOCAL_ONLY: &str = "local_only";
-/// The largest lane frame, in bytes.
-pub const MAX_FRAME: usize = 128 * 1024;
-/// The largest decoded `UploadChunk::data`, in bytes.
-pub const MAX_CHUNK: usize = 64 * 1024;
 /// How long the lane waits for the next request before it closes the connection.
 const REQUEST_LIMIT: Duration = Duration::from_secs(30);
-/// How long `WaitFacts` waits for a change before it answers with the unchanged facts.
-pub const WAIT_FACTS_LIMIT: Duration = Duration::from_secs(20);
 /// How often an admitted operation's fence is rechecked against the ledger.
 const FENCE_INTERVAL: Duration = Duration::from_millis(500);
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "request", rename_all = "snake_case", deny_unknown_fields)]
-pub enum LaneRequest {
-    Status,
-    /// Reads the Core's update facts. A struct variant, so unknown fields are refused.
-    Facts {},
-    /// Answers with the facts once the Core's `boot` or facts `revision` differs from these, or
-    /// after [`WAIT_FACTS_LIMIT`] with the unchanged facts. A client that shares no work major
-    /// with the Core follows facts this way.
-    WaitFacts {
-        boot: String,
-        revision: u64,
-    },
-    /// Checks the Core's own feed now, and installs the release it names when that is newer.
-    /// Answers `Facts`. A Core that never fetches a feed answers `no_update_feed`.
-    Check,
-    /// Installs the release the Core's own feed names. Answers `Installed`.
-    StageFetch,
-    /// Begins a push of `length` archive bytes of `version` with the Update Floor `floor`, null
-    /// for a Preflight or Development version. The Core refuses a version it would not install
-    /// before any byte arrives.
-    StageUpload {
-        version: String,
-        #[serde(deserialize_with = "crate::update::ordering::present")]
-        floor: Option<String>,
-        length: u64,
-        sha256: String,
-        /// Base64.
-        signature: String,
-    },
-    UploadChunk {
-        upload: String,
-        offset: u64,
-        /// Base64, at most [`MAX_CHUNK`] bytes decoded.
-        data: String,
-    },
-    Preview {
-        action: LaneAction,
-    },
-    Execute {
-        action: LaneAction,
-        token: String,
-        operation: String,
-    },
-    Resolve {
-        operation: String,
-    },
-    Acknowledge {
-        operation: String,
-    },
-    /// Reads the server's System Permissions. This and the requests below answer only a caller
-    /// on the server's own machine, and refuse a paired one with `local_only`.
-    Permissions,
-    /// Asks the system for one System Permission.
-    RequestPermission {
-        permission: SystemPermission,
-    },
-    /// Prepares a Permission Setup of one System Permission. `setup` is the client's random
-    /// name for it, which [`LaneRequest::CancelPermissionSetup`] names.
-    PreparePermissionSetup {
-        permission: SystemPermission,
-        setup: String,
-    },
-    /// Cancels a Permission Setup, over another connection while its preparation runs. The
-    /// preparation then takes no further effect.
-    CancelPermissionSetup {
-        setup: String,
-    },
-    /// Forgets the system's decision for one System Permission and this server alone.
-    ResetPermission {
-        permission: SystemPermission,
-    },
-    /// Reads the Core's detailed update facts: the facts and what only its update engine knows,
-    /// as one snapshot. Since service [`crate::update::facts::MINOR_DETAILED_FACTS`].
-    DetailedFacts {},
-    /// As [`LaneRequest::WaitFacts`], answering with the detailed update facts. Since service
-    /// [`crate::update::facts::MINOR_DETAILED_FACTS`].
-    WaitDetailedFacts {
-        boot: String,
-        revision: u64,
-    },
-    /// Service 1.3, account-local only. The helper requests the final automatic Stop grant.
-    GrantStop {
-        operation: String,
-        boot: String,
-        candidate: String,
-    },
-}
-
-impl LaneReply {
-    /// This reply as a connection whose admission selected `selected` reads it: its facts
-    /// through [`UpdateFacts::for_selected`], and a code the selected minor lacks as the nearest
-    /// one it has.
-    #[must_use]
-    pub fn for_selected(self, selected: crate::protocol::version::ProtocolVersion) -> Self {
-        let facts = |facts: Box<UpdateFacts>| Box::new(facts.for_selected(selected));
-        match self {
-            Self::Status(mut status) => {
-                status.update = status.update.map(facts);
-                Self::Status(status)
-            }
-            Self::Facts { boot, facts: f } => Self::Facts {
-                boot,
-                facts: facts(f),
-            },
-            Self::Installed {
-                installed,
-                facts: f,
-            } => Self::Installed {
-                installed,
-                facts: facts(f),
-            },
-            Self::Error { code }
-                if code == CLOCK_BEHIND
-                    && selected.minor < crate::update::facts::MINOR_RESTART_FACTS =>
-            {
-                Self::Error {
-                    code: "candidate_unverified".to_owned(),
-                }
-            }
-            reply => reply,
-        }
-    }
-}
-
-/// The code of a feed check that found this Machine's clock behind. Since service 1.1.
-pub(crate) const CLOCK_BEHIND: &str = "clock_behind";
-
-impl LaneRequest {
-    /// The first service lane version that has this request. A client never sends a request
-    /// that its admission's selected version lacks, and the lane refuses one as `unsupported`.
-    /// A minor adds a request by appending a variant above and naming its minor here.
-    pub const fn since(&self) -> crate::protocol::version::ProtocolVersion {
-        let minor = match self {
-            Self::DetailedFacts {} | Self::WaitDetailedFacts { .. } => {
-                crate::update::facts::MINOR_DETAILED_FACTS
-            }
-            Self::GrantStop { .. } => crate::idle_restart::MINOR,
-            _ => 0,
-        };
-        crate::protocol::version::ProtocolVersion { major: 1, minor }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
-pub enum LaneAction {
-    /// Only the Core's own machine stops it. A paired caller gets `local_only`, because a
-    /// stopped Core can't be started remotely.
-    Stop,
-    Restart,
-    Network {
-        access: NetworkAccess,
-    },
-    /// Remove Machine: stops SpaceTerm Core, revokes every pairing and removes the service,
-    /// the launcher and every installed version. Workspace data stays. Gated by
-    /// [`Capability::Uninstall`], as Restart is by [`Capability::Restart`]. Once the helper
-    /// starts, the Core answers no further request, so the caller treats `Accepted` as the
-    /// outcome.
-    Uninstall,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "reply", rename_all = "snake_case", deny_unknown_fields)]
-pub enum LaneReply {
-    Status(LaneStatus),
-    /// The update facts of the Core run `boot`.
-    Facts {
-        boot: String,
-        facts: Box<crate::update::facts::UpdateFacts>,
-    },
-    /// The detailed update facts of the Core run `boot`. Only a connection that selected
-    /// service [`crate::update::facts::MINOR_DETAILED_FACTS`] or later asks for them.
-    DetailedFacts {
-        boot: String,
-        detailed: Box<crate::update::facts::DetailedUpdateFacts>,
-    },
-    /// `StageFetch` or a push's last `UploadChunk` finished. `installed` is false when the feed
-    /// named no newer version.
-    Installed {
-        installed: bool,
-        facts: Box<UpdateFacts>,
-    },
-    UploadProgress {
-        upload: String,
-        next_offset: u64,
-    },
-    Preview {
-        token: String,
-        expires_at: String,
-        effects: LaneEffects,
-    },
-    /// The preview of a Network Access change.
-    NetworkPreview {
-        token: String,
-        expires_at: String,
-        effects: LaneNetworkEffects,
-    },
-    Accepted {
-        operation: String,
-        /// The run of the server that admitted it. A Restart or Update has completed its
-        /// replacement once a receipt carries a different boot.
-        boot: String,
-    },
-    Receipt(LaneReceipt),
-    Acknowledged,
-    Permissions(PermissionsReport),
-    PermissionRequested(RequestOutcome),
-    PermissionSetup(SetupReadiness),
-    PermissionSetupCancelled,
-    PermissionReset,
-    /// `code` is a code from the CLI output contract.
-    Error {
-        code: String,
-    },
-    /// The Core refused a version because its running version is older than the version's
-    /// Update Floor: the CLI output contract's `below_floor`, with the floor it names.
-    BelowFloor {
-        floor: crate::update::ordering::Floor,
-    },
-    StopGranted {},
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LaneReceipt {
-    pub operation: String,
-    pub action: LaneAction,
-    pub state: LaneOperationState,
-    pub code: Option<String>,
-    /// The run of the server answering now.
-    pub boot: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LaneOperationState {
-    Admitted,
-    Launched,
-    Running,
-    Done,
-    Failed,
-    NotPerformed,
-    Unresolved,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LaneVersion {
-    pub version: String,
-    pub commit: String,
-    pub sha256: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LaneActivation {
-    Settled,
-    Unresolved,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LaneNetwork {
-    pub enabled: bool,
-    pub bind: Option<String>,
-    pub listening: bool,
-    pub addresses: Vec<std::net::IpAddr>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LaneDevice {
-    pub id: String,
-    pub name: String,
-    pub fingerprint: String,
-    pub last_connected_at: Option<String>,
-}
-
-/// Mirrors the `server.status` data of the CLI output contract. Held outcomes are the CLI's own
-/// journals, so the lane leaves them out.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LaneStatus {
-    pub running: bool,
-    pub stopped: bool,
-    pub installed: bool,
-    pub automatic_start: bool,
-    pub linger: Option<bool>,
-    pub runtime: LaneVersion,
-    /// The Core's update facts. None while no runtime is installed.
-    pub update: Option<Box<UpdateFacts>>,
-    pub activation: LaneActivation,
-    pub sessions: u32,
-    pub network: LaneNetwork,
-    pub devices: Vec<LaneDevice>,
-    pub lane_major: u16,
-    /// The running server's Terminal Diagnostics counters. A stopped server has none.
-    pub terminal_counters: Option<TerminalCounterSnapshot>,
-}
-
-/// Mirrors the confirmation `effects` of `stop` and `restart`. A Restart names the version it
-/// restarts from, unless the Core's update engine could not open; a Restart into the Pending
-/// Version also names that version and its work major. Stop leaves the version fields empty.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LaneEffects {
-    pub ends_sessions: u32,
-    pub sessions: Vec<String>,
-    pub start_requires_machine: bool,
-    pub from: Option<LaneVersion>,
-    pub to: Option<LaneVersion>,
-    /// The work protocol major a Restart into the Pending Version activates, so a client can
-    /// warn when its own work major differs.
-    pub to_major: Option<u16>,
-}
 
 /// What the lane needs from the running server around it.
 pub trait LaneHost: Send + Sync {
@@ -491,26 +174,6 @@ pub struct LaneCore {
     executing: Mutex<()>,
     /// A fence watcher runs. The watcher clears it only under `executing`.
     watching: AtomicBool,
-}
-
-/// The capability a previewed or executed action needs, when it is not part of every service
-/// lane.
-const fn required(action: &LaneAction) -> Option<Capability> {
-    match action {
-        LaneAction::Restart => Some(Capability::Restart),
-        LaneAction::Uninstall => Some(Capability::Uninstall),
-        LaneAction::Stop | LaneAction::Network { .. } => None,
-    }
-}
-
-/// Whether `request` previews or executes an action newer than the connection's `selected`
-/// service lane version.
-fn newer_than(request: &LaneRequest, selected: crate::protocol::version::ProtocolVersion) -> bool {
-    matches!(
-        request,
-        LaneRequest::Preview { action } | LaneRequest::Execute { action, .. }
-            if required(action).is_some_and(|capability| capability.since().1 > selected)
-    )
 }
 
 /// The part of an observation that does not depend on the Session set, and the effects it
@@ -630,7 +293,7 @@ impl LaneCore {
             authorized()?;
             let caller = NetworkCaller::of(&actor, route);
             let (reply, launch) = match serde_json::from_slice::<LaneRequest>(&bytes) {
-                Ok(request) if request.since() > selected || newer_than(&request, selected) => {
+                Ok(request) if !request.supported_at(selected) => {
                     (error(&CoreError::Unsupported), None)
                 }
                 Ok(request) => self.respond(request, &actor, caller, connection),
@@ -670,7 +333,7 @@ impl LaneCore {
         // An action this Core's service lane does not have is refused before its preview or
         // admission, from the same table clients read.
         if let LaneRequest::Preview { action } | LaneRequest::Execute { action, .. } = &request
-            && let Some(capability) = required(action)
+            && let Some(capability) = action.required_capability()
             && self.capabilities.check(capability).is_err()
         {
             return (error(&CoreError::Unsupported), None);
@@ -1693,7 +1356,7 @@ impl runtime::updates::Restarter for LaneCore {
         fence: runtime::updates::Fence,
     ) -> Result<runtime::updates::Launch, runtime::updates::RestartRefusal> {
         use runtime::updates::{Fence, RestartRefusal};
-        let id = OperationId::random().map_err(RestartRefusal::Core)?;
+        let id = random_operation_id().map_err(RestartRefusal::Core)?;
         let record = Record {
             id,
             actor: Actor::CORE,

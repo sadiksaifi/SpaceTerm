@@ -77,7 +77,10 @@ fn presentation(inventory: &Inventory, pane: Id) -> Result<Option<&Snapshot>> {
         .find(|candidate| candidate.id == pane)
         .and_then(|pane| pane.presentation.as_deref());
     if let Some(snapshot) = snapshot {
-        stage("inventory-presentation-validation", snapshot.validate())?;
+        stage(
+            "inventory-presentation-validation",
+            snapshot.validate().map_err(|_| CoreError::Protocol),
+        )?;
     }
     Ok(snapshot)
 }

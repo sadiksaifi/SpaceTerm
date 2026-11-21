@@ -1038,14 +1038,14 @@ mod tests {
     #[cfg(feature = "client")]
     #[test]
     fn pending_edits_and_validated_conflict_drafts_survive_client_reopen() {
-        use crate::hierarchy::{ClientJournal, Mutation, Outcome, RetainedOutcome};
+        use crate::hierarchy::{Mutation, Outcome, RetainedOutcome, open_client_journal};
         let fixture = Fixture::new();
         let mutation = Mutation::RenameWorkspace {
             workspace: [3; 32],
             version: 7,
             name: "Draft".into(),
         };
-        let mut journal = ClientJournal::open(fixture.open(), [1; 32], [2; 32]).unwrap();
+        let mut journal = open_client_journal(fixture.open(), [1; 32], [2; 32]).unwrap();
         journal.submit(4, mutation.clone()).unwrap();
         // A concurrently spawned child can inherit the close-on-exec lock until exec. Closing
         // the owner's handle must release ownership even while that inherited descriptor lives.
@@ -1062,7 +1062,7 @@ mod tests {
             }
         }
         drop(journal);
-        let reopened = ClientJournal::open(fixture.open(), [1; 32], [2; 32]);
+        let reopened = open_client_journal(fixture.open(), [1; 32], [2; 32]);
         release.write_all(&[1]).unwrap();
         // SAFETY: this reaps only the child created above; no other process is signalled.
         unsafe {
@@ -1090,12 +1090,12 @@ mod tests {
         );
         journal.retire(result.clone()).unwrap();
         drop(journal);
-        let journal = ClientJournal::open(fixture.open(), [1; 32], [2; 32]).unwrap();
+        let journal = open_client_journal(fixture.open(), [1; 32], [2; 32]).unwrap();
         assert!(journal.pending().is_none());
         assert_eq!(journal.last(), Some(&result));
         drop(journal);
         assert!(matches!(
-            ClientJournal::open(fixture.open(), [9; 32], [2; 32]),
+            open_client_journal(fixture.open(), [9; 32], [2; 32]),
             Err(CoreError::AuthenticationRefused)
         ));
     }
@@ -1103,10 +1103,10 @@ mod tests {
     #[cfg(all(feature = "client", target_os = "linux"))]
     #[test]
     fn uncertain_edit_journal_cannot_resume_until_its_actual_outcome_is_synchronized() {
-        use crate::hierarchy::{ClientJournal, Mutation};
+        use crate::hierarchy::{Mutation, open_client_journal};
         let fixture = Fixture::new();
         let data = fixture.open();
-        let mut journal = ClientJournal::open(fixture.open(), [1; 32], [2; 32]).unwrap();
+        let mut journal = open_client_journal(fixture.open(), [1; 32], [2; 32]).unwrap();
         let fault = sync_failure::fail_directory(&data.0);
         assert_eq!(
             journal.submit(
@@ -1121,11 +1121,11 @@ mod tests {
         );
         drop(journal);
         assert!(matches!(
-            ClientJournal::open(fixture.open(), [1; 32], [2; 32]),
+            open_client_journal(fixture.open(), [1; 32], [2; 32]),
             Err(CoreError::StorageUnavailable)
         ));
         drop(fault);
-        let journal = ClientJournal::open(fixture.open(), [1; 32], [2; 32]).unwrap();
+        let journal = open_client_journal(fixture.open(), [1; 32], [2; 32]).unwrap();
         assert_eq!(journal.pending().unwrap().sequence, 1);
     }
     #[test]
