@@ -224,7 +224,8 @@ fn rename_exclusive(directory: &File, from: &str, to: &str) -> std::io::Result<(
 /// [`removing`] without replacing anything there, and only a managed link found under that name
 /// is deleted. Another program's entry that took the launcher path after the check moves back.
 /// If yet another entry took the path meanwhile, the moved entry stays under the removal name
-/// and the removal fails; no entry but SpaceTerm's link is ever deleted.
+/// and the removal fails. The SpaceTerm-named temporary and removal names carry the window
+/// [`select`] accepts for the launcher path.
 pub(in crate::service) fn remove(
     home: &Path,
     identity: &str,
