@@ -3026,6 +3026,9 @@ fn concurrent_shared_links_of_one_pairing_each_admit_and_answer() {
 #[test]
 fn a_shared_handle_keeps_the_restart_facts_until_the_next_link_reports_newer_ones() {
     use crate::MachineConnection;
+    use crate::client::PairedClients;
+    use crate::protocol::capability::Unavailable;
+    use crate::protocol::version::{Incompatible, ProtocolVersion, SERVICE, WORK};
     use crate::update::facts::{self, UpdateCheck, UpdateFacts, Version};
     use crate::update::source::FactsSource;
 
@@ -3040,23 +3043,17 @@ fn a_shared_handle_keeps_the_restart_facts_until_the_next_link_reports_newer_one
             Some(self.0.clone())
         }
     }
-    struct Connector {
-        endpoint: String,
-        paired: PairedDevice,
-        credential: Arc<DeviceCredential>,
-    }
-    impl DirectConnector for Connector {
-        fn connect(&self) -> Result<DirectConnection, DirectError> {
-            DirectConnection::connect(&self.endpoint, &self.paired, &self.credential)
-        }
-    }
-
     let fixture = Fixture::new();
-    fixture.enable();
-    let credential = Arc::new(DeviceCredential::generate().unwrap());
-    let paired = fixture.enroll(&credential);
-    let serve = |operation: Option<facts::Operation>| {
+    let (machine, _) = paired_workspace_machine(&fixture);
+    let paths = fixture.paths.clone();
+    let clients = PairedClients::new(move || MachineConnection::with_paths(paths.clone()));
+    clients.prepare().unwrap();
+    let core = clients.bind(machine.clone()).unwrap();
+    let lane = crate::service::lane::tests::serving(&fixture.paths);
+    let serve = |work: ProtocolVersion, operation: Option<facts::Operation>| {
         let mut environment = fixture.environment(service(Refusing));
+        environment.versions.work = work;
+        environment.lane = Some(Arc::clone(&lane));
         environment.facts = Some(Arc::new(Fixed(UpdateFacts {
             revision: 1,
             platform: crate::update::facts::HOST_PLATFORM,
@@ -3090,17 +3087,6 @@ fn a_shared_handle_keeps_the_restart_facts_until_the_next_link_reports_newer_one
             }
         })
     };
-    let core = MachineConnection::direct(
-        &paired.pin.build,
-        [42; 32],
-        paired.clone(),
-        Arc::new(Connector {
-            endpoint: fixture.endpoint(),
-            paired: paired.clone(),
-            credential: Arc::clone(&credential),
-        }),
-    )
-    .unwrap();
     let operation =
         |core: &MachineConnection| core.update_facts().map(|facts| facts.operation.clone());
     let until = |core: &MachineConnection, expected: Option<Option<facts::Operation>>| {
@@ -3113,19 +3099,58 @@ fn a_shared_handle_keeps_the_restart_facts_until_the_next_link_reports_newer_one
     let restarting = facts::Operation::Restarting {
         to: Version::parse("1.5.0").unwrap(),
     };
-    let first = serve(Some(restarting.clone()));
-    core.link().unwrap();
+    let older = ProtocolVersion {
+        major: WORK.major,
+        minor: 1,
+    };
+    let incompatible = ProtocolVersion {
+        major: WORK.major + 1,
+        minor: 0,
+    };
+    let first = serve(WORK, Some(restarting.clone()));
+    let shared = machine.link().unwrap();
+    assert_eq!(shared.work(), Some(WORK));
     until(&core, Some(Some(restarting.clone())));
+
+    let service = serve(incompatible, None);
+    let session = core.service_lane().unwrap().session().unwrap();
+    assert_eq!(session.selected(), SERVICE);
+    drop(session);
+    service.join().unwrap().unwrap();
+
+    let other = serve(older, None);
+    let independent = core.connect(Arc::new(|_| {})).unwrap();
+    assert_eq!(independent.work(), Some(older));
+    assert_eq!(core.core_versions().unwrap().work, older);
+    assert_eq!(core.capabilities().work(), Ok(WORK));
+    assert_eq!(machine.refresh().unwrap().work, WORK);
+    assert_eq!(core.refresh().unwrap().work, WORK);
+    independent.close();
+    other.join().unwrap().unwrap();
+
+    let refused = serve(incompatible, None);
+    let refusal = CoreError::IncompatibleProtocol(Incompatible::CallerTooOld);
+    assert_eq!(core.connect(Arc::new(|_| {})).err(), Some(refusal));
+    assert_eq!(refused.join().unwrap(), Err(refusal));
+    assert_eq!(core.core_versions().unwrap().work, incompatible);
+    assert_eq!(core.capabilities().work(), Ok(WORK));
+    assert_eq!(core.capabilities().service(), Ok(SERVICE));
+    assert_eq!(core.refresh().unwrap().work, WORK);
+
     // The restart ends the link.
     core.disconnect();
     assert!(core.live_link().is_none());
+    assert_eq!(core.capabilities().work(), Err(Unavailable::ClientTooOld));
+    assert_eq!(core.capabilities().service(), Ok(SERVICE));
     assert_eq!(operation(&core), Some(Some(restarting)));
     let _ = first.join().unwrap();
     // The next link's facts replace them.
-    let second = serve(None);
-    core.link().unwrap();
+    let second = serve(older, None);
+    assert_eq!(core.link().unwrap().work(), Some(older));
+    assert_eq!(core.capabilities().work(), Ok(older));
     until(&core, Some(None));
     core.disconnect();
+    assert_eq!(core.capabilities().work(), Err(Unavailable::NotConnected));
     assert_eq!(
         operation(&core),
         None,

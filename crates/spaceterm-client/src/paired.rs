@@ -1,12 +1,11 @@
 use crate::admission::{CONNECTION_LIMIT, Caller};
-use crate::connection::carrier::Carrier;
 use crate::connection::link::{CoreLink, LinkSink};
 use crate::connection::path::NetworkPath;
 use crate::direct::{DirectConnection, DirectConnector, PairedDevice};
 use crate::pane::control::ClientName;
 use crate::protocol::AgentName;
 use crate::service::lane::Lane;
-use crate::work::WorkConnection;
+use crate::work::{AdmittedWork, WorkConnection};
 use crate::{AuthenticatedStatus, CoreError, WaitLimit};
 use std::sync::{Arc, Weak};
 use std::time::Instant;
@@ -81,12 +80,13 @@ impl PairedMachine {
         &self.work
     }
 
-    /// Admits a new, independent work connection over the exact pairing.
+    /// Admits a new, independent work connection over the exact pairing and returns its
+    /// selected version with its carrier.
     pub fn admit_work(
         &self,
         cancelled: Option<&dyn Fn() -> bool>,
         deadline: Option<Instant>,
-    ) -> Result<Box<dyn Carrier>, CoreError> {
+    ) -> Result<AdmittedWork, CoreError> {
         let check = || {
             if cancelled.is_some_and(|cancelled| cancelled()) {
                 Err(CoreError::ServiceBusy)
@@ -110,7 +110,7 @@ impl PairedMachine {
         &self,
         connection: DirectConnection,
         wait: &WaitLimit,
-    ) -> Result<Box<dyn Carrier>, CoreError> {
+    ) -> Result<AdmittedWork, CoreError> {
         if wait.ended() {
             return Err(CoreError::ServiceBusy);
         }
@@ -132,13 +132,17 @@ impl PairedMachine {
                 .map(|(_, version)| version.clone())
                 .map_err(Clone::clone),
         );
-        Ok(admitted?.0)
+        let (carrier, negotiated) = admitted?;
+        Ok(AdmittedWork {
+            carrier,
+            selected: negotiated.selected,
+        })
     }
 
     /// Gets the work link that receives inventory and sends Workspace and directory requests.
     pub fn link(&self) -> Result<CoreLink, CoreError> {
         self.work.link_with(
-            |events| self.work.start(self.admit_work(None, None)?, events),
+            |events| self.admit_work(None, None)?.start(events),
             None,
             None,
         )
@@ -147,10 +151,7 @@ impl PairedMachine {
     /// Opens or reuses the work link under an absolute deadline.
     pub fn link_by(&self, deadline: Instant) -> Result<CoreLink, CoreError> {
         self.work.link_with(
-            |events| {
-                self.work
-                    .start(self.admit_work(None, Some(deadline))?, events)
-            },
+            |events| self.admit_work(None, Some(deadline))?.start(events),
             None,
             Some(deadline),
         )
@@ -165,11 +166,11 @@ impl PairedMachine {
         let link = self.work.link_with(
             |events| {
                 let connection = self.connector.connect_with(wait)?;
-                let carrier = self.admit_connection(connection, wait)?;
+                let admitted = self.admit_connection(connection, wait)?;
                 if wait.ended() {
                     return Err(CoreError::ServiceBusy);
                 }
-                self.work.start(carrier, events)
+                admitted.start(events)
             },
             Some(&|| wait.is_cancelled()),
             Some(wait.deadline()),
@@ -190,13 +191,7 @@ impl PairedMachine {
     }
 
     pub fn refresh(&self) -> Result<AuthenticatedStatus, CoreError> {
-        self.link()?;
-        let work = self
-            .work
-            .admissions()
-            .capabilities(true)
-            .work()
-            .map_err(|_| CoreError::Protocol)?;
+        let work = self.link()?.work().ok_or(CoreError::Protocol)?;
         Ok(AuthenticatedStatus { work })
     }
 

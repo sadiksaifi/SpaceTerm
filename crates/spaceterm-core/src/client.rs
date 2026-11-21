@@ -136,7 +136,10 @@ pub struct MachineConnection {
     client_cache: std::sync::Arc<ClientCache>,
 }
 
-use spaceterm_client::{PairedMachine, work::WorkConnection};
+use spaceterm_client::{
+    PairedMachine,
+    work::{AdmittedWork, WorkConnection},
+};
 
 /// Native account context for the desktop's paired routes. Presentation handles own their
 /// writers while in use. The context keeps only the account and its resolved directories.
@@ -659,8 +662,8 @@ impl MachineConnection {
         Ok(core)
     }
     /// Admits a new connection through its route's verified authority, without implicit Start,
-    /// and returns its carrier. A local admission waits for a Restart or Update to finish;
-    /// `cancelled` ends that wait early.
+    /// and returns its carrier and selected version. A local admission waits for a Restart or
+    /// Update to finish; `cancelled` ends that wait early.
     /// With `deadline`, the dial, the wait for a Restart or Update and admission end by it.
     /// Without it, admission has its own [`protocol::CONNECTION_LIMIT`] from the handshake on,
     /// however long the dial or that wait took.
@@ -668,16 +671,16 @@ impl MachineConnection {
         &self,
         cancelled: Option<&dyn Fn() -> bool>,
         deadline: Option<std::time::Instant>,
-    ) -> Result<(Box<dyn crate::connection::carrier::Carrier>, ClientScope), CoreError> {
+    ) -> Result<(AdmittedWork, ClientScope), CoreError> {
         if cancelled.is_some_and(|cancelled| cancelled()) {
             return Err(CoreError::ServiceBusy);
         }
         let admission =
             || deadline.unwrap_or_else(|| std::time::Instant::now() + protocol::CONNECTION_LIMIT);
         if let Some(direct) = &self.direct {
-            let carrier = direct.machine.admit_work(cancelled, deadline)?;
+            let admitted = direct.machine.admit_work(cancelled, deadline)?;
             return Ok((
-                carrier,
+                admitted,
                 self.scope_for(
                     self.effective_client(&direct.paired.client),
                     direct.paired.pin.core,
@@ -709,11 +712,14 @@ impl MachineConnection {
             admission(),
         );
         self.shared.record_work(&admitted);
-        admitted?;
+        let negotiated = admitted?;
         let carrier =
             crate::connection::unix::UnixCarrier::new(stream).map_err(|_| CoreError::Protocol)?;
         Ok((
-            Box::new(carrier),
+            AdmittedWork {
+                carrier: Box::new(carrier),
+                selected: negotiated.selected,
+            },
             self.scope_for(self.effective_client(&base), core),
         ))
     }
@@ -743,9 +749,9 @@ impl MachineConnection {
         cancelled: Option<&dyn Fn() -> bool>,
         deadline: Option<std::time::Instant>,
     ) -> Result<CoreLink, CoreError> {
-        let (carrier, scope) = self.connect_admitted(cancelled, deadline)?;
+        let (admitted, scope) = self.connect_admitted(cancelled, deadline)?;
         self.bind_scope(scope)?;
-        self.shared.start(carrier, events)
+        admitted.start(events)
     }
     /// The one live connection this handle and its clones share with the server. Connects when
     /// none is live. A link that ended is never reused; its pending requests already failed.
@@ -828,11 +834,11 @@ impl MachineConnection {
             crate::service::check_admission(&self.paths, self.admission_wait(), cancelled)?;
             self.machine_id()?;
         }
-        self.link_with(cancelled, None)?;
-        let capabilities = self.shared.admissions().capabilities(true);
-        Ok(AuthenticatedStatus {
-            work: capabilities.work().map_err(|_| CoreError::Protocol)?,
-        })
+        let work = self
+            .link_with(cancelled, None)?
+            .work()
+            .ok_or(CoreError::Protocol)?;
+        Ok(AuthenticatedStatus { work })
     }
     /// Explicit first setup retains a nonsecret server identity. It never changes Stop intent.
     pub fn setup(&self) -> Result<(), CoreError> {

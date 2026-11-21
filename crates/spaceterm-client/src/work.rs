@@ -1,16 +1,36 @@
 //! Shared work links, admission state and pushed updates for one Machine.
 use crate::admission::{Admissions, Refused};
+use crate::connection::carrier::Carrier;
 use crate::connection::link::{CoreLink, LinkEvent, LinkSink};
+use crate::protocol::capability::Capabilities;
+use crate::protocol::version::ProtocolVersion;
 use crate::{CoreError, protocol};
 use std::sync::{Arc, Mutex, Weak};
+
+/// An admitted Work carrier and the version selected for that connection.
+pub struct AdmittedWork {
+    pub carrier: Box<dyn Carrier>,
+    pub selected: ProtocolVersion,
+}
+
+impl AdmittedWork {
+    /// Starts the Work I/O thread with this connection's selected version.
+    pub fn start(self, events: Arc<dyn LinkSink>) -> Result<CoreLink, CoreError> {
+        crate::connection::io::spawn_link_with_work(self.carrier, events, Some(self.selected))
+            .map_err(|_| CoreError::Protocol)
+    }
+}
 
 /// The one live link that a handle and its clones share with their server, and the sinks that
 /// receive its pushed inventory and health.
 #[derive(Default)]
 pub struct WorkConnection {
+    /// Serializes dials while readers continue to inspect the shared link.
+    connecting: Mutex<()>,
     link: Mutex<Option<CoreLink>>,
     subscribers: Mutex<Vec<Weak<dyn LinkSink>>>,
-    /// The latest admission on each lane, which the handle's capabilities follow.
+    /// The latest admissions, used for Offer diagnostics, disconnected Work outcomes and
+    /// service-lane capabilities.
     admissions: Arc<Mutex<Admissions>>,
     /// The generation of the latest link connected, or 0 before the first.
     generation: std::sync::atomic::AtomicU64,
@@ -90,15 +110,16 @@ impl WorkConnection {
     pub fn record_work(&self, admitted: &Result<protocol::Negotiated, Refused>) {
         self.admissions().record(protocol::Lane::Work, admitted);
     }
-    pub fn admissions(&self) -> std::sync::MutexGuard<'_, Admissions> {
+    fn admissions(&self) -> std::sync::MutexGuard<'_, Admissions> {
         self.admissions.lock().unwrap_or_else(|e| e.into_inner())
     }
-    /// What this Machine's connections can do now, from the versions their latest admissions
-    /// negotiated: the shared live work connection, and the latest service-lane admission of
-    /// this handle and its clones.
-    pub fn capabilities(&self) -> protocol::capability::Capabilities {
-        let live = self.live_link().is_some();
-        self.admissions().capabilities(live)
+    /// Uses the shared link's selected Work version while it lives. Without a live link,
+    /// reports the latest Work admission outcome. Service follows its own latest admission.
+    pub fn capabilities(&self) -> Capabilities {
+        let admissions = self.admissions();
+        let work = self.live_link().and_then(|link| link.work());
+        let latest = admissions.capabilities(false);
+        Capabilities::new(work.map_or(latest.work(), Ok), latest.service())
     }
     /// The versions the Core offered at the latest admission on either lane, also when it
     /// refused this client. None before the first Offer.
@@ -141,12 +162,9 @@ impl WorkConnection {
     /// Reads the shared live connection without opening one or waiting for a pending dial.
     /// Paired presentation follows its route owner's connection and backoff through this read.
     pub fn live_link(&self) -> Option<CoreLink> {
-        let saved = match self.link.try_lock() {
-            Ok(saved) => saved,
-            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => return None,
-        };
-        saved
+        self.link
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .filter(|link| link.health() == crate::connection::link::Health::Live)
             .cloned()
@@ -154,7 +172,10 @@ impl WorkConnection {
     /// Closes the shared connection, including links retained by this handle's clones.
     /// The route owner must disable its connector before disconnecting to prevent reconnects.
     pub fn disconnect(&self) {
-        let link = self.link.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let link = {
+            let _connecting = self.connecting.lock().unwrap_or_else(|e| e.into_inner());
+            self.link.lock().unwrap_or_else(|e| e.into_inner()).take()
+        };
         if let Some(link) = link {
             link.close();
         }
@@ -168,17 +189,17 @@ impl WorkConnection {
         let passed = || deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline);
         // Callers share a successful connection. Paired presentation reads live_link instead
         // of queuing behind a dial.
-        let mut saved = loop {
+        let _connecting = loop {
             if cancelled.is_some_and(|cancelled| cancelled()) {
                 return Err(CoreError::ServiceBusy);
             }
-            match self.link.try_lock() {
-                Ok(saved) => break saved,
+            match self.connecting.try_lock() {
+                Ok(connecting) => break connecting,
                 Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
                 Err(std::sync::TryLockError::WouldBlock)
                     if cancelled.is_none() && deadline.is_none() =>
                 {
-                    break self.link.lock().unwrap_or_else(|e| e.into_inner());
+                    break self.connecting.lock().unwrap_or_else(|e| e.into_inner());
                 }
                 // The callback has no wake handle. A bounded wait lets a queued caller
                 // cancel without waiting for another caller's network deadline.
@@ -196,17 +217,21 @@ impl WorkConnection {
         if cancelled.is_some_and(|cancelled| cancelled()) {
             return Err(CoreError::ServiceBusy);
         }
-        if let Some(link) = saved.as_ref()
-            && link.health() == crate::connection::link::Health::Live
         {
-            return Ok(link.clone());
+            let mut saved = self.link.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(link) = saved.as_ref()
+                && link.health() == crate::connection::link::Health::Live
+            {
+                return Ok(link.clone());
+            }
+            *saved = None;
         }
-        *saved = None;
         // A dial that starts after the deadline could only outlive it.
         if passed() {
             return Err(CoreError::ServiceBusy);
         }
         let link = connect(Arc::new(Fanout(Arc::downgrade(self))))?;
+        let mut saved = self.link.lock().unwrap_or_else(|e| e.into_inner());
         *saved = Some(link.clone());
         let generation = LINK_GENERATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         self.generation
@@ -218,6 +243,7 @@ impl WorkConnection {
     /// a handle in process, without a socket.
     #[cfg(any(test, feature = "test-support"))]
     pub fn adopt(&self, link: CoreLink) {
+        let _connecting = self.connecting.lock().unwrap_or_else(|e| e.into_inner());
         let version = crate::update::facts::Version::parse("0.0.0")
             .unwrap_or_else(|_| unreachable!("valid version literal"));
         self.record_work(&Ok(protocol::Negotiated {
@@ -244,19 +270,5 @@ impl WorkConnection {
     /// Shares the admission state with the service lane.
     pub fn admitted_lanes(&self) -> Arc<Mutex<Admissions>> {
         Arc::clone(&self.admissions)
-    }
-
-    /// Starts the work I/O thread and sets its negotiated work version.
-    pub fn start(
-        &self,
-        carrier: Box<dyn crate::connection::carrier::Carrier>,
-        events: Arc<dyn LinkSink>,
-    ) -> Result<CoreLink, CoreError> {
-        let link =
-            crate::connection::io::spawn_link(carrier, events).map_err(|_| CoreError::Protocol)?;
-        if let Ok(work) = self.admissions().capabilities(true).work() {
-            link.select_work(work);
-        }
-        Ok(link)
     }
 }

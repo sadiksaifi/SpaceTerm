@@ -7,6 +7,7 @@ use super::Wake;
 use super::carrier::{Carrier, CarrierError, Offer, Priority};
 use super::link::{CoreLink, LinkError, LinkSink, WeakLink};
 use crate::protocol::limits;
+use crate::protocol::version::ProtocolVersion;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
@@ -264,8 +265,19 @@ pub fn spawn_link(
     carrier: Box<dyn Carrier>,
     events: Arc<dyn LinkSink>,
 ) -> std::io::Result<CoreLink> {
+    spawn_link_with_work(carrier, events, None)
+}
+
+pub(crate) fn spawn_link_with_work(
+    carrier: Box<dyn Carrier>,
+    events: Arc<dyn LinkSink>,
+    work: Option<ProtocolVersion>,
+) -> std::io::Result<CoreLink> {
     let (waker, wake) = Waker::new()?;
     let link = CoreLink::new(events, wake, Instant::now());
+    if let Some(work) = work {
+        link.select_work(work);
+    }
     let weak = link.downgrade();
     std::thread::Builder::new()
         .name("spaceterm-link".into())
