@@ -1,5 +1,5 @@
 //! Bounded presentation facts. These strings never grant filesystem or shell authority.
-use crate::CoreError;
+use crate::protocol::Fatal;
 use serde::{Deserialize, Serialize};
 
 pub const MAX_TITLE_CHARS: usize = 256;
@@ -90,7 +90,7 @@ pub fn sanitize(value: &str, limit: usize) -> String {
 }
 impl Snapshot {
     /// Reject malformed peers before any presentation string enters the client cache.
-    pub fn validate(&self) -> Result<(), CoreError> {
+    pub fn validate(&self) -> Result<(), Fatal> {
         let valid =
             |value: &str, limit| value.chars().count() <= limit && value.chars().all(presentable);
         let optional =
@@ -108,7 +108,7 @@ impl Snapshot {
             || matches!(&self.title_glyph, TitleGlyph::Retained(Some(s)) if !valid(s, MAX_TITLE_CHARS))
             || matches!(self.progress, Progress::Normal(n) | Progress::Error(n) | Progress::Paused(n) if n > 100)
         {
-            return Err(CoreError::Protocol);
+            return Err(Fatal::ProtocolViolation);
         }
         Ok(())
     }

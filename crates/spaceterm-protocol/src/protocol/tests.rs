@@ -1298,7 +1298,7 @@ fn update_facts_travel_as_their_own_kind_within_their_bound() {
     // The detailed facts carry the largest facts within their own bound.
     let detailed = crate::update::facts::DetailedUpdateFacts {
         facts: largest.clone(),
-        continuation: Some(crate::update::Continuation::NeedsConfirmation),
+        continuation: Some(crate::update::facts::Continuation::NeedsConfirmation),
         working: u32::MAX,
         restart: None,
     };

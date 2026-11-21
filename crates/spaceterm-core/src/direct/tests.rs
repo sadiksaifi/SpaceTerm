@@ -2763,7 +2763,7 @@ fn concurrent_shared_links_of_one_pairing_each_admit_and_answer() {
 #[test]
 fn a_shared_handle_keeps_the_restart_facts_until_the_next_link_reports_newer_ones() {
     use crate::MachineConnection;
-    use crate::update::facts::{self, Platform, UpdateCheck, UpdateFacts, Version};
+    use crate::update::facts::{self, UpdateCheck, UpdateFacts, Version};
     use crate::update::source::FactsSource;
 
     /// Facts that never change.
@@ -2796,7 +2796,7 @@ fn a_shared_handle_keeps_the_restart_facts_until_the_next_link_reports_newer_one
         let mut environment = fixture.environment(service(Refusing));
         environment.facts = Some(Arc::new(Fixed(UpdateFacts {
             revision: 1,
-            platform: Platform::HOST,
+            platform: crate::update::facts::HOST_PLATFORM,
             running: Version::parse("1.4.0").unwrap(),
             pending: None,
             sessions: 0,

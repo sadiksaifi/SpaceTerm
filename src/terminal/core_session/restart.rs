@@ -101,11 +101,11 @@ mod tests {
 
     #[test]
     fn only_a_restart_the_core_began_because_nothing_ran_counts_as_idle() {
-        use spaceterm_core::update::facts::{Platform, UpdateCheck};
+        use spaceterm_core::update::facts::UpdateCheck;
         let detailed = |restart| DetailedUpdateFacts {
             facts: UpdateFacts {
                 revision: 1,
-                platform: Platform::HOST,
+                platform: spaceterm_core::update::facts::HOST_PLATFORM,
                 running: Version::parse("0.11.4").unwrap(),
                 pending: None,
                 sessions: 2,

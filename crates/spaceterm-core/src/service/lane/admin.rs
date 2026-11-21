@@ -701,7 +701,7 @@ pub fn execute(
     dispatch: &mut dyn FnMut() -> Result<(), LaneError>,
     interrupted: &dyn Fn() -> Option<Instant>,
 ) -> Result<Outcome, LaneError> {
-    let id = OperationId::random()?;
+    let id = crate::service::operations::random_operation_id()?;
     let mut journal = Journal::default();
     let (outcome, shared) = execute_as(
         lane,
@@ -915,7 +915,7 @@ fn execute_after_waits(
     let mut session = session;
     // One operation ID for the whole approval, journaled once. An attempt whose reply was lost
     // is followed under that ID until it answers, so a later attempt never admits another.
-    let id = OperationId::random()?;
+    let id = crate::service::operations::random_operation_id()?;
     let mut journal = Journal::default();
     // The definite refusal of the last attempt, which a deadline that passes before the next
     // attempt reports.
@@ -1148,17 +1148,17 @@ mod tests {
         // The record refuses a path through a symbolic link, as macOS's temporary directory is.
         let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
             "spaceterm-pending-{}",
-            OperationId::random().unwrap()
+            crate::service::operations::random_operation_id().unwrap()
         ));
         let pending = PendingOperations::new(Directory::open(&root, true).unwrap());
         let ids: Vec<_> = (0..MAX_PENDING)
-            .map(|_| OperationId::random().unwrap())
+            .map(|_| crate::service::operations::random_operation_id().unwrap())
             .collect();
         for id in &ids {
             pending.add(id).unwrap();
         }
         assert_eq!(
-            pending.add(&OperationId::random().unwrap()),
+            pending.add(&crate::service::operations::random_operation_id().unwrap()),
             Err(CoreError::Capacity)
         );
         pending.remove(&ids[0].to_string()).unwrap();

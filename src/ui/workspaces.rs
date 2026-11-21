@@ -4784,7 +4784,7 @@ mod restart_tests {
     fn publish(link: &CoreLink, operation: Option<Operation>) {
         let facts = UpdateFacts {
             revision: 1,
-            platform: Platform::HOST,
+            platform: spaceterm_core::update::facts::HOST_PLATFORM,
             running: Version::parse("0.11.1").unwrap(),
             pending: None,
             sessions: 0,

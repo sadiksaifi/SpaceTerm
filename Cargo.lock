@@ -5939,6 +5939,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha2-const-stable"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f179d4e11094a893b82fff208f74d448a7512f99f5a0acbd5c679b705f83ed9"
+
+[[package]]
 name = "sharded-slab"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6171,6 +6177,7 @@ dependencies = [
  "spaceterm-connections",
  "spaceterm-core",
  "spaceterm-directories",
+ "spaceterm-protocol",
  "spaceterm-ui",
  "tar",
  "thiserror 2.0.19",
@@ -6244,16 +6251,15 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-av-foundation",
  "objc2-foundation 0.3.2",
- "postcard",
  "rcgen",
  "ring",
  "rustls",
  "rustls-webpki",
  "serde",
- "serde_bytes",
  "serde_json",
  "socket2",
  "spaceterm-directories",
+ "spaceterm-protocol",
  "tar",
  "thiserror 2.0.19",
  "ureq",
@@ -6266,6 +6272,20 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "spaceterm-protocol"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "postcard",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "sha2-const-stable",
+ "thiserror 2.0.19",
+ "zeroize",
 ]
 
 [[package]]

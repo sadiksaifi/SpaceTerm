@@ -17,7 +17,7 @@ use spaceterm_connections::{
     StoreError,
 };
 use spaceterm_core::direct::{DirectError, Invitation};
-use spaceterm_core::pane::control::{ClientName, MAX_CLIENT_NAME_CHARS};
+use spaceterm_core::pane::control::MAX_CLIENT_NAME_CHARS;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -392,7 +392,7 @@ impl Connections<'_> {
             .recover_while(deadline, &|| self.io.interrupted())
             .map_err(pairing_failure)?;
         self.checkpoint(deadline)?;
-        let computer = ClientName::this_computer();
+        let computer = spaceterm_core::pane::control::this_computer();
         let computer: String = computer
             .as_str()
             .chars()

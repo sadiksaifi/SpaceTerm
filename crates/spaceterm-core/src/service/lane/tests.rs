@@ -1408,7 +1408,7 @@ fn a_service_lane_hello_reaches_the_lane_as_its_agent() {
             &mut core,
             &lane.lane.core,
             &lane.lane.service.identity,
-            &crate::protocol::CoreVersions::for_tests(),
+            &crate::protocol::versions_for_tests(),
         )
         .unwrap();
         let crate::protocol::Admission::Service(actor) = admitted else {
@@ -1665,7 +1665,7 @@ mod flow {
                 session,
                 LaneAction::Restart,
                 token,
-                OperationId::random().unwrap(),
+                crate::service::operations::random_operation_id().unwrap(),
                 Duration::from_secs(20),
                 &mut |op| {
                     admitted.push(*op);
@@ -1693,7 +1693,7 @@ mod flow {
             session,
             LaneAction::Uninstall,
             token,
-            OperationId::random().unwrap(),
+            crate::service::operations::random_operation_id().unwrap(),
             Duration::from_secs(20),
             &mut |_| Ok(()),
             &|| None,
@@ -1966,7 +1966,7 @@ mod flow {
                 session,
                 LaneAction::Stop,
                 token,
-                OperationId::random().unwrap(),
+                crate::service::operations::random_operation_id().unwrap(),
                 Duration::from_secs(20),
                 &mut |op| {
                     admitted = Some(*op);
@@ -2022,7 +2022,7 @@ mod flow {
                 session,
                 LaneAction::Restart,
                 token,
-                OperationId::random().unwrap(),
+                crate::service::operations::random_operation_id().unwrap(),
                 Duration::from_secs(20),
                 &mut |_| Ok(()),
                 &|| None,
@@ -2129,7 +2129,7 @@ mod flow {
                 session,
                 LaneAction::Restart,
                 token,
-                OperationId::random().unwrap(),
+                crate::service::operations::random_operation_id().unwrap(),
                 Duration::from_secs(20),
                 &mut |op| {
                     admitted = Some(*op);
@@ -2168,7 +2168,7 @@ mod flow {
                 std::thread::sleep(Duration::from_millis(2500));
                 settle();
             });
-            let id = OperationId::random().unwrap();
+            let id = crate::service::operations::random_operation_id().unwrap();
             let mut admitted = Vec::new();
             let outcome = client::perform(
                 &(lossy.clone() as Arc<dyn Connector>),
@@ -2213,7 +2213,7 @@ mod flow {
                 session,
                 LaneAction::Restart,
                 token,
-                OperationId::random().unwrap(),
+                crate::service::operations::random_operation_id().unwrap(),
                 Duration::from_secs(60),
                 &mut |_| Ok(()),
                 &|| Some(interrupted),
@@ -2318,7 +2318,7 @@ mod flow {
                 session,
                 LaneAction::Restart,
                 token,
-                OperationId::random().unwrap(),
+                crate::service::operations::random_operation_id().unwrap(),
                 Duration::from_secs(60),
                 &mut |_| Ok(()),
                 &|| (Instant::now() >= at).then_some(at + Duration::from_secs(5)),
@@ -2352,7 +2352,7 @@ mod flow {
                 session,
                 LaneAction::Stop,
                 token,
-                OperationId::random().unwrap(),
+                crate::service::operations::random_operation_id().unwrap(),
                 Duration::from_secs(20),
                 &mut |_| Ok(()),
                 &|| None,
@@ -2592,7 +2592,7 @@ mod flow {
                 session,
                 LaneAction::Stop,
                 approved.token,
-                OperationId::random().unwrap(),
+                crate::service::operations::random_operation_id().unwrap(),
                 Duration::ZERO,
                 &mut |_| {
                     admitted += 1;
@@ -2804,7 +2804,7 @@ mod flow {
             });
             let session =
                 Session::open(connector.as_ref(), Instant::now() + Duration::from_secs(5)).unwrap();
-            let id = OperationId::random().unwrap();
+            let id = crate::service::operations::random_operation_id().unwrap();
             let outcome = client::perform(
                 &connector,
                 session,
@@ -2899,7 +2899,7 @@ mod flow {
         pending: &admin::PendingOperations,
         state: State,
     ) -> OperationId {
-        let id = OperationId::random().unwrap();
+        let id = crate::service::operations::random_operation_id().unwrap();
         let mut ledger = lane.lane.ledger().unwrap();
         ledger
             .admit(Record {
@@ -3491,7 +3491,9 @@ mod flow {
                     &lane,
                     crate::protocol::version::ProtocolVersion { major: 1, minor: 2 },
                     vec![LaneRequest::GrantStop {
-                        operation: OperationId::random().unwrap().to_string(),
+                        operation: crate::service::operations::random_operation_id()
+                            .unwrap()
+                            .to_string(),
                         boot: hex(&lane.lane.boot),
                         candidate: hex(&[7; 32]),
                     }],
@@ -3912,7 +3914,7 @@ fn a_service_1_3_helper_and_handler_complete_the_encoded_stop_grant() {
         let caller = std::thread::spawn(move || {
             super::super::helper::grant_stop_over(&mut helper, &identity, &record)
         });
-        let mut versions = crate::protocol::CoreVersions::for_tests();
+        let mut versions = crate::protocol::versions_for_tests();
         versions.service = crate::protocol::version::ProtocolVersion { major: 1, minor: 3 };
         let admitted = crate::protocol::admit_core(
             &mut core,
@@ -3956,7 +3958,7 @@ fn a_service_1_2_helper_sends_no_stop_grant_request_bytes() {
         let caller = std::thread::spawn(move || {
             super::super::helper::grant_stop_over(&mut helper, &identity, &record)
         });
-        let mut versions = crate::protocol::CoreVersions::for_tests();
+        let mut versions = crate::protocol::versions_for_tests();
         versions.service = crate::protocol::version::ProtocolVersion { major: 1, minor: 2 };
         let admitted = crate::protocol::admit_core(
             &mut core,

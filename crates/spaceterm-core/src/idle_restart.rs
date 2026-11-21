@@ -5,8 +5,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
-/// Work and service minor that add the Stop grant and the retained-input refusal.
-pub const MINOR: u16 = 3;
+pub use spaceterm_protocol::version::MINOR_IDLE_RESTART as MINOR;
 
 /// Input was not admitted because Stop has been granted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

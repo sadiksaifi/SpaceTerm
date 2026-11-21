@@ -7,6 +7,7 @@ edition = "2024"
 members = [
     "crates/spaceterm-directories",
     "crates/spaceterm-core",
+    "crates/spaceterm-protocol",
     "crates/spaceterm-cli",
     "crates/spaceterm-connections",
     "crates/spaceterm-ui",
@@ -14,7 +15,7 @@ members = [
     "third_party/libghostty-vt-sys",
 ]
 exclude = ["third_party/block"]
-default-members = [".", "crates/spaceterm-directories", "crates/spaceterm-core", "crates/spaceterm-cli", "crates/spaceterm-connections", "crates/spaceterm-ui"]
+default-members = [".", "crates/spaceterm-directories", "crates/spaceterm-core", "crates/spaceterm-protocol", "crates/spaceterm-cli", "crates/spaceterm-connections", "crates/spaceterm-ui"]
 resolver = "2"
 
 [patch.crates-io]
@@ -96,6 +97,7 @@ required-features = ["native-tests"]
 serde_json = "1.0"
 
 [dependencies]
+spaceterm-protocol = { path = "crates/spaceterm-protocol" }
 spaceterm-connections = { path = "crates/spaceterm-connections", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

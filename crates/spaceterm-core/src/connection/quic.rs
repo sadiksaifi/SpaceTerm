@@ -46,8 +46,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 
-/// The protocol's own ALPN.
-pub const ALPN: &[u8] = b"spaceterm/1";
+pub use spaceterm_protocol::direct::wire::ALPN;
 /// Received frame bytes that `receive` has not taken yet. Above it the carrier stops reading
 /// streams, so the peer's sending waits on QUIC flow control.
 const INBOUND_BYTES: usize = 2 * limits::MAX_FRAME_BYTES;

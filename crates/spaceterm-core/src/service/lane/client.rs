@@ -793,7 +793,7 @@ impl Lane {
         admitted: &mut dyn FnMut(&OperationId) -> Result<(), LaneError>,
         interrupted: &dyn Fn() -> Option<Instant>,
     ) -> Result<Outcome, LaneError> {
-        let id = OperationId::random()?;
+        let id = crate::service::operations::random_operation_id()?;
         self.perform_as(
             session,
             (action, token, id),

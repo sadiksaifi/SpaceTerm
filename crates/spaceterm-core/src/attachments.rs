@@ -5,13 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-/// One attachment lifetime. Reattachment always receives a higher generation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Attachment {
-    pub workspace: Id,
-    pub generation: u64,
-}
+pub use spaceterm_protocol::attachments::Attachment;
+
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Choices {

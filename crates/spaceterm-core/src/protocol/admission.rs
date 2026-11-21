@@ -1,118 +1,27 @@
-//! Bounded admission: the Hello/Offer preamble every protocol major reads the same way, as
-//! length-prefixed JSON. An incompatible peer therefore always receives a typed incompatibility.
-//! After admission both peers switch to the postcard framing in [`super::frame`].
-//! Peer-account authority comes from the socket. IDs are nonsecret fences, never credentials.
-//!
-//! The preamble is frozen: later majors read and write these exact messages, each at most
-//! [`MAX_FRAME`] bytes with unknown fields refused. A Hello names the lane it opens and offers
-//! the caller's versions of that lane's protocol, and the Core selects one with
-//! [`negotiate`] or none. The Offer always carries the Core's own versions, so a refused client
-//! knows which side is older and whether the other lane admits it.
-use super::version::{self, Incompatible, ProtocolVersion, negotiate};
+//! Native and paired admission transport for SpaceTerm Core.
+#[cfg(test)]
+use super::version;
+use super::version::{Incompatible, ProtocolVersion, negotiate};
+use super::{AgentName, CoreVersions, Lane, Negotiated};
 use crate::pane::control::ClientName;
+#[cfg(test)]
 use crate::update::facts::Version;
 use crate::{AuthenticatedStatus, CoreError};
 use ring::rand::{SecureRandom, SystemRandom};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Serialize, de::DeserializeOwned};
+pub(crate) use spaceterm_protocol::protocol::admission::prefixed;
+use spaceterm_protocol::protocol::admission::{Hello, MAX_FRAME, Offer, well_formed};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-const MAX_FRAME: usize = 8192;
+#[cfg(test)]
+pub(crate) fn versions_for_tests() -> CoreVersions {
+    CoreVersions::current(Version::parse(crate::UNVERSIONED).unwrap_or_else(|_| unreachable!()))
+}
+
 pub(crate) const CONNECTION_LIMIT: Duration = Duration::from_secs(5);
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Hello {
-    lane: Lane,
-    /// The caller's versions of `lane`'s protocol: its current version and, when one exists,
-    /// its previous major at that major's last minor. 1 or 2 entries, distinct majors, highest
-    /// first.
-    versions: Vec<ProtocolVersion>,
-    build: String,
-    core: [u8; 32],
-    /// The base Client Identity.
-    client: [u8; 32],
-    /// Composed by the client and rechecked by the server.
-    name: ClientName,
-    agent: Option<AgentName>,
-}
-
-/// What an admitted connection carries. Each lane negotiates its own protocol version: the work
-/// protocol or the service lane.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Lane {
-    Work,
-    Service,
-}
-
-impl Lane {
-    /// The versions this build offers as a caller of this lane: the current one, then the
-    /// previous major when one exists.
-    pub fn offered(self) -> Vec<ProtocolVersion> {
-        let (current, previous) = match self {
-            Self::Work => (version::WORK, version::PREVIOUS_WORK),
-            Self::Service => (version::SERVICE, version::PREVIOUS_SERVICE),
-        };
-        std::iter::once(current).chain(previous).collect()
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Offer {
-    /// `negotiate(hello.versions, the Core's version of hello.lane)`. None when no major is
-    /// shared; the Core then closes the connection.
-    selected: Option<ProtocolVersion>,
-    /// The Core's own versions.
-    versions: CoreVersions,
-    build: String,
-    core: [u8; 32],
-    /// The effective Client Identity, derived from the agent name when the client sent one.
-    client: [u8; 32],
-}
-
-/// A SpaceTerm Core's version and the protocol versions it listens with.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CoreVersions {
-    pub version: Version,
-    pub work: ProtocolVersion,
-    pub service: ProtocolVersion,
-}
-
-impl CoreVersions {
-    /// A Core of this build running `version`.
-    pub fn current(version: Version) -> Self {
-        Self {
-            version,
-            work: version::WORK,
-            service: version::SERVICE,
-        }
-    }
-
-    /// A Core of this build running [`crate::UNVERSIONED`].
-    #[cfg(test)]
-    pub(crate) fn for_tests() -> Self {
-        Self::current(Version::parse(crate::UNVERSIONED).unwrap_or_else(|_| unreachable!()))
-    }
-
-    /// The version the Core listens with on `lane`.
-    pub fn of(&self, lane: Lane) -> ProtocolVersion {
-        match lane {
-            Lane::Work => self.work,
-            Lane::Service => self.service,
-        }
-    }
-}
-
-/// What a client's admission negotiated on one lane, and the Core's own versions.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Negotiated {
-    pub selected: ProtocolVersion,
-    pub core: CoreVersions,
-}
 
 /// Why a client's admission ended without a selected version.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -138,77 +47,6 @@ impl From<Refused> for CoreError {
             Refused::Incompatible { older, .. } => Self::IncompatibleProtocol(older),
             Refused::Failed(error) => error,
         }
-    }
-}
-
-/// An agent name, `[a-z0-9][a-z0-9-]{0,31}`. It names an identity, not a secret.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct AgentName(String);
-
-impl AgentName {
-    pub const MAX_LEN: usize = 32;
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// The Client Identity of this agent under the base Client Identity `base`:
-    /// `SHA-256("spaceterm.agent.v1" || base || name)`. The server derives it at admission, so a
-    /// paired client can only name agents of its own pairing.
-    pub fn client(&self, base: &[u8; 32]) -> [u8; 32] {
-        let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
-        digest.update(b"spaceterm.agent.v1");
-        digest.update(base);
-        digest.update(self.0.as_bytes());
-        let mut client = [0; 32];
-        client.copy_from_slice(digest.finish().as_ref());
-        client
-    }
-
-    /// The suffix every Client Name of this agent ends with.
-    pub(crate) fn name_suffix(&self) -> String {
-        format!(" CLI {}", self.0)
-    }
-}
-
-/// The agent name did not match `[a-z0-9][a-z0-9-]{0,31}`. It carries no value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "Agent names use 1 to 32 lowercase letters, digits or hyphens, starting with a letter or digit."
-)]
-pub struct InvalidAgentName;
-
-impl TryFrom<String> for AgentName {
-    type Error = InvalidAgentName;
-
-    fn try_from(name: String) -> Result<Self, Self::Error> {
-        let bytes = name.as_bytes();
-        let valid = !bytes.is_empty()
-            && bytes.len() <= Self::MAX_LEN
-            && bytes[0].is_ascii_lowercase() | bytes[0].is_ascii_digit()
-            && bytes
-                .iter()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-');
-        if valid {
-            Ok(Self(name))
-        } else {
-            Err(InvalidAgentName)
-        }
-    }
-}
-
-impl std::str::FromStr for AgentName {
-    type Err = InvalidAgentName;
-
-    fn from_str(name: &str) -> Result<Self, Self::Err> {
-        name.to_owned().try_into()
-    }
-}
-
-impl From<AgentName> for String {
-    fn from(name: AgentName) -> Self {
-        name.0
     }
 }
 
@@ -250,14 +88,6 @@ pub(crate) struct Unsent {
     /// Whether any byte of the frame may have reached the peer. False is definite: nothing of
     /// the frame was written.
     pub(crate) written: bool,
-}
-
-/// Prefixes `bytes` with their length, the admission framing on every transport.
-pub(crate) fn prefixed(bytes: &[u8]) -> Vec<u8> {
-    let mut frame = Vec::with_capacity(4 + bytes.len());
-    frame.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
-    frame.extend_from_slice(bytes);
-    frame
 }
 
 // A native-local transport refusal, never a Hello or Offer. The impossible frame length
@@ -466,15 +296,6 @@ pub(crate) fn admit_direct_machine(
         versions,
         Some((paired.client, paired.pairing)),
     )
-}
-
-/// 1 or 2 versions with distinct majors, highest first.
-fn well_formed(versions: &[ProtocolVersion]) -> bool {
-    match versions {
-        [_] => true,
-        [first, second] => first.major > second.major,
-        _ => false,
-    }
 }
 
 fn admit_core_transport(

@@ -382,12 +382,12 @@ impl MachineConnection {
     fn client_name(&self) -> crate::pane::control::ClientName {
         if let Some(cli) = &self.cli {
             return crate::pane::control::ClientName::for_cli(
-                self.computer.as_ref(),
+                self.computer.computer_name().as_deref(),
                 cli.agent.as_ref(),
             );
         }
         crate::pane::control::ClientName::for_computer(
-            self.computer.as_ref(),
+            self.computer.computer_name().as_deref(),
             self.development.as_deref(),
         )
     }
@@ -1356,7 +1356,7 @@ mod tests {
                 &mut stream,
                 &machine_id,
                 &identity,
-                &protocol::CoreVersions::for_tests(),
+                &crate::protocol::versions_for_tests(),
             )
             .unwrap()
             .work()
@@ -1438,7 +1438,7 @@ mod tests {
                 &mut stream,
                 &pin,
                 &identity,
-                &protocol::CoreVersions::for_tests(),
+                &crate::protocol::versions_for_tests(),
             )
             .unwrap()
             .work()
@@ -1485,7 +1485,7 @@ mod tests {
                 &mut stream,
                 &pin,
                 &paths.identity,
-                &protocol::CoreVersions::for_tests(),
+                &crate::protocol::versions_for_tests(),
             )
             .unwrap()
             .work();
@@ -1550,7 +1550,7 @@ mod tests {
                             &mut stream,
                             &pin,
                             &identity,
-                            &protocol::CoreVersions::for_tests(),
+                            &crate::protocol::versions_for_tests(),
                         )
                         .unwrap()
                         .work();

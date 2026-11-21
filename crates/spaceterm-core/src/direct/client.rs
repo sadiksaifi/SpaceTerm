@@ -1,31 +1,12 @@
 use super::*;
 use crate::connection::quic::QuicStream;
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
 pub(super) fn invitation(payload: wire::Invite) -> Result<Invitation, DirectError> {
-    let bytes = zeroize::Zeroizing::new(
-        serde_json::to_vec(&payload).map_err(|_| DirectError::InvalidInvitation)?,
-    );
-    let text = zeroize::Zeroizing::new(format!(
-        "spaceterm://pair/{}",
-        URL_SAFE_NO_PAD.encode(&bytes)
-    ));
+    let text = payload.encode()?;
     Ok(Invitation { payload, text })
 }
 pub(super) fn parse_invitation(text: &str) -> Result<Invitation, DirectError> {
-    if text.len() > 8192 {
-        return Err(DirectError::InvalidInvitation);
-    }
-    let encoded = text
-        .strip_prefix("spaceterm://pair/")
-        .ok_or(DirectError::InvalidInvitation)?;
-    let bytes = zeroize::Zeroizing::new(
-        URL_SAFE_NO_PAD
-            .decode(encoded)
-            .map_err(|_| DirectError::InvalidInvitation)?,
-    );
-    let payload: wire::Invite =
-        serde_json::from_slice(&bytes).map_err(|_| DirectError::InvalidInvitation)?;
+    let payload = wire::Invite::decode(text)?;
     if payload.schema != 1
         || payload.token == [0; 32]
         || payload.id == [0; 32]

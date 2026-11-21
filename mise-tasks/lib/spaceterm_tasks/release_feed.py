@@ -28,7 +28,7 @@ MINIMUM_SYSTEM = {"macos-arm64": "26.0", "linux-x86_64": "2.35"}
 FEEDS = (("core", "macos-arm64"), ("core", "linux-x86_64"), ("desktop", "linux-x86_64"))
 PROTOCOLS = ("work", "service", "desktop_channel")
 # The file that owns this build's protocol versions.
-PROTOCOL_SOURCE = Path("crates/spaceterm-core/src/protocol/version.rs")
+PROTOCOL_SOURCE = Path("crates/spaceterm-protocol/src/version.rs")
 VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 FEED_KEYS = {
     "schema",
@@ -76,7 +76,7 @@ def asset_names(version):
 
 
 def protocols(root=ROOT):
-    """This build's protocol versions, as `protocol/version.rs` declares them."""
+    """This build's protocol versions, as `spaceterm-protocol/src/version.rs` declares them."""
     try:
         source = (root / PROTOCOL_SOURCE).read_text()
     except OSError:

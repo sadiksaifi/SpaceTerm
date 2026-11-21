@@ -8784,7 +8784,7 @@ fn a_blocked_pane_follows_the_cores_download_and_restarts_only_after_approval(
         link: MachineLink::Incompatible(Incompatible::ListenerTooOld),
         facts: Some(UpdateFacts {
             revision: 1,
-            platform: Platform::HOST,
+            platform: spaceterm_core::update::facts::HOST_PLATFORM,
             running: Version::parse("0.11.4").unwrap(),
             pending,
             sessions: 3,

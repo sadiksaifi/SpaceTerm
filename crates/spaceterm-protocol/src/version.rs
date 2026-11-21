@@ -12,15 +12,15 @@ pub struct ProtocolVersion {
 
 /// This build's work protocol version. Each version is 1.0 at the first release. Work 1.1 adds
 /// the update fact values of [`crate::update::facts::MINOR_RESTART_FACTS`], the
-/// [`super::Kind::GitDirectoryInventory`] frame kind of
-/// [`super::inventory_1_0::MINOR_GIT_DIRECTORY_INVENTORY`], and the Worktree error of
+/// [`crate::protocol::Kind::GitDirectoryInventory`] frame kind of
+/// [`crate::protocol::inventory_1_0::MINOR_GIT_DIRECTORY_INVENTORY`], and the Worktree error of
 /// [`crate::worktree::MINOR_CHANGED_AFTER_CLOSING`]. Work 1.2 adds the
-/// [`super::Kind::DetailedUpdateFacts`] message of
+/// [`crate::protocol::Kind::DetailedUpdateFacts`] message of
 /// [`crate::update::facts::MINOR_DETAILED_FACTS`]. Work 1.3 adds the restarting input refusal.
 /// Work 1.4 adds the background start of [`crate::pane::MINOR_PREPARE`].
 pub const WORK: ProtocolVersion = ProtocolVersion { major: 1, minor: 4 };
-// The build document's major is the work major.
-const _: () = assert!(super::MAJOR == WORK.major);
+/// The work protocol major carried in build documents.
+pub const MAJOR: u16 = WORK.major;
 
 /// This build's service lane version. Service 1.1 adds the update fact values of
 /// [`crate::update::facts::MINOR_RESTART_FACTS`] and the `clock_behind` code. Service 1.2 adds
@@ -70,6 +70,9 @@ pub fn negotiate(
         Err(Incompatible::ListenerTooOld)
     }
 }
+
+/// Work and service minor that add the Stop grant and the retained-input refusal.
+pub const MINOR_IDLE_RESTART: u16 = 3;
 
 #[cfg(test)]
 mod tests {

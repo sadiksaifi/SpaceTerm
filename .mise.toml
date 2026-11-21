@@ -440,7 +440,7 @@ run = [
   { task = "fmt:check" },
   { task = "lint:python" },
   { task = "lint:shell" },
-  "cargo test --release --package spaceterm-core --package spaceterm-cli --package spaceterm-directories --package spaceterm-connections --no-default-features --locked",
+  "cargo test --release --package spaceterm-protocol --package spaceterm-core --package spaceterm-cli --package spaceterm-directories --package spaceterm-connections --no-default-features --locked",
   { task = "release:check-desktop-migrations" },
 ]
 
@@ -472,7 +472,18 @@ run = "python -m spaceterm_tasks.release_rehearsal {{usage.folder | quote}} --ap
 
 [tasks."core:test"]
 description = "Test SpaceTerm Core account admission and private storage"
-run = "cargo test --package spaceterm-core --package spaceterm-cli --package spaceterm-directories --all-features --locked"
+run = "cargo test --package spaceterm-protocol --package spaceterm-core --package spaceterm-cli --package spaceterm-directories --all-features --locked"
+
+[tasks."protocol:test"]
+description = "Test protocol encoding, negotiation and validation"
+run = "cargo test --package spaceterm-protocol --locked"
+
+[tasks."protocol:check"]
+description = "Lint and document the portable protocol crate"
+run = [
+    "cargo clippy --package spaceterm-protocol --all-targets --all-features --locked --no-deps -- -D warnings",
+    "cargo doc --package spaceterm-protocol --locked --no-deps",
+]
 
 [tasks."cli:identity:test"]
 description = "Test CLI identities, creation control and journals, then exercise them against a fresh Development SpaceTerm Core"
