@@ -31,17 +31,28 @@ impl AccountRevocation for MachineConnection {
     }
 }
 
-/// Constructs the registry using this computer's device name and route signal.
+impl AccountRevocation for PairedClients {
+    fn revoke(
+        &self,
+        pin: &MachinePin,
+        operation: UnpairKey,
+        target: PairingId,
+    ) -> Result<RevocationReceipt, DirectError> {
+        self.account()?.revoke(pin, operation, target)
+    }
+}
+
+/// Constructs the portable registry and its native account context without resolving the account.
 pub fn paired_routes(
     identity: &str,
     records: Arc<dyn Records>,
     credentials: Arc<dyn CredentialStore>,
-) -> (DirectConnections, Option<Arc<PairedClients>>) {
-    let local = MachineConnection::for_identity(identity).ok();
-    let device = local.clone();
+) -> (DirectConnections, Arc<PairedClients>) {
+    let presentation = paired_presentation(identity);
+    let device = Arc::clone(&presentation);
     let name: DeviceName = Arc::new(move || {
-        device.as_ref().map_or_else(
-            || {
+        device.account().map_or_else(
+            |_| {
                 let computer = SystemComputerName.computer_name();
                 spaceterm_client::pane::control::ClientName::for_computer(computer.as_deref(), None)
             },
@@ -54,34 +65,25 @@ pub fn paired_routes(
         credentials,
         name,
         Arc::new(crate::connection::route_signal::client_signal),
-        local
-            .as_ref()
-            .map(|local| Arc::new(local.clone()) as Arc<dyn AccountRevocation>),
+        Some(presentation.clone()),
     );
-    with_presentation(routes, local)
+    let cleanup = Arc::clone(&presentation);
+    routes.on_route_removed(Arc::new(move |route| {
+        let _ = cleanup.remove_route(route);
+    }));
+    (routes, presentation)
+}
+
+fn paired_presentation(identity: &str) -> Arc<PairedClients> {
+    let identity = identity.to_owned();
+    Arc::new(PairedClients::new(move || {
+        MachineConnection::for_identity(&identity)
+    }))
 }
 
 #[cfg(feature = "test-support")]
-pub fn with_paired_presentation(
-    identity: &str,
-    routes: DirectConnections,
-) -> (DirectConnections, Option<Arc<PairedClients>>) {
-    let presentation = MachineConnection::for_identity(identity)
-        .ok()
-        .map(|base| Arc::new(PairedClients::new(base)));
-    (routes, presentation)
-}
-
-fn with_presentation(
-    routes: DirectConnections,
-    local: Option<MachineConnection>,
-) -> (DirectConnections, Option<Arc<PairedClients>>) {
-    let presentation = local.map(|local| Arc::new(PairedClients::new(local)));
-    if let Some(presentation) = &presentation {
-        let presentation = Arc::clone(presentation);
-        routes.on_route_removed(Arc::new(move |route| {
-            let _ = presentation.remove_route(route);
-        }));
-    }
-    (routes, presentation)
+pub fn with_paired_presentation(identity: &str) -> Arc<PairedClients> {
+    let presentation = paired_presentation(identity);
+    presentation.prepare().expect("fixture account context");
+    presentation
 }

@@ -780,6 +780,9 @@ impl NativeFixture {
             credentials.clone(),
         );
         direct.resume_retained();
+        wait_for("paired registry startup", || {
+            direct.retained_inventory_loaded()
+        });
         Self {
             root,
             paths,
@@ -1409,6 +1412,9 @@ fn native_core_setup_acceptance() {
         fixture.credentials.clone(),
     );
     relaunched.resume_retained();
+    wait_for("saved registry startup", || {
+        relaunched.retained_inventory_loaded()
+    });
     assert_eq!(relaunched.route(&route).unwrap().paired, paired);
     assert_eq!(
         relaunched.route(&route).unwrap().endpoint,

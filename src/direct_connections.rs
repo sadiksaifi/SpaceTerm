@@ -1,7 +1,12 @@
 //! Desktop presentation and retained state for the portable paired connection registry.
-use spaceterm_client::direct::{DirectError, PairingId};
-use spaceterm_core::{MachineConnection, native_client::PairedClients};
-use std::sync::Arc;
+use spaceterm_client::direct::{DirectError, Endpoint, PairingId};
+use spaceterm_client::pane::control::ClientName;
+use spaceterm_core::{CoreError, MachineConnection, native_client::PairedClients};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use zeroize::Zeroizing;
 
 pub use spaceterm_client::{
     ConnectionStore, DirectRoute, DirectRouteId, DirectRouteStatus, EnrollmentStage, JoinId,
@@ -11,9 +16,20 @@ pub use spaceterm_client::{
 pub use spaceterm_client::{PendingEnrollment, SavedConnection, UnpairState};
 
 #[derive(Clone)]
-pub struct DirectConnections {
+pub struct DirectConnections(Arc<DesktopRoutes>);
+
+struct DesktopRoutes {
     routes: spaceterm_client::DirectConnections,
-    presentation: Option<Arc<PairedClients>>,
+    presentation: Arc<PairedClients>,
+    starting: AtomicBool,
+}
+
+impl DesktopRoutes {
+    fn prepare(&self) -> Result<(), CoreError> {
+        self.presentation.prepare()?;
+        self.routes.resume_retained();
+        Ok(())
+    }
 }
 
 impl DirectConnections {
@@ -24,30 +40,63 @@ impl DirectConnections {
     ) -> Self {
         let (routes, presentation) =
             spaceterm_core::native_client::paired_routes(identity, records, credentials);
-        Self {
+        Self(Arc::new(DesktopRoutes {
             routes,
             presentation,
+            starting: AtomicBool::new(false),
+        }))
+    }
+
+    /// Resolves native paths and loads the retained registry off the UI thread. A route can
+    /// become Connected only after its native context is available.
+    pub fn resume_retained(&self) {
+        if self.0.starting.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let weak = Arc::downgrade(&self.0);
+        let started = std::thread::Builder::new()
+            .name("spaceterm-paired-startup".into())
+            .spawn(move || {
+                while let Some(owner) = weak.upgrade() {
+                    if owner.prepare().is_ok() {
+                        return;
+                    }
+                    drop(owner);
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+            });
+        if started.is_err() {
+            self.0.starting.store(false, Ordering::Release);
         }
     }
 
+    /// Runs on the enrollment worker. The native account and retained registry must be ready
+    /// before an Invitation Link can publish a new connected route.
+    pub fn join(
+        &self,
+        text: Zeroizing<String>,
+        endpoint: Option<Endpoint>,
+        name: ClientName,
+    ) -> Result<JoinId, DirectError> {
+        self.0.prepare()?;
+        if !self.0.routes.retained_inventory_loaded() {
+            return Err(DirectError::StorageUnavailable);
+        }
+        self.0.routes.join(text, endpoint, name)
+    }
+
     pub fn core(&self, id: &DirectRouteId) -> Option<MachineConnection> {
-        self.presentation.as_ref()?.bind(self.routes.core(id)?).ok()
+        self.0.presentation.bind(self.0.routes.core(id)?).ok()
     }
 
     pub fn service(&self, id: &DirectRouteId) -> Option<MachineConnection> {
-        self.presentation
-            .as_ref()?
-            .bind(self.routes.service(id)?)
-            .ok()
+        self.0.presentation.bind(self.0.routes.service(id)?).ok()
     }
 
     /// Looks up retained presentation state without opening a network connection.
     pub fn storage(&self, id: &DirectRouteId) -> Option<MachineConnection> {
-        let route = self.routes.route(id)?;
-        self.presentation
-            .as_ref()?
-            .offline(route.id, route.paired)
-            .ok()
+        let route = self.0.routes.route(id)?;
+        self.0.presentation.offline(route.id, route.paired).ok()
     }
 
     pub fn revoke_other(
@@ -60,7 +109,7 @@ impl DirectConnections {
         if !core.is_account_local() {
             return Err(DirectError::AuthenticationRefused);
         }
-        self.routes.revoke_other(pin, target, label)
+        self.0.routes.revoke_other(pin, target, label)
     }
 }
 
@@ -68,7 +117,7 @@ impl std::ops::Deref for DirectConnections {
     type Target = spaceterm_client::DirectConnections;
 
     fn deref(&self) -> &Self::Target {
-        &self.routes
+        &self.0.routes
     }
 }
 
@@ -76,17 +125,15 @@ impl std::ops::Deref for DirectConnections {
 pub mod tests {
     use super::*;
     use spaceterm_client::tests as fixture;
-    use zeroize::Zeroizing;
 
     fn desktop(routes: spaceterm_client::DirectConnections) -> DirectConnections {
-        let (routes, presentation) = spaceterm_core::native_client::with_paired_presentation(
-            "spaceterm-development",
+        DirectConnections(Arc::new(DesktopRoutes {
             routes,
-        );
-        DirectConnections {
-            routes,
-            presentation,
-        }
+            presentation: spaceterm_core::native_client::with_paired_presentation(
+                "spaceterm-development",
+            ),
+            starting: AtomicBool::new(true),
+        }))
     }
 
     pub fn offline(label: &str) -> (DirectConnections, DirectRouteId) {
