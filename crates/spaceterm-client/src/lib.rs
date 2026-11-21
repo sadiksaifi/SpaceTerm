@@ -35,3 +35,5 @@ pub use store::{
     PendingRevocation, RecoveryGuard, RemovalConfirmation, SavedConnection, SavedConnectionChange,
     StoreError, StoreKind, UnpairState, readable, valid_name,
 };
+
+pub mod workspace;

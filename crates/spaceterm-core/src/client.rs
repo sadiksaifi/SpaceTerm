@@ -477,7 +477,7 @@ impl MachineConnection {
     }
     /// One journal writer for this stable client and original server identity.
     pub fn operation_journal(&self) -> Result<crate::hierarchy::ClientJournal, CoreError> {
-        crate::hierarchy::ClientJournal::open(
+        crate::hierarchy::open_client_journal(
             self.client_directory()?,
             self.machine_id()?,
             self.client_id()?,
@@ -504,7 +504,7 @@ impl MachineConnection {
             ),
             None => (self.machine_id()?, self.client_id()?),
         };
-        crate::hierarchy::ClientJournal::open_locked(directory, lock, core, client)
+        crate::hierarchy::open_locked_client_journal(directory, lock, core, client)
     }
     /// Opens the private arrangement without contacting or starting the server.
     pub fn client_view_store(&self) -> Result<crate::client_view::ClientViewStore, CoreError> {

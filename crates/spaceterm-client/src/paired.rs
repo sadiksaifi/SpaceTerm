@@ -128,6 +128,27 @@ impl PairedMachine {
         )
     }
 
+    /// Opens or reuses the work link under an absolute deadline.
+    pub fn link_by(&self, deadline: Instant) -> Result<CoreLink, CoreError> {
+        self.work.link_with(
+            |events| {
+                self.work
+                    .start(self.admit_work(None, Some(deadline))?, events)
+            },
+            None,
+            Some(deadline),
+        )
+    }
+
+    /// Gives this pairing's Workspace edits their own durable writer. The journal is bound to
+    /// the exact Machine and effective Client Identity before it can dispatch a request.
+    pub fn workspace_edits(
+        &self,
+        journal: Box<dyn crate::workspace::JournalStore>,
+    ) -> Result<crate::workspace::WorkspaceEditor, CoreError> {
+        crate::workspace::WorkspaceEditor::new(self.clone(), journal)
+    }
+
     pub fn refresh(&self) -> Result<AuthenticatedStatus, CoreError> {
         self.link()?;
         let work = self

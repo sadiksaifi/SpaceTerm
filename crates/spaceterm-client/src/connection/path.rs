@@ -2,7 +2,7 @@
 //!
 //! A client's QUIC socket moves when a send fails or a ping goes unanswered. Neither happens when
 //! a preferred network returns while the current one still works, as when Ethernet comes back
-//! under Wi-Fi. [`PathWatch`] asks the routing table after each route-change signal and once per
+//! under Wi-Fi. The carrier asks the routing table after each route-change signal and once per
 //! ping interval, and says when the answer is an address the client's socket does not use.
 use crate::protocol::limits;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};

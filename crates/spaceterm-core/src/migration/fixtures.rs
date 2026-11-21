@@ -168,7 +168,7 @@ pub fn write_client_records(directory: &Path) {
         .unwrap()
         .initialize(&shared.inventory, Some(workspace))
         .unwrap();
-    crate::hierarchy::ClientJournal::open(open(), core, client)
+    crate::hierarchy::open_client_journal(open(), core, client)
         .unwrap()
         .submit(
             1,

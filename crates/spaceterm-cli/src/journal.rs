@@ -24,6 +24,9 @@ use crate::contract::{
 };
 use crate::io::run::settled;
 use crate::state::{CliState, RouteKey, Runs, WriterGuard};
+use spaceterm_client::workspace::{
+    EditError, EditProgress, confirm_acknowledgement, dispatch_original, resolve_original,
+};
 use spaceterm_core::connection::link::{CoreLink, RequestError};
 use spaceterm_core::hierarchy::{ClientJournal, Mutation, Outcome, RetainedOutcome};
 use spaceterm_core::pane::Refusal;
@@ -131,24 +134,27 @@ fn dispatch(
     let sequence = revision.next_sequence;
     crate::interrupt::dispatch()?;
     journal
-        .submit(sequence, mutation.clone())
+        .submit(sequence, mutation)
         .map_err(from_core_error)?;
-    let reply = request(link, Operation::Mutate { sequence, mutation }, deadline);
-    let outcome = match reply {
-        Some(Ok(ReplyBody::Outcome(outcome))) => outcome,
-        Some(Ok(_)) => return Err(Failure::new(Code::ProtocolError)),
-        Some(Err(refusal)) => {
-            // A refused edit may still have been recorded before an uncertain write. Only the
-            // recorded outcome, or its absence, decides.
-            return match resolve(journal, link, sequence, deadline)? {
+    match dispatch_original(
+        journal,
+        |operation| edit_request(link, operation, deadline),
+        || (),
+        |journal, outcome, ()| acknowledge(journal, link, outcome.sequence, deadline),
+    ) {
+        Ok(EditProgress::Outcome { outcome, .. }) => Ok(*outcome),
+        Ok(EditProgress::Missing) => Err(Failure::new(Code::OutcomeUnconfirmed)),
+        Err(EditError::Request(RequestError::Refused(refusal))) => {
+            // The operation may have been recorded before an uncertain write. Only its
+            // recorded outcome, or authoritative absence, decides.
+            match resolve(journal, link, deadline)? {
                 Resolved::Outcome(outcome) => Ok(*outcome),
                 Resolved::Missing => Err(from_core_error(refusal.into())),
                 Resolved::Unknown => Err(Failure::new(Code::OutcomeUnconfirmed)),
-            };
+            }
         }
-        None => return Err(Failure::new(Code::OutcomeUnconfirmed)),
-    };
-    finish(journal, link, outcome, deadline)
+        Err(error) => Err(edit_failure(error)),
+    }
 }
 
 /// What the server recorded for a pending sequence.
@@ -163,71 +169,47 @@ enum Resolved {
 fn resolve(
     journal: &mut ClientJournal,
     link: &CoreLink,
-    sequence: u64,
     deadline: Instant,
 ) -> Result<Resolved, Failure> {
-    match request(link, Operation::Resolve { sequence }, deadline) {
-        Some(Ok(ReplyBody::Outcome(outcome))) => Ok(Resolved::Outcome(Box::new(finish(
-            journal, link, outcome, deadline,
-        )?))),
-        Some(Ok(_)) => Err(Failure::new(Code::ProtocolError)),
-        Some(Err(Refusal::Missing)) => {
-            journal.abandon().map_err(from_core_error)?;
-            Ok(Resolved::Missing)
-        }
-        Some(Err(_)) | None => Ok(Resolved::Unknown),
+    match resolve_original(
+        journal,
+        |operation| edit_request(link, operation, deadline),
+        |journal, outcome| acknowledge(journal, link, outcome.sequence, deadline),
+    ) {
+        Ok(EditProgress::Outcome { outcome, .. }) => Ok(Resolved::Outcome(outcome)),
+        Ok(EditProgress::Missing) => Ok(Resolved::Missing),
+        Err(EditError::Request(_) | EditError::Unconfirmed) => Ok(Resolved::Unknown),
+        Err(error) => Err(edit_failure(error)),
     }
 }
 
-/// Retires a validated outcome, acknowledges it, and forgets it once the server confirms that
-/// it forgot it too. An unconfirmed acknowledgement keeps the outcome for the next command.
-fn finish(
-    journal: &mut ClientJournal,
-    link: &CoreLink,
-    outcome: RetainedOutcome,
-    deadline: Instant,
-) -> Result<RetainedOutcome, Failure> {
-    let pending = journal.pending().ok_or(Failure::new(Code::ProtocolError))?;
-    // Validation precedes acknowledgement.
-    if outcome.sequence != pending.sequence || outcome.mutation != pending.mutation {
-        return Err(Failure::new(Code::ProtocolError));
+fn edit_failure(error: EditError) -> Failure {
+    match error {
+        EditError::Core(error) => from_core_error(error),
+        EditError::Request(_) | EditError::Unconfirmed => Failure::new(Code::OutcomeUnconfirmed),
     }
-    if outcome.outcome == Outcome::Pending {
-        return Ok(outcome);
-    }
-    journal.retire(outcome.clone()).map_err(from_core_error)?;
-    acknowledge(journal, link, outcome.sequence, deadline)?;
-    Ok(outcome)
 }
 
-/// How long [`acknowledge`] keeps asking whether the server applied an acknowledgement.
-const ACKNOWLEDGE_CONFIRMATION: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// Acknowledges `sequence`, then asks for it until the server answers `Missing`, which proves it
-/// applied the acknowledgement. The link sends requests ahead of acknowledgements, so the first
-/// answers may still name the outcome. An acknowledgement not confirmed in time keeps the
-/// outcome for the next command, which acknowledges it again.
 fn acknowledge(
     journal: &mut ClientJournal,
     link: &CoreLink,
     sequence: u64,
     deadline: Instant,
-) -> Result<(), Failure> {
-    if link.acknowledge(sequence).is_err() {
-        return Ok(());
-    }
-    let until = deadline.min(Instant::now() + ACKNOWLEDGE_CONFIRMATION);
-    loop {
-        match request(link, Operation::Resolve { sequence }, until) {
-            Some(Err(Refusal::Missing)) => {
-                return journal.settled(sequence).map_err(from_core_error);
-            }
-            Some(Ok(ReplyBody::Outcome(_))) if Instant::now() < until => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            _ => return Ok(()),
-        }
-    }
+) -> Result<(), EditError> {
+    confirm_acknowledgement(journal, link, sequence, deadline, |operation, by| {
+        edit_request(link, operation, by)
+    })
+    .map_err(EditError::from)
+}
+
+fn edit_request(
+    link: &CoreLink,
+    operation: Operation,
+    deadline: Instant,
+) -> Result<ReplyBody, EditError> {
+    request(link, operation, deadline)
+        .ok_or(EditError::Unconfirmed)?
+        .map_err(|refusal| RequestError::Refused(refusal).into())
 }
 
 /// Sends `operation` and waits for its reply until `deadline`. `None` means no reply arrived:
@@ -377,7 +359,7 @@ fn settle_journal(
     deadline: Instant,
 ) -> Result<Option<RecoveredOperation>, Failure> {
     if let Some(pending) = journal.pending().cloned() {
-        let outcome = match resolve(journal, link, pending.sequence, deadline)? {
+        let outcome = match resolve(journal, link, deadline)? {
             Resolved::Outcome(outcome) if outcome.outcome == Outcome::Pending => {
                 RecoveredOutcome::unknown()
             }
@@ -396,7 +378,7 @@ fn settle_journal(
     };
     // The outcome was retired but its acknowledgement may not have arrived. The command that
     // dispatched it may not have reported it either.
-    acknowledge(journal, link, last.sequence, deadline)?;
+    acknowledge(journal, link, last.sequence, deadline).map_err(edit_failure)?;
     Ok(Some(mutation_item(
         last.sequence,
         recovered_outcome(&last.outcome),

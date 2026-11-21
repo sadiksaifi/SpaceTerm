@@ -348,7 +348,7 @@ impl DirectConnection {
             std::time::Instant::now() + std::time::Duration::from_secs(30),
         )
     }
-    /// [`Self::admit_service_lane`] that sends no admission frame once `deadline` has passed.
+    /// Admits the service lane and sends frames only before `deadline`.
     pub fn admit_service_lane_by(
         self,
         caller: crate::admission::Caller<'_>,

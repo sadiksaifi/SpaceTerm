@@ -2594,6 +2594,156 @@ fn paired_administration_is_refused_without_changing_invitations_claims_or_devic
     let _ = core.join().unwrap();
 }
 
+#[cfg(feature = "client")]
+#[test]
+fn paired_workspace_retry_keeps_the_original_after_a_lost_reply_and_reconnect() {
+    use crate::hierarchy::{CreateControl, Mutation, Outcome, State, journal_writer};
+    use crate::protocol::{Fatal, InventoryRevision};
+    use spaceterm_client::workspace::EditError;
+
+    struct Runtime {
+        state: Arc<Mutex<State>>,
+        outbox: Option<Outbox>,
+        lose_reply: bool,
+    }
+    impl PaneService for Runtime {
+        fn admitted(&mut self, peer: &Peer, _: ClientName, outbox: Outbox) {
+            let state = self.state.lock().unwrap();
+            outbox
+                .inventory(InventoryRevision {
+                    inventory: state.inventory.clone(),
+                    next_sequence: state.next_sequence(peer.client),
+                })
+                .unwrap();
+            self.outbox = Some(outbox);
+        }
+        fn request(&mut self, peer: &Peer, _: RequestId, operation: Operation) -> Dispatch {
+            let Operation::Mutate { sequence, mutation } = operation else {
+                panic!("expected the original Workspace mutation");
+            };
+            let mut state = self.state.lock().unwrap();
+            state
+                .apply(peer.client, sequence, mutation, "/tmp".as_ref(), |_| true)
+                .unwrap();
+            let receipt = state.outcome(peer.client, sequence).unwrap().clone();
+            let outbox = self.outbox.as_ref().unwrap();
+            if std::mem::take(&mut self.lose_reply) {
+                // The Core committed the edit. The connection ends before its reply leaves.
+                outbox.goodbye(Fatal::Stalled).unwrap();
+                return Dispatch::Deferred;
+            }
+            outbox
+                .inventory(InventoryRevision {
+                    inventory: state.inventory.clone(),
+                    next_sequence: state.next_sequence(peer.client),
+                })
+                .unwrap();
+            Dispatch::reply(Ok(ReplyBody::Outcome(receipt)))
+        }
+        fn input(&mut self, _: &Peer, _: Input) {}
+        fn view(&mut self, _: &Peer, _: View) {}
+        fn effect_done(&mut self, _: &Peer, _: EffectDone) {}
+        fn acknowledge(&mut self, peer: &Peer, sequence: u64) {
+            self.state
+                .lock()
+                .unwrap()
+                .acknowledge(peer.client, sequence)
+                .unwrap();
+        }
+        fn disconnected(&mut self, _: &Peer) {}
+        fn shutdown(&mut self) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
+
+    struct Connector {
+        endpoint: String,
+        paired: PairedDevice,
+        credential: DeviceCredential,
+    }
+    impl DirectConnector for Connector {
+        fn connect(&self) -> Result<DirectConnection, DirectError> {
+            DirectConnection::connect(&self.endpoint, &self.paired, &self.credential)
+        }
+
+        fn connect_by(&self, deadline: Instant) -> Result<DirectConnection, DirectError> {
+            DirectConnection::connect_until(
+                &self.endpoint,
+                &self.paired,
+                &self.credential,
+                deadline,
+            )
+        }
+    }
+
+    let fixture = Fixture::new();
+    fixture.enable();
+    let credential = DeviceCredential::generate().unwrap();
+    let paired = fixture.enroll(&credential);
+    let machine = spaceterm_client::PairedMachine::new(
+        &fixture.paths.identity,
+        [1; 32],
+        paired.clone(),
+        Arc::new(Connector {
+            endpoint: fixture.endpoint(),
+            paired,
+            credential,
+        }),
+        Arc::new(|| "Paired Client".into()),
+        None,
+        Arc::new(|| None),
+    )
+    .unwrap();
+    let authority = Arc::new(Mutex::new(State::empty()));
+    let runtime = service(Runtime {
+        state: Arc::clone(&authority),
+        outbox: None,
+        lose_reply: true,
+    });
+    let open = || {
+        let directory = crate::Directory::open(&fixture.root.join("client"), true).unwrap();
+        machine
+            .workspace_edits(journal_writer(directory).unwrap())
+            .unwrap()
+    };
+    let mutation = Mutation::CreateWorkspace {
+        name: "Original".into(),
+        directory: None,
+        control: CreateControl::Creator,
+    };
+    let until = || Instant::now() + Duration::from_secs(5);
+
+    let first = fixture.serve_next_with(Arc::clone(&runtime));
+    let mut editor = open();
+    let failure = editor
+        .submit(mutation.clone(), Instant::now() + Duration::from_secs(2))
+        .unwrap_err();
+    assert!(
+        matches!(
+            failure,
+            EditError::Request(RequestError::Link(_)) | EditError::Unconfirmed
+        ),
+        "{failure:?}"
+    );
+    assert_eq!(editor.journal().pending().unwrap().sequence, 1);
+    assert_eq!(authority.lock().unwrap().inventory.workspaces.len(), 1);
+    drop(editor);
+    machine.disconnect();
+    first.join().unwrap().unwrap();
+
+    let second = fixture.serve_next_with(runtime);
+    let mut editor = open();
+    let receipt = editor.retry(until()).unwrap().unwrap();
+    assert_eq!(receipt.sequence, 1);
+    assert_eq!(receipt.mutation, mutation);
+    assert!(matches!(receipt.outcome, Outcome::Accepted { .. }));
+    assert_eq!(authority.lock().unwrap().inventory.workspaces.len(), 1);
+    assert!(editor.journal().pending().is_none());
+    assert_eq!(editor.journal().last().unwrap(), &receipt);
+    machine.disconnect();
+    second.join().unwrap().unwrap();
+}
+
 #[test]
 fn end_all_sessions_requires_account_local_admission_but_workspace_mutations_do_not() {
     #[derive(Default)]

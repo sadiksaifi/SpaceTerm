@@ -305,7 +305,7 @@ fn frame(request: &LaneRequest) -> Result<Vec<u8>, CoreError> {
 }
 
 /// Runs blocking `work` on its own thread named `name`, so the caller stops waiting as soon as
-/// `deadline()` passes. `deadline()` is read again every [`CHECK`], so an interrupt that sets it
+/// `deadline()` passes. `deadline()` is read again every 100 milliseconds, so an interrupt that sets it
 /// or moves it closer ends the wait while a stalled server or activation still holds `work`.
 /// `None` from `deadline()` means no deadline yet. Abandoned work runs on until it ends by
 /// itself, such as lane I/O at its own fixed deadline. `None` means the deadline passed first.
@@ -729,7 +729,7 @@ impl Lane {
         Session::open_within(&self.connector, &by).map_err(|error| past(error, deadline))
     }
 
-    /// Executes a previewed action as a new operation and follows it. See [`perform`].
+    /// Executes a previewed action as a new operation and follows it.
     pub fn perform(
         &self,
         session: Session,
@@ -751,7 +751,7 @@ impl Lane {
     }
 
     /// Executes a previewed action as operation `id` and follows it until the absolute instant
-    /// `until`. See [`perform`]. `accepted` runs once, as soon as the server is known to have
+    /// `until`. `accepted` runs once, as soon as the server is known to have
     /// admitted the operation, and `settle` takes its settled receipt on the session that read
     /// it.
     pub fn perform_as(

@@ -311,21 +311,50 @@ impl CoreLink {
     /// Waits until this link received more than `seen` revisions, and returns the newest. Fails
     /// once the link ends. Never call it on the I/O thread.
     pub fn next_inventory(&self, seen: u64) -> Result<(u64, Arc<InventoryRevision>), LinkError> {
+        self.inventory_after(seen, None)?.ok_or(LinkError::Closed)
+    }
+
+    /// Like [`Self::next_inventory`], with an absolute deadline. A timeout leaves the link open.
+    pub fn next_inventory_by(
+        &self,
+        seen: u64,
+        deadline: Instant,
+    ) -> Result<Option<(u64, Arc<InventoryRevision>)>, LinkError> {
+        self.inventory_after(seen, Some(deadline))
+    }
+
+    fn inventory_after(
+        &self,
+        seen: u64,
+        deadline: Option<Instant>,
+    ) -> Result<Option<(u64, Arc<InventoryRevision>)>, LinkError> {
         let mut state = self.lock();
         loop {
             if let Some((count, revision)) = &state.inventory
                 && *count > seen
             {
-                return Ok((*count, Arc::clone(revision)));
+                return Ok(Some((*count, Arc::clone(revision))));
             }
             if let Some(error) = state.closed {
                 return Err(error);
             }
-            state = self
-                .shared
-                .revisions
-                .wait(state)
-                .unwrap_or_else(|e| e.into_inner());
+            state = match deadline {
+                Some(deadline) => {
+                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                        return Ok(None);
+                    };
+                    self.shared
+                        .revisions
+                        .wait_timeout(state, remaining)
+                        .unwrap_or_else(|error| error.into_inner())
+                        .0
+                }
+                None => self
+                    .shared
+                    .revisions
+                    .wait(state)
+                    .unwrap_or_else(|error| error.into_inner()),
+            };
         }
     }
 

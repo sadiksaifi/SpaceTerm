@@ -764,7 +764,7 @@ impl CliState {
                 continue;
             }
             let directory = Directory::open(&path, false)?;
-            let operations = ClientJournal::held(&directory)?;
+            let operations = spaceterm_core::hierarchy::held_client_journal(&directory)?;
             let runs = directory
                 .read_json::<RunsRecord>("runs.json")?
                 .map_or(0, |record| record.runs.len().min(u32::MAX as usize) as u32);
