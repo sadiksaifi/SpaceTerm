@@ -1,6 +1,6 @@
 //! Desktop presentation and retained state for the portable paired connection registry.
-use spaceterm_client::direct::{DirectConnection, DirectConnector, DirectError, PairingId};
-use spaceterm_core::MachineConnection;
+use spaceterm_client::direct::{DirectError, PairingId};
+use spaceterm_core::{MachineConnection, native_client::PairedClients};
 use std::sync::Arc;
 
 pub use spaceterm_client::{
@@ -13,7 +13,7 @@ pub use spaceterm_client::{PendingEnrollment, SavedConnection, UnpairState};
 #[derive(Clone)]
 pub struct DirectConnections {
     routes: spaceterm_client::DirectConnections,
-    identity: String,
+    presentation: Option<Arc<PairedClients>>,
 }
 
 impl DirectConnections {
@@ -22,31 +22,32 @@ impl DirectConnections {
         records: Arc<dyn spaceterm_client::records::Records>,
         credentials: Arc<dyn spaceterm_client::CredentialStore>,
     ) -> Self {
+        let (routes, presentation) =
+            spaceterm_core::native_client::paired_routes(identity, records, credentials);
         Self {
-            routes: spaceterm_core::native_client::paired_routes(identity, records, credentials),
-            identity: identity.to_owned(),
+            routes,
+            presentation,
         }
     }
 
     pub fn core(&self, id: &DirectRouteId) -> Option<MachineConnection> {
-        MachineConnection::for_paired_client(&self.identity, self.routes.core(id)?).ok()
+        self.presentation.as_ref()?.bind(self.routes.core(id)?).ok()
     }
 
     pub fn service(&self, id: &DirectRouteId) -> Option<MachineConnection> {
-        MachineConnection::for_paired_client(&self.identity, self.routes.service(id)?).ok()
+        self.presentation
+            .as_ref()?
+            .bind(self.routes.service(id)?)
+            .ok()
     }
 
     /// Looks up retained presentation state without opening a network connection.
     pub fn storage(&self, id: &DirectRouteId) -> Option<MachineConnection> {
-        struct Offline;
-        impl DirectConnector for Offline {
-            fn connect(&self) -> Result<DirectConnection, DirectError> {
-                Err(DirectError::Transport)
-            }
-        }
-
         let route = self.routes.route(id)?;
-        MachineConnection::direct(&self.identity, route.id, route.paired, Arc::new(Offline)).ok()
+        self.presentation
+            .as_ref()?
+            .offline(route.id, route.paired)
+            .ok()
     }
 
     pub fn revoke_other(
@@ -78,9 +79,13 @@ pub mod tests {
     use zeroize::Zeroizing;
 
     fn desktop(routes: spaceterm_client::DirectConnections) -> DirectConnections {
-        DirectConnections {
-            identity: "spaceterm-development".to_owned(),
+        let (routes, presentation) = spaceterm_core::native_client::with_paired_presentation(
+            "spaceterm-development",
             routes,
+        );
+        DirectConnections {
+            routes,
+            presentation,
         }
     }
 

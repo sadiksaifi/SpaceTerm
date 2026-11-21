@@ -8,6 +8,7 @@ use crate::{
     storage::Directory,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
 
 /// The lock a paired route's client records are checked under.
@@ -137,6 +138,91 @@ pub struct MachineConnection {
 }
 
 use spaceterm_client::{PairedMachine, work::WorkConnection};
+
+/// Native presentation and journal scope for the desktop's portable paired routes.
+/// The account and its directories are bound once by startup. Cached state contains no
+/// connection or credential, so removing a route can drop its transport independently.
+pub struct PairedClients {
+    base: MachineConnection,
+    retained: Mutex<BTreeMap<[u8; 32], RouteClientCache>>,
+}
+
+struct RouteClientCache {
+    paired: crate::direct::PairedDevice,
+    cache: Arc<ClientCache>,
+}
+
+impl PairedClients {
+    pub(crate) fn new(base: MachineConnection) -> Self {
+        Self {
+            base,
+            retained: Mutex::default(),
+        }
+    }
+
+    /// Binds this handle to the captured native state. Reconnecting the same pairing keeps
+    /// its cache. Replacing the pairing, including a new Client Identity, gives it a new cache.
+    pub fn bind(&self, machine: PairedMachine) -> Result<MachineConnection, CoreError> {
+        let paired = machine.paired();
+        if paired.pin.build != self.base.identity || machine.agent().is_some() {
+            return Err(CoreError::AuthenticationRefused);
+        }
+        let mut retained = self
+            .retained
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let slot = retained
+            .entry(*machine.route())
+            .or_insert_with(|| RouteClientCache {
+                paired: paired.clone(),
+                cache: Arc::default(),
+            });
+        if slot.paired != *paired {
+            *slot = RouteClientCache {
+                paired: paired.clone(),
+                cache: Arc::default(),
+            };
+        }
+        self.base
+            .clone()
+            .retain_paired(machine, Arc::clone(&slot.cache))
+    }
+
+    /// Opens a handle to retained state without opening a work or service lane.
+    pub fn offline(
+        &self,
+        route: [u8; 32],
+        paired: crate::direct::PairedDevice,
+    ) -> Result<MachineConnection, CoreError> {
+        struct Offline;
+        impl crate::direct::DirectConnector for Offline {
+            fn connect(
+                &self,
+            ) -> Result<crate::direct::DirectConnection, crate::direct::DirectError> {
+                Err(crate::direct::DirectError::Transport)
+            }
+        }
+        self.bind(self.base.paired_machine(route, paired, Arc::new(Offline))?)
+    }
+
+    pub(crate) fn remove_route(&self, route: &[u8; 32]) -> Result<(), CoreError> {
+        self.retained
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(route);
+        let path = self
+            .base
+            .paths
+            .data
+            .join("clients")
+            .join(direct_account(&self.base.account, route));
+        match Directory::open(&path, false) {
+            Ok(directory) => crate::client_view::discard_inventory(&directory),
+            Err(CoreError::NotSetUp) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+}
 
 struct DirectRoute {
     id: [u8; 32],
@@ -799,27 +885,22 @@ impl MachineConnection {
             self.effective_client(&direct.paired.client),
         )
     }
-    /// Removes the Workspace Inventory copy the paired route `route` retained, without network
-    /// or credential access. A route that retained none is unchanged.
-    pub fn discard_retained_inventory(identity: &str, route: [u8; 32]) -> Result<(), CoreError> {
-        let handle = Self::for_identity(identity)?;
-        let path = handle
-            .paths
-            .data
-            .join("clients")
-            .join(direct_account(&handle.account, &route));
-        match Directory::open(&path, false) {
-            Ok(directory) => crate::client_view::discard_inventory(&directory),
-            Err(CoreError::NotSetUp) => Ok(()),
-            Err(error) => Err(error),
-        }
-    }
     fn with_direct(
         self,
         route: [u8; 32],
         paired: crate::direct::PairedDevice,
         connector: std::sync::Arc<dyn crate::direct::DirectConnector>,
     ) -> Result<Self, CoreError> {
+        let machine = self.paired_machine(route, paired, connector)?;
+        self.retain_paired(machine, Arc::default())
+    }
+
+    fn paired_machine(
+        &self,
+        route: [u8; 32],
+        paired: crate::direct::PairedDevice,
+        connector: Arc<dyn crate::direct::DirectConnector>,
+    ) -> Result<PairedMachine, CoreError> {
         let computer = Arc::clone(&self.computer);
         let development = self.development.clone();
         let cli = self.cli.clone();
@@ -836,7 +917,7 @@ impl MachineConnection {
                 development.as_deref(),
             )
         });
-        let machine = PairedMachine::new(
+        PairedMachine::new(
             &self.identity,
             route,
             paired,
@@ -844,16 +925,14 @@ impl MachineConnection {
             name,
             self.agent().cloned(),
             Arc::new(crate::connection::route_signal::client_signal),
-        )?;
-        self.retain_paired(machine)
+        )
     }
 
-    /// Gives the portable route its desktop-owned presentation and journal storage.
-    pub fn for_paired_client(identity: &str, machine: PairedMachine) -> Result<Self, CoreError> {
-        Self::for_identity(identity)?.retain_paired(machine)
-    }
-
-    fn retain_paired(mut self, machine: PairedMachine) -> Result<Self, CoreError> {
+    fn retain_paired(
+        mut self,
+        machine: PairedMachine,
+        client_cache: Arc<ClientCache>,
+    ) -> Result<Self, CoreError> {
         let route = *machine.route();
         let paired = machine.paired().clone();
         if paired.pin.build != self.identity || machine.agent() != self.agent() {
@@ -869,7 +948,7 @@ impl MachineConnection {
             paired,
             machine,
         }));
-        self.client_cache = std::sync::Arc::default();
+        self.client_cache = client_cache;
         let direct = self
             .direct
             .as_ref()
@@ -1655,6 +1734,34 @@ mod tests {
             .with_direct([3; 32], paired, Arc::new(NoConnect))
             .unwrap()
     }
+    #[test]
+    fn desktop_routes_keep_the_startup_scope_and_share_presentation_until_repaired() {
+        let identity = paired_identity().pin.build;
+        let data = std::path::PathBuf::from("/test-account-data");
+        let local = MachineConnection::with_paths(Paths {
+            identity,
+            data: data.clone(),
+            runtime: "/test-runtime".into(),
+        })
+        .unwrap();
+        let accounts = PairedClients::new(local);
+        let mut paired = paired_identity();
+        let pin = [3; 32];
+        let first = accounts.offline(pin, paired.clone()).unwrap();
+        let second = accounts.offline(pin, paired.clone()).unwrap();
+        let first_scope = first.client_scope().unwrap();
+        assert_eq!(first_scope.directory, data);
+        assert!(second.client_scope().unwrap() == first_scope);
+        assert!(Arc::ptr_eq(&first.client_cache, &second.client_cache));
+
+        paired.pairing = [19; 32];
+        paired.client = [20; 32];
+        let replacement = accounts.offline(pin, paired).unwrap();
+        assert!(!Arc::ptr_eq(&first.client_cache, &replacement.client_cache));
+        assert_eq!(replacement.admitted_client_id().unwrap(), [20; 32]);
+        assert!(first.client_scope().unwrap() == first_scope);
+    }
+
     /// Another command holds the paired route's lock while a confirmed action opens its lane.
     /// Admitting the route waits no later than the action's one deadline, and once the lock is
     /// free the same handle opens its lane and its record.

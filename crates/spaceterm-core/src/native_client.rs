@@ -14,6 +14,7 @@ mod connection_storage;
 pub mod credentials;
 pub mod migration;
 
+pub use crate::client::PairedClients;
 pub use connection_storage::connection_store;
 
 impl AccountRevocation for MachineConnection {
@@ -35,7 +36,7 @@ pub fn paired_routes(
     identity: &str,
     records: Arc<dyn Records>,
     credentials: Arc<dyn CredentialStore>,
-) -> DirectConnections {
+) -> (DirectConnections, Option<Arc<PairedClients>>) {
     let local = MachineConnection::for_identity(identity).ok();
     let device = local.clone();
     let name: DeviceName = Arc::new(move || {
@@ -53,11 +54,34 @@ pub fn paired_routes(
         credentials,
         name,
         Arc::new(crate::connection::route_signal::client_signal),
-        local.map(|local| Arc::new(local) as Arc<dyn AccountRevocation>),
+        local
+            .as_ref()
+            .map(|local| Arc::new(local.clone()) as Arc<dyn AccountRevocation>),
     );
-    let identity = identity.to_owned();
-    routes.on_route_removed(Arc::new(move |route| {
-        let _ = MachineConnection::discard_retained_inventory(&identity, *route);
-    }));
-    routes
+    with_presentation(routes, local)
+}
+
+#[cfg(feature = "test-support")]
+pub fn with_paired_presentation(
+    identity: &str,
+    routes: DirectConnections,
+) -> (DirectConnections, Option<Arc<PairedClients>>) {
+    let presentation = MachineConnection::for_identity(identity)
+        .ok()
+        .map(|base| Arc::new(PairedClients::new(base)));
+    (routes, presentation)
+}
+
+fn with_presentation(
+    routes: DirectConnections,
+    local: Option<MachineConnection>,
+) -> (DirectConnections, Option<Arc<PairedClients>>) {
+    let presentation = local.map(|local| Arc::new(PairedClients::new(local)));
+    if let Some(presentation) = &presentation {
+        let presentation = Arc::clone(presentation);
+        routes.on_route_removed(Arc::new(move |route| {
+            let _ = presentation.remove_route(route);
+        }));
+    }
+    (routes, presentation)
 }
