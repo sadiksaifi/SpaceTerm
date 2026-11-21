@@ -24,7 +24,7 @@ zig = "0.16.0"
 "cargo:cargo-sweep" = "0.8.0"
 "cargo:cargo-zigbuild" = "0.24.0"
 "npm:skills" = "1.7.0"
-"npm:tagsmith" = "1.2.0"
+"npm:tagsmith" = "1.2.1"
 # Rasterizes the brand assets; see mise-tasks/brand.py.
 "github:linebender/resvg" = { version = "0.49.0", os = ["macos"] }
 # The signed updater framework and its signing tools.
