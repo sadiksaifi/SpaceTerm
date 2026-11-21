@@ -161,7 +161,11 @@ pub(super) fn activate_pending(
 fn grant_stop(identity: &str, record: &Record) -> Result<(), CoreError> {
     let paths = crate::host::Paths::for_identity(identity)?;
     let mut stream = crate::host::connect(&paths)?;
-    grant_stop_over(&mut stream, identity, record)
+    grant_stop_over(
+        &mut crate::protocol::LocalPreamble(&mut stream),
+        identity,
+        record,
+    )
 }
 
 /// The connected account-local transport, including version negotiation and the exact grant reply.

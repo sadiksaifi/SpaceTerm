@@ -801,7 +801,7 @@ mod tests {
                             .map(|line| self.rows[line].clone())
                             .collect(),
                     },
-                    PresentationGeneration::test(self.revision),
+                    PresentationGeneration::from_counter(self.revision),
                 )
                 .unwrap()
                 .as_ref()
@@ -1264,7 +1264,7 @@ mod tests {
                         selection: None,
                         changed_rows,
                     },
-                    PresentationGeneration::test(generation.get()),
+                    PresentationGeneration::from_counter(generation.get()),
                 )
                 .unwrap()
                 .as_ref()
@@ -1814,7 +1814,7 @@ mod tests {
                     Some(vec![first, second]),
                     vec![row(first, 1, "A"), row(second, 1, "B")],
                 ),
-                crate::terminal::PresentationGeneration::test(1),
+                crate::terminal::PresentationGeneration::from_counter(1),
             )
             .unwrap();
         let mut tree = pane_tree(model.as_ref().clone());
@@ -1825,7 +1825,7 @@ mod tests {
         tree.model = state
             .apply(
                 make_update(2, None, vec![row(second, 2, "C")]),
-                crate::terminal::PresentationGeneration::test(2),
+                crate::terminal::PresentationGeneration::from_counter(2),
             )
             .unwrap()
             .as_ref()
@@ -1839,7 +1839,7 @@ mod tests {
         tree.model = state
             .apply(
                 make_update(3, Some(vec![second]), vec![]),
-                crate::terminal::PresentationGeneration::test(3),
+                crate::terminal::PresentationGeneration::from_counter(3),
             )
             .unwrap()
             .as_ref()

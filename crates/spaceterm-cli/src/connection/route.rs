@@ -6,16 +6,11 @@ use crate::contract::{
 };
 use crate::scope::IdPrefix;
 use crate::state::RouteKey;
-use spaceterm_connections::{
-    ConnectionStore, CredentialError, CredentialStore, Interaction, SavedConnection,
-};
+use spaceterm_client::{ConnectionStore, CredentialError, Interaction, SavedConnection};
 use spaceterm_core::{
-    CliRoute, CoreError, MachineConnection,
-    direct::{DeviceCredential, DirectConnection, DirectConnector, DirectError},
-    protocol::AgentName,
+    CliRoute, CoreError, MachineConnection, direct::DirectError, protocol::AgentName,
 };
 use std::io::IsTerminal;
-use std::sync::Arc;
 use std::time::Instant;
 
 pub struct AdmittedRoute {
@@ -250,12 +245,7 @@ impl Route {
                         CredentialError::Unavailable => DirectError::CredentialUnavailable,
                     })
                 })?;
-                let connector = Arc::new(Connector {
-                    saved: saved.as_ref().clone(),
-                    credentials,
-                    interaction,
-                    deadline,
-                });
+                let connector = saved.connector(credentials, interaction, deadline);
                 CliRoute::Paired {
                     route: saved.route,
                     paired: saved.paired.clone(),
@@ -266,51 +256,9 @@ impl Route {
         MachineConnection::for_cli(identity, route, agent)
     }
 }
-struct Connector {
-    saved: SavedConnection,
-    credentials: Arc<dyn CredentialStore>,
-    interaction: Interaction,
-    deadline: Option<Instant>,
-}
-impl Connector {
-    fn dial(&self, deadline: Option<Instant>) -> Result<DirectConnection, DirectError> {
-        let secret = self
-            .credentials
-            .read(&self.saved.credential, self.interaction)
-            .map_err(|error| match error {
-                CredentialError::InteractionRequired => DirectError::InteractionRequired,
-                CredentialError::Unavailable => DirectError::CredentialUnavailable,
-            })?
-            .ok_or(DirectError::CredentialUnavailable)?;
-        let credential = DeviceCredential::from_bytes(&secret)?;
-        match deadline {
-            Some(deadline) => DirectConnection::connect_until(
-                &self.saved.endpoint,
-                &self.saved.paired,
-                &credential,
-                deadline,
-            ),
-            None => {
-                DirectConnection::connect(&self.saved.endpoint, &self.saved.paired, &credential)
-            }
-        }
-    }
-}
-impl DirectConnector for Connector {
-    fn connect(&self) -> Result<DirectConnection, DirectError> {
-        self.dial(self.deadline)
-    }
-    /// A service-lane dial follows its request's deadline. After a confirmation prompt that is
-    /// the approved action's budget, which began when the person answered, so the deadline this
-    /// connector took before the prompt never ends it early.
-    fn connect_by(&self, deadline: Instant) -> Result<DirectConnection, DirectError> {
-        self.dial(Some(deadline))
-    }
-}
-
 pub fn from_global(global: &Global, identity: &str) -> Result<Route, ResolutionError> {
     let selector = selector(global)?;
-    let store = ConnectionStore::new(
+    let store = spaceterm_core::native_client::connection_store(
         spaceterm_core::cli_state_root(identity).map_err(crate::contract::from_core_error)?,
     );
     resolve(&selector, &store)
@@ -400,10 +348,7 @@ mod tests {
 
     /// The one credential of a Saved Connection.
     struct OneCredential(zeroize::Zeroizing<Vec<u8>>);
-    impl super::CredentialStore for OneCredential {
-        fn kind(&self) -> spaceterm_connections::StoreKind {
-            spaceterm_connections::StoreKind::Keychain
-        }
+    impl spaceterm_client::CredentialStore for OneCredential {
         fn read(
             &self,
             _: &[u8; 32],
@@ -428,37 +373,37 @@ mod tests {
     /// the receipt dial after the person answered does not fail at once.
     #[test]
     fn a_service_lane_dial_follows_its_request_deadline_after_a_confirmation_prompt() {
-        use spaceterm_core::direct::{DeviceCredential, DirectConnector, MachinePin, PairedDevice};
+        use spaceterm_core::direct::{DeviceCredential, MachinePin, PairedDevice};
         use std::time::{Duration, Instant};
         // A silent endpoint never answers a handshake, so a dial ends only at its deadline.
         let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let credential = DeviceCredential::generate().unwrap();
-        let connector = super::Connector {
-            saved: super::SavedConnection {
-                name: "Penguin".into(),
-                route: [1; 32],
-                endpoint: format!("quic://{}", silent.local_addr().unwrap()),
-                paired: PairedDevice {
-                    pin: MachinePin {
-                        build: "spaceterm-development".into(),
-                        core: [3; 32],
-                        public_key: [4; 32],
-                        certificate: [5; 32],
-                    },
-                    pairing: [6; 32],
-                    client: [7; 32],
+        let saved = super::SavedConnection {
+            name: "Penguin".into(),
+            route: [1; 32],
+            endpoint: format!("quic://{}", silent.local_addr().unwrap()),
+            paired: PairedDevice {
+                pin: MachinePin {
+                    build: "spaceterm-development".into(),
+                    core: [3; 32],
+                    public_key: [4; 32],
+                    certificate: [5; 32],
                 },
-                credential: [1; 32],
-                credential_store: spaceterm_connections::StoreKind::Keychain,
-                unpair: spaceterm_connections::UnpairState::Paired,
+                pairing: [6; 32],
+                client: [7; 32],
             },
-            credentials: std::sync::Arc::new(OneCredential(zeroize::Zeroizing::new(
+            credential: [1; 32],
+            credential_store: spaceterm_client::StoreKind::Keychain,
+            unpair: spaceterm_client::UnpairState::Paired,
+        };
+        let connector = saved.connector(
+            std::sync::Arc::new(OneCredential(zeroize::Zeroizing::new(
                 credential.expose_bytes().to_vec(),
             ))),
-            interaction: super::Interaction::Quiet,
+            super::Interaction::Quiet,
             // Taken when the command began; reading the confirmation used all of it.
-            deadline: Some(Instant::now()),
-        };
+            Some(Instant::now()),
+        );
         let began = Instant::now();
         assert!(connector.connect().is_err());
         assert!(

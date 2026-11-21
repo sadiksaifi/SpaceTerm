@@ -19,7 +19,7 @@ fn main() {
         println!("cargo:rerun-if-changed={}", path.display());
     }
     println!("cargo:rerun-if-changed=../../build/identity.rs");
-    println!("cargo:rerun-if-changed=../spaceterm-core/src/protocol/version.rs");
+    println!("cargo:rerun-if-changed=../spaceterm-protocol/src/version.rs");
     println!("cargo:rerun-if-changed=src");
     let release = std::env::var("SPACETERM_RELEASE_TAG").ok();
     let packaged = std::env::var("SPACETERM_PACKAGED").as_deref() == Ok("1");
@@ -94,12 +94,11 @@ fn floor(release: Option<&str>) -> String {
 }
 
 /// The build document's `protocols` object, from the three constants in the Core's
-/// `protocol/version.rs`. Each is declared on one line as
+/// `spaceterm-protocol/src/version.rs`. Each is declared on one line as
 /// `pub const WORK: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };`.
 fn protocols(root: &std::path::Path) -> String {
-    let source =
-        std::fs::read_to_string(root.join("crates/spaceterm-core/src/protocol/version.rs"))
-            .expect("read the protocol versions");
+    let source = std::fs::read_to_string(root.join("crates/spaceterm-protocol/src/version.rs"))
+        .expect("read the protocol versions");
     let version = |name: &str| {
         let prefix = format!("pub const {name}: ProtocolVersion = ProtocolVersion {{ major: ");
         let mut found = source.lines().filter_map(|line| line.strip_prefix(&prefix));

@@ -2,7 +2,7 @@
 //!
 //! - [`carrier`] moves whole frames over one connection. [`unix`] carries account-local IPC,
 //!   [`quic`] paired connections, and [`loopback`] is an in-memory carrier for tests.
-//! - [`path`] tells a paired client when the system would reach its server from another local
+//! - [`spaceterm_client::connection::path`] tells a paired client when the system would reach its server from another local
 //!   address, so its QUIC socket moves there.
 //! - [`route_signal`] turns readable when the system's routes or addresses change.
 //! - [`io`] runs one I/O thread per connection, waiting on carrier readiness and a wake pipe.
@@ -18,14 +18,8 @@
 //!
 //! No code here sleeps or polls on a timer. An architecture test enforces this.
 pub mod admitted;
-pub mod carrier;
-pub mod health;
 pub mod io;
-pub mod link;
-pub mod loopback;
 pub mod outbox;
-pub mod path;
-pub mod quic;
 pub mod registry;
 pub mod route_signal;
 pub mod service;
@@ -34,17 +28,7 @@ pub mod sync;
 mod tests;
 pub mod unix;
 
-/// Wakes a connection's I/O thread after another thread queued work for it. Implementations
-/// must not block, for example by writing one byte to a nonblocking pipe.
-pub trait Wake: Send + Sync {
-    fn wake(&self);
-}
-
-impl<F: Fn() + Send + Sync> Wake for F {
-    fn wake(&self) {
-        self()
-    }
-}
+pub use spaceterm_client::connection::{Wake, carrier, health, link, loopback, quic};
 
 #[cfg(test)]
 mod architecture_tests {
@@ -53,7 +37,8 @@ mod architecture_tests {
     fn connection_and_carrier_code_never_sleeps() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut sources = Vec::new();
-        let mut pending = vec![root.join("connection")];
+        let client = root.join("../../spaceterm-client/src");
+        let mut pending = vec![root.join("connection"), client.join("connection")];
         while let Some(directory) = pending.pop() {
             for entry in std::fs::read_dir(directory).unwrap() {
                 let path = entry.unwrap().path();
@@ -66,8 +51,8 @@ mod architecture_tests {
                 }
             }
         }
-        // The paired QUIC handshake and pairing messages that precede the carrier.
-        sources.push(root.join("direct/quic.rs"));
+
+        sources.push(client.join("direct/quic.rs"));
         assert!(sources.len() > 10);
         let sleep = ["thread", "::sleep"].concat();
         for path in sources {

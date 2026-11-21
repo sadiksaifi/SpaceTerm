@@ -4,29 +4,7 @@
 //! [`super::facts::MINOR_DETAILED_FACTS`] reports its engine's own [`Continuation`], which takes
 //! precedence over [`continuation`].
 use super::facts::{FailureKind, UpdateFacts};
-use serde::{Deserialize, Serialize};
-
-/// How a Pending Version finishes. JSON: `"soon"`, `"when_sessions_end"` and so on. A minor may
-/// only append variants after the existing ones.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Continuation {
-    /// No live Terminal Session: SpaceTerm Core restarts into it within its grace period.
-    Soon,
-    /// SpaceTerm Core restarts into it by itself once no Terminal Session is live.
-    WhenSessionsEnd,
-    /// SpaceTerm Core restarts into it by itself once no Terminal Session is live, or once no
-    /// live Terminal Session has had work going on for the idle period. Only the detailed
-    /// update facts can report it. Admission uses the revocable lease and final Stop grant of ADR 0065.
-    WhenNothingRuns,
-    /// A work or service major changes: it restarts only when a person confirms it.
-    NeedsConfirmation,
-    /// A start into it failed: SpaceTerm Core does not try it again by itself in this boot.
-    StartFailed,
-    /// A newer install failure replaced the failure the facts would show, so they cannot tell
-    /// whether a start into it failed.
-    Unknown,
-}
+pub use spaceterm_protocol::update::facts::Continuation;
 
 /// How the Pending Version in `facts` finishes, by the silent-restart rule of every released
 /// Core. None without a Pending Version. Never returns [`Continuation::WhenNothingRuns`].
@@ -58,7 +36,7 @@ pub fn continuation(facts: &UpdateFacts) -> Option<Continuation> {
 mod tests {
     use super::*;
     use crate::update::facts::{
-        InstallFailure, Platform, Protocols, StartFailure, UpdateCheck, UpdateFailure, Version,
+        InstallFailure, Protocols, StartFailure, UpdateCheck, UpdateFailure, Version,
     };
 
     fn version(text: &str) -> Version {
@@ -68,7 +46,7 @@ mod tests {
     fn facts(sessions: u32, breaking: bool, failure: Option<(&str, FailureKind)>) -> UpdateFacts {
         UpdateFacts {
             revision: 1,
-            platform: Platform::HOST,
+            platform: crate::update::facts::HOST_PLATFORM,
             running: version("0.11.3"),
             pending: Some(super::super::facts::PendingVersion {
                 version: version("0.11.4"),

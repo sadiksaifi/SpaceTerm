@@ -919,7 +919,7 @@ fn ending_demand_drops_the_panes_model_and_ignores_late_ones() {
 fn takeover_semantics_ignore_models_published_before_the_reading_reset() {
     let old = ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix);
     let mut reset = (*old).clone();
-    reset.generation = PresentationGeneration::test(2);
+    reset.generation = PresentationGeneration::from_counter(2);
     let mut state = accessibility::Accessibility::new(Arc::default());
     state.start();
     state.update(Arc::new(TerminalAccessibilityModel::from_screen(&old)));

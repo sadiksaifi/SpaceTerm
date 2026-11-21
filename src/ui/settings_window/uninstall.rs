@@ -22,7 +22,6 @@ use spaceterm_ui::{
 };
 
 use crate::application_identity::ApplicationIdentity;
-use crate::direct_connections::credentials::{self, CredentialError, CredentialStore};
 use crate::direct_connections::{ConnectionStore, DirectConnections, StoreKind};
 use crate::installed_app::{InstalledApp, remove_directory};
 use crate::machine_connection::CoreError;
@@ -30,6 +29,7 @@ pub(crate) use crate::machine_connection::service::Data;
 use crate::machine_connection::service::{CliUninstall, Service};
 use crate::platform::app_directories::AppDirectories;
 use crate::ui::sidebar_window::form::action_button;
+use spaceterm_core::native_client::credentials::{self, CredentialError, CredentialStore};
 
 use super::SettingsWindow;
 
@@ -560,7 +560,7 @@ pub(super) fn installed(service: &Service) -> Option<Arc<dyn SpaceTermRemoval>> 
         data: DesktopData {
             cli: spaceterm_core::cli_state_root(identity)
                 .ok()
-                .map(ConnectionStore::new),
+                .map(spaceterm_core::native_client::connection_store),
             open: Box::new(move |kind| credentials::for_cli_record(identity, kind)),
             roots: AppDirectories::resolve(identity).ok().map(|directories| {
                 vec![

@@ -168,7 +168,7 @@ pub fn write_client_records(directory: &Path) {
         .unwrap()
         .initialize(&shared.inventory, Some(workspace))
         .unwrap();
-    crate::hierarchy::ClientJournal::open(open(), core, client)
+    crate::hierarchy::open_client_journal(open(), core, client)
         .unwrap()
         .submit(
             1,
@@ -179,7 +179,7 @@ pub fn write_client_records(directory: &Path) {
             },
         )
         .unwrap();
-    let pending = crate::service::lane::admin::PendingOperations::new(open());
+    let pending = crate::service::lane::admin::pending_operations(open());
     pending
         .add(&crate::service::operations::OperationId([1; 16]))
         .unwrap();

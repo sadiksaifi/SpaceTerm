@@ -16,12 +16,18 @@ class WorkflowBoundaryTests(unittest.TestCase):
     def test_secret_jobs_install_fresh_tools_and_native_checks_use_separate_jobs(self):
         # actionlint checks YAML syntax. These assertions guard the security boundary
         # against reintroducing caches or secrets while wiring new release stages.
+        workflow_directory = ROOT / ".github/workflows"
         workflows = {}
         self.assertEqual(
-            sorted(path.name for path in (ROOT / ".github/workflows").iterdir()), ["release.yml"]
+            sorted(path.name for path in workflow_directory.iterdir()),
+            ["mobile-crates.yml", "release.yml"],
         )
+        mobile = (workflow_directory / "mobile-crates.yml").read_text()
+        self.assertIn("\non: pull_request\n", mobile)
+        self.assertNotRegex(mobile, r"(?m)^\s*environment:")
+        self.assertNotRegex(mobile, r"\bsecrets\s*[.\[]")
         for name in ("release",):
-            text = (ROOT / f".github/workflows/{name}.yml").read_text()
+            text = (workflow_directory / f"{name}.yml").read_text()
             self.assertIn("MISE_LOCKED: 'true'", text)
             self.assertIn("\ncache-mode: none\n", text.split("jobs:\n", 1)[0])
             pieces = re.split(r"^  ([a-z][a-z-]*):\n", text.split("jobs:\n", 1)[1], flags=re.M)

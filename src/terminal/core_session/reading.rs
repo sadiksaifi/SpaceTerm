@@ -5,7 +5,7 @@
 //! present the result. The worker applies frames, decodes Scrollback pages and asks for the rows
 //! the reading still needs.
 use super::scrollback::{
-    CachedRow, CopyOutcome, Grid, PageRequest, PointerEvent, Scrollback,
+    CopyOutcome, DecodedPage, Grid, PageRequest, PointerEvent, Scrollback,
     route::{self, Modes, PointerRoute, PointerRouter, WheelRoute},
 };
 use super::*;
@@ -393,9 +393,6 @@ impl PresentationHandle {
     }
 }
 
-/// A decoded page: its epoch, first position and rows.
-pub(super) type DecodedPage = (u64, u64, Vec<CachedRow>);
-
 /// Decodes page replies against the screen's width, which every row of the current history
 /// epoch shares. A reply that does not answer its request decodes to `None`.
 pub(super) fn decode_pages(
@@ -406,20 +403,11 @@ pub(super) fn decode_pages(
     pages
         .into_iter()
         .map(|(request, page)| {
-            let rows = page
-                .filter(|page| {
-                    page.epoch == request.epoch
-                        && page.start >= request.start
-                        && page.rows.len() <= usize::from(request.rows)
+            let rows = page.and_then(|page| {
+                spaceterm_terminal_client::scrollback::decode_page(request, page, columns, |link| {
+                    super::screen::decode_hyperlink(link, local_files)
                 })
-                .and_then(|page| {
-                    let rows = super::screen_decoder::decode_page(&page, columns, local_files)
-                        .ok()?
-                        .iter()
-                        .map(|(cells, wrapped)| CachedRow::new(cells, *wrapped))
-                        .collect::<Vec<_>>();
-                    Some((page.epoch, page.start, rows))
-                });
+            });
             (request, rows)
         })
         .collect()

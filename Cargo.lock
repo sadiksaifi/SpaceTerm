@@ -5939,6 +5939,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha2-const-stable"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f179d4e11094a893b82fff208f74d448a7512f99f5a0acbd5c679b705f83ed9"
+
+[[package]]
 name = "sharded-slab"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6166,15 +6172,15 @@ dependencies = [
  "serde_json_lenient",
  "sha2",
  "smallvec",
- "smol_str",
  "socket2",
- "spaceterm-connections",
+ "spaceterm-client",
  "spaceterm-core",
  "spaceterm-directories",
+ "spaceterm-protocol",
+ "spaceterm-terminal-client",
  "spaceterm-ui",
  "tar",
  "thiserror 2.0.19",
- "unicode-bidi",
  "unicode-segmentation",
  "ureq",
  "yeslogic-fontconfig-sys",
@@ -6201,31 +6207,32 @@ dependencies = [
  "serde_json",
  "signal-hook",
  "spaceterm",
- "spaceterm-connections",
+ "spaceterm-client",
  "spaceterm-core",
  "spaceterm-directories",
  "zeroize",
 ]
 
 [[package]]
-name = "spaceterm-connections"
+name = "spaceterm-client"
 version = "0.0.0"
 dependencies = [
  "async-channel",
- "async-io",
  "base64 0.22.1",
- "core-foundation 0.10.1",
- "futures-lite",
+ "bytes",
  "getrandom 0.4.3",
  "libc",
- "pollster 0.4.0",
- "security-framework",
- "security-framework-sys",
+ "noq-proto",
+ "noq-udp",
+ "rcgen",
+ "ring",
+ "rustls",
+ "rustls-webpki",
  "serde",
  "serde_json",
- "spaceterm-core",
- "spaceterm-directories",
- "zbus",
+ "socket2",
+ "spaceterm-protocol",
+ "thiserror 2.0.19",
  "zeroize",
 ]
 
@@ -6233,10 +6240,14 @@ dependencies = [
 name = "spaceterm-core"
 version = "0.0.0"
 dependencies = [
+ "async-io",
  "base64 0.22.1",
  "block2 0.6.2",
  "bytes",
+ "core-foundation 0.10.1",
  "flate2",
+ "futures-lite",
+ "getrandom 0.4.3",
  "jiff",
  "libc",
  "noq-proto",
@@ -6244,19 +6255,23 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-av-foundation",
  "objc2-foundation 0.3.2",
- "postcard",
+ "pollster 0.4.0",
  "rcgen",
  "ring",
  "rustls",
  "rustls-webpki",
+ "security-framework",
+ "security-framework-sys",
  "serde",
- "serde_bytes",
  "serde_json",
  "socket2",
+ "spaceterm-client",
  "spaceterm-directories",
+ "spaceterm-protocol",
  "tar",
  "thiserror 2.0.19",
  "ureq",
+ "zbus",
  "zeroize",
 ]
 
@@ -6266,6 +6281,29 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "spaceterm-protocol"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "postcard",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "sha2-const-stable",
+ "thiserror 2.0.19",
+ "zeroize",
+]
+
+[[package]]
+name = "spaceterm-terminal-client"
+version = "0.0.0"
+dependencies = [
+ "smol_str",
+ "spaceterm-protocol",
+ "unicode-bidi",
 ]
 
 [[package]]

@@ -1728,7 +1728,7 @@ mod edits {
 
     impl JournalAt {
         fn open(&self) -> spaceterm_core::hierarchy::ClientJournal {
-            spaceterm_core::hierarchy::ClientJournal::open_in(&self.0, JOURNAL_CORE, JOURNAL_CLIENT)
+            spaceterm_core::hierarchy::open_client_journal_in(&self.0, JOURNAL_CORE, JOURNAL_CLIENT)
                 .expect("the journal opens")
         }
     }
@@ -1741,7 +1741,7 @@ mod edits {
 
     impl super::super::PresentationRecord for JournalAt {
         fn presented(&self, sequence: u64) -> Result<(), spaceterm_core::CoreError> {
-            spaceterm_core::hierarchy::ClientJournal::open_in(
+            spaceterm_core::hierarchy::open_client_journal_in(
                 &self.0,
                 JOURNAL_CORE,
                 JOURNAL_CLIENT,
@@ -1750,7 +1750,7 @@ mod edits {
         }
 
         fn forgotten_presented(&self, total: u64) -> Result<(), spaceterm_core::CoreError> {
-            spaceterm_core::hierarchy::ClientJournal::open_in(
+            spaceterm_core::hierarchy::open_client_journal_in(
                 &self.0,
                 JOURNAL_CORE,
                 JOURNAL_CLIENT,

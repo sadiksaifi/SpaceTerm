@@ -1,6 +1,6 @@
 # Negotiate protocol versions per connection
 
-SpaceTerm has three protocols that change independently: the work protocol, the [service lane](0057-administer-servers-over-the-service-lane.md) and the [Desktop Channel](0060-open-files-and-show-work-in-the-desktop-over-the-desktop-channel.md). Each has a `major.minor` version. [The version module](../../crates/spaceterm-core/src/protocol/version.rs) owns this build's three versions and the rule that selects one. Client and SpaceTerm Core release numbers need not match, because only protocol versions decide compatibility.
+SpaceTerm has three protocols that change independently: the work protocol, the [service lane](0057-administer-servers-over-the-service-lane.md) and the [Desktop Channel](0060-open-files-and-show-work-in-the-desktop-over-the-desktop-channel.md). Each has a `major.minor` version. [The version module](../../crates/spaceterm-protocol/src/version.rs) owns this build's three versions and the rule that selects one. Client and SpaceTerm Core release numbers need not match, because only protocol versions decide compatibility.
 
 ## The rule
 
@@ -26,7 +26,7 @@ Account-local admission capacity is a local runtime condition, not a protocol re
 
 A Machine is ready only after its work admission selects a version. A refusal for want of a shared major is a typed outcome that names the older side. [ADR 0034](0034-confirm-server-update-restarts-and-explain-incompatibility.md) owns what the person sees. The CLI reports `incompatible_protocol`, or `desktop_incompatible` for the Desktop Channel, with `details.update` naming the side to update: `machine` for SpaceTerm Core on the Machine the command reached, `desktop` for the desktop, and `core` for SpaceTerm Core on this computer, which ships the CLI.
 
-A client derives each Machine's capabilities from the versions its admissions selected, through [the capability check](../../crates/spaceterm-core/src/protocol/capability.rs). An operation the selected minor lacks is unavailable on that Machine, and the client never sends it.
+A client derives each Machine's capabilities from the versions its admissions selected, through [the capability check](../../crates/spaceterm-protocol/src/protocol/capability.rs). An operation the selected minor lacks is unavailable on that Machine, and the client never sends it.
 
 After work admission, SpaceTerm Core sends its update facts, then sends them again after each change. The service lane's `Facts` and `WaitFacts` answer from the same [facts source](../../crates/spaceterm-core/src/update/source.rs).
 

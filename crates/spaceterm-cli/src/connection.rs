@@ -12,18 +12,19 @@ use crate::state::{CliState, RouteKey};
 use connections::enrollment::{self, PairingClient, PairingNetwork};
 use serde::Serialize;
 use serde_json::Value;
-use spaceterm_connections::{
+use spaceterm_client::{
     self as connections, ConnectionStore, CredentialError, CredentialStore, SavedConnection,
     StoreError,
 };
 use spaceterm_core::direct::{DirectError, Invitation};
-use spaceterm_core::pane::control::{ClientName, MAX_CLIENT_NAME_CHARS};
+use spaceterm_core::pane::control::MAX_CLIENT_NAME_CHARS;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
-pub use connections::credentials::CredentialProvider;
+pub use connections::enrollment::CredentialProvider;
+use connections::enrollment::SelectedCredentials;
 pub struct CliCredentials<'a> {
     identity: &'a str,
     private_file: std::cell::Cell<bool>,
@@ -45,27 +46,26 @@ impl<'a> CliCredentials<'a> {
     }
 }
 impl CredentialProvider for CliCredentials<'_> {
-    fn select(&self) -> Result<Arc<dyn CredentialStore>, CredentialError> {
-        self.notice(connections::credentials::for_cli_enrollment(self.identity)?)
+    fn select(&self) -> Result<SelectedCredentials, CredentialError> {
+        let (kind, store) =
+            spaceterm_core::native_client::credentials::for_cli_enrollment(self.identity)?;
+        self.notice(kind);
+        Ok((kind, store))
     }
     fn open(
         &self,
         kind: connections::StoreKind,
     ) -> Result<Arc<dyn CredentialStore>, CredentialError> {
-        self.notice(connections::credentials::for_cli_record(
-            self.identity,
-            kind,
-        )?)
+        let store =
+            spaceterm_core::native_client::credentials::for_cli_record(self.identity, kind)?;
+        self.notice(kind);
+        Ok(store)
     }
 }
 impl CliCredentials<'_> {
-    fn notice(
-        &self,
-        store: Arc<dyn CredentialStore>,
-    ) -> Result<Arc<dyn CredentialStore>, CredentialError> {
+    fn notice(&self, kind: connections::StoreKind) {
         self.private_file
-            .set(self.private_file.get() || store.kind() == connections::StoreKind::PrivateFile);
-        Ok(store)
+            .set(self.private_file.get() || kind == connections::StoreKind::PrivateFile);
     }
 }
 /// Reading held outcomes never admits a connection or settles a journal.
@@ -166,7 +166,7 @@ pub fn execute(command: &MachineCommand, global: &Global, identity: &str) -> Com
         Ok(root) => root,
         Err(error) => return CommandOutput::failure(path, contract::from_core_error(error)),
     };
-    let store = ConnectionStore::new(root);
+    let store = spaceterm_core::native_client::connection_store(root);
     let mut io = match terminal::Terminal::new(!global.json && !global.no_input) {
         Ok(io) => io,
         Err(failure) => return CommandOutput::failure(path, failure),
@@ -392,7 +392,7 @@ impl Connections<'_> {
             .recover_while(deadline, &|| self.io.interrupted())
             .map_err(pairing_failure)?;
         self.checkpoint(deadline)?;
-        let computer = ClientName::this_computer();
+        let computer = spaceterm_core::pane::control::this_computer();
         let computer: String = computer
             .as_str()
             .chars()
