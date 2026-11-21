@@ -175,13 +175,13 @@ impl SettingsWindow {
     /// Removes the route here and records the revocation, which finishes on its own. The
     /// selection moves on at once, since the route is gone from this computer.
     fn unpair_this_device(&mut self, route: DirectRouteId, cx: &mut Context<Self>) {
-        self.remove_route(route, DirectConnections::unpair_self, cx);
+        self.remove_route(route, |connections, id| connections.unpair_self(id), cx);
     }
 
     /// Removes a route whose Core already revoked this device, with its key, asking that Core
     /// nothing.
     pub(super) fn forget_machine(&mut self, route: DirectRouteId, cx: &mut Context<Self>) {
-        self.remove_route(route, DirectConnections::forget, cx);
+        self.remove_route(route, |connections, id| connections.forget(id), cx);
     }
 
     fn remove_route(

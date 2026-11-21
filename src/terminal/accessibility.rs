@@ -2348,7 +2348,7 @@ mod tests {
                         cells: Vec::new(),
                     }],
                 },
-                PresentationGeneration::test(1),
+                PresentationGeneration::from_counter(1),
             )
             .unwrap();
         let geometry = AccessibilityGeometry::new(0.0, 0.0, 10.0, 20.0).unwrap();
@@ -2492,7 +2492,7 @@ mod tests {
         };
         assert!(
             state
-                .apply(pending, PresentationGeneration::test(1))
+                .apply(pending, PresentationGeneration::from_counter(1))
                 .is_none()
         );
         let complete = state
@@ -2509,7 +2509,7 @@ mod tests {
                     selection: None,
                     changed_rows: vec![update_row(second_id, 1, "new", false)],
                 },
-                PresentationGeneration::test(2),
+                PresentationGeneration::from_counter(2),
             )
             .unwrap();
         assert_eq!(complete.text(), "old\nnew");
@@ -2528,7 +2528,7 @@ mod tests {
                     selection: None,
                     changed_rows: vec![update_row(second_id, 2, "NEW", false)],
                 },
-                PresentationGeneration::test(3),
+                PresentationGeneration::from_counter(3),
             )
             .unwrap();
         assert_eq!(changed.text(), "old\nNEW");
@@ -2557,7 +2557,7 @@ mod tests {
                     selection: None,
                     changed_rows: vec![update_row(primary_id, 1, "primary", false)],
                 },
-                PresentationGeneration::test(1),
+                PresentationGeneration::from_counter(1),
             )
             .unwrap();
         let primary_document = Arc::clone(&state.primary.document);
@@ -2575,7 +2575,7 @@ mod tests {
                     selection: None,
                     changed_rows: vec![update_row(alternate_id, 1, "alternate", false)],
                 },
-                PresentationGeneration::test(2),
+                PresentationGeneration::from_counter(2),
             )
             .unwrap();
         assert_eq!(primary.text(), "primary");
@@ -2595,7 +2595,7 @@ mod tests {
                     selection: None,
                     changed_rows: vec![update_row(primary_id, 2, "resumed", false)],
                 },
-                PresentationGeneration::test(3),
+                PresentationGeneration::from_counter(3),
             )
             .unwrap();
         assert_eq!(resumed.text(), "resumed");
@@ -2634,7 +2634,7 @@ mod tests {
                         ],
                     }],
                 },
-                PresentationGeneration::test(7),
+                PresentationGeneration::from_counter(7),
             )
             .unwrap();
         let request = model.selection_request(1..3).unwrap();
@@ -2643,7 +2643,7 @@ mod tests {
             Some(Some((cell_ref, cell_ref)))
         );
         let stale_generation = AccessibilitySelectionRequest {
-            generation: PresentationGeneration::test(6),
+            generation: PresentationGeneration::from_counter(6),
             ..request.clone()
         };
         assert_eq!(state.resolve_selection(&stale_generation), None);
@@ -2673,11 +2673,11 @@ mod tests {
                         ],
                     }],
                 },
-                PresentationGeneration::test(8),
+                PresentationGeneration::from_counter(8),
             )
             .unwrap();
         let stale_revision = AccessibilitySelectionRequest {
-            generation: PresentationGeneration::test(8),
+            generation: PresentationGeneration::from_counter(8),
             ..request
         };
         assert_eq!(state.resolve_selection(&stale_revision), None);
@@ -2707,7 +2707,7 @@ mod tests {
                     selection: None,
                     changed_rows: vec![update_row(id, 1, "old", false)],
                 },
-                PresentationGeneration::test(1),
+                PresentationGeneration::from_counter(1),
             )
             .unwrap();
         let request = model.selection_request(0..1).unwrap();
@@ -2727,7 +2727,7 @@ mod tests {
                         selection: None,
                         changed_rows: Vec::new(),
                     },
-                    PresentationGeneration::test(2),
+                    PresentationGeneration::from_counter(2),
                 )
                 .is_none()
         );
@@ -2754,7 +2754,7 @@ mod tests {
                     selection: None,
                     changed_rows: vec![update_row(primary_id, 1, "primary", false)],
                 },
-                PresentationGeneration::test(1),
+                PresentationGeneration::from_counter(1),
             )
             .unwrap();
         let request = primary.selection_request(0..1).unwrap();
@@ -2773,7 +2773,7 @@ mod tests {
                     selection: None,
                     changed_rows: vec![update_row(alternate_id, 1, "alternate", false)],
                 },
-                PresentationGeneration::test(1),
+                PresentationGeneration::from_counter(1),
             )
             .unwrap();
 
@@ -2817,7 +2817,7 @@ mod tests {
                     selection: None,
                     changed_rows,
                 },
-                PresentationGeneration::test(1),
+                PresentationGeneration::from_counter(1),
             )
             .unwrap();
         assert_eq!(initial.data.document.rows, 10_001);
@@ -2838,7 +2838,7 @@ mod tests {
                     selection: None,
                     changed_rows: Vec::new(),
                 },
-                PresentationGeneration::test(2),
+                PresentationGeneration::from_counter(2),
             )
             .unwrap();
         assert_eq!(pruned.data.document.rows, 10_000);
@@ -2889,7 +2889,7 @@ mod tests {
                         rectangle: false,
                     }),
                 ),
-                PresentationGeneration::test(1),
+                PresentationGeneration::from_counter(1),
             )
             .unwrap();
         assert_eq!(model.text(), "a\nb\nc\nd\ne\nf");
@@ -2909,7 +2909,7 @@ mod tests {
                         rectangle: false,
                     }),
                 ),
-                PresentationGeneration::test(1),
+                PresentationGeneration::from_counter(1),
             )
             .unwrap();
         assert_eq!(model.cursor_cell(), None);
@@ -2993,7 +2993,7 @@ mod tests {
                     vec![update_row(a, 1, "a", false), update_row(b, 1, "b", false)],
                     true,
                 ),
-                PresentationGeneration::test(1),
+                PresentationGeneration::from_counter(1),
             )
             .unwrap();
         assert_eq!(initial.text(), "a\nb");
@@ -3001,7 +3001,7 @@ mod tests {
             state
                 .apply(
                     update(Some(vec![b, c]), vec![update_row(b, 2, "B", false)], false),
-                    PresentationGeneration::test(2),
+                    PresentationGeneration::from_counter(2),
                 )
                 .is_none()
         );
@@ -3015,7 +3015,7 @@ mod tests {
                     ],
                     true,
                 ),
-                PresentationGeneration::test(3),
+                PresentationGeneration::from_counter(3),
             )
             .unwrap();
         assert_eq!(replaced.text(), "B\nC");
@@ -3025,19 +3025,22 @@ mod tests {
             state
                 .apply(
                     update(Some(vec![a, b, c]), vec![], false),
-                    PresentationGeneration::test(4)
+                    PresentationGeneration::from_counter(4)
                 )
                 .is_none()
         );
         assert!(
             state
-                .apply(update(None, vec![], true), PresentationGeneration::test(5))
+                .apply(
+                    update(None, vec![], true),
+                    PresentationGeneration::from_counter(5)
+                )
                 .is_none()
         );
         let restored = state
             .apply(
                 update(None, vec![update_row(a, 3, "A", false)], true),
-                PresentationGeneration::test(6),
+                PresentationGeneration::from_counter(6),
             )
             .unwrap();
         assert_eq!(restored.text(), "A\nB\nC");
@@ -3046,21 +3049,21 @@ mod tests {
         let reordered = state
             .apply(
                 update(Some(vec![c, b, a, c]), vec![], true),
-                PresentationGeneration::test(7),
+                PresentationGeneration::from_counter(7),
             )
             .unwrap();
         assert_eq!(reordered.text(), "C\nB\nA\nC");
         let empty = state
             .apply(
                 update(Some(vec![]), vec![], true),
-                PresentationGeneration::test(8),
+                PresentationGeneration::from_counter(8),
             )
             .unwrap();
         assert_eq!(empty.text(), "");
         let still_empty = state
             .apply(
                 update(None, vec![update_row(c, 2, "stale", false)], true),
-                PresentationGeneration::test(9),
+                PresentationGeneration::from_counter(9),
             )
             .unwrap();
         assert_eq!(still_empty.text(), "");
@@ -3068,14 +3071,14 @@ mod tests {
             state
                 .apply(
                     update(Some(vec![c]), vec![], true),
-                    PresentationGeneration::test(10)
+                    PresentationGeneration::from_counter(10)
                 )
                 .is_none()
         );
         let fresh = state
             .apply(
                 update(None, vec![update_row(c, 3, "fresh", false)], true),
-                PresentationGeneration::test(11),
+                PresentationGeneration::from_counter(11),
             )
             .unwrap();
         assert_eq!(fresh.text(), "fresh");
@@ -3141,7 +3144,7 @@ mod tests {
                 },
             }
         };
-        let generation = PresentationGeneration::test(1);
+        let generation = PresentationGeneration::from_counter(1);
         let selection = AccessibilitySelectionRefs {
             start: cell(0, 0),
             end: cell(0, 1),
@@ -3206,7 +3209,7 @@ mod tests {
                         vec![update_row(old, 1, "old", false)],
                         true
                     ),
-                    PresentationGeneration::test(1)
+                    PresentationGeneration::from_counter(1)
                 )
                 .unwrap()
                 .text(),
@@ -3221,7 +3224,7 @@ mod tests {
                         vec![update_row(old, 2, "stale", false)],
                         false
                     ),
-                    PresentationGeneration::test(2)
+                    PresentationGeneration::from_counter(2)
                 )
                 .is_none()
         );
@@ -3229,14 +3232,14 @@ mod tests {
             state
                 .apply(
                     update(2, None, vec![update_row(old, 3, "stale", false)], true),
-                    PresentationGeneration::test(3)
+                    PresentationGeneration::from_counter(3)
                 )
                 .is_none()
         );
         let current = state
             .apply(
                 update(2, None, vec![update_row(new, 1, "new", false)], true),
-                PresentationGeneration::test(4),
+                PresentationGeneration::from_counter(4),
             )
             .unwrap();
         assert_eq!(current.text(), "new");
@@ -3251,7 +3254,7 @@ mod tests {
                             vec![update_row(new, 2, "rejected", false)],
                             true
                         ),
-                        PresentationGeneration::test(5)
+                        PresentationGeneration::from_counter(5)
                     )
                     .is_none()
             );
@@ -3259,7 +3262,7 @@ mod tests {
         let retained = state
             .apply(
                 update(2, None, vec![update_row(new, 2, "retained", false)], true),
-                PresentationGeneration::test(6),
+                PresentationGeneration::from_counter(6),
             )
             .unwrap();
         assert_eq!(retained.text(), "retained");
@@ -3289,14 +3292,14 @@ mod tests {
                         vec![update_row(a, 1, "a", false), update_row(b, 1, "b", false)],
                         true,
                     ),
-                    PresentationGeneration::test(1),
+                    PresentationGeneration::from_counter(1),
                 )
                 .unwrap();
             assert!(
                 state
                     .apply(
                         update(Some(topology.clone()), vec![], false),
-                        PresentationGeneration::test(2)
+                        PresentationGeneration::from_counter(2)
                     )
                     .is_none()
             );
@@ -3306,18 +3309,24 @@ mod tests {
                 state
                     .apply(
                         update(Some(topology), vec![], false),
-                        PresentationGeneration::test(3)
+                        PresentationGeneration::from_counter(3)
                     )
                     .is_none()
             );
             let complete = state
-                .apply(update(None, vec![], true), PresentationGeneration::test(4))
+                .apply(
+                    update(None, vec![], true),
+                    PresentationGeneration::from_counter(4),
+                )
                 .unwrap();
             assert_eq!(complete.text(), expected);
             assert!(complete.data.content_revision > initial.data.content_revision);
             assert_eq!(initial.text(), "a\nb");
             let unchanged = state
-                .apply(update(None, vec![], true), PresentationGeneration::test(5))
+                .apply(
+                    update(None, vec![], true),
+                    PresentationGeneration::from_counter(5),
+                )
                 .unwrap();
             assert!(Arc::ptr_eq(
                 &complete.data.document,
@@ -3357,7 +3366,7 @@ mod tests {
                     vec![update_row(primary, 1, "primary", false)],
                     true,
                 ),
-                PresentationGeneration::test(1),
+                PresentationGeneration::from_counter(1),
             )
             .unwrap();
         assert!(
@@ -3370,7 +3379,7 @@ mod tests {
                         vec![update_row(primary, 2, "changed", false)],
                         false
                     ),
-                    PresentationGeneration::test(2)
+                    PresentationGeneration::from_counter(2)
                 )
                 .is_none()
         );
@@ -3383,14 +3392,14 @@ mod tests {
                     vec![update_row(alternate, 1, "alternate", false)],
                     true,
                 ),
-                PresentationGeneration::test(3),
+                PresentationGeneration::from_counter(3),
             )
             .unwrap();
         assert_eq!(other.text(), "alternate");
         let complete = state
             .apply(
                 update(AccessibilityScreen::Primary, 1, None, vec![], true),
-                PresentationGeneration::test(4),
+                PresentationGeneration::from_counter(4),
             )
             .unwrap();
         assert_eq!(complete.text(), "changed");

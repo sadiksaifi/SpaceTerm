@@ -466,7 +466,7 @@ fn a_wheel_measured_against_an_earlier_paint_of_the_same_grid_still_scrolls() {
     let painted = adapter.frame(40);
     // Output arrives between the paint and the wheel.
     let current = ScreenMapping {
-        local: PresentationGeneration::test(5),
+        local: PresentationGeneration::from_counter(5),
         wire: 18,
         ..painted
     };
@@ -542,7 +542,8 @@ fn a_copy_waiting_for_rows_wakes_the_worker_to_request_them() {
     );
 }
 
-pub(super) fn assert_copy_readiness_and_page_decoding() {
+#[test]
+fn scrollback_copy_readiness_and_page_decoding() {
     use super::super::pointer_input::*;
     let adapter = Adapter::new();
     let mapping = adapter.frame(40);
@@ -607,7 +608,7 @@ fn mapping_history(adapter: &Adapter) -> crate::terminal::emulator::HistorySnaps
         .lock()
         .unwrap()
         .scrollback
-        .present(PresentationGeneration::test(1))
+        .present(PresentationGeneration::from_counter(1))
         .unwrap()
         .history
 }
@@ -723,7 +724,7 @@ impl Adapter {
     fn tracking_screen(&self, local: u64, wire: u64, mouse_tracking: bool) -> ScreenMapping {
         let mapping = ScreenMapping {
             epoch: self.active.epoch,
-            local: PresentationGeneration::test(local),
+            local: PresentationGeneration::from_counter(local),
             wire,
             size: *self.handle.size.lock().unwrap(),
             mouse_tracking,
@@ -767,7 +768,7 @@ impl Adapter {
             .lock()
             .unwrap()
             .scrollback
-            .present(PresentationGeneration::test(99))
+            .present(PresentationGeneration::from_counter(99))
             .unwrap()
     }
     fn confirmation(&mut self) -> super::super::paste::PasteConfirmation {
@@ -1168,7 +1169,7 @@ fn modal_paste_is_single_use_and_lost_confirmation_reply_is_typed_as_uncertain()
         let epoch = adapter.handle.state.invalidate();
         let mapping = ScreenMapping {
             epoch,
-            local: PresentationGeneration::test(10),
+            local: PresentationGeneration::from_counter(10),
             wire: 3,
             size: *adapter.handle.size.lock().unwrap(),
             mouse_tracking: false,
@@ -1544,7 +1545,7 @@ fn same_wire_size_resize_keeps_quiet_pointer_and_wheel_input_at_the_new_fitted_c
             adapter.active.epoch,
             ScreenMapping {
                 epoch: adapter.active.epoch,
-                local: PresentationGeneration::test(8),
+                local: PresentationGeneration::from_counter(8),
                 wire: 91,
                 size: pane_size(original),
                 mouse_tracking: true,
@@ -1567,7 +1568,7 @@ fn same_wire_size_resize_keeps_quiet_pointer_and_wheel_input_at_the_new_fitted_c
         y: position.y,
     };
     adapter.handle.pointer(PointerInput {
-        generation: PresentationGeneration::test(8),
+        generation: PresentationGeneration::from_counter(8),
         phase: PointerPhase::Press,
         button: Some(PointerButton::Left),
         position,
@@ -1575,7 +1576,7 @@ fn same_wire_size_resize_keeps_quiet_pointer_and_wheel_input_at_the_new_fitted_c
         shift_selection: ShiftSelectionPolicy::ReportToApplication,
     });
     adapter.handle.wheel(WheelInput {
-        generation: PresentationGeneration::test(8),
+        generation: PresentationGeneration::from_counter(8),
         horizontal_steps: 0,
         vertical_steps: 1,
         phase: WheelPhase::GestureChanged,
@@ -1633,7 +1634,7 @@ fn a_wire_size_change_waits_for_its_authoritative_pointer_mapping() {
     let original = *adapter.handle.size.lock().unwrap();
     let mapping = ScreenMapping {
         epoch: adapter.active.epoch,
-        local: PresentationGeneration::test(8),
+        local: PresentationGeneration::from_counter(8),
         wire: 91,
         size: original,
         mouse_tracking: true,
@@ -1672,7 +1673,7 @@ fn a_wire_size_change_waits_for_its_authoritative_pointer_mapping() {
         .unwrap();
     // The resize itself publishes this authoritative replacement, without shell output.
     let replacement = ScreenMapping {
-        local: PresentationGeneration::test(9),
+        local: PresentationGeneration::from_counter(9),
         wire: 92,
         size: pane_size(resized),
         ..mapping
@@ -1719,7 +1720,7 @@ fn pointer_coordinates_use_fitted_cells_and_the_authoritative_screen_revision() 
     adapter.drain(|_| Ok(Reply::Unchanged)).unwrap();
     adapter.handle.state.interaction.lock().unwrap().screen = Some(ScreenMapping {
         epoch: adapter.active.epoch,
-        local: PresentationGeneration::test(8),
+        local: PresentationGeneration::from_counter(8),
         wire: 91,
         size: pane_size(geometry),
         mouse_tracking: true,
@@ -1730,7 +1731,7 @@ fn pointer_coordinates_use_fitted_cells_and_the_authoritative_screen_revision() 
     let position =
         geometry.to_backing_position(LogicalPosition::new(cell.width * 1.5, cell.height * 2.5));
     let input = PointerInput {
-        generation: PresentationGeneration::test(8),
+        generation: PresentationGeneration::from_counter(8),
         phase: PointerPhase::Press,
         button: Some(PointerButton::Left),
         position: SurfacePosition {
@@ -1741,7 +1742,7 @@ fn pointer_coordinates_use_fitted_cells_and_the_authoritative_screen_revision() 
         shift_selection: ShiftSelectionPolicy::ReportToApplication,
     };
     adapter.handle.pointer(PointerInput {
-        generation: PresentationGeneration::test(7),
+        generation: PresentationGeneration::from_counter(7),
         ..input
     });
     adapter.handle.pointer(input);

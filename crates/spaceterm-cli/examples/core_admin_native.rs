@@ -494,7 +494,7 @@ fn expired_token_check(options: &Options) -> Result<String> {
 }
 
 fn admitted_crash(options: &Options) -> Result<String> {
-    let operation = OperationId::random()?.to_string();
+    let operation = spaceterm_core::service::operations::random_operation_id()?.to_string();
     options.fixture("inject-admitted", &[&operation])?;
     options.fixture("end-server", &[])?;
     options.machine_cli(&["start"])?.expect(0, "local start")?;
@@ -731,7 +731,7 @@ fn fill_ledger(identity: &str) -> Result<String> {
     let mut ledger = Ledger::open(identity)?;
     let mut written = 0;
     loop {
-        let id = OperationId::random()?;
+        let id = spaceterm_core::service::operations::random_operation_id()?;
         match ledger.admit(fixture_record(identity, id, State::Admitted)?) {
             Ok(_) => {
                 ledger.mark(&id, State::Unresolved)?;

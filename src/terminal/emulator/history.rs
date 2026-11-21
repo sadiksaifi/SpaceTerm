@@ -12,15 +12,6 @@ use super::*;
 use crate::terminal::accessibility::AccessibilityOrigin;
 use libghostty_vt::screen::GridRef;
 
-/// The primary screen's Scrollback. Rows `oldest..total` are retained, and visible row `r` is
-/// position `total + r`. Positions of one epoch never name different content.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct HistorySnapshot {
-    pub epoch: u64,
-    pub oldest: u64,
-    pub total: u64,
-}
-
 pub(super) struct HistoryTracker {
     current: HistorySnapshot,
     columns: u16,
@@ -206,11 +197,11 @@ impl TerminalEmulator {
                     TerminalColor::Palette(cell.bg_color_palette()?.0)
                 }
                 CellContentTag::BgColorRgb => TerminalColor::Rgb(cell.bg_color_rgb()?.into()),
-                _ => style.bg_color.into(),
+                _ => terminal_color(style.bg_color),
             };
             cells.push(CellSnapshot {
                 text,
-                foreground_source: style.fg_color.into(),
+                foreground_source: terminal_color(style.fg_color),
                 background_source,
                 inverse: style.inverse,
                 bold: style.bold,
@@ -218,13 +209,13 @@ impl TerminalEmulator {
                 italic: style.italic,
                 blinking: style.blink,
                 invisible: style.invisible,
-                underline: style.underline.into(),
-                underline_source: style.underline_color.into(),
+                underline: terminal_underline(style.underline),
+                underline_source: terminal_color(style.underline_color),
                 strikethrough: style.strikethrough,
                 overline: style.overline,
                 selected: false,
                 spacer_tail,
-                semantic_content: cell.semantic_content()?.into(),
+                semantic_content: cell_semantic(cell.semantic_content()?),
                 hyperlink: if cell.has_hyperlink()? {
                     self.history_hyperlink(&reference, links)
                 } else {

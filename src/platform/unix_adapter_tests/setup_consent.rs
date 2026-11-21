@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
-use crate::direct_connections::credentials::{CredentialError, CredentialStore, Interaction};
 use crate::platform::app_directories::AppDirectoryEnvironment;
 use crate::platform::testing::{RecordingFilesystem, resolve_app_paths};
 use crate::ssh::askpass::{
@@ -16,6 +15,7 @@ use crate::ssh::process::{
     ProcessExit, ProcessSignal, SpawnedSshProcess, SshProcessMechanismError, SshProcessPipes,
     SshProcessSpawnRequest,
 };
+use spaceterm_core::native_client::credentials::{CredentialError, CredentialStore, Interaction};
 
 struct NoPrompt(Arc<AtomicUsize>);
 impl AskPassLease for NoPrompt {
@@ -39,9 +39,6 @@ impl AskPassAttemptFactory for NoPrompt {
 
 struct NoCredentials;
 impl CredentialStore for NoCredentials {
-    fn kind(&self) -> spaceterm_connections::StoreKind {
-        spaceterm_connections::StoreKind::SecretService
-    }
     fn read(
         &self,
         _: &[u8; 32],
@@ -354,11 +351,9 @@ impl Fixture {
         );
         let direct = DirectConnections::with_credentials(
             identity(),
-            Arc::new(spaceterm_connections::records::PrivateRecords::new(
-                Arc::new(crate::direct_connection_storage::DesktopRecordFile::new(
-                    Arc::clone(&paths),
-                )),
-            )),
+            Arc::new(spaceterm_client::records::PrivateRecords::new(Arc::new(
+                crate::direct_connection_storage::DesktopRecordFile::new(Arc::clone(&paths)),
+            ))),
             Arc::new(NoCredentials),
         );
         let adapter = ProcessAdapter {

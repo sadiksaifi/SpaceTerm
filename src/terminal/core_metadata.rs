@@ -9,7 +9,7 @@ pub(crate) fn decode(
     local_files: Option<&crate::platform::local_filesystem::LocalFilesystemAuthority>,
     remote: Option<&RemoteTerminalMetadataContext>,
 ) -> Result<Arc<TerminalMetadataSnapshot>, CoreError> {
-    wire.validate()?;
+    wire.validate().map_err(|_| CoreError::Protocol)?;
     // Only constructor-injected local authority selects a Local context. The wire has no such bit.
     let context = if local_files.is_some() {
         TerminalMetadataContext::local(

@@ -7,14 +7,16 @@ edition = "2024"
 members = [
     "crates/spaceterm-directories",
     "crates/spaceterm-core",
+    "crates/spaceterm-protocol",
     "crates/spaceterm-cli",
-    "crates/spaceterm-connections",
+    "crates/spaceterm-client",
+    "crates/spaceterm-terminal-client",
     "crates/spaceterm-ui",
     "third_party/libghostty-vt",
     "third_party/libghostty-vt-sys",
 ]
 exclude = ["third_party/block"]
-default-members = [".", "crates/spaceterm-directories", "crates/spaceterm-core", "crates/spaceterm-cli", "crates/spaceterm-connections", "crates/spaceterm-ui"]
+default-members = [".", "crates/spaceterm-directories", "crates/spaceterm-core", "crates/spaceterm-protocol", "crates/spaceterm-cli", "crates/spaceterm-client", "crates/spaceterm-terminal-client", "crates/spaceterm-ui"]
 resolver = "2"
 
 [patch.crates-io]
@@ -29,10 +31,10 @@ accesskit_unix = { git = "https://github.com/sadiksaifi/accesskit", tag = "space
 # Every build outside the packaging script is SpaceTerm Development and carries its developer tools.
 default = ["desktop", "developer-tools"]
 # Native fixtures also exercise the desktop adapters.
-native-tests = ["desktop-tests", "spaceterm-connections/native-tests"]
+native-tests = ["desktop-tests", "spaceterm-core/native-tests"]
 developer-tools = ["desktop-tests", "spaceterm-ui/control-preview", "spaceterm-core/developer-tools"]
 desktop-tests = [
-    "spaceterm-connections/test-support",
+    "spaceterm-client/test-support",
     "desktop",
     "gpui/test-support",
     "spaceterm-ui/test-support",
@@ -42,7 +44,7 @@ desktop-tests = [
     "dep:gpui_wgpu",
 ]
 desktop = [
-    "dep:spaceterm-connections",
+    "dep:spaceterm-client",
     "dep:notify",
     "dep:gpui",
     "dep:gpui_platform",
@@ -51,7 +53,6 @@ desktop = [
     "dep:image",
     "dep:smallvec",
     "dep:rustc-hash",
-    "dep:unicode-bidi",
     "dep:unicode-segmentation",
     "dep:ureq",
     "dep:tar",
@@ -96,7 +97,8 @@ required-features = ["native-tests"]
 serde_json = "1.0"
 
 [dependencies]
-spaceterm-connections = { path = "crates/spaceterm-connections", optional = true }
+spaceterm-protocol = { path = "crates/spaceterm-protocol" }
+spaceterm-client = { path = "crates/spaceterm-client", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
@@ -115,13 +117,12 @@ notify = { version = "=8.2.0", optional = true }
 portable-pty = "=0.9.0"
 pollster = "=0.4.0"
 smallvec = { version = "=1.15.2", optional = true }
-smol_str = "=0.3.6"
 rustc-hash = { version = "=2.1.3", optional = true }
 spaceterm-directories = { path = "crates/spaceterm-directories" }
+spaceterm-terminal-client = { path = "crates/spaceterm-terminal-client" }
 spaceterm-ui = { path = "crates/spaceterm-ui", optional = true }
 spaceterm-core = { path = "crates/spaceterm-core" }
 thiserror = "2.0.17"
-unicode-bidi = { version = "=0.3.18", optional = true }
 unicode-segmentation = { version = "=1.13.3", optional = true }
 zeroize = "=1.9.0"
 same-file = "=1.0.6"

@@ -4764,7 +4764,7 @@ mod restart_tests {
         connection::link::CoreLink,
         hierarchy::{Axis, CloseTarget, Mutation},
         protocol::{self, CoreMessage, RawFrame},
-        update::facts::{Operation, Platform, UpdateCheck, UpdateFacts, Version},
+        update::facts::{Operation, UpdateCheck, UpdateFacts, Version},
     };
     use std::{rc::Rc, sync::Arc, time::Instant};
 
@@ -4784,7 +4784,7 @@ mod restart_tests {
     fn publish(link: &CoreLink, operation: Option<Operation>) {
         let facts = UpdateFacts {
             revision: 1,
-            platform: Platform::HOST,
+            platform: spaceterm_core::update::facts::HOST_PLATFORM,
             running: Version::parse("0.11.1").unwrap(),
             pending: None,
             sessions: 0,

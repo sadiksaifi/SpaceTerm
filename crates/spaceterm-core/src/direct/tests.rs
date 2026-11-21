@@ -2594,6 +2594,269 @@ fn paired_administration_is_refused_without_changing_invitations_claims_or_devic
     let _ = core.join().unwrap();
 }
 
+#[cfg(feature = "client")]
+struct WorkspaceCredential {
+    key: [u8; 32],
+    value: Mutex<Option<DeviceCredential>>,
+}
+
+#[cfg(feature = "client")]
+impl spaceterm_client::CredentialStore for WorkspaceCredential {
+    fn read(
+        &self,
+        key: &[u8; 32],
+        interaction: spaceterm_client::Interaction,
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, spaceterm_client::CredentialError> {
+        assert_eq!(interaction, spaceterm_client::Interaction::Quiet);
+        assert_eq!(*key, self.key);
+        Ok(self
+            .value
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|key| zeroize::Zeroizing::new(key.expose_bytes().to_vec())))
+    }
+
+    fn insert(&self, _: &[u8; 32], _: &[u8]) -> Result<(), spaceterm_client::CredentialError> {
+        Err(spaceterm_client::CredentialError::Unavailable)
+    }
+
+    fn remove(
+        &self,
+        _: &[u8; 32],
+        _: spaceterm_client::Interaction,
+    ) -> Result<(), spaceterm_client::CredentialError> {
+        self.value.lock().unwrap().take();
+        Ok(())
+    }
+}
+
+#[cfg(feature = "client")]
+fn paired_workspace_machine(
+    fixture: &Fixture,
+) -> (spaceterm_client::PairedMachine, Arc<WorkspaceCredential>) {
+    use spaceterm_client::{Interaction, SavedConnection, StoreKind, UnpairState};
+
+    fixture.enable();
+    let credential = DeviceCredential::generate().unwrap();
+    let saved = SavedConnection {
+        name: "Paired Machine".into(),
+        route: [1; 32],
+        endpoint: fixture.endpoint(),
+        paired: fixture.enroll(&credential),
+        credential: [2; 32],
+        credential_store: StoreKind::PrivateFile,
+        unpair: UnpairState::Paired,
+    };
+    let credentials = Arc::new(WorkspaceCredential {
+        key: saved.credential,
+        value: Mutex::new(Some(credential)),
+    });
+    let connector = saved.connector(credentials.clone(), Interaction::Quiet, None);
+    let machine = spaceterm_client::PairedMachine::new(
+        &fixture.paths.identity,
+        saved.route,
+        saved.paired,
+        connector,
+        Arc::new(|| "Paired Client".into()),
+        None,
+        Arc::new(|| None),
+    )
+    .unwrap();
+    (machine, credentials)
+}
+
+#[cfg(feature = "client")]
+#[test]
+fn paired_workspace_retry_keeps_the_original_after_a_lost_reply_and_reconnect() {
+    use crate::hierarchy::{CreateControl, Mutation, Outcome, State, journal_writer};
+    use crate::protocol::{Fatal, InventoryRevision};
+    use spaceterm_client::workspace::EditError;
+
+    struct Runtime {
+        state: Arc<Mutex<State>>,
+        outbox: Option<Outbox>,
+        lose_reply: bool,
+    }
+    impl PaneService for Runtime {
+        fn admitted(&mut self, peer: &Peer, _: ClientName, outbox: Outbox) {
+            let state = self.state.lock().unwrap();
+            outbox
+                .inventory(InventoryRevision {
+                    inventory: state.inventory.clone(),
+                    next_sequence: state.next_sequence(peer.client),
+                })
+                .unwrap();
+            self.outbox = Some(outbox);
+        }
+        fn request(&mut self, peer: &Peer, _: RequestId, operation: Operation) -> Dispatch {
+            let Operation::Mutate { sequence, mutation } = operation else {
+                panic!("expected the original Workspace mutation");
+            };
+            let mut state = self.state.lock().unwrap();
+            state
+                .apply(peer.client, sequence, mutation, "/tmp".as_ref(), |_| true)
+                .unwrap();
+            let receipt = state.outcome(peer.client, sequence).unwrap().clone();
+            let outbox = self.outbox.as_ref().unwrap();
+            if std::mem::take(&mut self.lose_reply) {
+                // The Core committed the edit. The connection ends before its reply leaves.
+                outbox.goodbye(Fatal::Stalled).unwrap();
+                return Dispatch::Deferred;
+            }
+            outbox
+                .inventory(InventoryRevision {
+                    inventory: state.inventory.clone(),
+                    next_sequence: state.next_sequence(peer.client),
+                })
+                .unwrap();
+            Dispatch::reply(Ok(ReplyBody::Outcome(receipt)))
+        }
+        fn input(&mut self, _: &Peer, _: Input) {}
+        fn view(&mut self, _: &Peer, _: View) {}
+        fn effect_done(&mut self, _: &Peer, _: EffectDone) {}
+        fn acknowledge(&mut self, peer: &Peer, sequence: u64) {
+            self.state
+                .lock()
+                .unwrap()
+                .acknowledge(peer.client, sequence)
+                .unwrap();
+        }
+        fn disconnected(&mut self, _: &Peer) {}
+        fn shutdown(&mut self) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
+
+    let fixture = Fixture::new();
+    let (machine, credentials) = paired_workspace_machine(&fixture);
+    let retained = machine.clone();
+    let authority = Arc::new(Mutex::new(State::empty()));
+    let runtime = service(Runtime {
+        state: Arc::clone(&authority),
+        outbox: None,
+        lose_reply: true,
+    });
+    let open = || {
+        let directory = crate::Directory::open(&fixture.root.join("client"), true).unwrap();
+        machine
+            .workspace_edits(journal_writer(directory).unwrap())
+            .unwrap()
+    };
+    let mutation = Mutation::CreateWorkspace {
+        name: "Original".into(),
+        directory: None,
+        control: CreateControl::Creator,
+    };
+    let until = || Instant::now() + Duration::from_secs(5);
+
+    let first = fixture.serve_next_with(Arc::clone(&runtime));
+    let mut editor = open();
+    let failure = editor
+        .submit(mutation, Instant::now() + Duration::from_secs(2))
+        .unwrap_err();
+    assert!(
+        matches!(
+            failure,
+            EditError::Request(RequestError::Link(_)) | EditError::Unconfirmed
+        ),
+        "{failure:?}"
+    );
+    assert_eq!(editor.journal().pending().unwrap().sequence, 1);
+    let original_receipt = {
+        let state = authority.lock().unwrap();
+        assert_eq!(state.inventory.workspaces.len(), 1);
+        state.outcome(machine.paired().client, 1).unwrap().clone()
+    };
+    assert!(matches!(original_receipt.outcome, Outcome::Accepted { .. }));
+    drop(editor);
+    machine.disconnect();
+    first.join().unwrap().unwrap();
+
+    let second = fixture.serve_next_with(runtime);
+    let mut editor = open();
+    let receipt = editor.retry(until()).unwrap().unwrap();
+    assert_eq!(receipt, original_receipt);
+    assert_eq!(authority.lock().unwrap().inventory.workspaces.len(), 1);
+    assert!(editor.journal().pending().is_none());
+    assert_eq!(editor.journal().last().unwrap(), &receipt);
+    machine.disconnect();
+    second.join().unwrap().unwrap();
+
+    drop(editor);
+    drop(machine);
+    let key = credentials.value.lock().unwrap().take().unwrap();
+    let withdrawn = CoreError::from(DirectError::CredentialUnavailable);
+    let server = fixture.serve_next();
+    let bounded = retained.link_with_limit(&spaceterm_client::WaitLimit::new(until()));
+    retained.disconnect();
+    assert_eq!(bounded.err(), Some(withdrawn));
+    let ordinary = retained.link();
+    retained.disconnect();
+    assert_eq!(ordinary.err(), Some(withdrawn));
+
+    // The original pairing still admits work over QUIC if the credential is available.
+    connect(&fixture.endpoint(), retained.paired(), &key).close();
+    server.join().unwrap().unwrap();
+}
+
+#[cfg(feature = "client")]
+#[test]
+fn paired_workspace_cancels_a_stalled_admission_before_journaling() {
+    use crate::hierarchy::{CreateControl, Mutation, journal_writer};
+    use spaceterm_client::{WaitLimit, workspace::EditError};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+
+    let fixture = Fixture::new();
+    let (machine, _) = paired_workspace_machine(&fixture);
+    let directory = crate::Directory::open(&fixture.root.join("client"), true).unwrap();
+    let mut editor = machine
+        .workspace_edits(journal_writer(directory).unwrap())
+        .unwrap();
+    let (finish, hold_open) = mpsc::channel();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let started = Instant::now();
+    let wait =
+        WaitLimit::new(started + Duration::from_secs(4)).with_cancellation(Arc::clone(&cancel));
+    std::thread::scope(|scope| {
+        let state = &fixture.state;
+        scope.spawn(move || {
+            let mut stream = accept_raw(state);
+            let challenge = state.lock().unwrap().challenge().unwrap();
+            stream.send(&challenge).unwrap();
+            let authentication: wire::Authentication = stream.receive().unwrap();
+            let answer = state
+                .lock()
+                .unwrap()
+                .authenticate(&challenge, &authentication);
+            assert!(matches!(answer, Ok(wire::Answer::Connected)));
+            stream.send(&answer).unwrap();
+            let hello: spaceterm_client::protocol::admission::Hello =
+                spaceterm_client::admission::Wire::new(&mut stream)
+                    .read()
+                    .unwrap();
+            assert_eq!(hello.lane, crate::protocol::Lane::Work);
+            cancel.store(true, Ordering::Release);
+            let _ = hold_open.recv_timeout(Duration::from_secs(5));
+        });
+        let result = editor.submit(
+            Mutation::CreateWorkspace {
+                name: "Original".into(),
+                directory: None,
+                control: CreateControl::Creator,
+            },
+            wait,
+        );
+        let _ = finish.send(());
+        assert_eq!(result, Err(EditError::Cancelled));
+    });
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(editor.journal().pending().is_none());
+}
+
 #[test]
 fn end_all_sessions_requires_account_local_admission_but_workspace_mutations_do_not() {
     #[derive(Default)]
@@ -2763,7 +3026,10 @@ fn concurrent_shared_links_of_one_pairing_each_admit_and_answer() {
 #[test]
 fn a_shared_handle_keeps_the_restart_facts_until_the_next_link_reports_newer_ones() {
     use crate::MachineConnection;
-    use crate::update::facts::{self, Platform, UpdateCheck, UpdateFacts, Version};
+    use crate::client::PairedClients;
+    use crate::protocol::capability::Unavailable;
+    use crate::protocol::version::{Incompatible, ProtocolVersion, SERVICE, WORK};
+    use crate::update::facts::{self, UpdateCheck, UpdateFacts, Version};
     use crate::update::source::FactsSource;
 
     /// Facts that never change.
@@ -2777,26 +3043,20 @@ fn a_shared_handle_keeps_the_restart_facts_until_the_next_link_reports_newer_one
             Some(self.0.clone())
         }
     }
-    struct Connector {
-        endpoint: String,
-        paired: PairedDevice,
-        credential: Arc<DeviceCredential>,
-    }
-    impl DirectConnector for Connector {
-        fn connect(&self) -> Result<DirectConnection, DirectError> {
-            DirectConnection::connect(&self.endpoint, &self.paired, &self.credential)
-        }
-    }
-
     let fixture = Fixture::new();
-    fixture.enable();
-    let credential = Arc::new(DeviceCredential::generate().unwrap());
-    let paired = fixture.enroll(&credential);
-    let serve = |operation: Option<facts::Operation>| {
+    let (machine, _) = paired_workspace_machine(&fixture);
+    let paths = fixture.paths.clone();
+    let clients = PairedClients::new(move || MachineConnection::with_paths(paths.clone()));
+    clients.prepare().unwrap();
+    let core = clients.bind(machine.clone()).unwrap();
+    let lane = crate::service::lane::tests::serving(&fixture.paths);
+    let serve = |work: ProtocolVersion, operation: Option<facts::Operation>| {
         let mut environment = fixture.environment(service(Refusing));
+        environment.versions.work = work;
+        environment.lane = Some(Arc::clone(&lane));
         environment.facts = Some(Arc::new(Fixed(UpdateFacts {
             revision: 1,
-            platform: Platform::HOST,
+            platform: crate::update::facts::HOST_PLATFORM,
             running: Version::parse("1.4.0").unwrap(),
             pending: None,
             sessions: 0,
@@ -2827,17 +3087,6 @@ fn a_shared_handle_keeps_the_restart_facts_until_the_next_link_reports_newer_one
             }
         })
     };
-    let core = MachineConnection::direct(
-        &paired.pin.build,
-        [42; 32],
-        paired.clone(),
-        Arc::new(Connector {
-            endpoint: fixture.endpoint(),
-            paired: paired.clone(),
-            credential: Arc::clone(&credential),
-        }),
-    )
-    .unwrap();
     let operation =
         |core: &MachineConnection| core.update_facts().map(|facts| facts.operation.clone());
     let until = |core: &MachineConnection, expected: Option<Option<facts::Operation>>| {
@@ -2850,19 +3099,58 @@ fn a_shared_handle_keeps_the_restart_facts_until_the_next_link_reports_newer_one
     let restarting = facts::Operation::Restarting {
         to: Version::parse("1.5.0").unwrap(),
     };
-    let first = serve(Some(restarting.clone()));
-    core.link().unwrap();
+    let older = ProtocolVersion {
+        major: WORK.major,
+        minor: 1,
+    };
+    let incompatible = ProtocolVersion {
+        major: WORK.major + 1,
+        minor: 0,
+    };
+    let first = serve(WORK, Some(restarting.clone()));
+    let shared = machine.link().unwrap();
+    assert_eq!(shared.work(), Some(WORK));
     until(&core, Some(Some(restarting.clone())));
+
+    let service = serve(incompatible, None);
+    let session = core.service_lane().unwrap().session().unwrap();
+    assert_eq!(session.selected(), SERVICE);
+    drop(session);
+    service.join().unwrap().unwrap();
+
+    let other = serve(older, None);
+    let independent = core.connect(Arc::new(|_| {})).unwrap();
+    assert_eq!(independent.work(), Some(older));
+    assert_eq!(core.core_versions().unwrap().work, older);
+    assert_eq!(core.capabilities().work(), Ok(WORK));
+    assert_eq!(machine.refresh().unwrap().work, WORK);
+    assert_eq!(core.refresh().unwrap().work, WORK);
+    independent.close();
+    other.join().unwrap().unwrap();
+
+    let refused = serve(incompatible, None);
+    let refusal = CoreError::IncompatibleProtocol(Incompatible::CallerTooOld);
+    assert_eq!(core.connect(Arc::new(|_| {})).err(), Some(refusal));
+    assert_eq!(refused.join().unwrap(), Err(refusal));
+    assert_eq!(core.core_versions().unwrap().work, incompatible);
+    assert_eq!(core.capabilities().work(), Ok(WORK));
+    assert_eq!(core.capabilities().service(), Ok(SERVICE));
+    assert_eq!(core.refresh().unwrap().work, WORK);
+
     // The restart ends the link.
     core.disconnect();
     assert!(core.live_link().is_none());
+    assert_eq!(core.capabilities().work(), Err(Unavailable::ClientTooOld));
+    assert_eq!(core.capabilities().service(), Ok(SERVICE));
     assert_eq!(operation(&core), Some(Some(restarting)));
     let _ = first.join().unwrap();
     // The next link's facts replace them.
-    let second = serve(None);
-    core.link().unwrap();
+    let second = serve(older, None);
+    assert_eq!(core.link().unwrap().work(), Some(older));
+    assert_eq!(core.capabilities().work(), Ok(older));
     until(&core, Some(None));
     core.disconnect();
+    assert_eq!(core.capabilities().work(), Err(Unavailable::NotConnected));
     assert_eq!(
         operation(&core),
         None,

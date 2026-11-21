@@ -122,6 +122,12 @@ impl PairedConnections {
     }
 }
 
+impl Sever for spaceterm_client::connection::quic::QuicSever {
+    fn sever(&self) {
+        self.sever();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

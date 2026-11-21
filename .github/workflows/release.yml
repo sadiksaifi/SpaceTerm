@@ -1,6 +1,6 @@
 name: Release
 
-# The only workflow. Nothing runs on a push or pull request. Dispatch it on main.
+# Dispatch releases on main.
 on:
   workflow_dispatch:
     inputs:

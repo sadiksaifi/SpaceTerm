@@ -51,7 +51,7 @@ impl CancellationToken {
 }
 
 #[cfg(feature = "desktop")]
-impl spaceterm_connections::setup::Cancellation for CancellationToken {
+impl spaceterm_client::setup::Cancellation for CancellationToken {
     fn is_cancelled(&self) -> bool {
         self.is_cancelled()
     }

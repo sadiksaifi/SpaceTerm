@@ -1,263 +1,31 @@
-//! Bounded admission: the Hello/Offer preamble every protocol major reads the same way, as
-//! length-prefixed JSON. An incompatible peer therefore always receives a typed incompatibility.
-//! After admission both peers switch to the postcard framing in [`super::frame`].
-//! Peer-account authority comes from the socket. IDs are nonsecret fences, never credentials.
-//!
-//! The preamble is frozen: later majors read and write these exact messages, each at most
-//! [`MAX_FRAME`] bytes with unknown fields refused. A Hello names the lane it opens and offers
-//! the caller's versions of that lane's protocol, and the Core selects one with
-//! [`negotiate`] or none. The Offer always carries the Core's own versions, so a refused client
-//! knows which side is older and whether the other lane admits it.
-use super::version::{self, Incompatible, ProtocolVersion, negotiate};
+//! Native and paired admission transport for SpaceTerm Core.
+#[cfg(test)]
+use super::version;
+#[cfg(test)]
+use super::version::Incompatible;
+use super::version::{ProtocolVersion, negotiate};
+use super::{AgentName, CoreVersions, Lane, Negotiated};
 use crate::pane::control::ClientName;
+#[cfg(test)]
 use crate::update::facts::Version;
 use crate::{AuthenticatedStatus, CoreError};
-use ring::rand::{SecureRandom, SystemRandom};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+pub(crate) use spaceterm_protocol::protocol::admission::prefixed;
+use spaceterm_protocol::protocol::admission::{Hello, MAX_FRAME, Offer, well_formed};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-const MAX_FRAME: usize = 8192;
-pub(crate) const CONNECTION_LIMIT: Duration = Duration::from_secs(5);
+pub(crate) use spaceterm_client::admission::{
+    CONNECTION_LIMIT, Caller, Preamble, Refused, Unsent, Wire, admit_service_lane,
+    admit_transport_by, random,
+};
+#[cfg(test)]
+pub(crate) use spaceterm_client::admission::{admit_lane, admit_transport};
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Hello {
-    lane: Lane,
-    /// The caller's versions of `lane`'s protocol: its current version and, when one exists,
-    /// its previous major at that major's last minor. 1 or 2 entries, distinct majors, highest
-    /// first.
-    versions: Vec<ProtocolVersion>,
-    build: String,
-    core: [u8; 32],
-    /// The base Client Identity.
-    client: [u8; 32],
-    /// Composed by the client and rechecked by the server.
-    name: ClientName,
-    agent: Option<AgentName>,
-}
-
-/// What an admitted connection carries. Each lane negotiates its own protocol version: the work
-/// protocol or the service lane.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Lane {
-    Work,
-    Service,
-}
-
-impl Lane {
-    /// The versions this build offers as a caller of this lane: the current one, then the
-    /// previous major when one exists.
-    pub fn offered(self) -> Vec<ProtocolVersion> {
-        let (current, previous) = match self {
-            Self::Work => (version::WORK, version::PREVIOUS_WORK),
-            Self::Service => (version::SERVICE, version::PREVIOUS_SERVICE),
-        };
-        std::iter::once(current).chain(previous).collect()
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Offer {
-    /// `negotiate(hello.versions, the Core's version of hello.lane)`. None when no major is
-    /// shared; the Core then closes the connection.
-    selected: Option<ProtocolVersion>,
-    /// The Core's own versions.
-    versions: CoreVersions,
-    build: String,
-    core: [u8; 32],
-    /// The effective Client Identity, derived from the agent name when the client sent one.
-    client: [u8; 32],
-}
-
-/// A SpaceTerm Core's version and the protocol versions it listens with.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CoreVersions {
-    pub version: Version,
-    pub work: ProtocolVersion,
-    pub service: ProtocolVersion,
-}
-
-impl CoreVersions {
-    /// A Core of this build running `version`.
-    pub fn current(version: Version) -> Self {
-        Self {
-            version,
-            work: version::WORK,
-            service: version::SERVICE,
-        }
-    }
-
-    /// A Core of this build running [`crate::UNVERSIONED`].
-    #[cfg(test)]
-    pub(crate) fn for_tests() -> Self {
-        Self::current(Version::parse(crate::UNVERSIONED).unwrap_or_else(|_| unreachable!()))
-    }
-
-    /// The version the Core listens with on `lane`.
-    pub fn of(&self, lane: Lane) -> ProtocolVersion {
-        match lane {
-            Lane::Work => self.work,
-            Lane::Service => self.service,
-        }
-    }
-}
-
-/// What a client's admission negotiated on one lane, and the Core's own versions.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Negotiated {
-    pub selected: ProtocolVersion,
-    pub core: CoreVersions,
-}
-
-/// Why a client's admission ended without a selected version.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Refused {
-    /// The Core answered and shares no major with this client on the lane. It closes the
-    /// connection next.
-    Incompatible {
-        older: Incompatible,
-        core: CoreVersions,
-    },
-    Failed(CoreError),
-}
-
-impl From<CoreError> for Refused {
-    fn from(error: CoreError) -> Self {
-        Self::Failed(error)
-    }
-}
-
-impl From<Refused> for CoreError {
-    fn from(refused: Refused) -> Self {
-        match refused {
-            Refused::Incompatible { older, .. } => Self::IncompatibleProtocol(older),
-            Refused::Failed(error) => error,
-        }
-    }
-}
-
-/// An agent name, `[a-z0-9][a-z0-9-]{0,31}`. It names an identity, not a secret.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct AgentName(String);
-
-impl AgentName {
-    pub const MAX_LEN: usize = 32;
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// The Client Identity of this agent under the base Client Identity `base`:
-    /// `SHA-256("spaceterm.agent.v1" || base || name)`. The server derives it at admission, so a
-    /// paired client can only name agents of its own pairing.
-    pub fn client(&self, base: &[u8; 32]) -> [u8; 32] {
-        let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
-        digest.update(b"spaceterm.agent.v1");
-        digest.update(base);
-        digest.update(self.0.as_bytes());
-        let mut client = [0; 32];
-        client.copy_from_slice(digest.finish().as_ref());
-        client
-    }
-
-    /// The suffix every Client Name of this agent ends with.
-    pub(crate) fn name_suffix(&self) -> String {
-        format!(" CLI {}", self.0)
-    }
-}
-
-/// The agent name did not match `[a-z0-9][a-z0-9-]{0,31}`. It carries no value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "Agent names use 1 to 32 lowercase letters, digits or hyphens, starting with a letter or digit."
-)]
-pub struct InvalidAgentName;
-
-impl TryFrom<String> for AgentName {
-    type Error = InvalidAgentName;
-
-    fn try_from(name: String) -> Result<Self, Self::Error> {
-        let bytes = name.as_bytes();
-        let valid = !bytes.is_empty()
-            && bytes.len() <= Self::MAX_LEN
-            && bytes[0].is_ascii_lowercase() | bytes[0].is_ascii_digit()
-            && bytes
-                .iter()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-');
-        if valid {
-            Ok(Self(name))
-        } else {
-            Err(InvalidAgentName)
-        }
-    }
-}
-
-impl std::str::FromStr for AgentName {
-    type Err = InvalidAgentName;
-
-    fn from_str(name: &str) -> Result<Self, Self::Err> {
-        name.to_owned().try_into()
-    }
-}
-
-impl From<AgentName> for String {
-    fn from(name: AgentName) -> Self {
-        name.0
-    }
-}
-
-pub(crate) fn random() -> Result<[u8; 32], CoreError> {
-    let mut bytes = [0; 32];
-    SystemRandom::new()
-        .fill(&mut bytes)
-        .map_err(|_| CoreError::StorageUnavailable)?;
-    Ok(bytes)
-}
-
-/// The transport of one admission: whole length-prefixed frames, each before a deadline. Account
-/// IPC writes them back to back; a paired connection carries the same bytes on its QUIC L0 stream.
-/// Each transport implements [`Self::send`] or [`Self::send_frame`], and the other follows.
-pub(crate) trait Preamble {
-    fn send(&mut self, frame: &[u8], deadline: Instant) -> Result<(), CoreError> {
-        self.send_frame(frame, deadline)
-            .map_err(|unsent| unsent.error)
-    }
-    /// [`Self::send`] that says, when it fails, whether any byte of the frame left. A transport
-    /// that cannot tell says one may have.
-    fn send_frame(&mut self, frame: &[u8], deadline: Instant) -> Result<(), Unsent> {
-        self.send(frame, deadline).map_err(|error| Unsent {
-            error,
-            written: true,
-        })
-    }
-    /// One frame of at most `max` bytes, without its length prefix.
-    fn receive(&mut self, max: usize, deadline: Instant) -> Result<Vec<u8>, CoreError>;
-    /// Admission proved the peer, so the transport may now hold frames as large as the
-    /// service lane's. A transport without its own flow control needs nothing.
-    fn admitted(&mut self) {}
-}
-
-/// A frame [`Preamble::send_frame`] did not send whole.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Unsent {
-    pub(crate) error: CoreError,
-    /// Whether any byte of the frame may have reached the peer. False is definite: nothing of
-    /// the frame was written.
-    pub(crate) written: bool,
-}
-
-/// Prefixes `bytes` with their length, the admission framing on every transport.
-pub(crate) fn prefixed(bytes: &[u8]) -> Vec<u8> {
-    let mut frame = Vec::with_capacity(4 + bytes.len());
-    frame.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
-    frame.extend_from_slice(bytes);
-    frame
+#[cfg(test)]
+pub(crate) fn versions_for_tests() -> CoreVersions {
+    CoreVersions::current(Version::parse(crate::UNVERSIONED).unwrap_or_else(|_| unreachable!()))
 }
 
 // A native-local transport refusal, never a Hello or Offer. The impossible frame length
@@ -272,7 +40,9 @@ pub(crate) fn reject_local_capacity(mut stream: UnixStream) {
     }
 }
 
-impl Preamble for UnixStream {
+pub(crate) struct LocalPreamble<T>(pub(crate) T);
+
+impl<T: std::borrow::BorrowMut<UnixStream>> Preamble for LocalPreamble<T> {
     /// Writes nothing once `deadline` has passed: the clock is read again before each write.
     fn send_frame(&mut self, frame: &[u8], deadline: Instant) -> Result<(), Unsent> {
         let frame = prefixed(frame);
@@ -281,18 +51,19 @@ impl Preamble for UnixStream {
             error: CoreError::Protocol,
             written: rest.len() < frame.len(),
         };
-        if self.set_nonblocking(true).is_err() {
+        let stream = self.0.borrow_mut();
+        if stream.set_nonblocking(true).is_err() {
             return Err(unsent(rest));
         }
         while !rest.is_empty() {
             if Instant::now() >= deadline {
                 return Err(unsent(rest));
             }
-            match self.write(rest) {
+            match stream.write(rest) {
                 Ok(0) => return Err(unsent(rest)),
                 Ok(count) => rest = &rest[count..],
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if !crate::connection::io::wait_fd(self.as_raw_fd(), true, deadline) {
+                    if !crate::connection::io::wait_fd(stream.as_raw_fd(), true, deadline) {
                         return Err(unsent(rest));
                     }
                 }
@@ -304,7 +75,7 @@ impl Preamble for UnixStream {
     }
 
     fn receive(&mut self, max: usize, deadline: Instant) -> Result<Vec<u8>, CoreError> {
-        receive_frame(self, max, deadline)
+        receive_frame(self.0.borrow_mut(), max, deadline)
     }
 }
 
@@ -357,36 +128,6 @@ fn read_exact(
         }
     }
     Ok(())
-}
-
-/// JSON admission messages under one absolute deadline.
-pub(crate) struct Wire<'a> {
-    stream: &'a mut dyn Preamble,
-    deadline: Instant,
-}
-impl<'a> Wire<'a> {
-    pub(crate) fn new(stream: &'a mut dyn Preamble) -> Self {
-        Self::until(stream, Instant::now() + CONNECTION_LIMIT)
-    }
-    /// Admission frames that end at `deadline` or after [`CONNECTION_LIMIT`], whichever comes
-    /// first. A frame is never sent once `deadline` has passed.
-    pub(crate) fn until(stream: &'a mut dyn Preamble, deadline: Instant) -> Self {
-        Self {
-            stream,
-            deadline: deadline.min(Instant::now() + CONNECTION_LIMIT),
-        }
-    }
-    pub(crate) fn read<T: DeserializeOwned>(&mut self) -> Result<T, CoreError> {
-        let bytes = self.stream.receive(MAX_FRAME, self.deadline)?;
-        serde_json::from_slice(&bytes).map_err(|_| CoreError::Protocol)
-    }
-    pub(crate) fn write(&mut self, value: &impl Serialize) -> Result<(), CoreError> {
-        let bytes = serde_json::to_vec(value).map_err(|_| CoreError::Protocol)?;
-        if bytes.len() > MAX_FRAME || Instant::now() >= self.deadline {
-            return Err(CoreError::Protocol);
-        }
-        self.stream.send(&bytes, self.deadline)
-    }
 }
 
 /// A connection the server admitted: its effective Client Identity, which an agent name derives
@@ -449,7 +190,7 @@ pub(crate) fn admit_core(
     versions: &CoreVersions,
 ) -> Result<Admission, CoreError> {
     crate::host::check_peer(stream)?;
-    admit_core_transport(stream, core, build, versions, None)
+    admit_core_transport(&mut LocalPreamble(stream), core, build, versions, None)
 }
 
 /// Only the paired host calls this after pinned-server and enrolled-device proof validation.
@@ -466,15 +207,6 @@ pub(crate) fn admit_direct_machine(
         versions,
         Some((paired.client, paired.pairing)),
     )
-}
-
-/// 1 or 2 versions with distinct majors, highest first.
-fn well_formed(versions: &[ProtocolVersion]) -> bool {
-    match versions {
-        [_] => true,
-        [first, second] => first.major > second.major,
-        _ => false,
-    }
 }
 
 fn admit_core_transport(
@@ -535,55 +267,6 @@ fn admit_core_transport(
     }))
 }
 
-/// Who a client admits as: its base Client Identity, its Client Name and its optional agent.
-#[derive(Clone, Copy)]
-pub(crate) struct Caller<'a> {
-    pub client: &'a [u8; 32],
-    pub name: &'a ClientName,
-    pub agent: Option<&'a AgentName>,
-}
-
-impl<'a> From<(&'a [u8; 32], &'a ClientName)> for Caller<'a> {
-    fn from((client, name): (&'a [u8; 32], &'a ClientName)) -> Self {
-        Self {
-            client,
-            name,
-            agent: None,
-        }
-    }
-}
-
-impl Caller<'_> {
-    /// The Client Identity the server must offer back.
-    pub(crate) fn effective(&self) -> [u8; 32] {
-        self.agent
-            .map_or(*self.client, |agent| agent.client(self.client))
-    }
-}
-
-/// Admits a service-lane connection as `caller` by `deadline`. The lane needs a shared service
-/// major, just as work admission needs a shared work major.
-#[cfg_attr(
-    not(feature = "client"),
-    allow(dead_code, reason = "the CLI's server commands open the service lane")
-)]
-pub(crate) fn admit_service_lane(
-    stream: &mut dyn Preamble,
-    caller: Caller<'_>,
-    core: &[u8; 32],
-    build: &str,
-    deadline: Instant,
-) -> Result<Negotiated, Refused> {
-    admit_lane(
-        stream,
-        caller,
-        core,
-        build,
-        (Lane::Service, &Lane::Service.offered()),
-        deadline,
-    )
-}
-
 #[cfg_attr(
     not(feature = "client"),
     allow(dead_code, reason = "client side used by desktop and admission tests")
@@ -623,102 +306,25 @@ struct LocalCaller<'a>(&'a mut UnixStream);
 
 impl Preamble for LocalCaller<'_> {
     fn send(&mut self, frame: &[u8], deadline: Instant) -> Result<(), CoreError> {
-        self.0.send(frame, deadline).map_err(|error| {
+        let mut stream = LocalPreamble(&mut *self.0);
+        stream.send(frame, deadline).map_err(|error| {
             // A rejecting Core can close before Hello is written. Its queued receipt still
             // belongs to this connection; an empty or malformed reply proves nothing.
-            match self.0.receive(MAX_FRAME, deadline) {
+            match stream.receive(MAX_FRAME, deadline) {
                 Err(CoreError::Capacity) => CoreError::Capacity,
                 _ => error,
             }
         })
     }
     fn receive(&mut self, max: usize, deadline: Instant) -> Result<Vec<u8>, CoreError> {
-        self.0.receive(max, deadline)
-    }
-}
-
-/// Admits a work connection as `caller`, offering this build's work versions.
-#[cfg(test)]
-pub(crate) fn admit_transport<'a>(
-    stream: &mut dyn Preamble,
-    caller: impl Into<Caller<'a>>,
-    core: &[u8; 32],
-    build: &str,
-) -> Result<Negotiated, Refused> {
-    admit_transport_by(
-        stream,
-        caller,
-        core,
-        build,
-        Instant::now() + CONNECTION_LIMIT,
-    )
-}
-
-/// Admits a work connection as `caller`, offering this build's work versions. No admission frame
-/// is sent or waited for after `deadline`.
-pub(crate) fn admit_transport_by<'a>(
-    stream: &mut dyn Preamble,
-    caller: impl Into<Caller<'a>>,
-    core: &[u8; 32],
-    build: &str,
-    deadline: Instant,
-) -> Result<Negotiated, Refused> {
-    admit_lane(
-        stream,
-        caller.into(),
-        core,
-        build,
-        (Lane::Work, &Lane::Work.offered()),
-        deadline,
-    )
-}
-
-/// The caller's half of admission on `lane`, offering `offered`, by `deadline`. The Offer must
-/// select one of the offered majors at no more than its offered minor, or none.
-fn admit_lane(
-    stream: &mut dyn Preamble,
-    caller: Caller<'_>,
-    core: &[u8; 32],
-    build: &str,
-    (lane, offered): (Lane, &[ProtocolVersion]),
-    deadline: Instant,
-) -> Result<Negotiated, Refused> {
-    let mut wire = Wire::until(stream, deadline);
-    wire.write(&Hello {
-        lane,
-        versions: offered.to_vec(),
-        build: build.to_owned(),
-        core: *core,
-        client: *caller.client,
-        name: caller.name.clone(),
-        agent: caller.agent.cloned(),
-    })?;
-    let offer: Offer = wire.read()?;
-    if offer.build != build || offer.core != *core || offer.client != caller.effective() {
-        return Err(CoreError::AuthenticationRefused.into());
-    }
-    let expected = negotiate(offered, offer.versions.of(lane));
-    match (offer.selected, expected) {
-        (Some(selected), Ok(expected)) if selected == expected => {
-            if lane == Lane::Service {
-                stream.admitted();
-            }
-            Ok(Negotiated {
-                selected,
-                core: offer.versions,
-            })
-        }
-        (None, Err(older)) => Err(Refused::Incompatible {
-            older,
-            core: offer.versions,
-        }),
-        _ => Err(CoreError::Protocol.into()),
+        LocalPreamble(&mut *self.0).receive(max, deadline)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     const fn v(major: u16, minor: u16) -> ProtocolVersion {
         ProtocolVersion { major, minor }
@@ -750,7 +356,7 @@ mod tests {
     ) -> (Result<Negotiated, Refused>, Result<Admission, CoreError>) {
         let (mut client, thread) = serve(core);
         let result = admit_lane(
-            &mut client,
+            &mut LocalPreamble(&mut client),
             (&[9; 32], &"Build Mac".into()).into(),
             &[7; 32],
             "spaceterm-development",
@@ -876,7 +482,8 @@ mod tests {
         for selected in [Some(v(1, 1)), Some(v(2, 0)), None] {
             let (mut client, mut core) = UnixStream::pair().unwrap();
             let thread = std::thread::spawn(move || {
-                let mut wire = Wire::new(&mut core);
+                let mut preamble = LocalPreamble(&mut core);
+                let mut wire = Wire::new(&mut preamble);
                 let _: Hello = wire.read().unwrap();
                 wire.write(&Offer {
                     selected,
@@ -891,7 +498,7 @@ mod tests {
                 .unwrap();
             });
             let result = admit_lane(
-                &mut client,
+                &mut LocalPreamble(&mut client),
                 (&[9; 32], &"Build Mac".into()).into(),
                 &[7; 32],
                 "spaceterm-development",
@@ -924,7 +531,8 @@ mod tests {
         for (build, machine_id) in [("spaceterm", [7; 32]), ("spaceterm-development", [8; 32])] {
             let (mut client, mut core) = UnixStream::pair().unwrap();
             let thread = std::thread::spawn(move || {
-                let mut wire = Wire::new(&mut core);
+                let mut preamble = LocalPreamble(&mut core);
+                let mut wire = Wire::new(&mut preamble);
                 let _: Hello = wire.read().unwrap();
                 wire.write(&Offer {
                     selected: Some(version::WORK),
@@ -959,8 +567,8 @@ mod tests {
     #[test]
     fn stalled_connections_obey_an_absolute_deadline() {
         let (_client, mut core) = UnixStream::pair().unwrap();
-        let mut wire = Wire::new(&mut core);
-        wire.deadline = Instant::now() + Duration::from_millis(10);
+        let mut preamble = LocalPreamble(&mut core);
+        let mut wire = Wire::until(&mut preamble, Instant::now() + Duration::from_millis(10));
         assert!(matches!(wire.read::<Hello>(), Err(CoreError::Protocol)));
     }
     #[test]
@@ -1028,7 +636,7 @@ mod tests {
         let (mut client, mut core) = UnixStream::pair().unwrap();
         let thread = std::thread::spawn(move || {
             admit_core_transport(
-                &mut core,
+                &mut LocalPreamble(&mut core),
                 &[7; 32],
                 "spaceterm-development",
                 &versions(),
@@ -1038,7 +646,7 @@ mod tests {
         let name: ClientName = "Build Mac CLI agent-1".into();
         assert!(
             admit_transport(
-                &mut client,
+                &mut LocalPreamble(&mut client),
                 Caller {
                     client: &[8; 32],
                     name: &name,
@@ -1070,7 +678,8 @@ mod tests {
     /// that part of it left.
     #[test]
     fn a_unix_frame_writes_nothing_after_its_deadline_and_says_when_part_of_it_left() {
-        let (mut sender, mut peer) = UnixStream::pair().unwrap();
+        let (sender, mut peer) = UnixStream::pair().unwrap();
+        let mut sender = LocalPreamble(sender);
         assert_eq!(
             sender.send_frame(b"{\"request\":\"execute\"}", Instant::now()),
             Err(Unsent {

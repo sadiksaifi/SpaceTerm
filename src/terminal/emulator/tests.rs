@@ -3566,7 +3566,13 @@ fn cursor_only_changes_reuse_every_row_and_report_cursor_damage() {
             .zip(second.rows.iter())
             .all(|(first, second)| Arc::ptr_eq(first, second))
     );
-    assert_eq!(second.damage, SnapshotDamage::cursor(0));
+    assert_eq!(
+        second.damage,
+        SnapshotDamage {
+            cursor: ContentDamageSnapshot::Rows(Arc::from([0])),
+            ..SnapshotDamage::default()
+        }
+    );
 }
 
 #[test]

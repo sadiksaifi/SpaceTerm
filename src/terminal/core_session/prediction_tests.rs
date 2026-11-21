@@ -306,10 +306,10 @@ fn only_unmodified_printable_ascii_shows() {
         assert_eq!(worker.shown(), "", "{text:?} did not suspend");
     }
 
-    // A key release writes nothing that moves the cursor.
+    // Wire key action 2 releases the key and writes nothing that moves the cursor.
     let mut worker = Worker::confirmed();
     let mut release = key("a", 0);
-    release.action = KEY_RELEASE;
+    release.action = 2;
     worker.send(keys(vec![key("a", 0), release]));
     worker.send(typed("b"));
     assert_eq!(worker.shown(), "ab");
@@ -477,7 +477,9 @@ fn the_view_shows_predictions_over_the_core_screen_and_exactly_that_screen_after
     reading.scrollback.screen(worker.screen());
     worker.send(typed("a"));
     assert!(reading.predict(worker.predictor.overlay()));
-    let predicted = reading.presented(PresentationGeneration::test(1)).unwrap();
+    let predicted = reading
+        .presented(PresentationGeneration::from_counter(1))
+        .unwrap();
     assert_eq!(predicted.rows[0][4].text, "a");
     assert_eq!(
         predicted.rows[0][4].underline,
@@ -489,7 +491,9 @@ fn the_view_shows_predictions_over_the_core_screen_and_exactly_that_screen_after
     let core = worker.screen();
     reading.scrollback.screen(Arc::clone(&core));
     assert!(reading.predict(worker.predictor.overlay()));
-    let presented = reading.presented(PresentationGeneration::test(2)).unwrap();
+    let presented = reading
+        .presented(PresentationGeneration::from_counter(2))
+        .unwrap();
     assert_eq!(presented.rows, core.rows);
     assert_eq!(presented.cursor, core.cursor);
 }
@@ -500,20 +504,28 @@ fn a_lost_connection_presents_the_frozen_screen_without_predictions_once() {
     let core = worker.screen();
     let mut reading = Reading::default();
     reading.scrollback.screen(Arc::clone(&core));
-    assert_eq!(reading.withdraw(PresentationGeneration::test(1)), None);
+    assert_eq!(
+        reading.withdraw(PresentationGeneration::from_counter(1)),
+        None
+    );
 
     worker.send(typed("a"));
     reading.predict(worker.predictor.overlay());
-    let predicted = reading.presented(PresentationGeneration::test(2)).unwrap();
+    let predicted = reading
+        .presented(PresentationGeneration::from_counter(2))
+        .unwrap();
     assert_ne!(predicted.rows, core.rows);
 
     reading.disconnect();
     let frozen = reading
-        .withdraw(PresentationGeneration::test(3))
+        .withdraw(PresentationGeneration::from_counter(3))
         .expect("the view still shows predictions");
     assert_eq!(frozen.rows, core.rows);
     assert_eq!(frozen.cursor, core.cursor);
-    assert_eq!(reading.withdraw(PresentationGeneration::test(4)), None);
+    assert_eq!(
+        reading.withdraw(PresentationGeneration::from_counter(4)),
+        None
+    );
 }
 
 #[test]

@@ -25,45 +25,14 @@ pub(crate) const HELPER_LOCK: &str = "service-helper.lock";
 /// settles the record as never performed.
 pub(crate) const LAUNCH_GRACE: Duration = Duration::from_secs(60);
 
-/// Names one service operation. The client chooses it, so a repeated `Execute` dispatches
-/// nothing new.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct OperationId(pub [u8; 16]);
+pub use spaceterm_protocol::service::lane::{Actor, OperationId};
 
-impl OperationId {
-    /// Parses the lane form: 32 lowercase hexadecimal characters.
-    pub fn parse(text: &str) -> Option<Self> {
-        if text.len() != 32
-            || !text
-                .bytes()
-                .all(|v| v.is_ascii_digit() || (b'a'..=b'f').contains(&v))
-        {
-            return None;
-        }
-        let mut id = [0; 16];
-        for (index, byte) in id.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).ok()?;
-        }
-        Some(Self(id))
-    }
-
-    pub fn random() -> Result<Self, CoreError> {
-        let bytes = crate::protocol::random()?;
-        let mut id = [0; 16];
-        id.copy_from_slice(&bytes[..16]);
-        Ok(Self(id))
-    }
-
-    /// The first 8 hexadecimal characters, for names such as the helper's unit.
-    pub fn short(&self) -> String {
-        self.to_string()[..8].to_owned()
-    }
-}
-
-impl std::fmt::Display for OperationId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
-    }
+/// Generates an identifier for a new service operation.
+pub fn random_operation_id() -> Result<OperationId, CoreError> {
+    let bytes = crate::protocol::random()?;
+    let mut id = [0; 16];
+    id.copy_from_slice(&bytes[..16]);
+    Ok(OperationId(id))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,23 +44,6 @@ pub enum Action {
     Uninstall,
     /// The lane applies it in-process. No helper claims it.
     Network(super::lane::network::NetworkAccess),
-}
-
-/// Who asked for an operation. Only the same actor acknowledges its record, and revoking a
-/// pairing forgets that pairing's settled records and orphans its unsettled one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Actor {
-    pub pairing: Option<crate::direct::PairingId>,
-    pub client: crate::hierarchy::Id,
-}
-
-impl Actor {
-    /// The Core itself, for a restart it decides on. No client acknowledges its records, so
-    /// settlement forgets them once they are terminal.
-    pub const CORE: Self = Self {
-        pairing: None,
-        client: [0; 32],
-    };
 }
 
 /// Why an admitted operation was never performed.

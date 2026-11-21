@@ -19,7 +19,7 @@ fn desktop_provenance(
         println!("cargo:rerun-if-env-changed={key}");
     }
     println!("cargo:rerun-if-changed=packaging/update-trust.json");
-    println!("cargo:rerun-if-changed=crates/spaceterm-core/src/protocol/version.rs");
+    println!("cargo:rerun-if-changed=crates/spaceterm-protocol/src/version.rs");
     let source = env::var("SPACETERM_CLI_SOURCE_STATE").ok();
     assert!(
         source.as_ref().is_none_or(|s| s.len() == 64
@@ -34,7 +34,7 @@ fn desktop_provenance(
             || (source.is_some() && core_floor.is_some() && desktop_floor.is_some()),
         "release desktops require source and both Update Floors"
     );
-    let text = std::fs::read_to_string(root.join("crates/spaceterm-core/src/protocol/version.rs"))
+    let text = std::fs::read_to_string(root.join("crates/spaceterm-protocol/src/version.rs"))
         .expect("protocol source");
     let mut protocols = serde_json::Map::new();
     for (key, constant) in [

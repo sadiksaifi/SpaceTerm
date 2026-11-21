@@ -4,7 +4,7 @@ use crate::platform::{
     app_paths::AppPaths,
     secure_filesystem::{SecureCommitOutcome, SecureEntryIdentity},
 };
-use spaceterm_connections::records::{Durability, RecordFile, SaveError};
+use spaceterm_client::records::{Durability, RecordFile, SaveError};
 use std::ffi::OsStr;
 use std::sync::{Arc, Mutex};
 pub(crate) const FILE: &str = "direct-device-connections.json";
@@ -109,7 +109,7 @@ mod tests {
     use super::*;
     use crate::platform::app_directories::AppDirectoryEnvironment;
     use crate::platform::testing::{RecordingFilesystem, resolve_app_paths};
-    use spaceterm_connections::records::{Document, PrivateRecords, Records};
+    use spaceterm_client::records::{Document, PrivateRecords, Records};
 
     fn storage() -> (PrivateRecords, Arc<RecordingFilesystem>) {
         let filesystem = Arc::new(RecordingFilesystem::default());
@@ -134,9 +134,7 @@ mod tests {
         let (records, filesystem) = storage();
         let mut document = Document::default();
         assert_eq!(records.save(&document), Ok(Durability::Synchronized));
-        document
-            .routes
-            .push(spaceterm_connections::tests::saved(1, 5));
+        document.routes.push(spaceterm_client::tests::saved(1, 5));
         filesystem.files.lock().unwrap().commit_outcome =
             Some(SecureCommitOutcome::CommittedButUnsynced);
 
@@ -152,9 +150,7 @@ mod tests {
     fn an_uncertain_publication_never_captures_a_competing_successors_identity() {
         let (records, filesystem) = storage();
         let mut document = Document::default();
-        document
-            .routes
-            .push(spaceterm_connections::tests::saved(1, 5));
+        document.routes.push(spaceterm_client::tests::saved(1, 5));
         {
             let mut files = filesystem.files.lock().unwrap();
             files.commit_outcome = Some(SecureCommitOutcome::CommittedButUnsynced);

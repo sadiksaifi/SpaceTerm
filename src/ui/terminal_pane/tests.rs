@@ -508,7 +508,7 @@ fn visibility_subscription_coalesces_hidden_receivers_and_retires_without_pollin
     assert_eq!(notifications.get(), 0);
     assert_eq!(
         pane.read_with(cx, |pane, _| pane.screen.generation),
-        crate::terminal::PresentationGeneration::test(12)
+        crate::terminal::PresentationGeneration::from_counter(12)
     );
     factory.set_visibility(window_id, WindowVisibility::default());
     cx.run_until_parked();
@@ -531,7 +531,7 @@ fn visibility_subscription_coalesces_hidden_receivers_and_retires_without_pollin
     assert!(notifications.get() > 0);
     let (initial_accessibility, scrolled_accessibility) =
         crate::terminal::testing::test_accessibility_viewport_models(
-            crate::terminal::PresentationGeneration::test(12),
+            crate::terminal::PresentationGeneration::from_counter(12),
         );
     pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(true));
     records
@@ -2626,7 +2626,9 @@ fn queued_appearance_screens_cannot_revert_the_latest_terminal_request(cx: &mut 
             let mut stale = (*graphics_screen(100, 1)).clone();
             stale.appearance_generation = intermediate;
             assert!(!pane.handle_event(TerminalSessionEvent::Screen(Arc::new(stale)), cx));
-            assert!(pane.screen.generation < crate::terminal::PresentationGeneration::test(100));
+            assert!(
+                pane.screen.generation < crate::terminal::PresentationGeneration::from_counter(100)
+            );
             let mut latest = (*graphics_screen(101, 1)).clone();
             latest.appearance_generation = pane.requested_terminal_generation;
             assert!(pane.handle_event(TerminalSessionEvent::Screen(Arc::new(latest)), cx));
@@ -4065,7 +4067,7 @@ fn product_hiding_releases_cursor_resources_before_redraw_and_restores_latest_sc
 
         let mut latest = blinking_cursor_screen(true, true);
         Arc::make_mut(&mut latest).generation =
-            crate::terminal::PresentationGeneration::test(42 + index as u64);
+            crate::terminal::PresentationGeneration::from_counter(42 + index as u64);
         pane.update(cx, |pane, cx| {
             pane.handle_event(TerminalSessionEvent::Screen(Arc::clone(&latest)), cx);
             pane.set_product_focus(visible, cx);
@@ -4229,7 +4231,7 @@ fn each_painted_grid_counts_once_as_a_painted_frame(cx: &mut TestAppContext) {
 
     for generation in 1..=10 {
         let changed = Arc::make_mut(&mut screen);
-        changed.generation = crate::terminal::PresentationGeneration::test(10 + generation);
+        changed.generation = crate::terminal::PresentationGeneration::from_counter(10 + generation);
         Arc::make_mut(&mut Arc::make_mut(&mut changed.rows)[0])[0].text =
             generation.to_string().into();
         pane.update(cx, |pane, cx| {
@@ -4309,7 +4311,7 @@ fn grid_rebuilds_for_output_selection_and_font_changes_and_composes_the_cursor(
 
     // Output and Selection change in separate frames so each invalidation is observed.
     let changed = Arc::make_mut(&mut screen);
-    changed.generation = crate::terminal::PresentationGeneration::test(11);
+    changed.generation = crate::terminal::PresentationGeneration::from_counter(11);
     Arc::make_mut(&mut Arc::make_mut(&mut changed.rows)[2])[0].text = "changed".into();
     pane.update(cx, |pane, cx| {
         pane.blink_phase_visible = !pane.blink_phase_visible;
@@ -4320,7 +4322,7 @@ fn grid_rebuilds_for_output_selection_and_font_changes_and_composes_the_cursor(
     let after_output = grid_paints(cx);
     assert!(after_output > initial);
     let changed = Arc::make_mut(&mut screen);
-    changed.generation = crate::terminal::PresentationGeneration::test(12);
+    changed.generation = crate::terminal::PresentationGeneration::from_counter(12);
     Arc::make_mut(&mut Arc::make_mut(&mut changed.rows)[0])[0].selected = true;
     pane.update(cx, |pane, cx| {
         pane.blink_phase_visible = true;
@@ -4358,7 +4360,7 @@ fn cursor_layer_retires_for_graphics_text_blink_and_preedit(cx: &mut TestAppCont
         pane.update(cx, |pane, cx| {
             let mut idle = blinking_cursor_screen(true, true);
             Arc::make_mut(&mut idle).generation =
-                crate::terminal::PresentationGeneration::test(20 + index as u64 * 2);
+                crate::terminal::PresentationGeneration::from_counter(20 + index as u64 * 2);
             pane.handle_event(TerminalSessionEvent::Screen(idle), cx);
             cx.notify();
         });
@@ -4368,7 +4370,8 @@ fn cursor_layer_retires_for_graphics_text_blink_and_preedit(cx: &mut TestAppCont
         }));
         let changed = Arc::make_mut(&mut screen);
         changed.cursor = cursor;
-        changed.generation = crate::terminal::PresentationGeneration::test(21 + index as u64 * 2);
+        changed.generation =
+            crate::terminal::PresentationGeneration::from_counter(21 + index as u64 * 2);
         pane.update(cx, |pane, cx| {
             pane.handle_event(TerminalSessionEvent::Screen(screen), cx);
             cx.notify();
@@ -4380,7 +4383,8 @@ fn cursor_layer_retires_for_graphics_text_blink_and_preedit(cx: &mut TestAppCont
     }
     pane.update(cx, |pane, cx| {
         let mut idle = blinking_cursor_screen(true, true);
-        Arc::make_mut(&mut idle).generation = crate::terminal::PresentationGeneration::test(30);
+        Arc::make_mut(&mut idle).generation =
+            crate::terminal::PresentationGeneration::from_counter(30);
         pane.handle_event(TerminalSessionEvent::Screen(idle), cx);
         cx.notify();
     });
@@ -4581,7 +4585,7 @@ fn cursor_blink_has_no_task_when_steady_hidden_or_unfocused_and_close_cancels(
         pane.update(cx, |pane, cx| {
             let mut screen = blinking_cursor_screen(false, true);
             Arc::make_mut(&mut screen).generation =
-                crate::terminal::PresentationGeneration::test(2);
+                crate::terminal::PresentationGeneration::from_counter(2);
             pane.handle_event(TerminalSessionEvent::Screen(screen), cx);
             cx.notify();
         });
@@ -4593,7 +4597,7 @@ fn cursor_blink_has_no_task_when_steady_hidden_or_unfocused_and_close_cancels(
         pane.update(cx, |pane, cx| {
             let mut screen = blinking_cursor_screen(true, true);
             Arc::make_mut(&mut screen).generation =
-                crate::terminal::PresentationGeneration::test(3);
+                crate::terminal::PresentationGeneration::from_counter(3);
             pane.handle_event(TerminalSessionEvent::Screen(screen), cx);
             cx.notify();
         });
@@ -6849,8 +6853,8 @@ fn accumulates_fractional_trackpad_scroll_into_terminal_steps() {
 #[test]
 fn hyperlinks_open_only_on_platform_modified_same_generation_release() {
     let link = crate::terminal::HyperlinkTarget::url("https://example.test").unwrap();
-    let first = crate::terminal::PresentationGeneration::test(1);
-    let second = crate::terminal::PresentationGeneration::test(2);
+    let first = crate::terminal::PresentationGeneration::from_counter(1);
+    let second = crate::terminal::PresentationGeneration::from_counter(2);
 
     assert_eq!(
         activated_link(
@@ -6901,7 +6905,7 @@ fn hyperlinks_open_only_on_platform_modified_same_generation_release() {
 #[test]
 fn active_link_hover_requires_the_platform_modifier() {
     let link = crate::terminal::HyperlinkTarget::url("https://example.test").unwrap();
-    let generation = crate::terminal::PresentationGeneration::test(1);
+    let generation = crate::terminal::PresentationGeneration::from_counter(1);
     let hovered = HoveredTerminalLink {
         generation,
         cell: CellGridPosition::new(0, 0),
@@ -6915,7 +6919,7 @@ fn active_link_hover_requires_the_platform_modifier() {
         ),
         (None, Some(&hovered))
     );
-    let second = crate::terminal::PresentationGeneration::test(2);
+    let second = crate::terminal::PresentationGeneration::from_counter(2);
     assert_eq!(active_hovered_link(Some(&hovered), second, true), None);
     assert!(hovered_link_for_generation(Some(&hovered), generation).is_some());
     assert_eq!(hovered_link_for_generation(Some(&hovered), second), None);
@@ -6997,8 +7001,8 @@ fn link_preview_fixture_should_not_create_a_target_or_change_terminal_state(
 fn context_link_requires_the_clicked_generation_and_identity() {
     let clicked = crate::terminal::HyperlinkTarget::url("https://example.test/first").unwrap();
     let replacement = crate::terminal::HyperlinkTarget::url("https://example.test/second").unwrap();
-    let first = crate::terminal::PresentationGeneration::test(1);
-    let second = crate::terminal::PresentationGeneration::test(2);
+    let first = crate::terminal::PresentationGeneration::from_counter(1);
+    let second = crate::terminal::PresentationGeneration::from_counter(2);
 
     assert_eq!(
         revalidated_context_link(first, Some(&clicked), first, Some(&clicked)),
@@ -7029,7 +7033,7 @@ fn context_copy_requires_the_frozen_presentation_generation(cx: &mut TestAppCont
             file_preview_eligible: false,
         };
         let current = pane.context_menu_actions(&menu);
-        menu.generation = crate::terminal::PresentationGeneration::test(6);
+        menu.generation = crate::terminal::PresentationGeneration::from_counter(6);
         (current, pane.context_menu_actions(&menu))
     });
 
@@ -7824,7 +7828,8 @@ fn retained_recovery_surface_follows_the_current_terminal_appearance(cx: &mut Te
     let (pane, cx, records) = connected_terminal_pane(cx);
     let events = records.last_event_sender().unwrap();
     let mut retained = blinking_cursor_screen(true, true);
-    Arc::make_mut(&mut retained).generation = crate::terminal::PresentationGeneration::test(1);
+    Arc::make_mut(&mut retained).generation =
+        crate::terminal::PresentationGeneration::from_counter(1);
     events
         .try_send(TerminalSessionEvent::Screen(retained))
         .unwrap();
@@ -7950,9 +7955,9 @@ fn glyph_failure_presents_the_last_valid_frame(
             ))
             .unwrap(),
         (
-            crate::terminal::PresentationGeneration::test(2),
-            crate::terminal::PresentationGeneration::test(1),
-            Some(crate::terminal::PresentationGeneration::test(1)),
+            crate::terminal::PresentationGeneration::from_counter(2),
+            crate::terminal::PresentationGeneration::from_counter(1),
+            Some(crate::terminal::PresentationGeneration::from_counter(1)),
             Some(crate::terminal::FailureClass::Presentation),
             true,
         )
@@ -8088,7 +8093,10 @@ fn second_image_atlas_failure_rolls_back_the_unpresented_generation() {
             )
         })
         .unwrap();
-    assert_eq!(last_valid, crate::terminal::PresentationGeneration::test(1));
+    assert_eq!(
+        last_valid,
+        crate::terminal::PresentationGeneration::from_counter(1)
+    );
     assert_eq!(failure, Some(crate::terminal::FailureClass::Resource));
     assert_eq!(
         cached,
@@ -8182,14 +8190,14 @@ fn newer_same_action_and_export_tokens_reject_stale_completions(cx: &mut TestApp
             TerminalFailure::resource("first-renderer-attempt"),
             true,
             Some(RecoveryAction::RendererResources),
-            crate::terminal::PresentationGeneration::test(1),
+            crate::terminal::PresentationGeneration::from_counter(1),
         );
         let first_recovery = pane.pending_recovery.unwrap();
         pane.present_failure_at(
             TerminalFailure::resource("second-renderer-attempt"),
             true,
             Some(RecoveryAction::RendererResources),
-            crate::terminal::PresentationGeneration::test(2),
+            crate::terminal::PresentationGeneration::from_counter(2),
         );
         let second_recovery = pane.pending_recovery.unwrap();
         assert!(!pane.clear_recovery(first_recovery));
@@ -8279,8 +8287,8 @@ fn renderer_resource_retry_retains_the_previous_gpu_cache_until_success(cx: &mut
             cache.read_with(cx, |cache, _| cache.cached_image_keys()),
         ),
         (
-            crate::terminal::PresentationGeneration::test(2),
-            Some(crate::terminal::PresentationGeneration::test(1)),
+            crate::terminal::PresentationGeneration::from_counter(2),
+            Some(crate::terminal::PresentationGeneration::from_counter(1)),
             Some(crate::terminal::FailureClass::Resource),
             vec![crate::terminal::ImageKey {
                 image_id: 1,
@@ -8499,7 +8507,7 @@ fn occlusion_evicts_image_resources_and_restore_reuploads_without_new_output(
     );
     assert!(pane.read_with(cx, |pane, _| {
         pane.render_lifecycle
-            .is_presented(crate::terminal::PresentationGeneration::test(1))
+            .is_presented(crate::terminal::PresentationGeneration::from_counter(1))
     }));
 }
 
@@ -8598,7 +8606,7 @@ fn product_hiding_releases_graphics_before_redraw_and_restores_without_output(
         );
         assert!(pane.read_with(cx, |pane, _| {
             pane.render_lifecycle
-                .is_presented(crate::terminal::PresentationGeneration::test(1))
+                .is_presented(crate::terminal::PresentationGeneration::from_counter(1))
         }));
     }
 }

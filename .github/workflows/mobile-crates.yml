@@ -1,0 +1,55 @@
+name: Mobile crates
+
+on: pull_request
+
+permissions:
+  contents: read
+
+env:
+  MISE_TASK_RUN_AUTO_INSTALL: 'false'
+  MISE_LOCKED: 'true'
+
+jobs:
+  external-consumer:
+    name: Build external consumer (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26
+            target: aarch64-apple-ios
+          - runner: ubuntu-26.04
+            target: aarch64-linux-android
+    env:
+      CANDIDATE_REVISION: ${{ github.event.pull_request.head.sha }}
+      RUST_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: python rust
+          version: 2026.10.4
+          cache: false
+      - name: Install Rust target
+        run: rustup target add "$RUST_TARGET"
+      - name: Locate iOS SDK
+        if: matrix.target == 'aarch64-apple-ios'
+        run: xcrun --sdk iphoneos --show-sdk-path
+      - name: Set up Android compiler
+        if: matrix.target == 'aarch64-linux-android'
+        run: |
+          ndk_bin="$ANDROID_HOME/ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          clang="$ndk_bin/aarch64-linux-android21-clang"
+          "$clang" --version
+          {
+            printf 'CC_aarch64_linux_android=%s\n' "$clang"
+            printf 'AR_aarch64_linux_android=%s\n' "$ndk_bin/llvm-ar"
+            printf 'CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=%s\n' "$clang"
+          } >> "$GITHUB_ENV"
+      - name: Build crates from the candidate Git revision
+        run: mise run check:mobile-consumer "$RUST_TARGET" "$CANDIDATE_REVISION"

@@ -1,9 +1,10 @@
 use super::*;
 use crate::{host::Paths, storage::Directory};
+use serde::{Deserialize, Serialize};
 
 pub(super) const MAX_DEVICES: usize = 256;
 pub(super) const MAX_REVOCATIONS: usize = 512;
-pub(super) const MAX_CONNECTION_TIME: u64 = 253_402_300_799;
+pub(super) use spaceterm_client::direct::MAX_CONNECTION_TIME;
 /// The agent names one pairing has admitted. Names are meant to be reused, so this bounds an
 /// account that generates one per run.
 pub(super) const MAX_AGENTS: usize = 64;
