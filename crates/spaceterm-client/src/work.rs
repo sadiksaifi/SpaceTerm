@@ -213,7 +213,7 @@ impl WorkConnection {
     /// Makes `link` this handle's shared connection while it stays live, admitted at this build's
     /// work version by a Core of this build running `0.0.0`. Tests use it to serve
     /// a handle in process, without a socket.
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn adopt(&self, link: CoreLink) {
         let version = crate::update::facts::Version::parse("0.0.0")
             .unwrap_or_else(|_| unreachable!("valid version literal"));

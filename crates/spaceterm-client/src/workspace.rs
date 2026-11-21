@@ -18,7 +18,6 @@ pub trait EditJournal {
     fn pending(&self) -> Option<&ClientOperation>;
     fn submit(&mut self, sequence: u64, mutation: Mutation) -> Result<(), CoreError>;
     fn retire(&mut self, result: RetainedOutcome) -> Result<(), CoreError>;
-    fn abandon(&mut self) -> Result<(), CoreError>;
     fn settled(&mut self, sequence: u64) -> Result<(), CoreError>;
 }
 
@@ -34,9 +33,6 @@ impl EditJournal for ClientJournal {
     }
     fn retire(&mut self, result: RetainedOutcome) -> Result<(), CoreError> {
         self.retire(result)
-    }
-    fn abandon(&mut self) -> Result<(), CoreError> {
-        self.abandon()
     }
     fn settled(&mut self, sequence: u64) -> Result<(), CoreError> {
         self.settled(sequence)
@@ -69,7 +65,7 @@ impl From<EditError> for CoreError {
     }
 }
 
-/// A validated outcome of the Original Operation, or an authoritative absence from Resolve.
+/// A validated outcome of the Original Operation, or a Missing reply from Resolve.
 pub enum EditProgress<T = ()> {
     Outcome {
         outcome: Box<RetainedOutcome>,
@@ -98,8 +94,8 @@ pub fn dispatch_original<J: EditJournal, T>(
     retire(journal, reply, reconcile, published)
 }
 
-/// Asks only what became of the already journaled edit. A confirmed absence releases the
-/// pending original, and a lost reply leaves it in place for a later connection.
+/// Asks only what became of the already journaled edit. A Missing reply leaves the journal
+/// pending. Core can answer Missing while a deferred edit is still in flight.
 pub fn resolve_original<J: EditJournal>(
     journal: &mut J,
     exchange: impl FnOnce(Operation) -> Result<ReplyBody, EditError>,
@@ -109,7 +105,6 @@ pub fn resolve_original<J: EditJournal>(
     let sequence = journal.pending().ok_or(CoreError::Protocol)?.sequence;
     match exchange(Operation::Resolve { sequence }) {
         Err(EditError::Request(RequestError::Refused(Refusal::Missing))) => {
-            journal.abandon()?;
             Ok(EditProgress::Missing)
         }
         reply => retire(
@@ -232,12 +227,17 @@ impl WorkspaceEditor {
         if self.journal.pending().is_none() {
             return Ok(None);
         }
-        resolve_original(
+        match resolve_original(
             &mut self.journal,
             |operation| request_by(&link, operation, deadline),
-            |_, outcome| link.acknowledge(outcome.sequence).map_err(EditError::from),
-        )
-        .map(Some)
+            |_, outcome| {
+                let _ = link.acknowledge(outcome.sequence);
+                Ok(())
+            },
+        )? {
+            EditProgress::Missing => Err(EditError::Unconfirmed),
+            outcome => Ok(Some(outcome)),
+        }
     }
 
     pub fn journal(&self) -> &ClientJournal {
@@ -272,7 +272,12 @@ impl WorkspaceEditor {
             &mut self.journal,
             |operation| request_by(link, operation, deadline),
             || (),
-            |_, outcome, ()| link.acknowledge(outcome.sequence).map_err(EditError::from),
+            |_, outcome, ()| {
+                // The receipt is already durable. If this link cannot accept the ack,
+                // the next usable link sends it again from the same journal.
+                let _ = link.acknowledge(outcome.sequence);
+                Ok(())
+            },
         )? {
             EditProgress::Outcome { outcome, .. } => Ok(*outcome),
             EditProgress::Missing => Err(CoreError::Protocol.into()),
@@ -300,7 +305,217 @@ fn request_by(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connection::link::LinkEvent;
+    use crate::direct::{DirectConnection, DirectConnector, DirectError, MachinePin, PairedDevice};
+    use crate::hierarchy::{CreateControl, Inventory};
+    use crate::protocol::{ClientMessage, CoreMessage, RawFrame, Reply, frame};
     use std::cell::Cell;
+    use std::sync::mpsc;
+
+    #[derive(Default)]
+    struct JournalBytes(Cell<Option<Vec<u8>>>);
+    impl JournalStore for JournalBytes {
+        fn read(&self) -> Result<Option<Vec<u8>>, CoreError> {
+            let bytes = self.0.take();
+            self.0.set(bytes.clone());
+            Ok(bytes)
+        }
+        fn replace(&self, bytes: &[u8]) -> Result<(), CoreError> {
+            self.0.set(Some(bytes.to_vec()));
+            Ok(())
+        }
+    }
+
+    struct NoConnector;
+    impl DirectConnector for NoConnector {
+        fn connect(&self) -> Result<DirectConnection, DirectError> {
+            panic!("expected an admitted link");
+        }
+    }
+
+    fn machine(connector: impl DirectConnector + 'static) -> PairedMachine {
+        PairedMachine::new(
+            "spaceterm-test",
+            [1; 32],
+            PairedDevice {
+                pin: MachinePin {
+                    build: "spaceterm-test".into(),
+                    core: [2; 32],
+                    public_key: [3; 32],
+                    certificate: [4; 32],
+                },
+                pairing: [5; 32],
+                client: [6; 32],
+            },
+            Arc::new(connector),
+            Arc::new(|| "Workspace Client".into()),
+            None,
+            Arc::new(|| None),
+        )
+        .unwrap()
+    }
+
+    fn link(machine: &PairedMachine) -> (CoreLink, mpsc::Receiver<()>) {
+        let (wake, frames) = mpsc::channel();
+        let link = CoreLink::new(
+            Arc::new(|_: LinkEvent| {}),
+            Arc::new(move || drop(wake.send(()))),
+            Instant::now(),
+        );
+        machine.work().adopt(link.clone());
+        (link, frames)
+    }
+
+    fn receive(link: &CoreLink, message: CoreMessage) {
+        for bytes in frame::encode_core(&message).unwrap().frames {
+            link.receive(RawFrame::parse(&bytes).unwrap(), Instant::now())
+                .unwrap();
+        }
+    }
+
+    fn inventory(link: &CoreLink) {
+        receive(
+            link,
+            CoreMessage::Inventory(Box::new(InventoryRevision {
+                inventory: Inventory {
+                    repositories: None,
+                    revision: 0,
+                    workspaces: Vec::new(),
+                    close: None,
+                },
+                next_sequence: 1,
+            })),
+        );
+    }
+
+    fn sent(link: &CoreLink, wake: &mpsc::Receiver<()>) -> ClientMessage {
+        let mut assembler = frame::Assembler::default();
+        loop {
+            wake.recv_timeout(Duration::from_secs(2)).unwrap();
+            while let Some((bytes, _)) = link.next_frame() {
+                if let Some(message) = assembler.client(RawFrame::parse(&bytes).unwrap()).unwrap() {
+                    return message;
+                }
+            }
+        }
+    }
+
+    fn mutation() -> Mutation {
+        Mutation::CreateWorkspace {
+            name: "Original".into(),
+            directory: None,
+            control: CreateControl::Creator,
+        }
+    }
+
+    #[test]
+    fn mobile_resolve_missing_leaves_the_original_pending_for_a_deferred_edit() {
+        let machine = machine(NoConnector);
+        let (link, wake) = link(&machine);
+        inventory(&link);
+        let mut editor = machine
+            .workspace_edits(Box::<JournalBytes>::default())
+            .unwrap();
+        let original = mutation();
+        editor.journal.submit(1, original.clone()).unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                let ClientMessage::Request(request) = sent(&link, &wake) else {
+                    panic!("expected Resolve");
+                };
+                assert!(matches!(
+                    request.operation,
+                    Operation::Resolve { sequence: 1 }
+                ));
+                receive(
+                    &link,
+                    CoreMessage::Reply(Box::new(Reply {
+                        id: request.id,
+                        result: Err(Refusal::Missing),
+                    })),
+                );
+            });
+            assert!(matches!(
+                editor.resolve(Instant::now() + Duration::from_secs(2)),
+                Err(EditError::Unconfirmed)
+            ));
+        });
+        let pending = editor.journal().pending().unwrap();
+        assert_eq!(pending.sequence, 1);
+        assert_eq!(pending.mutation, original);
+    }
+
+    #[test]
+    fn mobile_returns_a_confirmed_receipt_and_resends_its_acknowledgement() {
+        struct CloseOnRetire {
+            link: CoreLink,
+            bytes: JournalBytes,
+        }
+        impl JournalStore for CloseOnRetire {
+            fn read(&self) -> Result<Option<Vec<u8>>, CoreError> {
+                self.bytes.read()
+            }
+            fn replace(&self, bytes: &[u8]) -> Result<(), CoreError> {
+                if self.bytes.read()?.is_some() {
+                    self.link.close();
+                }
+                self.bytes.replace(bytes)
+            }
+        }
+        let machine = machine(NoConnector);
+        let (first, wake) = link(&machine);
+        inventory(&first);
+        let mut editor = machine
+            .workspace_edits(Box::new(CloseOnRetire {
+                link: first.clone(),
+                bytes: JournalBytes::default(),
+            }))
+            .unwrap();
+        let receipt = RetainedOutcome {
+            sequence: 1,
+            mutation: mutation(),
+            outcome: Outcome::Accepted { target: [7; 32] },
+        };
+        std::thread::scope(|scope| {
+            let receipt = &receipt;
+            scope.spawn(move || {
+                let ClientMessage::Request(request) = sent(&first, &wake) else {
+                    panic!("expected the original mutation");
+                };
+                assert!(matches!(
+                    request.operation,
+                    Operation::Mutate { sequence: 1, .. }
+                ));
+                receive(
+                    &first,
+                    CoreMessage::Reply(Box::new(Reply {
+                        id: request.id,
+                        result: Ok(ReplyBody::Outcome(receipt.clone())),
+                    })),
+                );
+            });
+            assert_eq!(
+                editor
+                    .submit(mutation(), Instant::now() + Duration::from_secs(2))
+                    .unwrap(),
+                *receipt
+            );
+        });
+        assert!(editor.journal().pending().is_none());
+        assert_eq!(editor.journal().last(), Some(&receipt));
+        let (reconnected, wake) = link(&machine);
+        inventory(&reconnected);
+        assert!(
+            editor
+                .resolve(Instant::now() + Duration::from_secs(2))
+                .unwrap()
+                .is_none()
+        );
+        let ClientMessage::Acknowledge(ack) = sent(&reconnected, &wake) else {
+            panic!("expected the retained acknowledgement");
+        };
+        assert_eq!(ack.sequence, 1);
+    }
 
     #[derive(Default)]
     struct UnsynchronizedStore(Cell<bool>);

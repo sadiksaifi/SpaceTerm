@@ -759,11 +759,6 @@ mod tests {
             fn pending(&self) -> Option<&ClientOperation> {
                 self.record.pending.as_ref()
             }
-            fn abandon(&mut self) -> Result<(), CoreError> {
-                self.record.pending = None;
-                self.binding.lock().unwrap().pending = None;
-                Ok(())
-            }
             fn settled(&mut self, sequence: u64) -> Result<(), CoreError> {
                 if self
                     .record

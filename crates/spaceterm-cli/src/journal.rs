@@ -177,7 +177,10 @@ fn resolve(
         |journal, outcome| acknowledge(journal, link, outcome.sequence, deadline),
     ) {
         Ok(EditProgress::Outcome { outcome, .. }) => Ok(Resolved::Outcome(outcome)),
-        Ok(EditProgress::Missing) => Ok(Resolved::Missing),
+        Ok(EditProgress::Missing) => {
+            journal.abandon().map_err(from_core_error)?;
+            Ok(Resolved::Missing)
+        }
         Err(EditError::Request(_) | EditError::Unconfirmed) => Ok(Resolved::Unknown),
         Err(error) => Err(edit_failure(error)),
     }
