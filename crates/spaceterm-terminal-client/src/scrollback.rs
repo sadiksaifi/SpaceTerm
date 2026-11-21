@@ -27,7 +27,7 @@ pub use cache::PageRequest;
 pub use row::CachedRow;
 pub use selection::{Grid, PointerEvent};
 
-use crate::find::{FindDirection, FindQueryGeneration};
+use crate::find::{FindDirection, FindQueryGeneration, MAX_QUERY_BYTES};
 use crate::selection::{SelectionCopy, SelectionCopyOptions};
 use crate::snapshot::HistorySnapshot as History;
 use crate::snapshot::{
@@ -349,7 +349,11 @@ impl<S: Snapshot> Scrollback<S> {
         self.selection.range().is_some()
     }
 
+    /// Sets a query within the byte limit. Oversized input retires the preceding query.
     pub fn set_find_query(&mut self, generation: FindQueryGeneration, text: String) -> bool {
+        if text.len() > MAX_QUERY_BYTES {
+            return self.end_find(generation);
+        }
         self.find.set_query(generation, text);
         true
     }

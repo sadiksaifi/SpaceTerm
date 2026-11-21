@@ -359,9 +359,10 @@ impl<L, C> DecodedScreen<L, C> {
         generation: PresentationGeneration,
     ) {
         screen.generation = generation;
-        if let Some((width, height)) = self.geometry.cell_pixels {
-            screen.cell_pixels = (u32::from(width), u32::from(height));
-        }
+        screen.cell_pixels = self
+            .geometry
+            .cell_pixels
+            .map_or((0, 0), |(width, height)| (u32::from(width), u32::from(height)));
         screen.history = HistorySnapshot {
             epoch: self.history.epoch,
             oldest: self.history.oldest,
@@ -403,5 +404,57 @@ impl<L, C> DecodedScreen<L, C> {
             color,
             text_color,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn geometry_without_cell_pixels_clears_the_old_dimensions() {
+        let mut decoder: ScreenDecoder = ScreenDecoder::new();
+        let mut screen = ScreenState::default();
+        let initial = ScreenUpdate {
+            geometry: Some(Geometry {
+                columns: 8,
+                rows: 2,
+                cell_pixels: Some((8, 16)),
+            }),
+            modes: Some(Modes::default()),
+            colors: Some(Colors {
+                foreground: [255; 3],
+                background: [0; 3],
+                cursor: [255; 3],
+                cursor_text: [0; 3],
+                palette: vec![[0; 3]; 256],
+                foreground_overridden: false,
+                background_overridden: false,
+                cursor_overridden: false,
+                palette_overrides: [0; 4],
+            }),
+            ..ScreenUpdate::default()
+        };
+        initial.validate().unwrap();
+        decoder
+            .apply(1, None, initial, |_| None)
+            .unwrap()
+            .apply_to_rows(&mut screen, PresentationGeneration::from_counter(1));
+        assert_eq!(screen.cell_pixels, (8, 16));
+
+        let resized = ScreenUpdate {
+            geometry: Some(Geometry {
+                columns: 10,
+                rows: 2,
+                cell_pixels: None,
+            }),
+            ..ScreenUpdate::default()
+        };
+        resized.validate().unwrap();
+        decoder
+            .apply(2, Some(1), resized, |_| None)
+            .unwrap()
+            .apply_to_rows(&mut screen, PresentationGeneration::from_counter(2));
+        assert_eq!(screen.cell_pixels, (0, 0));
     }
 }

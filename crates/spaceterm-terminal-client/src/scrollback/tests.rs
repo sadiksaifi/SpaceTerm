@@ -404,6 +404,22 @@ fn the_cache_keeps_the_rows_nearest_the_view_when_full() {
 }
 
 #[test]
+fn an_oversized_find_query_retires_the_previous_search() {
+    let core = Core::new(1000);
+    let mut scrollback = attached(&core, &["line", "", "", ""]);
+    assert_eq!(core.serve(&mut scrollback), 1);
+    let first = FindQueryGeneration::from_counter(1);
+    assert!(scrollback.set_find_query(first, "line".into()));
+    let generation = PresentationGeneration::from_counter(1);
+    assert!(scrollback.present(generation).unwrap().screen.state.find.is_some());
+
+    let oversized = "é".repeat(crate::find::MAX_QUERY_BYTES / 2 + 1);
+    assert!(scrollback.set_find_query(FindQueryGeneration::from_counter(2), oversized));
+    assert!(scrollback.present(generation).unwrap().screen.state.find.is_none());
+    assert!(scrollback.requests().is_empty());
+}
+
+#[test]
 fn find_matches_across_page_boundaries_and_soft_wraps() {
     let mut core = Core::new(1000);
     // "needle" is soft-wrapped across positions 799 and 800, the boundary of two pages.

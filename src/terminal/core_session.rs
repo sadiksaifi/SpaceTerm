@@ -1597,14 +1597,9 @@ impl TerminalSessionHandle for PresentationHandle {
         self.read(|scrollback| scrollback.scroll(movement));
     }
     fn set_find_query(&self, generation: super::FindQueryGeneration, text: String) {
-        if text.len() <= super::find::MAX_QUERY_BYTES {
-            // The query outlives a connection, so a Pane that opens with Find open finds once
-            // its screen arrives.
-            self.local(|reading| ((), reading.scrollback.set_find_query(generation, text)));
-        } else {
-            // Retire the previous search while the field presents this generation's limit.
-            self.end_find(generation);
-        }
+        // The query outlives a connection, so a Pane that opens with Find open finds once
+        // its screen arrives.
+        self.local(|reading| ((), reading.scrollback.set_find_query(generation, text)));
     }
     fn navigate_find(
         &self,
