@@ -359,7 +359,9 @@ mod tests {
         let (wake, frames) = mpsc::channel();
         let link = CoreLink::new(
             Arc::new(|_: LinkEvent| {}),
-            Arc::new(move || drop(wake.send(()))),
+            Arc::new(move || {
+                let _ = wake.send(());
+            }),
             Instant::now(),
         );
         machine.work().adopt(link.clone());
@@ -406,6 +408,23 @@ mod tests {
             directory: None,
             control: CreateControl::Creator,
         }
+    }
+
+    #[test]
+    fn oversized_workspace_edits_are_refused_before_dispatch() {
+        let mut editor = machine(NoConnector)
+            .workspace_edits(Box::<JournalBytes>::default())
+            .unwrap();
+        let oversized = Mutation::CreateWorkspace {
+            name: "x".repeat(257),
+            directory: None,
+            control: CreateControl::Creator,
+        };
+        assert_eq!(
+            editor.submit(oversized, Instant::now() + Duration::from_secs(2)),
+            Err(EditError::Core(CoreError::Unsupported))
+        );
+        assert!(editor.journal().pending().is_none());
     }
 
     #[test]
