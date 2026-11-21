@@ -171,6 +171,29 @@ fn a_refused_uninstall_says_why_and_keeps_the_command(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_change_that_fails_after_it_landed_shows_the_launcher_as_it_is(cx: &mut TestAppContext) {
+    let (files, window, cx) = open_settings(Some(Launcher::Installed), cx);
+    click(NAVIGATION_SELECTOR, cx);
+    // The link is removed, then saving the directory fails.
+    *files.unlink.lock().unwrap() = Err(ToolFailure::StorageUnavailable);
+    *files.launcher.lock().unwrap() = Ok(Launcher::Missing);
+    choose("Uninstall", cx);
+    let removed = presentation(&window, cx);
+    assert_eq!(
+        (
+            removed.state,
+            removed.action,
+            removed.caption.map(|(_, tone)| tone)
+        ),
+        (
+            "Not installed",
+            Some((ToolAction::Install, "Install")),
+            Some(CaptionTone::Error)
+        )
+    );
+}
+
+#[gpui::test]
 fn another_programs_file_offers_nothing_and_is_never_replaced(cx: &mut TestAppContext) {
     let (files, window, cx) = open_settings(Some(Launcher::OtherFile), cx);
     click(NAVIGATION_SELECTOR, cx);

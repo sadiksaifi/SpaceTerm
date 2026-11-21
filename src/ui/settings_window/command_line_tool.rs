@@ -323,11 +323,11 @@ impl SettingsWindow {
                 match (work, result) {
                     (_, Ok(status)) => row.check = ToolCheck::Checked(status),
                     (ToolWork::Check, Err(failure)) => row.check = ToolCheck::Failed(failure),
-                    // A refused change leaves the last status in place and says why; another
-                    // program's file found meanwhile is read again, so the row shows it.
+                    // A failed change says why and reads the command again: it may have landed
+                    // before the failure, or found another program's file meanwhile.
                     (ToolWork::Install | ToolWork::Repair | ToolWork::Uninstall, Err(failure)) => {
                         row.failure = Some(failure);
-                        again |= matches!(failure, ToolFailure::Occupied | ToolFailure::Blocked);
+                        again = true;
                     }
                 }
                 if again {
