@@ -127,6 +127,21 @@ fn reports_change(message: &[u8]) -> bool {
     }
 }
 
+#[cfg(feature = "client")]
+impl spaceterm_client::connection::path::PathSignal for RouteSignal {
+    fn descriptor(&self) -> RawFd {
+        self.descriptor()
+    }
+    fn changed(&self) -> bool {
+        self.changed()
+    }
+}
+
+#[cfg(feature = "client")]
+pub(crate) fn client_signal() -> Option<Box<dyn spaceterm_client::connection::path::PathSignal>> {
+    RouteSignal::open().map(|signal| Box::new(signal) as _)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -201,19 +216,4 @@ pub(crate) mod tests {
         )));
         assert!(!reports_change(&[]));
     }
-}
-
-#[cfg(feature = "client")]
-impl spaceterm_client::connection::path::PathSignal for RouteSignal {
-    fn descriptor(&self) -> RawFd {
-        self.descriptor()
-    }
-    fn changed(&self) -> bool {
-        self.changed()
-    }
-}
-
-#[cfg(feature = "client")]
-pub(crate) fn client_signal() -> Option<Box<dyn spaceterm_client::connection::path::PathSignal>> {
-    RouteSignal::open().map(|signal| Box::new(signal) as _)
 }

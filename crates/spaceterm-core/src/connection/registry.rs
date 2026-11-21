@@ -122,6 +122,12 @@ impl PairedConnections {
     }
 }
 
+impl Sever for spaceterm_client::connection::quic::QuicSever {
+    fn sever(&self) {
+        self.sever();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,11 +171,5 @@ mod tests {
         registry.revoke([2; 32]);
         assert!(registry.is_empty() && outboxes[2].is_closing());
         assert_eq!(severed.load(Ordering::Relaxed), 3);
-    }
-}
-
-impl Sever for spaceterm_client::connection::quic::QuicSever {
-    fn sever(&self) {
-        self.sever();
     }
 }
