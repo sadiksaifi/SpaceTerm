@@ -203,6 +203,7 @@ pub(crate) mod tests {
     }
 }
 
+#[cfg(feature = "client")]
 impl spaceterm_client::connection::path::PathSignal for RouteSignal {
     fn descriptor(&self) -> RawFd {
         self.descriptor()
@@ -212,6 +213,7 @@ impl spaceterm_client::connection::path::PathSignal for RouteSignal {
     }
 }
 
+#[cfg(feature = "client")]
 pub(crate) fn client_signal() -> Option<Box<dyn spaceterm_client::connection::path::PathSignal>> {
     RouteSignal::open().map(|signal| Box::new(signal) as _)
 }
