@@ -626,7 +626,7 @@ fn provision_retains_exact_signed_bytes_and_reuses_verified_installation() {
     std::fs::remove_dir_all(root).unwrap();
 }
 #[test]
-fn a_client_links_the_launcher_the_installer_selects_and_keeps_other_files() {
+fn a_client_links_and_removes_the_launcher_the_installer_selects_and_keeps_other_files() {
     let home = temporary();
     let service = Service::for_paths(crate::host::Paths {
         identity: "spaceterm-development".into(),
@@ -712,6 +712,15 @@ fn a_client_links_the_launcher_the_installer_selects_and_keeps_other_files() {
             assert_eq!(service.cli_launcher(), Ok(CliLauncher::NotLink));
             assert_eq!(service.link_cli(unused), Ok(CliLink::Kept));
             assert_eq!(std::fs::read(&launcher).unwrap(), b"local tool");
+
+            // Removing the launcher keeps another tool's file and removes only SpaceTerm's link.
+            assert_eq!(service.unlink_cli(), Ok(()));
+            assert_eq!(std::fs::read(&launcher).unwrap(), b"local tool");
+            std::fs::remove_file(&launcher).unwrap();
+            assert_eq!(service.link_cli(unused), Ok(CliLink::Linked));
+            assert_eq!(service.unlink_cli(), Ok(()));
+            assert_eq!(service.cli_launcher(), Ok(CliLauncher::Missing));
+            assert_eq!(service.unlink_cli(), Ok(()));
         },
     );
     std::fs::remove_dir_all(home).unwrap();
