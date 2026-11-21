@@ -141,7 +141,11 @@ impl ClientJournal {
             return Err(CoreError::Unsupported);
         }
         self.record.pending = Some(ClientOperation { sequence, mutation });
-        self.save()
+        let Ok(bytes) = serde_json::to_vec(&self.record) else {
+            self.record.pending = None;
+            return Err(CoreError::StorageUnavailable);
+        };
+        self.replace(&bytes)
     }
     /// Retires the pending operation with its validated outcome in one write. Acknowledge the
     /// outcome to the server only after this succeeds; [`Self::last`] keeps it to acknowledge
@@ -166,7 +170,10 @@ impl ClientJournal {
     }
     fn save(&mut self) -> Result<(), CoreError> {
         let bytes = serde_json::to_vec(&self.record).map_err(|_| CoreError::StorageUnavailable)?;
-        if let Err(error) = self.store.replace(&bytes) {
+        self.replace(&bytes)
+    }
+    fn replace(&mut self, bytes: &[u8]) -> Result<(), CoreError> {
+        if let Err(error) = self.store.replace(bytes) {
             // Re-read the durable result before issuing another operation from this journal.
             self.available = false;
             let retained = read(self.store.read()?)?.ok_or(CoreError::StorageUnavailable)?;

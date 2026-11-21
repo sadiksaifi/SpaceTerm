@@ -447,6 +447,29 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn journal_accepts_a_valid_edit_after_encoding_fails() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        use std::path::PathBuf;
+
+        let mut journal =
+            ClientJournal::open(Box::<JournalBytes>::default(), [2; 32], [6; 32]).unwrap();
+        let invalid = Mutation::CreateWorkspace {
+            name: "Original".into(),
+            directory: Some(PathBuf::from(OsString::from_vec(vec![b'/', 0xff]))),
+            control: CreateControl::Creator,
+        };
+        assert!(invalid.is_bounded());
+        assert!(matches!(
+            journal.submit(1, invalid),
+            Err(CoreError::StorageUnavailable)
+        ));
+
+        journal.submit(1, mutation()).unwrap();
+    }
+
     #[test]
     fn default_bounded_dial_never_starts_an_unbounded_connector() {
         assert_eq!(
