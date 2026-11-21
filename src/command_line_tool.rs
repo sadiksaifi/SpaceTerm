@@ -3,11 +3,9 @@
 //! Installing creates the link `install.sh` creates, through the same service code, so it needs
 //! no administrator and asks for no password. It never replaces a file or link that another
 //! program put at the launcher path. SpaceTerm runs no shell and edits no shell profile to learn
-//! or change PATH, so it makes no claim about which command a shell finds. Reads and installs
-//! block, so callers run them off the UI thread.
-use std::future::Future;
-use std::path::{Path, PathBuf};
-use std::pin::Pin;
+//! or change PATH, so it makes no claim about which command a shell finds. Removing it removes
+//! only SpaceTerm's own link. Reads, installs and removals block, so callers run them off the
+//! UI thread.
 use std::sync::Arc;
 
 /// What the launcher path holds.
@@ -31,14 +29,14 @@ pub(crate) enum Launcher {
 }
 
 impl Launcher {
-    /// The one action each state offers: Install where nothing usable is there, and Reveal
-    /// wherever a file is.
-    pub(crate) fn action(self) -> ToolAction {
+    /// The actions each state offers: Install where nothing usable is there, and Repair or
+    /// Uninstall for SpaceTerm's working link. Another program's entry, and a link blocked by
+    /// one, offer none, because SpaceTerm never touches that entry.
+    pub(crate) fn actions(self) -> &'static [ToolAction] {
         match self {
-            Self::Missing | Self::Stale | Self::Outdated => ToolAction::Install,
-            Self::Installed | Self::OtherLink | Self::OtherFile | Self::Blocked => {
-                ToolAction::Reveal
-            }
+            Self::Missing | Self::Stale | Self::Outdated => &[ToolAction::Install],
+            Self::Installed => &[ToolAction::Repair, ToolAction::Uninstall],
+            Self::OtherLink | Self::OtherFile | Self::Blocked => &[],
         }
     }
 }
@@ -46,12 +44,13 @@ impl Launcher {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ToolAction {
     Install,
-    /// Shows the launcher in the file manager, or for [`Launcher::Blocked`] the entry that
-    /// blocks it.
-    Reveal,
+    /// Links SpaceTerm's launcher again, as Install does.
+    Repair,
+    /// Removes SpaceTerm's launcher.
+    Uninstall,
 }
 
-/// Why a read, install or reveal didn't complete. Classifications only: no path, environment
+/// Why a read, install or removal didn't complete. Classifications only: no path, environment
 /// value or native error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ToolFailure {
@@ -71,8 +70,6 @@ pub(crate) enum ToolFailure {
     Occupied,
     /// Another program's entry holds the temporary name replacement uses, so nothing changed.
     Blocked,
-    /// The file manager is missing, refused or didn't answer.
-    RevealUnavailable,
 }
 
 /// The outcome of linking the launcher.
@@ -85,44 +82,26 @@ pub(crate) enum LinkOutcome {
     Blocked,
 }
 
-/// The file manager's answer to a reveal.
-pub(crate) type Reveal = Pin<Box<dyn Future<Output = Result<(), ToolFailure>> + Send>>;
-
 /// The account's launcher files.
 pub(crate) trait LauncherFiles: Send + Sync {
     /// What the launcher path holds, read without following it.
     fn read(&self) -> Result<Launcher, ToolFailure>;
     /// Links the launcher as the installer does, deciding again what the path holds.
     fn link(&self) -> Result<LinkOutcome, ToolFailure>;
-    /// The launcher's path.
-    fn launcher(&self) -> PathBuf;
-    /// The temporary name a replacement links from.
-    fn temporary(&self) -> PathBuf;
-}
-
-/// The desktop's file manager.
-pub(crate) trait FileViewer: Send + Sync {
-    /// Asks it to show `path` selected in its folder. Called on the UI thread, which it never
-    /// blocks; the returned future settles with the file manager's answer.
-    fn reveal(&self, path: &Path) -> Reveal;
-}
-
-/// The host capabilities a [`CommandLineTool`] uses.
-#[derive(Clone)]
-pub(crate) struct CommandLineToolAdapters {
-    pub(crate) files: Arc<dyn LauncherFiles>,
-    pub(crate) viewer: Arc<dyn FileViewer>,
+    /// Removes SpaceTerm's own link, deciding again what the path holds. Another program's
+    /// entry, or nothing there, is left as it is.
+    fn unlink(&self) -> Result<(), ToolFailure>;
 }
 
 /// The launcher of one build identity, such as `spaceterm-development`.
 pub(crate) struct CommandLineTool {
     name: &'static str,
-    adapters: CommandLineToolAdapters,
+    files: Arc<dyn LauncherFiles>,
 }
 
 impl CommandLineTool {
-    pub(crate) fn new(name: &'static str, adapters: CommandLineToolAdapters) -> Self {
-        Self { name, adapters }
+    pub(crate) fn new(name: &'static str, files: Arc<dyn LauncherFiles>) -> Self {
+        Self { name, files }
     }
 
     /// The command people type, which is the launcher's file name.
@@ -132,18 +111,18 @@ impl CommandLineTool {
 
     /// Reads what the launcher path holds. Blocks.
     pub(crate) fn status(&self) -> Result<Launcher, ToolFailure> {
-        self.adapters.files.read()
+        self.files.read()
     }
 
-    /// Installs the launcher unless another program's file or link is there, and reports the
-    /// launcher afterward. An installed launcher is left as it is. Blocks.
+    /// Links the launcher unless another program's file or link is there, and reports the
+    /// launcher afterward. Install and Repair both run this; an installed launcher is linked
+    /// again. Blocks.
     pub(crate) fn install(&self) -> Result<Launcher, ToolFailure> {
-        match self.adapters.files.read()? {
-            Launcher::Installed => {}
+        match self.files.read()? {
             Launcher::OtherLink | Launcher::OtherFile => return Err(ToolFailure::Occupied),
             Launcher::Blocked => return Err(ToolFailure::Blocked),
-            Launcher::Missing | Launcher::Stale | Launcher::Outdated => {
-                match self.adapters.files.link()? {
+            Launcher::Missing | Launcher::Stale | Launcher::Outdated | Launcher::Installed => {
+                match self.files.link()? {
                     LinkOutcome::Linked => {}
                     LinkOutcome::Kept => return Err(ToolFailure::Occupied),
                     LinkOutcome::Blocked => return Err(ToolFailure::Blocked),
@@ -153,15 +132,11 @@ impl CommandLineTool {
         self.status()
     }
 
-    /// Shows `launcher`'s entry in the file manager: the entry blocking a blocked launcher, and
-    /// the launcher otherwise. Only a launcher whose action is Reveal offers this.
-    pub(crate) fn reveal(&self, launcher: Launcher) -> Reveal {
-        let path = if launcher == Launcher::Blocked {
-            self.adapters.files.temporary()
-        } else {
-            self.adapters.files.launcher()
-        };
-        self.adapters.viewer.reveal(&path)
+    /// Removes SpaceTerm's launcher and reports the launcher afterward, which another program's
+    /// entry may still hold. Blocks.
+    pub(crate) fn uninstall(&self) -> Result<Launcher, ToolFailure> {
+        self.files.unlink()?;
+        self.status()
     }
 }
 
@@ -171,15 +146,17 @@ pub(crate) mod testing {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    pub(crate) const DIRECTORY: &str = "/home/someone/.local/bin";
-
-    /// Launcher files whose contents the test sets and whose links it counts.
+    /// Launcher files whose contents the test sets and whose links and removals it counts.
     pub(crate) struct ScriptedFiles {
         pub(crate) launcher: Mutex<Result<Launcher, ToolFailure>>,
         /// What linking returns. A successful link leaves the launcher installed; a kept one
         /// found another program's link there.
         pub(crate) link: Mutex<Result<LinkOutcome, ToolFailure>>,
+        /// What removing returns. A successful removal leaves nothing where SpaceTerm's link
+        /// was, as the service does, and leaves another program's entry in place.
+        pub(crate) unlink: Mutex<Result<(), ToolFailure>>,
         pub(crate) links: AtomicUsize,
+        pub(crate) unlinks: AtomicUsize,
         pub(crate) reads: AtomicUsize,
     }
 
@@ -188,13 +165,19 @@ pub(crate) mod testing {
             Arc::new(Self {
                 launcher: Mutex::new(launcher),
                 link: Mutex::new(Ok(LinkOutcome::Linked)),
+                unlink: Mutex::new(Ok(())),
                 links: AtomicUsize::new(0),
+                unlinks: AtomicUsize::new(0),
                 reads: AtomicUsize::new(0),
             })
         }
 
         pub(crate) fn links(&self) -> usize {
             self.links.load(Ordering::SeqCst)
+        }
+
+        pub(crate) fn unlinks(&self) -> usize {
+            self.unlinks.load(Ordering::SeqCst)
         }
     }
 
@@ -214,43 +197,23 @@ pub(crate) mod testing {
             }
             outcome
         }
-        fn launcher(&self) -> PathBuf {
-            Path::new(DIRECTORY).join("spaceterm-development")
-        }
-        fn temporary(&self) -> PathBuf {
-            Path::new(DIRECTORY).join(".launcher-spaceterm-development")
-        }
-    }
-
-    /// A file manager that records what it was asked to show and answers as the test sets.
-    #[derive(Default)]
-    pub(crate) struct RecordingViewer {
-        pub(crate) shown: Mutex<Vec<PathBuf>>,
-        pub(crate) refuse: bool,
-    }
-
-    impl FileViewer for RecordingViewer {
-        fn reveal(&self, path: &Path) -> Reveal {
-            self.shown.lock().unwrap().push(path.to_owned());
-            let answer = if self.refuse {
-                Err(ToolFailure::RevealUnavailable)
-            } else {
-                Ok(())
-            };
-            Box::pin(std::future::ready(answer))
+        fn unlink(&self) -> Result<(), ToolFailure> {
+            self.unlinks.fetch_add(1, Ordering::SeqCst);
+            let outcome = *self.unlink.lock().unwrap();
+            if outcome.is_ok() {
+                let mut launcher = self.launcher.lock().unwrap();
+                if !matches!(*launcher, Ok(Launcher::OtherLink | Launcher::OtherFile)) {
+                    *launcher = Ok(Launcher::Missing);
+                }
+            }
+            outcome
         }
     }
 
-    pub(crate) fn tool(
-        files: &Arc<ScriptedFiles>,
-        viewer: &Arc<RecordingViewer>,
-    ) -> CommandLineTool {
+    pub(crate) fn tool(files: &Arc<ScriptedFiles>) -> CommandLineTool {
         CommandLineTool::new(
             "spaceterm-development",
-            CommandLineToolAdapters {
-                files: Arc::clone(files) as Arc<dyn LauncherFiles>,
-                viewer: Arc::clone(viewer) as Arc<dyn FileViewer>,
-            },
+            Arc::clone(files) as Arc<dyn LauncherFiles>,
         )
     }
 }
@@ -260,91 +223,84 @@ mod tests {
     use super::testing::*;
     use super::*;
 
-    fn fixture(launcher: Launcher) -> (Arc<ScriptedFiles>, Arc<RecordingViewer>, CommandLineTool) {
+    fn fixture(launcher: Launcher) -> (Arc<ScriptedFiles>, CommandLineTool) {
         let files = ScriptedFiles::new(Ok(launcher));
-        let viewer = Arc::new(RecordingViewer::default());
-        let tool = tool(&files, &viewer);
-        (files, viewer, tool)
+        let tool = tool(&files);
+        (files, tool)
     }
 
     #[test]
     fn installing_links_a_missing_stale_or_outdated_launcher_and_reports_it_installed() {
         for launcher in [Launcher::Missing, Launcher::Stale, Launcher::Outdated] {
-            let (files, _, tool) = fixture(launcher);
-            assert_eq!(tool.status().map(Launcher::action), Ok(ToolAction::Install));
+            let (files, tool) = fixture(launcher);
+            assert_eq!(
+                tool.status().map(Launcher::actions),
+                Ok(&[ToolAction::Install][..])
+            );
             assert_eq!(tool.install(), Ok(Launcher::Installed));
             assert_eq!(files.links(), 1);
         }
     }
 
     #[test]
-    fn another_programs_file_or_link_is_never_replaced() {
+    fn repairing_an_installed_launcher_links_it_again() {
+        let (files, tool) = fixture(Launcher::Installed);
+        assert_eq!(
+            tool.status().map(Launcher::actions),
+            Ok(&[ToolAction::Repair, ToolAction::Uninstall][..])
+        );
+        assert_eq!(tool.install(), Ok(Launcher::Installed));
+        assert_eq!(files.links(), 1);
+    }
+
+    #[test]
+    fn uninstalling_removes_the_launcher_and_reports_it_missing() {
+        let (files, tool) = fixture(Launcher::Installed);
+        assert_eq!(tool.uninstall(), Ok(Launcher::Missing));
+        assert_eq!(files.unlinks(), 1);
+        assert_eq!(
+            tool.status().map(Launcher::actions),
+            Ok(&[ToolAction::Install][..])
+        );
+    }
+
+    #[test]
+    fn another_programs_file_or_link_is_never_replaced_and_offers_nothing() {
         for launcher in [Launcher::OtherLink, Launcher::OtherFile] {
-            let (files, _, tool) = fixture(launcher);
+            let (files, tool) = fixture(launcher);
             assert_eq!(tool.install(), Err(ToolFailure::Occupied));
             assert_eq!(files.links(), 0);
-            assert_eq!(tool.status().map(Launcher::action), Ok(ToolAction::Reveal));
+            assert_eq!(tool.status().map(Launcher::actions), Ok(&[][..]));
         }
         // A file that appears between the read and the link is kept by the link itself.
-        let (files, _, tool) = fixture(Launcher::Missing);
+        let (files, tool) = fixture(Launcher::Missing);
         *files.link.lock().unwrap() = Ok(LinkOutcome::Kept);
         assert_eq!(tool.install(), Err(ToolFailure::Occupied));
     }
 
     #[test]
-    fn an_installed_launcher_is_left_as_it_is() {
-        let (files, _, tool) = fixture(Launcher::Installed);
-        assert_eq!(tool.install(), Ok(Launcher::Installed));
-        assert_eq!(files.links(), 0);
-    }
-
-    #[test]
     fn failures_pass_through_as_classifications() {
         let files = ScriptedFiles::new(Err(ToolFailure::UnsafeStorage));
-        let viewer = Arc::new(RecordingViewer {
-            refuse: true,
-            ..RecordingViewer::default()
-        });
-        let tool = tool(&files, &viewer);
+        let tool = tool(&files);
         assert_eq!(tool.status(), Err(ToolFailure::UnsafeStorage));
         assert_eq!(tool.install(), Err(ToolFailure::UnsafeStorage));
-        assert_eq!(
-            futures_lite::future::block_on(tool.reveal(Launcher::Installed)),
-            Err(ToolFailure::RevealUnavailable)
-        );
         *files.launcher.lock().unwrap() = Ok(Launcher::Missing);
         *files.link.lock().unwrap() = Err(ToolFailure::Busy);
         assert_eq!(tool.install(), Err(ToolFailure::Busy));
+        *files.launcher.lock().unwrap() = Ok(Launcher::Installed);
+        *files.unlink.lock().unwrap() = Err(ToolFailure::Busy);
+        assert_eq!(tool.uninstall(), Err(ToolFailure::Busy));
+        assert_eq!(tool.status(), Ok(Launcher::Installed));
     }
 
     #[test]
-    fn a_blocked_launcher_is_never_linked_and_reveals_the_entry_that_blocks_it() {
-        let (files, viewer, tool) = fixture(Launcher::Outdated);
+    fn a_blocked_launcher_is_never_linked_and_offers_nothing() {
+        let (files, tool) = fixture(Launcher::Outdated);
         *files.link.lock().unwrap() = Ok(LinkOutcome::Blocked);
         assert_eq!(tool.install(), Err(ToolFailure::Blocked));
         assert_eq!(tool.status(), Ok(Launcher::Blocked));
         assert_eq!(tool.install(), Err(ToolFailure::Blocked));
         assert_eq!(files.links(), 1);
-        assert_eq!(
-            futures_lite::future::block_on(tool.reveal(Launcher::Blocked)),
-            Ok(())
-        );
-        assert_eq!(
-            *viewer.shown.lock().unwrap(),
-            [Path::new(DIRECTORY).join(".launcher-spaceterm-development")]
-        );
-    }
-
-    #[test]
-    fn reveal_shows_the_launcher_itself() {
-        let (_, viewer, tool) = fixture(Launcher::Installed);
-        assert_eq!(
-            futures_lite::future::block_on(tool.reveal(Launcher::Installed)),
-            Ok(())
-        );
-        assert_eq!(
-            *viewer.shown.lock().unwrap(),
-            [Path::new(DIRECTORY).join("spaceterm-development")]
-        );
+        assert_eq!(tool.status().map(Launcher::actions), Ok(&[][..]));
     }
 }

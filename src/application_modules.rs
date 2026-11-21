@@ -57,6 +57,8 @@ mod core_resource_manifest;
 )]
 mod domain;
 #[cfg(feature = "desktop")]
+mod file_viewer;
+#[cfg(feature = "desktop")]
 mod host_fonts;
 #[cfg(feature = "desktop")]
 mod invitation_links;

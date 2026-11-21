@@ -170,7 +170,6 @@ fn desktop_profile(
                 this_computer: "This Computer",
                 this_computer_phrase: "this computer",
                 system_directory_selection: "Choose Directory…",
-                reveal_file: "Show in Folder",
                 uninstall_description: "Removes SpaceTerm and SpaceTerm Core from this computer.",
                 uninstall_app_remedy: "run install.sh --uninstall",
             },
@@ -242,7 +241,7 @@ fn compose(
         direct_machines.clone(),
     );
     let core_context_paths = startup.core_context_paths();
-    let command_line_tool = command_line_tool(identity, bus.clone());
+    let command_line_tool = command_line_tool(identity);
     // Repository Status reads run on threads that the deterministic test executor rejects.
     let repository_status = (!cfg!(test)).then(|| {
         super::repository_status_host::repository_status_adapters(
@@ -341,19 +340,15 @@ fn compose(
     })
 }
 
-/// This build's command, installed through the account's service and shown in the file manager.
+/// This build's command, installed through the account's service.
 fn command_line_tool(
     identity: ApplicationIdentity,
-    bus: Option<super::linux_session_bus::SessionBus>,
 ) -> Option<Arc<crate::command_line_tool::CommandLineTool>> {
     let files =
         super::account_launcher_files::AccountLauncherFiles::new(identity.directory_name()).ok()?;
     Some(Arc::new(crate::command_line_tool::CommandLineTool::new(
         identity.directory_name(),
-        crate::command_line_tool::CommandLineToolAdapters {
-            files: Arc::new(files),
-            viewer: Arc::new(super::linux_file_viewer::FileManagerViewer::new(bus)),
-        },
+        Arc::new(files),
     )))
 }
 

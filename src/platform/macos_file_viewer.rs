@@ -5,7 +5,7 @@ use objc2::MainThreadMarker;
 use objc2_app_kit::NSWorkspace;
 use objc2_foundation::NSString;
 
-use crate::command_line_tool::{FileViewer, Reveal, ToolFailure};
+use crate::file_viewer::{FileViewer, Reveal, RevealUnavailable};
 
 pub(crate) struct FinderViewer;
 
@@ -16,14 +16,14 @@ impl FileViewer for FinderViewer {
     }
 }
 
-fn select(path: &Path) -> Result<(), ToolFailure> {
+fn select(path: &Path) -> Result<(), RevealUnavailable> {
     if MainThreadMarker::new().is_none() {
-        return Err(ToolFailure::RevealUnavailable);
+        return Err(RevealUnavailable);
     }
-    let path = path.to_str().ok_or(ToolFailure::RevealUnavailable)?;
+    let path = path.to_str().ok_or(RevealUnavailable)?;
     // An empty root opens a new Finder window on the file's folder.
     NSWorkspace::sharedWorkspace()
         .selectFile_inFileViewerRootedAtPath(Some(&NSString::from_str(path)), &NSString::new())
         .then_some(())
-        .ok_or(ToolFailure::RevealUnavailable)
+        .ok_or(RevealUnavailable)
 }

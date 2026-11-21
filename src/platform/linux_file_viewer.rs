@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use super::linux_session_bus::SessionBus;
-use crate::command_line_tool::{FileViewer, Reveal, ToolFailure};
+use crate::file_viewer::{FileViewer, Reveal, RevealUnavailable};
 
 const SERVICE: &str = "org.freedesktop.FileManager1";
 const PATH: &str = "/org/freedesktop/FileManager1";
@@ -23,7 +23,7 @@ impl FileViewer for FileManagerViewer {
     /// within the bus's method timeout are all unavailable.
     fn reveal(&self, path: &Path) -> Reveal {
         let unavailable =
-            || -> Reveal { Box::pin(std::future::ready(Err(ToolFailure::RevealUnavailable))) };
+            || -> Reveal { Box::pin(std::future::ready(Err(RevealUnavailable))) };
         let Some(bus) = &self.bus else {
             return unavailable();
         };
@@ -40,7 +40,7 @@ impl FileViewer for FileManagerViewer {
                     &(vec![uri.as_str()], ""),
                 )
                 .map(|_| ())
-                .map_err(|_| ToolFailure::RevealUnavailable);
+                .map_err(|_| RevealUnavailable);
             let _ = answer.try_send(shown);
         });
         if dispatched.is_err() {
@@ -50,7 +50,7 @@ impl FileViewer for FileManagerViewer {
             settled
                 .recv()
                 .await
-                .unwrap_or(Err(ToolFailure::RevealUnavailable))
+                .unwrap_or(Err(RevealUnavailable))
         })
     }
 }
@@ -64,7 +64,7 @@ mod tests {
         let viewer = FileManagerViewer::new(None);
         assert_eq!(
             futures_lite::future::block_on(viewer.reveal(Path::new("/home/someone/.local/bin/x"))),
-            Err(ToolFailure::RevealUnavailable)
+            Err(RevealUnavailable)
         );
     }
 }
@@ -130,7 +130,7 @@ mod linux_adapter_tests {
         (connection, shows)
     }
 
-    fn reveal(bus: &Bus) -> Result<(), ToolFailure> {
+    fn reveal(bus: &Bus) -> Result<(), RevealUnavailable> {
         let viewer =
             FileManagerViewer::new(Some(SessionBus::connect_to(Some(bus.1.clone())).unwrap()));
         futures_lite::future::block_on(viewer.reveal(Path::new("/home/some one/.local/bin/x")))
@@ -139,11 +139,11 @@ mod linux_adapter_tests {
     #[test]
     fn linux_reveal_reports_the_file_managers_answer() {
         let absent = bus();
-        assert_eq!(reveal(&absent), Err(ToolFailure::RevealUnavailable));
+        assert_eq!(reveal(&absent), Err(RevealUnavailable));
 
         let refusing = bus();
         let (_core, shows) = serve(&refusing, true);
-        assert_eq!(reveal(&refusing), Err(ToolFailure::RevealUnavailable));
+        assert_eq!(reveal(&refusing), Err(RevealUnavailable));
         assert_eq!(shows.try_recv().unwrap().len(), 1);
 
         let showing = bus();
