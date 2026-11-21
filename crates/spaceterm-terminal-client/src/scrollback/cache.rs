@@ -10,6 +10,7 @@ use std::ops::Range;
 /// One `Operation::ScrollbackPage` this cache asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PageRequest {
+    session: [u8; 32],
     pub epoch: u64,
     pub start: u64,
     pub rows: u16,
@@ -26,8 +27,8 @@ pub(super) struct ScrollbackCache<L, C> {
     session: Option<[u8; 32]>,
     history: History,
     rows: BTreeMap<u64, CachedRow<L, C>>,
-    /// Pages asked for and not answered yet, of any epoch or connection. Every one counts toward
-    /// the in-flight limit until its reply settles it; the link answers each exactly once.
+    /// Unanswered pages for this session, including across epochs and connections. They each
+    /// count toward the in-flight limit until their replies settle them.
     in_flight: Vec<PageRequest>,
     /// Ranges answered for the current history, cached or not. A refused or shortened page is not
     /// asked for again until a frame reports different history.
@@ -60,6 +61,8 @@ impl<L, C> ScrollbackCache<L, C> {
         let same = self.session == Some(session);
         if !same {
             self.clear();
+            self.history = History::default();
+            self.in_flight.clear();
             self.session = Some(session);
         }
         same
@@ -116,17 +119,19 @@ impl<L, C> ScrollbackCache<L, C> {
         }
     }
 
-    /// Settles a page this cache asked for. Rows of an older epoch are discarded. A page that
-    /// starts later than asked shows the server discarded the rows before it.
+    /// Settles a page this cache asked for. A page still in flight can fill rows only for the
+    /// current session and epoch. A page that starts later than asked shows the server discarded
+    /// the rows before it.
     pub(super) fn page(
         &mut self,
         request: PageRequest,
         page: Option<DecodedPage<L, C>>,
         focus: u64,
     ) {
-        if let Some(index) = self.in_flight.iter().position(|sent| *sent == request) {
-            self.in_flight.swap_remove(index);
-        }
+        let Some(index) = self.in_flight.iter().position(|sent| *sent == request) else {
+            return;
+        };
+        self.in_flight.swap_remove(index);
         if request.epoch != self.history.epoch {
             return;
         }
@@ -147,13 +152,12 @@ impl<L, C> ScrollbackCache<L, C> {
         }
     }
 
-    /// Forgets requests that were never sent, so they neither count toward the in-flight limit
-    /// nor block asking for their rows again.
     /// Forgets every request still in flight, whose replies reach a connection that ended.
     pub(super) fn forget_in_flight(&mut self) {
         self.in_flight.clear();
     }
 
+    /// Forgets requests that were never sent, leaving their rows available to request again.
     pub(super) fn unsent(&mut self, requests: &[PageRequest]) {
         for request in requests {
             if let Some(index) = self.in_flight.iter().position(|sent| sent == request) {
@@ -171,6 +175,9 @@ impl<L, C> ScrollbackCache<L, C> {
     /// Pages to ask for so the retained positions in `wanted` become cached, nearest to `focus`
     /// first, within the in-flight limit.
     pub(super) fn request(&mut self, wanted: Range<u64>, focus: u64) -> Vec<PageRequest> {
+        let Some(session) = self.session else {
+            return Vec::new();
+        };
         let wanted = self.retained(wanted);
         let mut missing = Vec::new();
         let mut cursor = wanted.start;
@@ -228,6 +235,7 @@ impl<L, C> ScrollbackCache<L, C> {
                     run.end = page.start;
                 }
                 let request = PageRequest {
+                    session,
                     epoch: self.history.epoch,
                     start: page.start,
                     rows: u16::try_from(page.end - page.start).unwrap_or(MAX_PAGE_ROWS),

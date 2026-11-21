@@ -197,6 +197,9 @@ fn select<L: Clone, C: Copy>(
     } else {
         last
     };
+    if first > through {
+        return row;
+    }
     let mut cells = row.to_vec();
     for cell in &mut cells[first..=through] {
         cell.selected = true;

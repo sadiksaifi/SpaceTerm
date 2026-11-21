@@ -200,6 +200,7 @@ impl<S: Snapshot> Scrollback<S> {
     /// cached only when the session is unchanged and the next frame keeps its history epoch.
     pub fn attach(&mut self, session: [u8; 32]) {
         if !self.cache.attach(session) {
+            self.screen = None;
             self.reset_reading();
         }
         self.warm = true;
@@ -229,6 +230,7 @@ impl<S: Snapshot> Scrollback<S> {
         }
         self.prune_placeholders();
         let alternate = screen.screen().active_screen == ActiveScreenSnapshot::Alternate;
+        let columns = screen.screen().size.cols;
         self.screen = Some(screen);
         if alternate {
             self.view.follow();
@@ -242,7 +244,7 @@ impl<S: Snapshot> Scrollback<S> {
             self.floor()
         };
         self.selection
-            .observe(floor.max(readable.start)..readable.end);
+            .observe(floor.max(readable.start)..readable.end, columns);
     }
 
     /// Moves the view by native wheel steps; positive steps move toward older rows.
@@ -322,7 +324,7 @@ impl<S: Snapshot> Scrollback<S> {
     }
 
     /// Sets the Selection assistive technology chose, or clears it. A Selection of another
-    /// history epoch, or with an endpoint outside the readable lines, leaves the Selection
+    /// history epoch, or with an endpoint outside the readable grid, leaves the Selection
     /// unchanged. Returns whether it changed.
     pub fn select(&mut self, selection: Option<EpochSelection>) -> bool {
         let Some(screen) = self.screen.clone() else {
@@ -334,7 +336,8 @@ impl<S: Snapshot> Scrollback<S> {
             None => None,
             Some(selection) => {
                 let point = |(line, column): (u64, u16)| {
-                    readable.contains(&line).then_some(Point { line, column })
+                    (readable.contains(&line) && column < lines.screen.size.cols)
+                        .then_some(Point { line, column })
                 };
                 match point(selection.start).zip(point(selection.end)) {
                     Some(range) if selection.epoch == lines.history.epoch => Some(range),

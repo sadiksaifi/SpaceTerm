@@ -104,28 +104,27 @@ impl LocalSelection {
         self.set(range)
     }
 
-    /// Keeps the Selection on readable lines after the oldest rows were discarded.
-    pub(super) fn observe(&mut self, readable: Range<u64>) {
-        let Some((start, end)) = self.range else {
-            return;
-        };
-        if end.line < readable.start || readable.is_empty() {
-            self.clear();
-        } else if start.line < readable.start {
-            self.set(Some((
-                Point {
-                    line: readable.start,
-                    column: 0,
-                },
-                end,
-            )));
+    /// Keeps the Selection and its drag anchor within the current grid.
+    pub(super) fn observe(&mut self, readable: Range<u64>, columns: u16) {
+        if let Some((start, end)) = self.range {
+            if !readable.contains(&end.line) || start.column >= columns || end.column >= columns {
+                self.clear();
+            } else if start.line < readable.start {
+                self.set(Some((
+                    Point {
+                        line: readable.start,
+                        column: 0,
+                    },
+                    end,
+                )));
+            }
         }
         if self
             .gesture
             .anchor
-            .is_some_and(|anchor| anchor.line < readable.start)
+            .is_some_and(|anchor| !readable.contains(&anchor.line) || anchor.column >= columns)
         {
-            self.gesture = Gesture::default();
+            self.cancel_gesture();
         }
     }
 

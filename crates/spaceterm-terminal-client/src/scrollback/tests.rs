@@ -174,17 +174,13 @@ fn a_cached_row_presents_its_cells_again_including_styled_trailing_blanks() {
 fn pages_start_small_continue_at_full_size_and_stay_within_four_in_flight() {
     let core = Core::new(3000);
     let mut scrollback = attached(&core, &["$", "", "", ""]);
-    let warm = scrollback.requests();
+    let [warm] = scrollback.requests().try_into().unwrap();
     assert_eq!(
-        warm,
-        vec![PageRequest {
-            epoch: 1,
-            start: 2800,
-            rows: 200
-        }],
+        (warm.epoch, warm.start, warm.rows),
+        (1, 2800, 200),
         "the rows just above the screen come first, in a small page"
     );
-    scrollback.page(warm[0], core.answer(warm[0]));
+    scrollback.page(warm, core.answer(warm));
     scrollback.set_find_query(FindQueryGeneration::from_counter(1), "line".into());
     let find = scrollback.requests();
     assert_eq!(find.len(), 4, "at most four pages are in flight");
@@ -199,14 +195,8 @@ fn pages_start_small_continue_at_full_size_and_stay_within_four_in_flight() {
         "nothing more until a page settles"
     );
     scrollback.page(find[0], core.answer(find[0]));
-    assert_eq!(
-        scrollback.requests(),
-        vec![PageRequest {
-            epoch: 1,
-            start: 300,
-            rows: 500
-        }]
-    );
+    let [next] = scrollback.requests().try_into().unwrap();
+    assert_eq!((next.epoch, next.start, next.rows), (1, 300, 500));
 }
 
 #[test]
@@ -387,6 +377,49 @@ fn the_cache_survives_a_reconnect_only_with_the_same_session_and_epoch() {
     core.serve(&mut other);
     other.attach([8; 32]);
     assert!(other.cache.get(299).is_none());
+}
+
+#[test]
+fn a_new_session_cannot_show_rows_from_the_previous_session() {
+    let mut old = Core::new(1);
+    old.rows[0].0 = "old page".into();
+    let mut scrollback = attached(&old, &["old gone", "", "", ""]);
+    old.serve(&mut scrollback);
+    old.rows.push(("old late".into(), false));
+    scrollback.screen(screen(&["old live", "", "", ""], old.history()));
+    scrollback.scroll(ScrollbackMovement::Top);
+    let [old_request] = scrollback.requests().try_into().unwrap();
+    assert_eq!(
+        presented(&mut scrollback)[..3],
+        ["old page", "old gone", "old live"]
+    );
+
+    let new = Core::new(3);
+    scrollback.attach([8; 32]);
+    let between_sessions = scrollback.present(PresentationGeneration::from_counter(2));
+    let between_view = scrollback.accessibility_view();
+    scrollback.screen(screen(&["new live", "", "", ""], new.history()));
+    scrollback.scroll(ScrollbackMovement::Top);
+    let before_reply = presented(&mut scrollback);
+    let new_requests = scrollback.requests();
+    scrollback.page(old_request, old.answer(old_request));
+    let after_reply = presented(&mut scrollback);
+
+    assert_eq!(
+        (before_reply, after_reply),
+        (
+            ["", "", "", "new live"].map(String::from).to_vec(),
+            ["", "", "", "new live"].map(String::from).to_vec(),
+        )
+    );
+    assert!(between_sessions.is_none());
+    assert_eq!(between_view, AccessibilityView::default());
+    let [new_request] = new_requests.try_into().unwrap();
+    scrollback.page(new_request, new.answer(new_request));
+    assert_eq!(
+        presented(&mut scrollback),
+        ["line0", "line1", "line2", "new live"]
+    );
 }
 
 #[test]
@@ -751,6 +784,54 @@ fn the_alternate_screen_has_no_scrollback_to_read() {
         find.total_matches, 0,
         "history is not searched behind the alternate screen"
     );
+}
+
+#[test]
+fn an_alternate_screen_width_shrink_revalidates_the_selection_and_drag_anchor() {
+    let core = Core::new(2);
+    let mut scrollback = attached(&core, &["$", "", "", ""]);
+    let mut wide = Arc::unwrap_or_clone(screen_of(
+        &[
+            ("abcdefgh", false),
+            ("ijklmnop", false),
+            ("", false),
+            ("", false),
+        ],
+        true,
+    ));
+    wide.state.history = core.history();
+    let mut narrow = wide.clone();
+    narrow.state.size.cols = 4;
+    narrow.state.rows = wide.state.rows.iter().map(|row| row[..4].into()).collect();
+    let wide = Arc::new(wide);
+    let narrow = Arc::new(narrow);
+    let narrow_grid = Grid { columns: 4, ..GRID };
+    let now = Instant::now();
+
+    for already_dragging in [true, false] {
+        scrollback.screen(Arc::clone(&wide));
+        press(&mut scrollback, 61.0, 5.0, now);
+        if already_dragging {
+            assert!(scrollback.pointer(PointerEvent::Drag { x: 66.0, y: 25.0 }, GRID, now));
+        }
+        scrollback.screen(Arc::clone(&narrow));
+        let presented = scrollback
+            .present(PresentationGeneration::from_counter(2))
+            .unwrap()
+            .screen;
+        assert!(
+            !presented
+                .state
+                .rows
+                .iter()
+                .flat_map(|row| row.iter())
+                .any(|cell| cell.selected)
+        );
+        assert_eq!(scrollback.accessibility_view().selection, None);
+        assert!(!scrollback.pointer(PointerEvent::Drag { x: 15.0, y: 25.0 }, narrow_grid, now));
+        assert!(!scrollback.selection_present());
+        scrollback.pointer(PointerEvent::Release, narrow_grid, now);
+    }
 }
 
 #[test]
