@@ -2716,7 +2716,7 @@ fn paired_workspace_retry_keeps_the_original_after_a_lost_reply_and_reconnect() 
     let first = fixture.serve_next_with(Arc::clone(&runtime));
     let mut editor = open();
     let failure = editor
-        .submit(mutation.clone(), Instant::now() + Duration::from_secs(2))
+        .submit(mutation, Instant::now() + Duration::from_secs(2))
         .unwrap_err();
     assert!(
         matches!(
@@ -2726,7 +2726,12 @@ fn paired_workspace_retry_keeps_the_original_after_a_lost_reply_and_reconnect() 
         "{failure:?}"
     );
     assert_eq!(editor.journal().pending().unwrap().sequence, 1);
-    assert_eq!(authority.lock().unwrap().inventory.workspaces.len(), 1);
+    let original_receipt = {
+        let state = authority.lock().unwrap();
+        assert_eq!(state.inventory.workspaces.len(), 1);
+        state.outcome(machine.paired().client, 1).unwrap().clone()
+    };
+    assert!(matches!(original_receipt.outcome, Outcome::Accepted { .. }));
     drop(editor);
     machine.disconnect();
     first.join().unwrap().unwrap();
@@ -2734,9 +2739,7 @@ fn paired_workspace_retry_keeps_the_original_after_a_lost_reply_and_reconnect() 
     let second = fixture.serve_next_with(runtime);
     let mut editor = open();
     let receipt = editor.retry(until()).unwrap().unwrap();
-    assert_eq!(receipt.sequence, 1);
-    assert_eq!(receipt.mutation, mutation);
-    assert!(matches!(receipt.outcome, Outcome::Accepted { .. }));
+    assert_eq!(receipt, original_receipt);
     assert_eq!(authority.lock().unwrap().inventory.workspaces.len(), 1);
     assert!(editor.journal().pending().is_none());
     assert_eq!(editor.journal().last().unwrap(), &receipt);

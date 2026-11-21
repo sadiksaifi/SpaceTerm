@@ -202,6 +202,9 @@ impl WorkspaceEditor {
         mutation: Mutation,
         deadline: Instant,
     ) -> Result<RetainedOutcome, EditError> {
+        if !mutation.is_bounded() {
+            return Err(CoreError::Unsupported.into());
+        }
         self.journal.verify_storage()?;
         if self.journal.pending().is_some() {
             return Err(EditError::Unconfirmed);
