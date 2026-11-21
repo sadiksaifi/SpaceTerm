@@ -10,12 +10,13 @@ members = [
     "crates/spaceterm-protocol",
     "crates/spaceterm-cli",
     "crates/spaceterm-client",
+    "crates/spaceterm-terminal-client",
     "crates/spaceterm-ui",
     "third_party/libghostty-vt",
     "third_party/libghostty-vt-sys",
 ]
 exclude = ["third_party/block"]
-default-members = [".", "crates/spaceterm-directories", "crates/spaceterm-core", "crates/spaceterm-protocol", "crates/spaceterm-cli", "crates/spaceterm-client", "crates/spaceterm-ui"]
+default-members = [".", "crates/spaceterm-directories", "crates/spaceterm-core", "crates/spaceterm-protocol", "crates/spaceterm-cli", "crates/spaceterm-client", "crates/spaceterm-terminal-client", "crates/spaceterm-ui"]
 resolver = "2"
 
 [patch.crates-io]
@@ -47,12 +48,12 @@ desktop = [
     "dep:notify",
     "dep:gpui",
     "dep:gpui_platform",
+    "dep:spaceterm-terminal-client",
     "dep:spaceterm-ui",
     "spaceterm-core/client",
     "dep:image",
     "dep:smallvec",
     "dep:rustc-hash",
-    "dep:unicode-bidi",
     "dep:unicode-segmentation",
     "dep:ureq",
     "dep:tar",
@@ -120,10 +121,10 @@ smallvec = { version = "=1.15.2", optional = true }
 smol_str = "=0.3.6"
 rustc-hash = { version = "=2.1.3", optional = true }
 spaceterm-directories = { path = "crates/spaceterm-directories" }
+spaceterm-terminal-client = { path = "crates/spaceterm-terminal-client", optional = true }
 spaceterm-ui = { path = "crates/spaceterm-ui", optional = true }
 spaceterm-core = { path = "crates/spaceterm-core" }
 thiserror = "2.0.17"
-unicode-bidi = { version = "=0.3.18", optional = true }
 unicode-segmentation = { version = "=1.13.3", optional = true }
 zeroize = "=1.9.0"
 same-file = "=1.0.6"

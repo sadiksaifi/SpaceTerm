@@ -6178,10 +6178,10 @@ dependencies = [
  "spaceterm-core",
  "spaceterm-directories",
  "spaceterm-protocol",
+ "spaceterm-terminal-client",
  "spaceterm-ui",
  "tar",
  "thiserror 2.0.19",
- "unicode-bidi",
  "unicode-segmentation",
  "ureq",
  "yeslogic-fontconfig-sys",
@@ -6296,6 +6296,13 @@ dependencies = [
  "sha2-const-stable",
  "thiserror 2.0.19",
  "zeroize",
+]
+
+[[package]]
+name = "spaceterm-terminal-client"
+version = "0.0.0"
+dependencies = [
+ "unicode-bidi",
 ]
 
 [[package]]

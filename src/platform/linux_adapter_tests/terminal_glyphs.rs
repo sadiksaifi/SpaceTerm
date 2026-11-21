@@ -127,7 +127,13 @@ fn linux_scope_guide_redraw_keeps_native_glyphs_on_exact_columns() {
             cells.extend("abéλ".repeat(30).chars().map(|ch| cell(&ch.to_string())));
             cells[10].bold = true;
             cells[20].italic = true;
-            let input = prepare_row_cached(&Arc::from(cells), &colors(), &fonts, 0, &[]);
+            let input = prepare_row_cached(
+                &Arc::from(cells),
+                &render_input::colors(&colors()),
+                &fonts,
+                0,
+                &[],
+            );
             let shaped = prepare_row_text(&input, px(14.0), &text_system);
             let mut suffix = Vec::new();
             for (fragment, text) in input.fragments.iter().zip(&shaped.text) {

@@ -1,0 +1,7 @@
+[package]
+name = "spaceterm-terminal-client"
+edition = "2024"
+publish = false
+
+[dependencies]
+unicode-bidi = "=0.3.18"

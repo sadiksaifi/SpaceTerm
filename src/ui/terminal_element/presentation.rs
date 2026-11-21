@@ -153,7 +153,6 @@ impl TerminalGridPresentation {
         if !presentation_unchanged {
             self.cursor.clear();
             let mut element = TerminalGridElement::new(screen, cache, configuration, cx);
-            element.cursor_style = element.cursor_preparation_style;
             element.blink_phase_visible = true;
             element.cursor_layer = Some(self.cursor.clone());
             // A new view identity invalidates the scene in this frame. A notify
