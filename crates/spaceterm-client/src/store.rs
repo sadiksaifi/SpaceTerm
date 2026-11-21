@@ -673,7 +673,7 @@ mod tests {
     use zeroize::Zeroizing;
 
     struct BlockedStore {
-        credential: Zeroizing<Vec<u8>>,
+        credential: Option<Zeroizing<Vec<u8>>>,
         blocked: AtomicBool,
         entered: mpsc::Sender<()>,
         release: Mutex<mpsc::Receiver<()>>,
@@ -695,7 +695,7 @@ mod tests {
                     .recv_timeout(Duration::from_secs(5));
                 let _ = self.returned.send(());
             }
-            Ok(Some(self.credential.clone()))
+            Ok(self.credential.clone())
         }
 
         fn insert(&self, _: &[u8; 32], _: &[u8]) -> Result<(), CredentialError> {
@@ -705,6 +705,32 @@ mod tests {
         fn remove(&self, _: &[u8; 32], _: Interaction) -> Result<(), CredentialError> {
             Err(CredentialError::Unavailable)
         }
+    }
+
+    struct ReadControl {
+        started: mpsc::Receiver<()>,
+        release: mpsc::Sender<()>,
+        returned: mpsc::Receiver<()>,
+    }
+
+    fn blocked_store(credential: Option<Zeroizing<Vec<u8>>>) -> (Arc<BlockedStore>, ReadControl) {
+        let (entered, started) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let (finished, returned) = mpsc::channel();
+        (
+            Arc::new(BlockedStore {
+                credential,
+                blocked: AtomicBool::new(false),
+                entered,
+                release: Mutex::new(released),
+                returned: finished,
+            }),
+            ReadControl {
+                started,
+                release,
+                returned,
+            },
+        )
     }
 
     struct EmptyStore;
@@ -727,6 +753,56 @@ mod tests {
         }
     }
 
+    fn assert_credential_slots(
+        saved: &SavedConnection,
+        first_store: Arc<BlockedStore>,
+        release_first: &mpsc::Sender<()>,
+    ) {
+        let retry = saved.connector(first_store, Interaction::Quiet, None);
+        let wait = WaitLimit::new(Instant::now() + Duration::from_secs(1));
+        assert_eq!(
+            retry.connect_with(&wait).err(),
+            Some(DirectError::Transport)
+        );
+
+        let (second_store, second) = blocked_store(None);
+        let second_dial = saved.connector(second_store.clone(), Interaction::Quiet, None);
+        second_store.blocked.store(true, Ordering::Release);
+        let worker = std::thread::spawn(move || {
+            let wait = WaitLimit::new(Instant::now() + Duration::from_secs(4));
+            second_dial.connect_with(&wait).err()
+        });
+        second.started.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        let third = saved.connector(Arc::new(EmptyStore), Interaction::Quiet, None);
+        let wait = WaitLimit::new(Instant::now() + Duration::from_secs(1));
+        assert_eq!(
+            third.connect_with(&wait).err(),
+            Some(DirectError::Transport),
+            "both credential read slots are in use",
+        );
+
+        release_first.send(()).unwrap();
+        let wait = WaitLimit::new(Instant::now() + Duration::from_secs(1));
+        let result = loop {
+            let result = third.connect_with(&wait).err();
+            if result != Some(DirectError::Transport) || wait.ended() {
+                break result;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(
+            result,
+            Some(DirectError::CredentialUnavailable),
+            "the cancelled read released its slot while the other read remained blocked",
+        );
+        second.release.send(()).unwrap();
+        assert_eq!(
+            worker.join().unwrap(),
+            Some(DirectError::CredentialUnavailable)
+        );
+    }
+
     #[test]
     fn saved_connector_discards_credentials_after_cancel_or_deadline() {
         for cancelling in [true, false] {
@@ -734,21 +810,9 @@ mod tests {
             socket
                 .set_read_timeout(Some(Duration::from_millis(150)))
                 .unwrap();
-            let (entered, read_started) = mpsc::channel();
-            let (release_read, release) = mpsc::channel();
-            let (returned, read_returned) = mpsc::channel();
-            let store = Arc::new(BlockedStore {
-                credential: Zeroizing::new(
-                    DeviceCredential::generate()
-                        .unwrap()
-                        .expose_bytes()
-                        .to_vec(),
-                ),
-                blocked: AtomicBool::new(false),
-                entered,
-                release: Mutex::new(release),
-                returned,
-            });
+            let credential = DeviceCredential::generate().unwrap();
+            let (store, read) =
+                blocked_store(Some(Zeroizing::new(credential.expose_bytes().to_vec())));
             let saved = SavedConnection {
                 name: "Paired Machine".into(),
                 route: [1; 32],
@@ -782,44 +846,29 @@ mod tests {
             let worker = std::thread::spawn(move || {
                 finished.send(dialer.connect_with(&wait).err()).unwrap();
             });
-            let entered_before_expiry = read_started.recv_timeout(Duration::from_secs(2));
+            let entered_before_expiry = read.started.recv_timeout(Duration::from_secs(2));
             if cancelling {
                 cancel.store(true, Ordering::Release);
             }
             let result = dial_finished.recv_timeout(Duration::from_secs(1));
-            let (same_store, independent_store) =
-                if cancelling && entered_before_expiry.is_ok() && result.is_ok() {
-                    let wait = WaitLimit::new(Instant::now() + Duration::from_secs(1));
-                    let retry = saved.connector(store.clone(), Interaction::Quiet, None);
-                    let same = retry.connect_with(&wait).err();
-                    let other = saved.connector(Arc::new(EmptyStore), Interaction::Quiet, None);
-                    let wait = WaitLimit::new(Instant::now() + Duration::from_secs(1));
-                    (same, other.connect_with(&wait).err())
-                } else {
-                    (None, None)
-                };
-            let _ = release_read.send(());
-            drop(release_read);
+            if cancelling && entered_before_expiry.is_ok() && result.is_ok() {
+                assert_credential_slots(&saved, store, &read.release);
+            } else {
+                let _ = read.release.send(());
+            }
+            drop(read.release);
             worker.join().unwrap();
             assert!(
                 entered_before_expiry.is_ok(),
                 "the dial must read its credential"
             );
             assert_eq!(result, Ok(Some(DirectError::Transport)));
-            if cancelling {
-                assert_eq!(same_store, Some(DirectError::Transport));
-                assert_eq!(
-                    independent_store,
-                    Some(DirectError::CredentialUnavailable),
-                    "a different store must be read while the first is still blocked",
-                );
-            }
-            read_returned.recv_timeout(Duration::from_secs(2)).unwrap();
+            read.returned.recv_timeout(Duration::from_secs(2)).unwrap();
             assert!(matches!(
                 socket.recv_from(&mut [0; 1500]).unwrap_err().kind(),
                 ErrorKind::WouldBlock | ErrorKind::TimedOut
             ));
-            assert_eq!(read_started.try_recv(), Err(mpsc::TryRecvError::Empty));
+            assert_eq!(read.started.try_recv(), Err(mpsc::TryRecvError::Empty));
         }
     }
 }
