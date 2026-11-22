@@ -218,6 +218,24 @@ impl Service {
         self.select_cli_locked(&data, provision)
     }
 
+    /// Remove the command-line launcher for a client acting with this account's authority.
+    /// Only a link into this identity's installations is removed, with a leftover replacement
+    /// link; another tool's launcher, or its entry at the temporary name, stays untouched.
+    /// Nothing there is not an error. Another service operation that outlasts the operation
+    /// grace returns ServiceBusy.
+    pub fn unlink_cli(&self) -> Result<(), CoreError> {
+        let data = Directory::open(&self.paths.data, true)?;
+        let _operation = match data.wait_lock("service.lock", OPERATION_GRACE, None)? {
+            LockWait::Locked(lock) => lock,
+            LockWait::Held | LockWait::Cancelled => return Err(CoreError::ServiceBusy),
+        };
+        launcher::remove(
+            self.cli_home()?,
+            &self.identity,
+            &self.paths.data.join("installations"),
+        )
+    }
+
     /// Read what the command-line launcher path holds, without following it or taking a lock.
     /// Unreadable service policy makes no launcher Outdated.
     pub fn cli_launcher(&self) -> Result<CliLauncher, CoreError> {

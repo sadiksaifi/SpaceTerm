@@ -1,26 +1,17 @@
 //! The account's command-line launcher, through the server's service code `install.sh` uses.
-use std::path::PathBuf;
-
 use crate::command_line_tool::{Launcher, LauncherFiles, LinkOutcome, ToolFailure};
 use crate::machine_connection::CoreError;
 use crate::machine_connection::service::{CliLauncher, CliLink, Service};
 
 pub(crate) struct AccountLauncherFiles {
     service: Service,
-    launcher: PathBuf,
-    temporary: PathBuf,
 }
 
 impl AccountLauncherFiles {
     /// Resolves the launcher of `identity` from the account record. Reads nothing else.
     pub(crate) fn new(identity: &str) -> Result<Self, CoreError> {
-        let service = Service::for_identity(identity)?;
-        let launcher = service.cli_launcher_path()?;
-        let temporary = service.cli_temporary_path()?;
         Ok(Self {
-            service,
-            launcher,
-            temporary,
+            service: Service::for_identity(identity)?,
         })
     }
 }
@@ -57,12 +48,8 @@ impl LauncherFiles for AccountLauncherFiles {
         })
     }
 
-    fn launcher(&self) -> PathBuf {
-        self.launcher.clone()
-    }
-
-    fn temporary(&self) -> PathBuf {
-        self.temporary.clone()
+    fn unlink(&self) -> Result<(), ToolFailure> {
+        self.service.unlink_cli().map_err(failure)
     }
 }
 

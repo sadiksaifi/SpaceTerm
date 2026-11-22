@@ -164,6 +164,9 @@ thread_local! {
     /// Runs on the temporary link just before the rename. A panic here interrupts the
     /// replacement as a crash would.
     static BEFORE_RENAME: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
+    /// Runs on the launcher path after removal found SpaceTerm's link there, as another
+    /// program could.
+    static BEFORE_REMOVAL: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
 }
 
 fn before_creation(_launcher: &Path) {
@@ -180,7 +183,49 @@ fn before_rename(_temporary: &Path) {
     }
 }
 
+fn before_removal(_launcher: &Path) {
+    #[cfg(test)]
+    if let Some(intrude) = BEFORE_REMOVAL.take() {
+        intrude(_launcher);
+    }
+}
+
+/// The one name a removal moves the launcher to before it decides, so it deletes only the entry
+/// it checked.
+fn removing(identity: &str) -> String {
+    format!(".launcher-{identity}-removing")
+}
+
+/// Renames `from` to `to` inside `directory`, unless an entry already holds `to`.
+fn rename_exclusive(directory: &File, from: &str, to: &str) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let invalid = |_| std::io::Error::from(std::io::ErrorKind::InvalidInput);
+    let from = std::ffi::CString::new(from).map_err(invalid)?;
+    let to = std::ffi::CString::new(to).map_err(invalid)?;
+    let fd = directory.as_raw_fd();
+    #[cfg(target_os = "linux")]
+    // SAFETY: renameat2 acts on two names beneath the retained directory, refusing replacement.
+    let result =
+        unsafe { libc::renameat2(fd, from.as_ptr(), fd, to.as_ptr(), libc::RENAME_NOREPLACE) };
+    #[cfg(target_os = "macos")]
+    // SAFETY: renameatx_np acts on two names beneath the retained directory, refusing replacement.
+    let result =
+        unsafe { libc::renameatx_np(fd, from.as_ptr(), fd, to.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
 /// Remove only a link into this identity's retained installations, under the service lock.
+///
+/// The service lock orders only SpaceTerm's own writers, so the launcher first moves to
+/// [`removing`] without replacing anything there, and only a managed link found under that name
+/// is deleted. Another program's entry that took the launcher path after the check moves back.
+/// If yet another entry took the path meanwhile, the moved entry stays under the removal name
+/// and the removal fails. The SpaceTerm-named temporary and removal names carry the window
+/// [`select`] accepts for the launcher path.
 pub(in crate::service) fn remove(
     home: &Path,
     identity: &str,
@@ -192,17 +237,30 @@ pub(in crate::service) fn remove(
     }
     let launcher = parent.join(identity);
     let leftover = temporary(&parent, identity);
-    let managed_launcher =
-        std::fs::read_link(&launcher).is_ok_and(|target| managed(&target, identity, installations));
-    let managed_leftover =
-        std::fs::read_link(&leftover).is_ok_and(|target| managed(&target, identity, installations));
-    if !managed_launcher && !managed_leftover {
+    let removal = removing(identity);
+    let moved = parent.join(&removal);
+    let ours = |path: &Path| {
+        std::fs::read_link(path).is_ok_and(|target| managed(&target, identity, installations))
+    };
+    if !ours(&launcher) && !ours(&leftover) && !ours(&moved) {
         return Ok(());
     }
     let directory = owned_directory(&parent)?;
     remove_leftover(&leftover, identity, installations)?;
-    if managed_launcher {
-        std::fs::remove_file(&launcher).map_err(|_| CoreError::StorageUnavailable)?;
+    // An interrupted removal's own link.
+    remove_leftover(&moved, identity, installations)?;
+    if ours(&launcher) {
+        before_removal(&launcher);
+        match rename_exclusive(&directory, identity, &removal) {
+            Ok(()) if ours(&moved) => {
+                std::fs::remove_file(&moved).map_err(|_| CoreError::StorageUnavailable)?;
+            }
+            Ok(()) => rename_exclusive(&directory, &removal, identity)
+                .map_err(|_| CoreError::StorageUnavailable)?,
+            // Gone meanwhile.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(CoreError::StorageUnavailable),
+        }
     }
     directory
         .sync_all()
@@ -318,6 +376,55 @@ mod tests {
         assert_eq!(
             std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
             1
+        );
+    }
+
+    #[test]
+    fn removal_keeps_an_entry_another_program_writes_after_the_check() {
+        let home = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("st-launcher-removal-{}", std::process::id()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&home)
+            .unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(home.clone());
+        let installations = home.join(".local/share/spaceterm-development/core/installations");
+        let runtime = installations.join("a".repeat(64));
+        let path = home.join(".local/bin/spaceterm-development");
+        assert_eq!(
+            select(&home, "spaceterm-development", &installations, &runtime),
+            Ok(CliLink::Linked)
+        );
+        // Another program replaces SpaceTerm's link after removal found it managed.
+        BEFORE_REMOVAL.set(Some(|launcher| {
+            std::fs::remove_file(launcher).unwrap();
+            std::fs::write(launcher, b"local tool").unwrap();
+        }));
+        remove(&home, "spaceterm-development", &installations).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"local tool");
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
+
+        // A removal interrupted after its move leaves SpaceTerm's link under the removal name,
+        // which the next removal deletes.
+        std::fs::remove_file(&path).unwrap();
+        let interrupted = path.with_file_name(".launcher-spaceterm-development-removing");
+        symlink(runtime.join(executable()), &interrupted).unwrap();
+        remove(&home, "spaceterm-development", &installations).unwrap();
+        assert!(!interrupted.is_symlink());
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            0
         );
     }
 

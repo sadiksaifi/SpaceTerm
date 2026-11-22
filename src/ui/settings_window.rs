@@ -2725,7 +2725,7 @@ impl SettingsWindow {
             ),
             SettingsRowId::MachineWorktreeLocation => (self.machine_location_caption(cx).0, None),
             SettingsRowId::CommandLineTool => {
-                let presentation = self.command_line_tool_presentation(cx)?;
+                let presentation = self.command_line_tool_presentation()?;
                 (presentation.explanation, presentation.caption)
             }
             _ => return None,

@@ -998,7 +998,7 @@ pub(crate) struct LaunchGate {
     pub(crate) store: Option<Arc<spaceterm_core::migration::DirectoryStore>>,
     pub(crate) identity: &'static str,
     pub(crate) alerts: Rc<dyn crate::ui::data_reset::LaunchAlerts>,
-    pub(crate) viewer: Option<Arc<dyn crate::command_line_tool::FileViewer>>,
+    pub(crate) viewer: Option<Arc<dyn crate::file_viewer::FileViewer>>,
     /// The Stepping Stone release for data too old to update.
     pub(crate) floor: Option<&'static str>,
 }
@@ -1621,7 +1621,7 @@ pub(crate) struct ApplicationCapabilities {
     pub(crate) selected_files: Arc<dyn crate::platform::selected_file::SelectedFileOpener>,
     /// Shows a folder in the file manager, such as where a reset put earlier files. None shows
     /// nothing.
-    pub(crate) file_viewer: Option<Arc<dyn crate::command_line_tool::FileViewer>>,
+    pub(crate) file_viewer: Option<Arc<dyn crate::file_viewer::FileViewer>>,
     /// Asks the launch questions about retained data before any SpaceTerm window opens.
     pub(crate) launch_alerts: Rc<dyn crate::ui::data_reset::LaunchAlerts>,
     /// Opens and watches the settings file the person edits in their own editor.

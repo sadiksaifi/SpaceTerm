@@ -1,18 +1,23 @@
-//! The Command Line Tool row: whether this build's command is in `~/.local/bin`, with Install or
-//! a way to show it. The row belongs to this computer, so it ignores the server picker.
-//! [`crate::command_line_tool`] owns the launcher policy.
+//! The Command Line Tool row: whether this build's command is in `~/.local/bin`, with Install,
+//! or Repair and Uninstall in its menu. The row belongs to this computer, so it ignores the
+//! server picker. [`crate::command_line_tool`] owns the launcher policy.
 use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Global, SharedString, Task, Window, div};
-use spaceterm_ui::{Button, ButtonSize, ButtonVariant, ProgressRing, ProgressSize, ProgressState};
+use spaceterm_ui::{
+    AnchoredAlignment, AnchoredPlacement, AnchoredPlacementConfig, Button, ButtonSize,
+    ButtonVariant, Icon, IconName, Menu, MenuEntry, ProgressRing, ProgressSize, ProgressState,
+};
 
 use super::SettingsWindow;
 use crate::command_line_tool::{CommandLineTool, Launcher, ToolAction, ToolFailure};
 use crate::ui::appearance::ChromeAppearance;
+use crate::ui::chrome_icons::IconRole;
 use crate::ui::sidebar_window::form::{CaptionTone, badge};
 
 pub(super) const ACTION_SELECTOR: &str = "settings-command-line-tool-action";
+pub(super) const MENU_SELECTOR: &str = "settings-command-line-tool-menu";
 pub(super) const PROGRESS_SELECTOR: &str = "settings-command-line-tool-progress";
 /// Where the launcher lives on every supported desktop, as people type it.
 const DIRECTORY: &str = "~/.local/bin";
@@ -45,6 +50,8 @@ pub(super) enum ToolCheck {
 pub(super) enum ToolWork {
     Check,
     Install,
+    Repair,
+    Uninstall,
 }
 
 /// The row's complete presentation, derived from its state alone so every state reads one way.
@@ -55,8 +62,10 @@ pub(super) struct ToolRowPresentation {
     pub(super) state_selector: &'static str,
     pub(super) explanation: SharedString,
     pub(super) caption: Option<(SharedString, CaptionTone)>,
-    /// The one action the row offers, and its label.
+    /// The action the row's button offers, and its label.
     pub(super) action: Option<(ToolAction, &'static str)>,
+    /// The actions the row's menu offers, and their labels. Empty omits the menu.
+    pub(super) menu: Vec<(ToolAction, &'static str)>,
     pub(super) working: bool,
 }
 
@@ -65,15 +74,13 @@ pub(super) struct CommandLineToolRow {
     tool: Arc<CommandLineTool>,
     pub(super) check: ToolCheck,
     pub(super) working: Option<ToolWork>,
-    /// Why the last Install or reveal didn't complete. The next action clears it.
+    /// Why the last Install, Repair or Uninstall didn't complete. The next action clears it.
     pub(super) failure: Option<ToolFailure>,
     /// A service operation or update finished while a step ran, so that step's read may predate
     /// it and the command is read again afterwards.
     read_outdated: bool,
     /// Returns the background result to GPUI. Dropping the window drops it.
     _operation: Option<Task<()>>,
-    /// Waits for the file manager's answer to a reveal.
-    _reveal: Option<Task<()>>,
 }
 
 impl CommandLineToolRow {
@@ -85,42 +92,33 @@ impl CommandLineToolRow {
             failure: None,
             read_outdated: false,
             _operation: None,
-            _reveal: None,
         }
     }
 
-    pub(super) fn presentation(&self, reveal: &'static str) -> ToolRowPresentation {
-        present(
-            self.tool.name(),
-            self.check,
-            self.working,
-            self.failure,
-            reveal,
-        )
+    pub(super) fn presentation(&self) -> ToolRowPresentation {
+        present(self.tool.name(), self.check, self.working, self.failure)
     }
 }
 
-/// The presentation of one state. `reveal` labels the action that shows the command in the
-/// desktop's file manager.
+/// The presentation of one state.
 pub(super) fn present(
     name: &str,
     check: ToolCheck,
     working: Option<ToolWork>,
     failure: Option<ToolFailure>,
-    reveal: &'static str,
 ) -> ToolRowPresentation {
-    let (state, state_selector, explanation, action) = match check {
+    let (state, state_selector, explanation, actions) = match check {
         ToolCheck::NotChecked => (
             "Not checked",
             "settings-command-line-tool-state-not-checked",
             SharedString::new_static("SpaceTerm checks the command when you open this section."),
-            None,
+            &[][..],
         ),
         ToolCheck::Failed(failure) => (
             "Unavailable",
             "settings-command-line-tool-state-unavailable",
             failure_text(failure, name),
-            None,
+            &[][..],
         ),
         ToolCheck::Checked(launcher) => {
             let (state, selector, explanation) = match launcher {
@@ -158,7 +156,7 @@ pub(super) fn present(
                 Launcher::Installed => (
                     "Installed",
                     "settings-command-line-tool-state-installed",
-                    format!("Run \u{201C}{name}\u{201D} in any terminal."),
+                    format!("Installed at {DIRECTORY}/{name}."),
                 ),
                 Launcher::OtherLink => (
                     "Other link",
@@ -177,27 +175,35 @@ pub(super) fn present(
                     ),
                 ),
             };
-            let action = launcher.action();
-            let label = match (action, launcher) {
-                (ToolAction::Install, Launcher::Stale | Launcher::Outdated) => "Reinstall",
-                (ToolAction::Install, _) => "Install",
-                (ToolAction::Reveal, _) => reveal,
-            };
             (
                 state,
                 selector,
                 SharedString::from(explanation),
-                Some((action, label)),
+                launcher.actions(),
             )
         }
     };
+    // Install is the row's button; the actions on a working command wait in its menu.
+    let mut action = None;
+    let mut menu = Vec::new();
+    for &offered in actions {
+        match offered {
+            ToolAction::Install => {
+                let label = match check {
+                    ToolCheck::Checked(Launcher::Stale | Launcher::Outdated) => "Reinstall",
+                    _ => "Install",
+                };
+                action = Some((offered, label));
+            }
+            ToolAction::Repair => menu.push((offered, "Repair")),
+            ToolAction::Uninstall => menu.push((offered, "Uninstall")),
+        }
+    }
     // SpaceTerm runs no shell to learn PATH, so the row names the directory PATH must include
-    // for a command SpaceTerm owns or would install.
+    // for a command it would install. An installed command's explanation names its path.
     let ours = matches!(
         check,
-        ToolCheck::Checked(
-            Launcher::Missing | Launcher::Stale | Launcher::Outdated | Launcher::Installed
-        )
+        ToolCheck::Checked(Launcher::Missing | Launcher::Stale | Launcher::Outdated)
     );
     let caption = match failure {
         Some(failure) => Some((failure_text(failure, name), CaptionTone::Error)),
@@ -215,6 +221,7 @@ pub(super) fn present(
         explanation,
         caption,
         action,
+        menu,
         working: working.is_some(),
     }
 }
@@ -246,20 +253,14 @@ fn failure_text(failure: ToolFailure, name: &str) -> SharedString {
         ToolFailure::Blocked => SharedString::from(format!(
             "Something else is using SpaceTerm\u{2019}s temporary name {DIRECTORY}/.launcher-{name}."
         )),
-        ToolFailure::RevealUnavailable => {
-            SharedString::new_static("The file manager couldn\u{2019}t show the command.")
-        }
     }
 }
 
 impl SettingsWindow {
-    pub(super) fn command_line_tool_presentation(&self, cx: &App) -> Option<ToolRowPresentation> {
-        let reveal = crate::desktop_profile::DesktopPresentation::get(cx)
-            .wording()
-            .reveal_file;
+    pub(super) fn command_line_tool_presentation(&self) -> Option<ToolRowPresentation> {
         self.command_line_tool
             .as_ref()
-            .map(|row| row.presentation(reveal))
+            .map(CommandLineToolRow::presentation)
     }
 
     /// Reads the command on the background executor as Servers comes into view. A running step
@@ -282,35 +283,14 @@ impl SettingsWindow {
         }
     }
 
-    /// Runs the row's action. Install runs on the background executor; showing the command asks
-    /// the file manager, whose answer arrives later.
+    /// Runs the row's action on the background executor.
     pub(super) fn request_command_line_tool(&mut self, action: ToolAction, cx: &mut Context<Self>) {
-        let Some(row) = self.command_line_tool.as_mut() else {
-            return;
+        let work = match action {
+            ToolAction::Install => ToolWork::Install,
+            ToolAction::Repair => ToolWork::Repair,
+            ToolAction::Uninstall => ToolWork::Uninstall,
         };
-        if row.working.is_some() {
-            return;
-        }
-        match action {
-            ToolAction::Install => self.run_command_line_tool(ToolWork::Install, cx),
-            ToolAction::Reveal => {
-                let ToolCheck::Checked(launcher) = row.check else {
-                    return;
-                };
-                row.failure = None;
-                let shown = row.tool.reveal(launcher);
-                row._reveal = Some(cx.spawn(async move |settings, cx| {
-                    let shown = shown.await;
-                    let _ = settings.update(cx, |settings, cx| {
-                        if let Some(row) = settings.command_line_tool.as_mut() {
-                            row.failure = shown.err();
-                        }
-                        cx.notify();
-                    });
-                }));
-                cx.notify();
-            }
-        }
+        self.run_command_line_tool(work, cx);
     }
 
     fn run_command_line_tool(&mut self, work: ToolWork, cx: &mut Context<Self>) {
@@ -321,14 +301,15 @@ impl SettingsWindow {
             return;
         }
         row.working = Some(work);
-        if work == ToolWork::Install {
+        if work != ToolWork::Check {
             row.failure = None;
         }
         let tool = Arc::clone(&row.tool);
         let result = cx.background_spawn(async move {
             match work {
                 ToolWork::Check => tool.status(),
-                ToolWork::Install => tool.install(),
+                ToolWork::Install | ToolWork::Repair => tool.install(),
+                ToolWork::Uninstall => tool.uninstall(),
             }
         });
         row._operation = Some(cx.spawn(async move |settings, cx| {
@@ -342,11 +323,11 @@ impl SettingsWindow {
                 match (work, result) {
                     (_, Ok(status)) => row.check = ToolCheck::Checked(status),
                     (ToolWork::Check, Err(failure)) => row.check = ToolCheck::Failed(failure),
-                    // A refused Install leaves the last status in place and says why; another
-                    // program's file found meanwhile is read again, so the row shows it.
-                    (ToolWork::Install, Err(failure)) => {
+                    // A failed change says why and reads the command again: it may have landed
+                    // before the failure, or found another program's file meanwhile.
+                    (ToolWork::Install | ToolWork::Repair | ToolWork::Uninstall, Err(failure)) => {
                         row.failure = Some(failure);
-                        again |= matches!(failure, ToolFailure::Occupied | ToolFailure::Blocked);
+                        again = true;
                     }
                 }
                 if again {
@@ -358,13 +339,13 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    /// The row's state badge, progress while a step runs, and its one action.
+    /// The row's state badge, progress while a step runs, its button and its menu.
     pub(super) fn render_command_line_tool(
         &mut self,
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(presentation) = self.command_line_tool_presentation(cx) else {
+        let Some(presentation) = self.command_line_tool_presentation() else {
             return div().into_any_element();
         };
         let owner = cx.weak_entity();
@@ -381,9 +362,47 @@ impl SettingsWindow {
                     });
                 })
         });
+        let menu = (!presentation.menu.is_empty()).then(|| {
+            let entries = presentation
+                .menu
+                .iter()
+                .enumerate()
+                .flat_map(|(index, &(action, label))| {
+                    // Uninstall sits apart from the step that keeps the command.
+                    let separator = (index > 0 && action == ToolAction::Uninstall)
+                        .then(MenuEntry::separator);
+                    let entry =
+                        MenuEntry::action(label, action).disabled(presentation.working);
+                    separator.into_iter().chain([entry])
+                })
+                .collect();
+            let owner = cx.weak_entity();
+            let icon_size = appearance.icons.metrics(IconRole::Control).glyph_size;
+            Menu::new(
+                MENU_SELECTOR,
+                SharedString::new_static("More for Command Line Tool"),
+                entries,
+            )
+            .icon_trigger(move |foreground| {
+                Icon::new(IconName::Ellipsis, icon_size, foreground).into_any_element()
+            })
+            .placement(AnchoredPlacementConfig::new(
+                AnchoredPlacement::Bottom,
+                AnchoredAlignment::End,
+            ))
+            .debug_selector(MENU_SELECTOR)
+            .on_activate(move |activation, _: &mut Window, cx| {
+                let action = *activation.action();
+                let _ = owner.update(cx, |settings, cx| {
+                    settings.request_command_line_tool(action, cx);
+                });
+            })
+        });
         let state_selector = presentation.state_selector;
         let progress = match self.command_line_tool.as_ref().and_then(|row| row.working) {
             Some(ToolWork::Install) => "Installing the command",
+            Some(ToolWork::Repair) => "Repairing the command",
+            Some(ToolWork::Uninstall) => "Uninstalling the command",
             _ => "Checking the command",
         };
         div()
@@ -405,6 +424,7 @@ impl SettingsWindow {
                 )
             })
             .children(button)
+            .children(menu)
             .into_any_element()
     }
 }
@@ -416,21 +436,15 @@ mod tests {
     const NAME: &str = "spaceterm-development";
 
     fn checked(launcher: Launcher) -> ToolRowPresentation {
-        present(
-            NAME,
-            ToolCheck::Checked(launcher),
-            None,
-            None,
-            "Show in Finder",
-        )
+        present(NAME, ToolCheck::Checked(launcher), None, None)
     }
 
     #[test]
-    fn each_launcher_state_reads_one_way_and_offers_one_action() {
+    fn each_launcher_state_reads_one_way_and_offers_its_actions() {
         let missing = checked(Launcher::Missing);
         assert_eq!(
-            (missing.state, missing.action),
-            ("Not installed", Some((ToolAction::Install, "Install")))
+            (missing.state, missing.action, missing.menu),
+            ("Not installed", Some((ToolAction::Install, "Install")), vec![])
         );
         let stale = checked(Launcher::Stale);
         assert_eq!(
@@ -442,27 +456,10 @@ mod tests {
             (outdated.state, outdated.action),
             ("Out of date", Some((ToolAction::Install, "Reinstall")))
         );
-        let installed = checked(Launcher::Installed);
-        assert_eq!(
-            (
-                installed.state,
-                installed.action,
-                installed.explanation.as_ref()
-            ),
-            (
-                "Installed",
-                Some((ToolAction::Reveal, "Show in Finder")),
-                "Run \u{201C}spaceterm-development\u{201D} in any terminal."
-            )
-        );
         let blocked = checked(Launcher::Blocked);
         assert_eq!(
-            (blocked.state, blocked.action, blocked.caption),
-            (
-                "Blocked",
-                Some((ToolAction::Reveal, "Show in Finder")),
-                None
-            )
+            (blocked.state, blocked.action, blocked.menu, blocked.caption),
+            ("Blocked", None, vec![], None)
         );
         assert!(
             blocked
@@ -475,8 +472,8 @@ mod tests {
         ] {
             let other = checked(launcher);
             assert_eq!(
-                (other.state, other.action, other.caption),
-                (state, Some((ToolAction::Reveal, "Show in Finder")), None)
+                (other.state, other.action, other.menu, other.caption),
+                (state, None, vec![], None)
             );
             assert!(
                 other
@@ -487,13 +484,32 @@ mod tests {
     }
 
     #[test]
+    fn an_installed_command_names_its_path_and_offers_repair_and_uninstall_in_its_menu() {
+        let installed = checked(Launcher::Installed);
+        assert_eq!(
+            (
+                installed.state,
+                installed.explanation.as_ref(),
+                installed.caption,
+                installed.action,
+                installed.menu
+            ),
+            (
+                "Installed",
+                "Installed at ~/.local/bin/spaceterm-development.",
+                None,
+                None,
+                vec![
+                    (ToolAction::Repair, "Repair"),
+                    (ToolAction::Uninstall, "Uninstall")
+                ]
+            )
+        );
+    }
+
+    #[test]
     fn the_row_names_the_directory_path_must_include_without_claiming_it_does() {
-        for launcher in [
-            Launcher::Missing,
-            Launcher::Stale,
-            Launcher::Outdated,
-            Launcher::Installed,
-        ] {
+        for launcher in [Launcher::Missing, Launcher::Stale, Launcher::Outdated] {
             assert_eq!(
                 checked(launcher).caption,
                 Some((
@@ -514,7 +530,6 @@ mod tests {
             ToolCheck::Checked(Launcher::Missing),
             None,
             Some(ToolFailure::NoCorePackage),
-            "Show in Finder",
         );
         assert_eq!(
             refused.caption,
@@ -530,16 +545,12 @@ mod tests {
             ToolCheck::Failed(ToolFailure::UnsafeStorage),
             None,
             None,
-            "Show in Finder",
         );
-        assert_eq!((unreadable.state, unreadable.action), ("Unavailable", None));
-        let checking = present(
-            NAME,
-            ToolCheck::NotChecked,
-            Some(ToolWork::Check),
-            None,
-            "Show in Finder",
+        assert_eq!(
+            (unreadable.state, unreadable.action, unreadable.menu),
+            ("Unavailable", None, vec![])
         );
+        let checking = present(NAME, ToolCheck::NotChecked, Some(ToolWork::Check), None);
         assert_eq!((checking.state, checking.working), ("Not checked", true));
     }
 }

@@ -77,7 +77,6 @@ fn desktop_profile(
                 this_computer: "This Mac",
                 this_computer_phrase: "this Mac",
                 system_directory_selection: "Choose in Finder…",
-                reveal_file: "Show in Finder",
                 uninstall_description: "Removes SpaceTerm and SpaceTerm Core from this Mac.",
                 uninstall_app_remedy: "move SpaceTerm to the Trash",
             },
@@ -245,7 +244,7 @@ fn compose(
     })
 }
 
-/// This build's command, installed through the account's service and shown in Finder.
+/// This build's command, installed through the account's service.
 fn command_line_tool(
     identity: ApplicationIdentity,
 ) -> Option<Arc<crate::command_line_tool::CommandLineTool>> {
@@ -253,10 +252,7 @@ fn command_line_tool(
         super::account_launcher_files::AccountLauncherFiles::new(identity.directory_name()).ok()?;
     Some(Arc::new(crate::command_line_tool::CommandLineTool::new(
         identity.directory_name(),
-        crate::command_line_tool::CommandLineToolAdapters {
-            files: Arc::new(files),
-            viewer: Arc::new(super::macos_file_viewer::FinderViewer),
-        },
+        Arc::new(files),
     )))
 }
 

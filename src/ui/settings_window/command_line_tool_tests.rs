@@ -1,12 +1,14 @@
-//! The Command Line Tool row driven through scripted launcher files, shell and file manager.
+//! The Command Line Tool row driven through scripted launcher files.
 use std::rc::Rc;
 use std::sync::Arc;
 
+use gpui::accesskit::Action;
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
+use spaceterm_ui::a11y_testing::{A11yTree, perform};
 
-use super::{ACTION_SELECTOR, ToolCheck};
+use super::{ACTION_SELECTOR, MENU_SELECTOR, ToolCheck};
 use crate::appearance::Appearance;
-use crate::command_line_tool::testing::{DIRECTORY, RecordingViewer, ScriptedFiles, tool};
+use crate::command_line_tool::testing::{ScriptedFiles, tool};
 use crate::command_line_tool::{Launcher, LinkOutcome, ToolAction, ToolFailure};
 use crate::machine_connection::CoreError;
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
@@ -22,26 +24,12 @@ use crate::ui::sidebar_window::form::CaptionTone;
 const NAVIGATION_SELECTOR: &str = "settings-navigation-settings-section-servers";
 const ROW_SELECTOR: &str = "settings-row-command-line-tool";
 
-struct Fixture {
-    files: Arc<ScriptedFiles>,
-    viewer: Arc<RecordingViewer>,
-}
-
 fn open_settings(
     launcher: Option<Launcher>,
     cx: &mut TestAppContext,
-) -> (Fixture, Entity<SettingsWindow>, &mut VisualTestContext) {
-    open_with_viewer(launcher, RecordingViewer::default(), cx)
-}
-
-fn open_with_viewer(
-    launcher: Option<Launcher>,
-    viewer: RecordingViewer,
-    cx: &mut TestAppContext,
-) -> (Fixture, Entity<SettingsWindow>, &mut VisualTestContext) {
+) -> (Arc<ScriptedFiles>, Entity<SettingsWindow>, &mut VisualTestContext) {
     let files = ScriptedFiles::new(Ok(launcher.unwrap_or(Launcher::Missing)));
-    let viewer = Arc::new(viewer);
-    let command_line_tool = launcher.map(|_| Arc::new(tool(&files, &viewer)));
+    let command_line_tool = launcher.map(|_| Arc::new(tool(&files)));
     let settings =
         crate::settings::Settings::load(MemoryStorage::with_document(&SettingsDocument::default()));
     let platform = RecordingAppearancePlatform::default();
@@ -70,7 +58,7 @@ fn open_with_viewer(
     });
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
-    (Fixture { files, viewer }, window, cx)
+    (files, window, cx)
 }
 
 fn click(selector: &'static str, cx: &mut VisualTestContext) {
@@ -87,16 +75,24 @@ fn presentation(
     window: &Entity<SettingsWindow>,
     cx: &mut VisualTestContext,
 ) -> super::ToolRowPresentation {
-    window.read_with(cx, |settings, cx| {
+    window.read_with(cx, |settings, _| {
         settings
-            .command_line_tool_presentation(cx)
+            .command_line_tool_presentation()
             .expect("the row is offered")
     })
 }
 
+/// Opens the row's menu and chooses `label`.
+fn choose(label: &str, cx: &mut VisualTestContext) {
+    click(MENU_SELECTOR, cx);
+    let tree = A11yTree::read(cx);
+    perform(cx, tree.node(label), Action::Click);
+    cx.run_until_parked();
+}
+
 #[gpui::test]
-fn opening_machines_checks_the_command_and_install_then_shows_it(cx: &mut TestAppContext) {
-    let (fixture, window, cx) = open_settings(Some(Launcher::Missing), cx);
+fn opening_machines_checks_the_command_and_install_then_offers_its_menu(cx: &mut TestAppContext) {
+    let (files, window, cx) = open_settings(Some(Launcher::Missing), cx);
     assert_eq!(
         window.read_with(cx, |settings, _| settings
             .command_line_tool
@@ -115,57 +111,119 @@ fn opening_machines_checks_the_command_and_install_then_shows_it(cx: &mut TestAp
         missing.caption.map(|(_, tone)| tone),
         Some(CaptionTone::Guidance)
     );
+    assert!(cx.debug_bounds(MENU_SELECTOR).is_none());
 
     click(ACTION_SELECTOR, cx);
-    assert_eq!(fixture.files.links(), 1);
+    assert_eq!(files.links(), 1);
     let installed = presentation(&window, cx);
     assert_eq!(
-        (installed.state, installed.action),
-        ("Installed", Some((ToolAction::Reveal, "Show in Folder")))
+        (installed.state, installed.action, installed.caption),
+        ("Installed", None, None)
     );
-
-    click(ACTION_SELECTOR, cx);
-    assert_eq!(
-        *fixture.viewer.shown.lock().unwrap(),
-        [std::path::Path::new(DIRECTORY).join("spaceterm-development")]
-    );
-    assert_eq!(fixture.files.links(), 1);
+    assert!(cx.debug_bounds(ACTION_SELECTOR).is_none());
+    assert!(cx.debug_bounds(MENU_SELECTOR).is_some());
 }
 
 #[gpui::test]
-fn another_programs_file_is_shown_and_never_replaced(cx: &mut TestAppContext) {
-    let (fixture, window, cx) = open_settings(Some(Launcher::OtherFile), cx);
+fn uninstall_removes_the_command_and_offers_install_again(cx: &mut TestAppContext) {
+    let (files, window, cx) = open_settings(Some(Launcher::Installed), cx);
+    click(NAVIGATION_SELECTOR, cx);
+    choose("Uninstall", cx);
+    assert_eq!((files.unlinks(), files.links()), (1, 0));
+    let removed = presentation(&window, cx);
+    assert_eq!(
+        (removed.state, removed.action, removed.menu),
+        ("Not installed", Some((ToolAction::Install, "Install")), vec![])
+    );
+    assert!(cx.debug_bounds(MENU_SELECTOR).is_none());
+}
+
+#[gpui::test]
+fn repair_links_the_command_again(cx: &mut TestAppContext) {
+    let (files, window, cx) = open_settings(Some(Launcher::Installed), cx);
+    click(NAVIGATION_SELECTOR, cx);
+    choose("Repair", cx);
+    assert_eq!((files.links(), files.unlinks()), (1, 0));
+    assert_eq!(presentation(&window, cx).state, "Installed");
+}
+
+#[gpui::test]
+fn a_refused_uninstall_says_why_and_keeps_the_command(cx: &mut TestAppContext) {
+    let (files, window, cx) = open_settings(Some(Launcher::Installed), cx);
+    click(NAVIGATION_SELECTOR, cx);
+    *files.unlink.lock().unwrap() = Err(ToolFailure::Busy);
+    choose("Uninstall", cx);
+    let refused = presentation(&window, cx);
+    assert_eq!(
+        (
+            refused.state,
+            refused.caption.map(|(text, tone)| (text.to_string(), tone))
+        ),
+        (
+            "Installed",
+            Some((
+                "Another SpaceTerm Core operation is running. Try again when it finishes."
+                    .to_owned(),
+                CaptionTone::Error
+            ))
+        )
+    );
+}
+
+#[gpui::test]
+fn a_change_that_fails_after_it_landed_shows_the_launcher_as_it_is(cx: &mut TestAppContext) {
+    let (files, window, cx) = open_settings(Some(Launcher::Installed), cx);
+    click(NAVIGATION_SELECTOR, cx);
+    // The link is removed, then saving the directory fails.
+    *files.unlink.lock().unwrap() = Err(ToolFailure::StorageUnavailable);
+    *files.launcher.lock().unwrap() = Ok(Launcher::Missing);
+    choose("Uninstall", cx);
+    let removed = presentation(&window, cx);
+    assert_eq!(
+        (
+            removed.state,
+            removed.action,
+            removed.caption.map(|(_, tone)| tone)
+        ),
+        (
+            "Not installed",
+            Some((ToolAction::Install, "Install")),
+            Some(CaptionTone::Error)
+        )
+    );
+}
+
+#[gpui::test]
+fn another_programs_file_offers_nothing_and_is_never_replaced(cx: &mut TestAppContext) {
+    let (files, window, cx) = open_settings(Some(Launcher::OtherFile), cx);
     click(NAVIGATION_SELECTOR, cx);
     let other = presentation(&window, cx);
     assert_eq!(
-        (other.state, other.action),
-        ("Other file", Some((ToolAction::Reveal, "Show in Folder")))
+        (other.state, other.action, other.menu),
+        ("Other file", None, vec![])
     );
-    click(ACTION_SELECTOR, cx);
-    assert_eq!(fixture.viewer.shown.lock().unwrap().len(), 1);
-    assert_eq!(fixture.files.links(), 0);
+    assert!(cx.debug_bounds(ACTION_SELECTOR).is_none());
+    assert!(cx.debug_bounds(MENU_SELECTOR).is_none());
+    assert_eq!((files.links(), files.unlinks()), (0, 0));
 }
 
 #[gpui::test]
 fn a_file_that_appears_during_install_is_kept_and_read_again(cx: &mut TestAppContext) {
-    let (fixture, window, cx) = open_settings(Some(Launcher::Missing), cx);
+    let (files, window, cx) = open_settings(Some(Launcher::Missing), cx);
     click(NAVIGATION_SELECTOR, cx);
     // Another program links its own file after the row read the path.
-    *fixture.files.link.lock().unwrap() = Ok(LinkOutcome::Kept);
+    *files.link.lock().unwrap() = Ok(LinkOutcome::Kept);
     click(ACTION_SELECTOR, cx);
     let kept = presentation(&window, cx);
-    assert_eq!(
-        (kept.state, kept.action.map(|(action, _)| action)),
-        ("Other link", Some(ToolAction::Reveal))
-    );
+    assert_eq!((kept.state, kept.action), ("Other link", None));
     assert_eq!(kept.caption.map(|(_, tone)| tone), Some(CaptionTone::Error));
 }
 
 #[gpui::test]
 fn a_refused_install_says_why_and_keeps_offering_install(cx: &mut TestAppContext) {
-    let (fixture, window, cx) = open_settings(Some(Launcher::Missing), cx);
+    let (files, window, cx) = open_settings(Some(Launcher::Missing), cx);
     click(NAVIGATION_SELECTOR, cx);
-    *fixture.files.link.lock().unwrap() = Err(ToolFailure::NoCorePackage);
+    *files.link.lock().unwrap() = Err(ToolFailure::NoCorePackage);
     click(ACTION_SELECTOR, cx);
     let refused = presentation(&window, cx);
     assert_eq!(
@@ -190,44 +248,18 @@ fn a_build_without_the_tool_omits_the_row(cx: &mut TestAppContext) {
     let (_, window, cx) = open_settings(None, cx);
     click(NAVIGATION_SELECTOR, cx);
     assert!(cx.debug_bounds(ROW_SELECTOR).is_none());
-    assert!(window.read_with(cx, |settings, cx| {
-        settings.command_line_tool_presentation(cx).is_none()
+    assert!(window.read_with(cx, |settings, _| {
+        settings.command_line_tool_presentation().is_none()
     }));
 }
 
 #[gpui::test]
-fn a_file_manager_that_cannot_show_the_command_is_reported(cx: &mut TestAppContext) {
-    let refusing = RecordingViewer {
-        refuse: true,
-        ..RecordingViewer::default()
-    };
-    let (fixture, window, cx) = open_with_viewer(Some(Launcher::Installed), refusing, cx);
-    click(NAVIGATION_SELECTOR, cx);
-    click(ACTION_SELECTOR, cx);
-    assert_eq!(fixture.viewer.shown.lock().unwrap().len(), 1);
-    let refused = presentation(&window, cx);
-    assert_eq!(
-        (
-            refused.state,
-            refused.caption.map(|(text, tone)| (text.to_string(), tone))
-        ),
-        (
-            "Installed",
-            Some((
-                "The file manager couldn\u{2019}t show the command.".to_owned(),
-                CaptionTone::Error
-            ))
-        )
-    );
-}
-
-#[gpui::test]
 fn a_finished_service_operation_reads_the_command_again(cx: &mut TestAppContext) {
-    let (fixture, window, cx) = open_settings(Some(Launcher::Installed), cx);
+    let (files, window, cx) = open_settings(Some(Launcher::Installed), cx);
     click(NAVIGATION_SELECTOR, cx);
     assert_eq!(presentation(&window, cx).state, "Installed");
     // An update couldn't repoint the launcher, which stays on the earlier server build.
-    *fixture.files.launcher.lock().unwrap() = Ok(Launcher::Outdated);
+    *files.launcher.lock().unwrap() = Ok(Launcher::Outdated);
     cx.update(|_, cx| {
         crate::ui::settings_window::local_operations::LocalCoreOperations::changed_elsewhere(
             cx,
@@ -244,11 +276,10 @@ fn a_finished_service_operation_reads_the_command_again(cx: &mut TestAppContext)
 
 #[gpui::test]
 fn a_finished_operation_during_a_read_reads_the_command_again(cx: &mut TestAppContext) {
-    let (fixture, window, cx) = open_settings(Some(Launcher::Installed), cx);
+    let (files, window, cx) = open_settings(Some(Launcher::Installed), cx);
     click(NAVIGATION_SELECTOR, cx);
     let reads = || {
-        fixture
-            .files
+        files
             .reads
             .load(std::sync::atomic::Ordering::SeqCst)
     };

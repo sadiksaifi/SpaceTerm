@@ -12,7 +12,7 @@ use spaceterm_ui::{
 };
 
 use super::WorkspaceManager;
-use crate::command_line_tool::FileViewer;
+use crate::file_viewer::FileViewer;
 
 /// The notice an automatic reset left for the first Workspace window.
 pub(crate) struct PendingNotice {
