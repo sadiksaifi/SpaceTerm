@@ -2032,8 +2032,46 @@ impl TabManager {
             }
         });
         // A Tab growing in lays its parts out at its whole width and shows each once its slot
-        // holds all of it, so its slot never cuts through a glyph, a word or a control.
-        let reveal = TabReveal::new(motion, close_button_size, close_clearance, appearance);
+        // holds all of it, so its slot never cuts through a glyph, a word or a control. Its
+        // words count as held once the slot holds the title they say, so a short title shows
+        // with the glyph instead of waiting for the slot to reach the close control.
+        let title_width = {
+            let measure = |text: &gpui::SharedString| {
+                appearance
+                    .typography
+                    .measure(TextRole::Navigation, text, window)
+                    .ceil()
+            };
+            let place = if identity.place.is_empty() {
+                px(0.0)
+            } else {
+                measure(&identity.place)
+            };
+            if identity.says_place_alone() {
+                place
+            } else {
+                let activity = if identity.activity.is_empty() {
+                    measure(&"Terminal".into())
+                } else {
+                    measure(&identity.activity)
+                };
+                if identity.place.is_empty() {
+                    activity
+                } else {
+                    activity
+                        + appearance.spacing(TAB_TRAILING_GAP) * 2.0
+                        + measure(&"·".into())
+                        + place
+                }
+            }
+        };
+        let reveal = TabReveal::new(
+            motion,
+            close_button_size,
+            close_clearance,
+            Some(title_width),
+            appearance,
+        );
         // A Tab that arrived says nothing of what it is doing until its Terminal Session names
         // it, however fast it grows in, so the first activity it says is its real name. One that
         // never gets a name says Terminal once its wait ends. While its Focused Pane's shell
@@ -3343,10 +3381,12 @@ struct TabReveal {
 }
 
 impl TabReveal {
+    /// `title` is how wide the words the Tab says are. Words of unknown width fill their room.
     fn new(
         motion: ItemMotion,
         close_button: Pixels,
         close_clearance: Pixels,
+        title: Option<Pixels>,
         appearance: &super::appearance::ChromeAppearance,
     ) -> Self {
         let leading = appearance.spacing(TAB_ITEM_LEFT_PADDING);
@@ -3375,7 +3415,8 @@ impl TabReveal {
         Self {
             glyph: motion.reveal(whole_at(&|_| (leading, leading + glyph))),
             words: motion.reveal(whole_at(&|width| {
-                (words, width - trailing - close_clearance)
+                let room = width - trailing - close_clearance;
+                (words, title.map_or(room, |title| (words + title).min(room)))
             })),
             close: motion.reveal(whole_at(&|width| {
                 (width - trailing - close_button, width - trailing)
@@ -9882,7 +9923,12 @@ mod tests {
         let leading = appearance.spacing(TAB_ITEM_LEFT_PADDING);
         let trailing = appearance.spacing(TAB_ITEM_RIGHT_PADDING);
         let glyph = appearance.icons.metrics(IconRole::Status).glyph_size;
-        for grows_from_end in [false, true] {
+        for (grows_from_end, title) in [
+            (false, None),
+            (true, None),
+            (false, Some(px(32.0))),
+            (true, Some(px(32.0))),
+        ] {
             for step in 0..=100 {
                 let presence = step as f32 / 100.0;
                 let motion = ItemMotion {
@@ -9890,7 +9936,8 @@ mod tests {
                     grows_from_end,
                     ..ItemMotion::default()
                 };
-                let reveal = TabReveal::new(motion, close_button, close_clearance, &appearance);
+                let reveal =
+                    TabReveal::new(motion, close_button, close_clearance, title, &appearance);
                 for width in [
                     appearance.spacing(TAB_ITEM_MINIMUM_WIDTH),
                     appearance.spacing(TAB_ITEM_WIDTH),
@@ -9902,12 +9949,14 @@ mod tests {
                     } else {
                         (px(0.0), shown)
                     };
+                    let words_start = leading + glyph + appearance.spacing(TAB_ORIGIN_GAP);
+                    let words_room = width - trailing - close_clearance;
                     for (opacity, start, end) in [
                         (reveal.glyph, leading, leading + glyph),
                         (
                             reveal.words,
-                            leading + glyph + appearance.spacing(TAB_ORIGIN_GAP),
-                            width - trailing - close_clearance,
+                            words_start,
+                            title.map_or(words_room, |title| (words_start + title).min(words_room)),
                         ),
                         (
                             reveal.close,
@@ -9929,10 +9978,62 @@ mod tests {
                 ItemMotion::default(),
                 close_button,
                 close_clearance,
+                title,
                 &appearance,
             );
             assert_eq!((rest.glyph, rest.words, rest.close), (1.0, 1.0, 1.0));
         }
+    }
+
+    /// A Tab growing in shows its words once its slot holds the words it says, not only once it
+    /// holds all the room words may take. A short title shows soon after the glyph.
+    #[test]
+    fn a_growing_tab_shows_a_short_title_before_its_slot_reaches_the_close_control() {
+        let appearance = crate::ui::appearance::ChromeAppearance::prepare(
+            &crate::appearance::ThemeCatalog::default()
+                .resolve(
+                    crate::appearance::AppearanceGeneration::INITIAL,
+                    &crate::appearance::AppearancePreferences::default(),
+                    crate::appearance::SystemAppearance::unavailable(),
+                    &crate::appearance::AvailableFonts::default(),
+                )
+                .expect("the built-in appearance resolves")
+                .chrome,
+        );
+        let close_button = px(20.0);
+        let close_clearance = close_button + appearance.spacing(TAB_TRAILING_GAP);
+        let width = appearance.spacing(TAB_ITEM_WIDTH);
+        let narrowest = appearance.spacing(TAB_ITEM_MINIMUM_WIDTH);
+        let words_start = appearance.spacing(TAB_ITEM_LEFT_PADDING)
+            + appearance.icons.metrics(IconRole::Status).glyph_size
+            + appearance.spacing(TAB_ORIGIN_GAP);
+        let title = px(32.0);
+        // A Tab grows toward any width down to its narrowest. This much of it holds the title
+        // at every such width, with room to fade in, and is short of the close control.
+        let presence = (words_start + title) / narrowest + 0.1;
+        assert!(
+            presence
+                < (width - appearance.spacing(TAB_ITEM_RIGHT_PADDING) - close_clearance) / width
+        );
+        let motion = ItemMotion {
+            entering: Some(presence),
+            ..ItemMotion::default()
+        };
+
+        let whole_room = TabReveal::new(motion, close_button, close_clearance, None, &appearance);
+        let titled = TabReveal::new(
+            motion,
+            close_button,
+            close_clearance,
+            Some(title),
+            &appearance,
+        );
+
+        assert_eq!(
+            whole_room.words, 0.0,
+            "words of unknown width wait for all their room"
+        );
+        assert_eq!(titled.words, 1.0, "a title the slot holds whole shows");
     }
 
     #[gpui::test]
