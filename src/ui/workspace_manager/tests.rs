@@ -9805,6 +9805,39 @@ fn a_starting_shell_with_no_known_directory_shows_no_words_while_it_starts(
     spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Pane Caption, Starting shell");
 }
 
+/// A Starting Directory too long to present whole still names its own folder in the Tab and
+/// the Pane Caption. The parent path is what gets shortened.
+#[gpui::test]
+fn a_starting_shell_in_a_long_directory_shows_that_directorys_folder(cx: &mut TestAppContext) {
+    let (harness, cx) = close_harness(cx);
+    let tab_view = harness.manager.read_with(cx, |manager, cx| {
+        manager
+            .active_tab_manager()
+            .expect("an active Workspace")
+            .read(cx)
+            .active_tab_view()
+    });
+    // Thirty ten-character folders put the last folder past the 256 characters a caption shows.
+    let mut directory = PathBuf::from("/");
+    for _ in 0..30 {
+        directory.push("abcdefghij");
+    }
+    directory.push("last-folder");
+    let mut inventory = close_published();
+    inventory.revision = 2;
+    inventory.workspaces[0].tabs[0].panes[0].starting_directory = directory;
+    harness.publish(inventory, cx);
+
+    harness.panes.pane(CLOSE_ROOT_PANE).start_shell();
+    settle_panes(cx);
+
+    assert_eq!(
+        tab_view.read_with(cx, |view, _| view.tab_title()).as_ref(),
+        "last-folder"
+    );
+    spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Pane Caption, last-folder");
+}
+
 /// A shell whose Connecting state the view never read, because it attached in one reading,
 /// still waits for its name from the Session's own startup evidence, however long its startup
 /// takes, and resolves only once the Session leaves startup.

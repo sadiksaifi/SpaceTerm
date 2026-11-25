@@ -9541,6 +9541,27 @@ mod tests {
         );
     }
 
+    /// A directory the shell reports that is too long to present whole still names its own
+    /// folder in the Tab.
+    #[gpui::test]
+    fn a_long_reported_directory_should_keep_its_folder_name_in_the_tab(cx: &mut TestAppContext) {
+        use crate::terminal::metadata::TitleProvenance;
+        let (manager, _records, cx) = tab_manager(cx);
+        // Thirty ten-character folders put the last folder past the 256 characters a Tab shows.
+        let directory = format!("{}/last-folder", "/abcdefghij".repeat(30));
+        report_metadata(cx, 1, 1, |metadata| {
+            metadata.directory.path = Arc::from(directory.as_str());
+            metadata.title.value = Arc::from("vim");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+        });
+        cx.run_until_parked();
+
+        let title = manager.read_with(cx, |manager, cx| {
+            manager.tabs.active_tab().read(cx).tab_title().to_string()
+        });
+        assert_eq!(title, "vim \u{b7} last-folder");
+    }
+
     /// How opaque the window painted a chip whose bounds are `chip`, if it painted one there.
     fn chip_opacity_at(chip: gpui::Bounds<Pixels>, cx: &mut VisualTestContext) -> Option<f32> {
         cx.update(|window, _| {

@@ -1504,20 +1504,22 @@ impl TerminalPane {
     /// How this Pane's caption writes `directory`, a directory on its Machine that its Terminal
     /// Session has not reported. The text is for presentation only.
     pub(crate) fn caption_directory(&self, directory: &std::path::Path) -> SharedString {
-        let directory = crate::terminal::metadata::sanitize_title(&directory.to_string_lossy());
-        compact_home_directory(&directory, self.metadata().context.home()).into()
+        presented_directory(&directory.to_string_lossy(), self.metadata().context.home()).into()
     }
 
     pub(crate) fn caption(&self) -> PaneCaptionFacts {
         use crate::terminal::metadata::{CommandState, TitleProvenance, sanitize_title};
 
         let metadata = self.metadata();
+        let home = metadata.context.home();
         let directory = match self.current_directory() {
             Some(crate::domain::CurrentDirectory::Local(path)) => {
-                sanitize_title(&path.to_string_lossy())
+                presented_directory(&path.to_string_lossy(), home)
             }
-            Some(crate::domain::CurrentDirectory::Remote(path)) => sanitize_title(path.as_str()),
-            None => sanitize_title(&metadata.directory.path),
+            Some(crate::domain::CurrentDirectory::Remote(path)) => {
+                presented_directory(path.as_str(), home)
+            }
+            None => presented_directory(&metadata.directory.path, home),
         };
         let running = metadata
             .command
@@ -1544,7 +1546,7 @@ impl TerminalPane {
         };
         PaneCaptionFacts {
             origin: PaneOrigin::from_context(&metadata.context),
-            directory: compact_home_directory(&directory, metadata.context.home()).into(),
+            directory: directory.into(),
             label: label.into(),
             glyph,
             running: running.is_some(),
@@ -5981,6 +5983,40 @@ fn short_hostname(host: &str) -> &str {
 }
 
 use spaceterm_core::labels::compact_home_directory;
+
+/// How a caption writes directory `path` of a Machine whose home is `home`: without control
+/// characters, with the home abbreviated, and with its own folder's name whole. A parent path too
+/// long to present keeps its leading folders and marks where the rest was left out, so a long path
+/// never shows another folder's name as its own.
+fn presented_directory(path: &str, home: Option<&str>) -> String {
+    use spaceterm_core::pane::metadata::MAX_TITLE_CHARS;
+    let presentable: String = path
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect();
+    let directory = compact_home_directory(presentable.trim(), home);
+    let trimmed = directory.trim_end_matches('/');
+    let Some(separator) = trimmed.rfind('/') else {
+        return directory.chars().take(MAX_TITLE_CHARS).collect();
+    };
+    let (parent, folder) = trimmed.split_at(separator + 1);
+    let folder: String = folder.chars().take(MAX_TITLE_CHARS).collect();
+    if parent.chars().count() <= MAX_TITLE_CHARS {
+        return format!("{parent}{folder}");
+    }
+    let mut leading = String::new();
+    let mut length = 0;
+    for part in parent.split_inclusive('/') {
+        let part_length = part.chars().count();
+        // The mark and its separator take two characters.
+        if length + part_length + 2 > MAX_TITLE_CHARS {
+            break;
+        }
+        leading.push_str(part);
+        length += part_length;
+    }
+    format!("{leading}\u{2026}/{folder}")
+}
 
 fn normalized_pane_title(reported_title: &str, fallback_title: &str) -> String {
     let reported = reported_title
