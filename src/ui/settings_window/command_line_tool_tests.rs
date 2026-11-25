@@ -27,7 +27,11 @@ const ROW_SELECTOR: &str = "settings-row-command-line-tool";
 fn open_settings(
     launcher: Option<Launcher>,
     cx: &mut TestAppContext,
-) -> (Arc<ScriptedFiles>, Entity<SettingsWindow>, &mut VisualTestContext) {
+) -> (
+    Arc<ScriptedFiles>,
+    Entity<SettingsWindow>,
+    &mut VisualTestContext,
+) {
     let files = ScriptedFiles::new(Ok(launcher.unwrap_or(Launcher::Missing)));
     let command_line_tool = launcher.map(|_| Arc::new(tool(&files)));
     let settings =
@@ -133,7 +137,11 @@ fn uninstall_removes_the_command_and_offers_install_again(cx: &mut TestAppContex
     let removed = presentation(&window, cx);
     assert_eq!(
         (removed.state, removed.action, removed.menu),
-        ("Not installed", Some((ToolAction::Install, "Install")), vec![])
+        (
+            "Not installed",
+            Some((ToolAction::Install, "Install")),
+            vec![]
+        )
     );
     assert!(cx.debug_bounds(MENU_SELECTOR).is_none());
 }
@@ -278,11 +286,7 @@ fn a_finished_service_operation_reads_the_command_again(cx: &mut TestAppContext)
 fn a_finished_operation_during_a_read_reads_the_command_again(cx: &mut TestAppContext) {
     let (files, window, cx) = open_settings(Some(Launcher::Installed), cx);
     click(NAVIGATION_SELECTOR, cx);
-    let reads = || {
-        files
-            .reads
-            .load(std::sync::atomic::Ordering::SeqCst)
-    };
+    let reads = || files.reads.load(std::sync::atomic::Ordering::SeqCst);
     let before = reads();
     // The read is admitted, then the operation finishes before its answer lands.
     window.update(cx, |settings, cx| {
