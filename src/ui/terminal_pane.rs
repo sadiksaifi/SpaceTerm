@@ -1501,12 +1501,6 @@ impl TerminalPane {
         )
     }
 
-    /// How this Pane's caption writes `directory`, a directory on its Machine that its Terminal
-    /// Session has not reported. The text is for presentation only.
-    pub(crate) fn caption_directory(&self, directory: &std::path::Path) -> SharedString {
-        presented_directory(&directory.to_string_lossy(), self.metadata().context.home()).into()
-    }
-
     pub(crate) fn caption(&self) -> PaneCaptionFacts {
         use crate::terminal::metadata::{CommandState, TitleProvenance, sanitize_title};
 
@@ -5984,16 +5978,14 @@ fn short_hostname(host: &str) -> &str {
 
 use spaceterm_core::labels::compact_home_directory;
 
-/// How a caption writes directory `path` of a Machine whose home is `home`: without control
-/// characters, with the home abbreviated, and with its own folder's name whole. A parent path too
-/// long to present keeps its leading folders and marks where the rest was left out, so a long path
-/// never shows another folder's name as its own.
-fn presented_directory(path: &str, home: Option<&str>) -> String {
-    use spaceterm_core::pane::metadata::MAX_TITLE_CHARS;
-    let presentable: String = path
-        .chars()
-        .filter(|character| !character.is_control())
-        .collect();
+/// How a caption writes directory `path` of a Machine whose home is `home`: without the control
+/// and invisible characters Terminal Metadata never carries, with the home abbreviated, and with
+/// its own folder's name whole. A parent path too long to present keeps its leading folders and
+/// marks where the rest was left out, so a long path never shows another folder's name as its
+/// own. The text is for presentation only.
+pub(crate) fn presented_directory(path: &str, home: Option<&str>) -> String {
+    use spaceterm_core::pane::metadata::{MAX_DIRECTORY_CHARS, MAX_TITLE_CHARS, sanitize};
+    let presentable = sanitize(path, MAX_DIRECTORY_CHARS);
     let directory = compact_home_directory(presentable.trim(), home);
     let trimmed = directory.trim_end_matches('/');
     let Some(separator) = trimmed.rfind('/') else {

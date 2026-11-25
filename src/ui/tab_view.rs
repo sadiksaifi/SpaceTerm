@@ -757,13 +757,13 @@ pub(crate) struct TabView {
     /// starts; once it started, when it did. Their Tab and Pane Caption wait for the first
     /// real name together, at most [`NAME_WAIT`] after the start.
     title_waits: BTreeMap<PaneId, Option<std::time::Instant>>,
-    /// The directory the inventory presents for each Pane, as its caption writes a directory.
-    /// A Pane that waits for its name says it in its Tab and Pane Caption, as where its shell
-    /// starts, until the shell reports its own.
-    pane_places: BTreeMap<PaneId, gpui::SharedString>,
-    /// The Focused Pane that last named this Tab: one with a real name that was not waiting
-    /// for it. It keeps naming the Tab while a Focused Pane after it starts its shell.
-    named_by: Option<PaneId>,
+    /// Where SpaceTerm Core starts each Pane's shell: the directory it confirmed for the Pane,
+    /// otherwise the Pane's Starting Directory. A Pane that waits for its name says it in its
+    /// Tab and Pane Caption until the shell reports its own.
+    pane_places: BTreeMap<PaneId, std::path::PathBuf>,
+    /// The last Focused Pane that was not waiting for its name, and what the Tab said for it.
+    /// The Tab keeps saying that while a Focused Pane after it starts its shell.
+    shown: Option<(PaneId, TabIdentity)>,
     /// Ends the earliest title wait.
     _title_wait: Option<gpui::Task<()>>,
     /// A Pane of this Tab waited for or used a background start turn at the last reading, so the
@@ -880,7 +880,7 @@ impl TabView {
             _classify: None,
             title_waits: BTreeMap::new(),
             pane_places: BTreeMap::new(),
-            named_by: None,
+            shown: None,
             _title_wait: None,
             _workspace_status: cx.spawn_in(window, async move |view, cx| {
                 while changes.recv().await.is_ok() {
@@ -928,7 +928,6 @@ impl TabView {
                         view.track_title_waits(window, cx);
                         if pane_id == view.tab.root_pane_id()
                             || pane_id == view.tab.focused_pane_id()
-                            || pane_id == view.naming_pane()
                         {
                             cx.emit(TabViewEvent::PresentationChanged {
                                 tab_id: view.tab.id(),
@@ -1067,40 +1066,45 @@ impl TabView {
 
     /// What this Tab presents about the Terminal Session its Focused Pane runs, read from that
     /// Pane's caption facts.
+    ///
+    /// While the Focused Pane's shell starts, the Tab holds the name it showed for the Pane
+    /// focused before, as it was when the focus left. A Split or a restored Pane taking the
+    /// focus then changes the Tab once, when the new shell names itself.
     pub(crate) fn tab_identity(&self) -> TabIdentity {
-        let named_by = self.naming_pane();
+        let focused = self.tab.focused_pane_id();
+        let attention = self.pane_attention.values().copied().sum::<u32>() > 0;
+        let identity = self.pane_identity(focused, attention);
+        if !identity.pending {
+            return identity;
+        }
+        match &self.shown {
+            Some((pane_id, shown))
+                if *pane_id != focused && self.tab.pane(*pane_id).is_some() && shown.is_named() =>
+            {
+                TabIdentity {
+                    attention,
+                    ..shown.clone()
+                }
+            }
+            _ => identity,
+        }
+    }
+
+    /// What Pane `pane_id` would have its Tab say.
+    fn pane_identity(&self, pane_id: PaneId, attention: bool) -> TabIdentity {
         TabIdentity::resolve(
-            self.caption_text(named_by),
-            self.pane_title(named_by),
-            self.pane_attention.values().copied().sum::<u32>() > 0,
+            self.caption_text(pane_id),
+            self.pane_title(pane_id),
+            attention,
         )
     }
 
-    /// The Pane that names the Tab: the Focused Pane, or while its shell starts, the Pane that
-    /// named the Tab before it. A Split or a restored Pane taking the focus then keeps the name
-    /// the Tab showed, rather than dropping it until the new shell names itself.
-    fn naming_pane(&self) -> PaneId {
+    /// Remembers what the Tab says for its Focused Pane, unless that Pane waits for its name.
+    fn follow_shown_identity(&mut self) {
         let focused = self.tab.focused_pane_id();
-        if !self.caption_text(focused).pending {
-            return focused;
-        }
-        self.named_by
-            .filter(|pane_id| {
-                *pane_id != focused && self.tab.pane(*pane_id).is_some() && self.names_tab(*pane_id)
-            })
-            .unwrap_or(focused)
-    }
-
-    /// Whether Pane `pane_id` has a real name and no longer waits for one.
-    fn names_tab(&self, pane_id: PaneId) -> bool {
-        self.pane_named(pane_id) && !self.caption_text(pane_id).pending
-    }
-
-    /// Remembers the Focused Pane as the one naming the Tab, once it has a name of its own.
-    fn follow_naming_pane(&mut self) {
-        let focused = self.tab.focused_pane_id();
-        if self.names_tab(focused) {
-            self.named_by = Some(focused);
+        let identity = self.pane_identity(focused, false);
+        if !identity.pending {
+            self.shown = Some((focused, identity));
         }
     }
 
@@ -1126,7 +1130,13 @@ impl TabView {
             && !text.has_directory
             && let Some(place) = self.pane_places.get(&pane_id)
         {
-            text.place_in(place);
+            // The Pane has no Terminal Metadata yet, so its Machine's home comes from the
+            // Panes that have.
+            let home = self.binding.sessions().home();
+            text.place_in(&super::terminal_pane::presented_directory(
+                &place.to_string_lossy(),
+                home.as_deref(),
+            ));
         }
         text
     }
@@ -1179,7 +1189,7 @@ impl TabView {
         }
         self.title_waits
             .retain(|pane_id, _| self.binding.view(*pane_id).is_some());
-        self.follow_naming_pane();
+        self.follow_shown_identity();
         if changed {
             cx.emit(TabViewEvent::PresentationChanged {
                 tab_id: self.tab.id(),
@@ -2018,7 +2028,7 @@ impl TabView {
 
     /// Gives each Pane the focus it presents. Returns the Panes whose presentation inputs changed.
     fn sync_terminal_focus(&mut self, cx: &mut Context<Self>) -> BTreeSet<PaneId> {
-        self.follow_naming_pane();
+        self.follow_shown_identity();
         let focused_terminal_id = self
             .tab
             .pane(self.tab.focused_pane_id())
@@ -2911,17 +2921,22 @@ impl TabView {
             changed = true;
             cx.notify();
         }
-        let places: BTreeMap<PaneId, gpui::SharedString> = core_tab
+        for pane in &core_tab.panes {
+            if let Some(home) = pane.presentation.as_ref().and_then(|p| p.home.as_deref()) {
+                self.binding.sessions().learn_home(home);
+            }
+        }
+        let places: BTreeMap<PaneId, std::path::PathBuf> = core_tab
             .panes
             .iter()
             .filter_map(|pane| {
                 let pane_id = self.binding.local_pane(pane.id)?;
-                let directory = pane.presented_directory();
-                if directory.as_os_str().is_empty() {
-                    return None;
-                }
-                let terminal = self.tab.pane(pane_id)?;
-                Some((pane_id, terminal.read(cx).caption_directory(directory)))
+                // A directory the shell of an earlier Session reported starts nothing.
+                let directory = pane
+                    .confirmed_directory
+                    .as_ref()
+                    .unwrap_or(&pane.starting_directory);
+                (!directory.as_os_str().is_empty()).then(|| (pane_id, directory.clone()))
             })
             .collect();
         if self.pane_places != places {

@@ -9462,15 +9462,15 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(title(cx), "vim \u{b7} app");
 
-        cx.dispatch_action(SplitRight);
-        cx.run_until_parked();
         let core = cx.update(|_, cx| {
             cx.global::<crate::ui::workspace_manager::tests::LocalCore>()
                 .clone()
         });
-        let pane = core.panes.pane(core.panes.opened_at(1));
-        pane.attach_quietly();
+        // A Pane a person creates starts its shell as it opens.
+        core.panes.start_opened_panes_quietly();
+        cx.dispatch_action(SplitRight);
         cx.run_until_parked();
+        let pane = core.panes.pane(core.panes.opened_at(1));
         assert_eq!(
             title(cx),
             "vim \u{b7} app",
@@ -9525,13 +9525,13 @@ mod tests {
             "Previous Pane lands on the second Pane"
         );
 
-        cx.dispatch_action(SplitRight);
-        cx.run_until_parked();
         let core = cx.update(|_, cx| {
             cx.global::<crate::ui::workspace_manager::tests::LocalCore>()
                 .clone()
         });
-        core.panes.pane(core.panes.opened_at(3)).attach_quietly();
+        // A Pane a person creates starts its shell as it opens.
+        core.panes.start_opened_panes_quietly();
+        cx.dispatch_action(SplitRight);
         cx.run_until_parked();
 
         assert_eq!(
@@ -9539,6 +9539,94 @@ mod tests {
             "top \u{b7} b",
             "the Tab keeps the name it showed while the new Pane's shell starts"
         );
+    }
+
+    /// The Tab holds the name it showed when a Split took the focus. What the Pane it split from
+    /// does meanwhile changes nothing on the Tab until the new shell names itself.
+    #[gpui::test]
+    fn a_split_should_hold_its_tabs_name_while_the_pane_it_came_from_changes(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::terminal::metadata::TitleProvenance;
+        let (manager, _records, cx) = tab_manager(cx);
+        let title = |cx: &mut VisualTestContext| {
+            manager.read_with(cx, |manager, cx| {
+                manager.tabs.active_tab().read(cx).tab_title().to_string()
+            })
+        };
+        let name = |cx: &mut VisualTestContext, generation: u64, title: &str| {
+            report_metadata(cx, 1, generation, |metadata| {
+                metadata.directory.path = Arc::from("/srv/app");
+                metadata.title.value = Arc::from(title);
+                metadata.title.provenance = TitleProvenance::TerminalControl;
+            });
+            cx.run_until_parked();
+        };
+        name(cx, 1, "cargo build");
+        let core = cx.update(|_, cx| {
+            cx.global::<crate::ui::workspace_manager::tests::LocalCore>()
+                .clone()
+        });
+        // A Pane a person creates starts its shell as it opens.
+        core.panes.start_opened_panes_quietly();
+        cx.dispatch_action(SplitRight);
+        cx.run_until_parked();
+
+        // The build ends in the first Pane while the new Pane's shell still starts.
+        name(cx, 2, "zsh");
+
+        assert_eq!(title(cx), "cargo build \u{b7} app");
+    }
+
+    /// A Focused Pane that says only Terminal, then starts a shell, never borrows the name of a
+    /// Pane the Tab was not showing. The Tab says where the new shell starts.
+    #[gpui::test]
+    fn a_starting_pane_should_not_put_a_name_its_tab_was_not_showing_on_the_tab(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::terminal::metadata::TitleProvenance;
+        let (manager, _records, cx) = tab_manager(cx);
+        let title = |cx: &mut VisualTestContext| {
+            manager.read_with(cx, |manager, cx| {
+                manager.tabs.active_tab().read(cx).tab_title().to_string()
+            })
+        };
+        report_metadata(cx, 1, 1, |metadata| {
+            metadata.directory.path = Arc::from("/srv/app");
+            metadata.title.value = Arc::from("vim");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+        });
+        cx.run_until_parked();
+        assert_eq!(title(cx), "vim \u{b7} app");
+        cx.dispatch_action(SplitRight);
+        cx.run_until_parked();
+        // The second Pane never names itself, so its wait ends and the Tab says Terminal.
+        cx.executor()
+            .advance_clock(crate::ui::tab_view::NAME_WAIT * 2);
+        cx.run_until_parked();
+        assert_eq!(title(cx), "Terminal");
+        let core = cx.update(|_, cx| {
+            cx.global::<crate::ui::workspace_manager::tests::LocalCore>()
+                .clone()
+        });
+        let second = core.panes.opened_at(1);
+        let place = core
+            .edits
+            .applied_inventory()
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| &tab.panes)
+            .find(|pane| pane.id == second)
+            .and_then(|pane| pane.starting_directory.file_name())
+            .expect("the second Pane starts in a named folder")
+            .to_string_lossy()
+            .into_owned();
+
+        core.panes.pane(second).attach_quietly();
+        cx.run_until_parked();
+
+        assert_eq!(title(cx), place);
     }
 
     /// A directory the shell reports that is too long to present whole still names its own

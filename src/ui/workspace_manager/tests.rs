@@ -9805,6 +9805,82 @@ fn a_starting_shell_with_no_known_directory_shows_no_words_while_it_starts(
     spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Pane Caption, Starting shell");
 }
 
+/// A starting shell's place is abbreviated against its Machine's home at once, which another
+/// Pane's published Terminal Metadata already names, so it never shows whole and then as `~`.
+#[gpui::test]
+fn a_starting_shell_in_the_home_directory_says_the_home_abbreviation(cx: &mut TestAppContext) {
+    use spaceterm_core::pane::metadata;
+    let (harness, cx) = close_harness(cx);
+    let tab_view = harness.manager.read_with(cx, |manager, cx| {
+        manager
+            .active_tab_manager()
+            .expect("an active Workspace")
+            .read(cx)
+            .active_tab_view()
+    });
+    let mut inventory = close_published();
+    inventory.revision = 2;
+    // A Pane of another Tab has published Terminal Metadata, which names the Machine's home.
+    let published = &mut inventory.workspaces[0].tabs[1].panes[0];
+    assert_eq!(published.id, CLOSE_SECOND_PANE);
+    published.presentation = Some(Box::new(metadata::Snapshot {
+        revision: 1,
+        shell_name: "zsh".into(),
+        title: "zsh".into(),
+        title_provenance: metadata::TitleProvenance::Fallback,
+        directory: "/server/work".into(),
+        directory_provenance: metadata::DirectoryProvenance::Initial,
+        user: None,
+        host: None,
+        home: Some("/server/work".into()),
+        freshness: metadata::Freshness::Live,
+        finished_commands: 0,
+        prompt_zone: metadata::PromptZone::Unknown,
+        command: None,
+        title_activity: false,
+        title_glyph: metadata::TitleGlyph::Reported,
+        progress: metadata::Progress::None,
+    }));
+    harness.publish(inventory, cx);
+
+    harness.panes.pane(CLOSE_ROOT_PANE).start_shell();
+    settle_panes(cx);
+
+    assert_eq!(
+        tab_view.read_with(cx, |view, _| view.tab_title()).as_ref(),
+        "~"
+    );
+    spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Pane Caption, ~");
+}
+
+/// A Starting Directory is written without the invisible characters Terminal Metadata never
+/// carries, so its folder reads the same before and after the shell reports it.
+#[gpui::test]
+fn a_starting_shells_place_drops_invisible_characters(cx: &mut TestAppContext) {
+    let (harness, cx) = close_harness(cx);
+    let tab_view = harness.manager.read_with(cx, |manager, cx| {
+        manager
+            .active_tab_manager()
+            .expect("an active Workspace")
+            .read(cx)
+            .active_tab_view()
+    });
+    let mut inventory = close_published();
+    inventory.revision = 2;
+    // U+202E reverses the text that follows it.
+    inventory.workspaces[0].tabs[0].panes[0].starting_directory =
+        PathBuf::from("/server/wo\u{202e}rk");
+    harness.publish(inventory, cx);
+
+    harness.panes.pane(CLOSE_ROOT_PANE).start_shell();
+    settle_panes(cx);
+
+    assert_eq!(
+        tab_view.read_with(cx, |view, _| view.tab_title()).as_ref(),
+        "work"
+    );
+}
+
 /// A Starting Directory too long to present whole still names its own folder in the Tab and
 /// the Pane Caption. The parent path is what gets shortened.
 #[gpui::test]
