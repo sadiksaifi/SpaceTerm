@@ -4656,12 +4656,15 @@ fn render_pane_caption(
             let room = gpui::size(bounds.size.width + caption.growing, bounds.size.height);
             let layout =
                 CaptionLayout::resolve(&caption, room.width, controls_reveal, window, &appearance);
+            // A growing Pane shows a caption part only once it holds all of it.
+            let edge = (caption.growing > px(0.0)).then(|| bounds.right());
             let content = render_pane_caption_content(
                 caption,
                 controls_reveal,
                 view,
                 crate::desktop_profile::DesktopPresentation::get(cx),
                 layout,
+                edge,
                 &appearance,
                 paint,
             );
@@ -4717,6 +4720,7 @@ fn render_pane_caption_content(
     view: gpui::WeakEntity<TabView>,
     presentation: &crate::desktop_profile::DesktopPresentation,
     layout: CaptionLayout,
+    edge: Option<Pixels>,
     appearance: &super::appearance::ChromeAppearance,
     paint: crate::appearance::CaptionPaint,
 ) -> AnyElement {
@@ -4937,7 +4941,7 @@ fn render_pane_caption_content(
     };
     let repository = text.repository.clone();
     let caption_content =
-        render_caption_identity(pane_id, text, attention, layout, appearance, &paint);
+        render_caption_identity(pane_id, text, attention, layout, edge, appearance, &paint);
     let focus_pane = move |window: &mut Window, cx: &mut App| {
         let _ = focus_view.update(cx, |view, cx| {
             view.focus_pane(pane_id, cx);
@@ -4985,13 +4989,16 @@ fn render_pane_caption_content(
         .when_some(
             repository.filter(|_| layout.repository.show),
             |row, repository| {
-                row.child(render_repository_segment(
-                    pane_id,
-                    &repository,
-                    (terminal.downgrade(), view.clone()),
-                    layout.repository,
-                    appearance,
-                    &paint,
+                row.child(whole(
+                    edge,
+                    render_repository_segment(
+                        pane_id,
+                        &repository,
+                        (terminal.downgrade(), view.clone()),
+                        layout.repository,
+                        appearance,
+                        &paint,
+                    ),
                 ))
             },
         )
@@ -5011,8 +5018,85 @@ fn render_pane_caption_content(
                     .child(label),
             )
         })
-        .child(controls_slot.child(controls_clip.child(controls)))
+        .child(whole(
+            edge,
+            controls_slot.child(controls_clip.child(controls)),
+        ))
         .into_any_element()
+}
+
+/// A part of the caption of a Pane growing into the layout. It shows only once the Pane as
+/// drawn, which ends at `edge`, holds all of it, so the Pane's edge never cuts through a word,
+/// a separator or a control. A part of a Pane at rest has no `edge` and always shows.
+struct WholePart {
+    part: AnyElement,
+    edge: Option<Pixels>,
+}
+
+fn whole(edge: Option<Pixels>, part: impl gpui::IntoElement) -> WholePart {
+    WholePart {
+        part: part.into_any_element(),
+        edge,
+    }
+}
+
+impl gpui::IntoElement for WholePart {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl gpui::Element for WholePart {
+    type RequestLayoutState = ();
+    /// Whether the part shows.
+    type PrepaintState = bool;
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+    fn request_layout(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (gpui::LayoutId, ()) {
+        (self.part.request_layout(window, cx), ())
+    }
+    fn prepaint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        let shows = self
+            .edge
+            .is_none_or(|edge| bounds.right() <= edge + px(0.5));
+        if shows {
+            self.part.prepaint(window, cx);
+        }
+        shows
+    }
+    fn paint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        shows: &mut bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if *shows {
+            self.part.paint(window, cx);
+        }
+    }
 }
 
 /// The mark before a branch name or detached commit id, in the inherited text color.
@@ -5150,6 +5234,7 @@ fn render_caption_identity(
     text: PaneCaptionText,
     attention: bool,
     layout: CaptionLayout,
+    edge: Option<Pixels>,
     appearance: &super::appearance::ChromeAppearance,
     paint: &crate::appearance::CaptionPaint,
 ) -> gpui::Div {
@@ -5167,14 +5252,21 @@ fn render_caption_identity(
         .flex()
         .items_center()
         .overflow_hidden()
-        .child(render_pane_origin(
-            pane_id,
-            &text.origin,
-            worded,
-            layout,
-            color,
-            appearance,
+        .child(whole(
+            edge,
+            render_pane_origin(pane_id, &text.origin, worded, layout, color, appearance),
         ));
+    // The separator after the Machine shows with what it separates the Machine from, so a
+    // growing Pane never shows one with nothing after it.
+    let origin_separator =
+        (worded && layout.show_host && !text.origin.host.is_empty()).then(|| {
+            div()
+                .debug_selector(move || format!("pane-caption-origin-separator-{}", pane_id.get()))
+                .flex_shrink_0()
+                .mx(appearance.spacing(5.0))
+                .text_color(gpui_color(color))
+                .child("›")
+        });
     let waiting = move |segment: gpui::Div| segment.when(unplaced, |segment| segment.opacity(0.0));
     caption_content = caption_content.when(unplaced, |row| {
         row.child(
@@ -5182,7 +5274,12 @@ fn render_caption_identity(
         )
     });
     if text.has_directory {
-        caption_content = caption_content
+        // The place: the separator from the Machine, the directory and its folder.
+        let place = div()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .children(origin_separator)
             .when(layout.show_directory && !text.directory.is_empty(), |row| {
                 row.child(
                     div()
@@ -5198,7 +5295,12 @@ fn render_caption_identity(
                     .min_w_0()
                     .truncate()
                     .child(text.name),
-            )
+            );
+        // The status, with the separator before it.
+        let status = div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
             .when(layout.show_status_separator, |row| {
                 row.child(
                     div()
@@ -5222,9 +5324,13 @@ fn render_caption_identity(
                         paint,
                         appearance,
                     )),
-            )
+            );
+        caption_content = caption_content
+            .child(whole(edge, place))
+            .child(whole(edge, status))
             .when(layout.show_label && !text.label.is_empty(), |row| {
-                row.child(
+                row.child(whole(
+                    edge,
                     div()
                         .debug_selector(move || format!("pane-caption-label-{}", pane_id.get()))
                         .min_w_0()
@@ -5233,7 +5339,7 @@ fn render_caption_identity(
                         // A starting shell's label is a prediction, drawn quietly.
                         .when(pending, |label| label.opacity(PREDICTED_OPACITY))
                         .child(text.label),
-                )
+                ))
                 .when(pending, |row| {
                     row.child(div().debug_selector(move || {
                         format!("pane-caption-label-predicted-{}", pane_id.get())
@@ -5242,18 +5348,29 @@ fn render_caption_identity(
             });
     } else {
         caption_content = caption_content
-            .child(render_pane_status(
-                pane_id,
-                (text.progress, text.glyph, attention),
-                paint,
-                appearance,
-            ))
-            .child(waiting(
+            .child(whole(
+                edge,
                 div()
-                    .debug_selector(move || format!("pane-caption-name-{}", pane_id.get()))
-                    .min_w_0()
-                    .truncate()
-                    .child(text.name),
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .children(origin_separator)
+                    .child(render_pane_status(
+                        pane_id,
+                        (text.progress, text.glyph, attention),
+                        paint,
+                        appearance,
+                    )),
+            ))
+            .child(whole(
+                edge,
+                waiting(
+                    div()
+                        .debug_selector(move || format!("pane-caption-name-{}", pane_id.get()))
+                        .min_w_0()
+                        .truncate()
+                        .child(text.name),
+                ),
             ));
     }
     caption_content
@@ -5282,7 +5399,8 @@ fn caption_row(
 }
 
 /// Renders the account and machine a Pane runs on, ahead of the directory it sits in. The
-/// separator after them shows only when `separates` words that follow.
+/// separator after them belongs to what follows, and the Machine keeps its gap when nothing
+/// `separates` it from words.
 fn render_pane_origin(
     pane_id: PaneId,
     origin: &PaneOrigin,
@@ -5314,18 +5432,6 @@ fn render_pane_origin(
                     .when(!separates, |host| host.mr(appearance.spacing(5.0)))
                     .child(origin.host.clone()),
             )
-            .when(separates, |row| {
-                row.child(
-                    div()
-                        .debug_selector(move || {
-                            format!("pane-caption-origin-separator-{}", pane_id.get())
-                        })
-                        .flex_shrink_0()
-                        .mx(appearance.spacing(5.0))
-                        .text_color(gpui_color(color))
-                        .child("›"),
-                )
-            })
         })
         .into_any_element()
 }

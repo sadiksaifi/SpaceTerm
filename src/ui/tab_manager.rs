@@ -9612,6 +9612,78 @@ mod tests {
         );
     }
 
+    /// A Pane growing in shows a part of its caption only once the Pane as drawn holds all of
+    /// it, so its edge never cuts through a word, a separator or a control.
+    #[gpui::test]
+    fn a_growing_panes_caption_should_show_each_part_whole(cx: &mut TestAppContext) {
+        use crate::terminal::metadata::TitleProvenance;
+        cx.update(|cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+        let (manager, _records, cx) = tab_manager(cx);
+        report_metadata(cx, 1, 1, |metadata| {
+            metadata.shell_name = Arc::from("zsh");
+            metadata.directory.path = Arc::from("/srv/app");
+            metadata.title.value = Arc::from("zsh");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+        });
+        cx.run_until_parked();
+        finish_slides(cx);
+        let core = cx.update(|_, cx| {
+            cx.global::<crate::ui::workspace_manager::tests::LocalCore>()
+                .clone()
+        });
+        core.panes.start_opened_panes_quietly();
+
+        cx.dispatch_action(SplitRight);
+        cx.run_until_parked();
+        let pane = manager.read_with(cx, |manager, cx| {
+            manager.tabs.active_tab().read(cx).focused_pane_id().get()
+        });
+        let parts: Vec<&'static str> = [
+            "pane-caption-name",
+            "pane-caption-status-separator",
+            "pane-caption-status",
+            "pane-controls-clip",
+        ]
+        .into_iter()
+        .map(|part| &*format!("{part}-{pane}").leak())
+        .collect();
+        let mut drawn = Vec::new();
+        for _ in 0..90 {
+            for part in &parts {
+                if let Some(bounds) = cx.debug_bounds(part) {
+                    drawn.push((*part, bounds.right()));
+                }
+            }
+            next_frame_after(3, cx);
+        }
+        finish_slides(cx);
+        for part in &parts {
+            if let Some(bounds) = cx.debug_bounds(part) {
+                drawn.push((*part, bounds.right()));
+            }
+        }
+        // The new Pane grows from its far edge, which is where its caption ends at rest.
+        let edge = cx
+            .debug_bounds(parts[3])
+            .expect("the settled Pane shows its controls")
+            .right();
+
+        assert!(
+            parts
+                .iter()
+                .all(|part| drawn.iter().any(|(shown, _)| shown == part)),
+            "every part must show by the time the Pane rests, got {drawn:?}"
+        );
+        let past: Vec<_> = drawn
+            .iter()
+            .filter(|(_, right)| *right > edge + px(0.5))
+            .collect();
+        assert!(
+            past.is_empty(),
+            "no part may reach past the Pane's edge at {edge:?}, got {past:?}"
+        );
+    }
+
     /// A Focused Pane that says only Terminal, then starts a shell, never borrows the name of a
     /// Pane the Tab was not showing. The Tab says where the new shell starts.
     #[gpui::test]
