@@ -5121,6 +5121,13 @@ fn render_caption_identity(
     paint: &crate::appearance::CaptionPaint,
 ) -> gpui::Div {
     let color = paint.foreground;
+    // A shell that is starting says nothing of what it is doing until its first confirmed name,
+    // as its Tab does, so neither says Terminal first and then something else. It says where it
+    // starts meanwhile, and shows no words when nothing says where that is.
+    let pending = text.pending;
+    let unplaced = pending && !text.has_directory;
+    // The Machine is separated from the words after it, so with no words it stands alone.
+    let worded = !unplaced && (text.has_directory || !text.name.is_empty());
     let mut caption_content = div()
         .flex_1()
         .min_w_0()
@@ -5130,15 +5137,11 @@ fn render_caption_identity(
         .child(render_pane_origin(
             pane_id,
             &text.origin,
+            worded,
             layout,
             color,
             appearance,
         ));
-    // A shell that is starting says nothing of what it is doing until its first confirmed name,
-    // as its Tab does, so neither says Terminal first and then something else. It says where it
-    // starts meanwhile, and shows no words when nothing says where that is.
-    let pending = text.pending;
-    let unplaced = pending && !text.has_directory;
     let waiting = move |segment: gpui::Div| segment.when(unplaced, |segment| segment.opacity(0.0));
     caption_content = caption_content.when(unplaced, |row| {
         row.child(
@@ -5241,10 +5244,12 @@ fn caption_row(
         .text_color(gpui_color(color))
 }
 
-/// Renders the account and machine a Pane runs on, ahead of the directory it sits in.
+/// Renders the account and machine a Pane runs on, ahead of the directory it sits in. The
+/// separator after them shows only when `separates` words that follow.
 fn render_pane_origin(
     pane_id: PaneId,
     origin: &PaneOrigin,
+    separates: bool,
     layout: CaptionLayout,
     color: crate::appearance::Color,
     appearance: &super::appearance::ChromeAppearance,
@@ -5268,15 +5273,22 @@ fn render_pane_origin(
                 div()
                     .debug_selector(move || format!("pane-caption-host-{}", pane_id.get()))
                     .text_color(gpui_color(color))
+                    // Without its separator the Machine keeps the gap to the status after it.
+                    .when(!separates, |host| host.mr(appearance.spacing(5.0)))
                     .child(origin.host.clone()),
             )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .mx(appearance.spacing(5.0))
-                    .text_color(gpui_color(color))
-                    .child("›"),
-            )
+            .when(separates, |row| {
+                row.child(
+                    div()
+                        .debug_selector(move || {
+                            format!("pane-caption-origin-separator-{}", pane_id.get())
+                        })
+                        .flex_shrink_0()
+                        .mx(appearance.spacing(5.0))
+                        .text_color(gpui_color(color))
+                        .child("›"),
+                )
+            })
         })
         .into_any_element()
 }
@@ -7926,6 +7938,54 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A Pane Caption separates its Machine from what follows it only when words follow. A
+    /// shell that starts where nothing says where shows its Machine and no separator.
+    #[gpui::test]
+    fn caption_should_show_no_separator_after_its_machine_while_it_has_no_words(
+        cx: &mut TestAppContext,
+    ) {
+        let (_, view, records, cx) = caption_view(cx);
+        let mut screen =
+            ScreenSnapshot::from_test_parts_at(Arc::from([]), Default::default(), "zsh", 1);
+        let metadata = Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata);
+        metadata.context = crate::terminal::metadata::TerminalMetadataContext::local(
+            crate::local_path::LocalPathSemantics::Posix,
+            "/Users/tester",
+            crate::terminal::metadata::LocalMachine::new(
+                Some("tester"),
+                Some("workstation"),
+                Some("/Users/tester"),
+            ),
+        );
+        publish_screen(&view, &records, 1, screen, cx);
+        cx.run_until_parked();
+        let shows = |cx: &mut VisualTestContext, part: &str| {
+            cx.debug_bounds(format!("pane-caption-{part}-1").leak())
+                .is_some()
+        };
+        assert!(
+            shows(cx, "host") && shows(cx, "origin-separator") && !shows(cx, "name-pending"),
+            "a caption with a name separates its Machine from it"
+        );
+
+        // The Pane's shell starts, and nothing says where.
+        view.update(cx, |view, cx| {
+            view.title_waits.insert(PaneId::new(1), None);
+            view.pane_places.clear();
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            shows(cx, "name-pending"),
+            "the caption has no words to show"
+        );
+        assert!(
+            shows(cx, "host") && !shows(cx, "origin-separator"),
+            "the caption names its Machine with no separator after it"
+        );
     }
 
     #[gpui::test]
