@@ -9774,6 +9774,37 @@ fn a_starting_shell_shows_its_starting_directory_in_its_tab_and_caption(cx: &mut
     );
 }
 
+/// A starting shell whose Pane the inventory places nowhere shows no words in its Tab and its
+/// Pane Caption until its wait ends, rather than saying Terminal first.
+#[gpui::test]
+fn a_starting_shell_with_no_known_directory_shows_no_words_while_it_starts(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = close_harness(cx);
+    let (tab, pane) = harness.manager.read_with(cx, |manager, cx| {
+        manager
+            .active_tab_manager()
+            .expect("an active Workspace")
+            .read(cx)
+            .active_terminal_identity(cx)
+    });
+    let tab_pending: &'static str = format!("tab-name-pending-{}", tab.get()).leak();
+    let caption_pending: &'static str = format!("pane-caption-name-pending-{}", pane.get()).leak();
+    let mut inventory = close_published();
+    inventory.revision = 2;
+    inventory.workspaces[0].tabs[0].panes[0].starting_directory = PathBuf::new();
+    harness.publish(inventory, cx);
+
+    harness.panes.pane(CLOSE_ROOT_PANE).start_shell();
+    settle_panes(cx);
+
+    assert!(
+        cx.debug_bounds(tab_pending).is_some() && cx.debug_bounds(caption_pending).is_some(),
+        "neither the Tab nor the Pane Caption has words to show"
+    );
+    spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Pane Caption, Starting shell");
+}
+
 /// A shell whose Connecting state the view never read, because it attached in one reading,
 /// still waits for its name from the Session's own startup evidence, however long its startup
 /// takes, and resolves only once the Session leaves startup.

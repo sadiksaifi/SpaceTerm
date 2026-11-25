@@ -9443,6 +9443,54 @@ mod tests {
         );
     }
 
+    /// A Split's new Pane takes the focus while its shell starts. The Tab keeps saying what the
+    /// Pane it showed is doing until the new shell names itself.
+    #[gpui::test]
+    fn a_split_should_keep_its_tabs_name_until_the_new_shell_names_itself(cx: &mut TestAppContext) {
+        use crate::terminal::metadata::TitleProvenance;
+        let (manager, _records, cx) = tab_manager(cx);
+        let title = |cx: &mut VisualTestContext| {
+            manager.read_with(cx, |manager, cx| {
+                manager.tabs.active_tab().read(cx).tab_title().to_string()
+            })
+        };
+        report_metadata(cx, 1, 1, |metadata| {
+            metadata.directory.path = Arc::from("/srv/app");
+            metadata.title.value = Arc::from("vim");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+        });
+        cx.run_until_parked();
+        assert_eq!(title(cx), "vim \u{b7} app");
+
+        cx.dispatch_action(SplitRight);
+        cx.run_until_parked();
+        let core = cx.update(|_, cx| {
+            cx.global::<crate::ui::workspace_manager::tests::LocalCore>()
+                .clone()
+        });
+        let pane = core.panes.pane(core.panes.opened_at(1));
+        pane.attach_quietly();
+        cx.run_until_parked();
+        assert_eq!(
+            title(cx),
+            "vim \u{b7} app",
+            "the Tab keeps its name while the new Pane's shell starts"
+        );
+
+        report_metadata(cx, 2, 1, |metadata| {
+            metadata.directory.path = Arc::from("/srv/api");
+            metadata.title.value = Arc::from("zsh");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+        });
+        pane.end_startup();
+        cx.run_until_parked();
+        assert_eq!(
+            title(cx),
+            "zsh \u{b7} api",
+            "the Tab follows its Focused Pane once that Pane's shell names itself"
+        );
+    }
+
     /// How opaque the window painted a chip whose bounds are `chip`, if it painted one there.
     fn chip_opacity_at(chip: gpui::Bounds<Pixels>, cx: &mut VisualTestContext) -> Option<f32> {
         cx.update(|window, _| {

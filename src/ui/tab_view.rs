@@ -923,6 +923,7 @@ impl TabView {
                         view.track_title_waits(window, cx);
                         if pane_id == view.tab.root_pane_id()
                             || pane_id == view.tab.focused_pane_id()
+                            || pane_id == view.naming_pane()
                         {
                             cx.emit(TabViewEvent::PresentationChanged {
                                 tab_id: view.tab.id(),
@@ -1062,12 +1063,33 @@ impl TabView {
     /// What this Tab presents about the Terminal Session its Focused Pane runs, read from that
     /// Pane's caption facts.
     pub(crate) fn tab_identity(&self) -> TabIdentity {
-        let focused = self.tab.focused_pane_id();
+        let named_by = self.naming_pane();
         TabIdentity::resolve(
-            self.caption_text(focused),
-            self.pane_title(focused),
+            self.caption_text(named_by),
+            self.pane_title(named_by),
             self.pane_attention.values().copied().sum::<u32>() > 0,
         )
+    }
+
+    /// The Pane that names the Tab: the Focused Pane, or while its shell starts, the Pane focused
+    /// most recently before it that has a name. A Split or a restored Pane taking the focus then
+    /// keeps the name the Tab showed, rather than dropping it until the new shell names itself.
+    fn naming_pane(&self) -> PaneId {
+        let focused = self.tab.focused_pane_id();
+        if !self.caption_text(focused).pending {
+            return focused;
+        }
+        self.tab
+            .focus_history()
+            .iter()
+            .rev()
+            .copied()
+            .find(|pane_id| {
+                *pane_id != focused
+                    && self.pane_named(*pane_id)
+                    && !self.caption_text(*pane_id).pending
+            })
+            .unwrap_or(focused)
     }
 
     /// The title Pane `pane_id` reported, or Terminal.
@@ -4298,7 +4320,7 @@ pub(crate) struct TabIdentity {
     /// Whether any Pane in the Tab is asking for attention.
     pub(crate) attention: bool,
     /// The Focused Pane's shell is starting and has not named itself yet, so the Tab waits for
-    /// its first name the same way the Pane Caption does.
+    /// its first name the same way the Pane Caption does, and says only its place meanwhile.
     pub(crate) pending: bool,
 }
 
@@ -4389,8 +4411,8 @@ struct PaneCaptionText {
     running: bool,
     progress: TerminalProgress,
     repository: Option<RepositoryCaption>,
-    /// The Pane's shell is starting and has not named itself yet. The caption and its Tab show
-    /// one waiting presentation until its first confirmed name, which then shows whole.
+    /// The Pane's shell is starting and has not named itself yet. The caption and its Tab say
+    /// where the shell starts and no activity until its first confirmed name.
     pending: bool,
 }
 
