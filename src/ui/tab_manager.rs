@@ -3428,13 +3428,14 @@ impl TabReveal {
             &|width| (width - trailing - close_button, width - trailing),
             None,
         ));
-        // The glyph and the words identify the Tab together, so neither shows alone, and the
-        // close control never shows on a Tab that has not said what it is.
-        let identity = glyph.min(words);
+        // A Tab says what it is before it shows anything else: neither its glyph nor its close
+        // control shows before its words. A Tab growing from its start uncovers the glyph
+        // first, which then waits for the words. One growing from its end uncovers the close
+        // control first, which waits likewise, and its glyph follows the words.
         Self {
-            glyph: identity,
-            words: identity,
-            close: close.min(identity),
+            glyph: glyph.min(words),
+            words,
+            close: close.min(words),
         }
     }
 }
@@ -10140,11 +10141,11 @@ mod tests {
         }
     }
 
-    /// A growing Tab identifies itself before it shows anything else: its glyph and its words
-    /// appear together, and its close control never shows before them, whichever end the Tab
-    /// grows from.
+    /// A growing Tab says what it is before it shows anything else: neither its glyph nor its
+    /// close control shows before its words, whichever end the Tab grows from, and the words
+    /// show as soon as its slot holds them.
     #[test]
-    fn a_growing_tab_should_show_its_glyph_and_words_together_and_no_control_before_them() {
+    fn a_growing_tab_should_show_nothing_before_its_words() {
         let appearance = crate::ui::appearance::ChromeAppearance::prepare(
             &crate::appearance::ThemeCatalog::default()
                 .resolve(
@@ -10168,19 +10169,38 @@ mod tests {
                     };
                     let reveal =
                         TabReveal::new(motion, close_button, close_clearance, title, &appearance);
-                    assert_eq!(
-                        reveal.glyph, reveal.words,
-                        "the glyph and the words show as one at {step}%, from the end: \
-                         {grows_from_end}, title {title:?}"
-                    );
                     assert!(
-                        reveal.close <= reveal.words,
-                        "the close control shows no sooner than the words at {step}%, from the \
-                         end: {grows_from_end}, title {title:?}, got {reveal:?}"
+                        reveal.glyph <= reveal.words && reveal.close <= reveal.words,
+                        "nothing shows before the words at {step}%, from the end: \
+                         {grows_from_end}, title {title:?}, got {reveal:?}"
                     );
+                    if !grows_from_end {
+                        assert_eq!(
+                            reveal.glyph, reveal.words,
+                            "a Tab growing from its start shows its glyph with its words at \
+                             {step}%, title {title:?}"
+                        );
+                    }
                 }
             }
         }
+        // A Tab growing from its end uncovers its words before its glyph, and they do not wait.
+        let from_end = TabReveal::new(
+            ItemMotion {
+                entering: Some(0.9),
+                grows_from_end: true,
+                ..ItemMotion::default()
+            },
+            close_button,
+            close_clearance,
+            Some(px(32.0)),
+            &appearance,
+        );
+        assert!(
+            from_end.words > 0.0 && from_end.glyph == 0.0 && from_end.close == from_end.words,
+            "the words and the close control show while the glyph is still out of view, got \
+             {from_end:?}"
+        );
     }
 
     /// A Tab growing in shows its words once its slot holds the words it says, not only once it
