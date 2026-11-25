@@ -3416,19 +3416,25 @@ impl TabReveal {
                 })
                 .fold(0.0, f32::max)
         };
+        let glyph = motion.reveal(whole_at(&|_| (leading, leading + glyph), None));
+        let words = motion.reveal(whole_at(
+            &|width| {
+                let room = width - trailing - close_clearance;
+                (words, title.map_or(room, |title| (words + title).min(room)))
+            },
+            title.map(|title| words + title + trailing + close_clearance),
+        ));
+        let close = motion.reveal(whole_at(
+            &|width| (width - trailing - close_button, width - trailing),
+            None,
+        ));
+        // The glyph and the words identify the Tab together, so neither shows alone, and the
+        // close control never shows on a Tab that has not said what it is.
+        let identity = glyph.min(words);
         Self {
-            glyph: motion.reveal(whole_at(&|_| (leading, leading + glyph), None)),
-            words: motion.reveal(whole_at(
-                &|width| {
-                    let room = width - trailing - close_clearance;
-                    (words, title.map_or(room, |title| (words + title).min(room)))
-                },
-                title.map(|title| words + title + trailing + close_clearance),
-            )),
-            close: motion.reveal(whole_at(
-                &|width| (width - trailing - close_button, width - trailing),
-                None,
-            )),
+            glyph: identity,
+            words: identity,
+            close: close.min(identity),
         }
     }
 }
@@ -10131,6 +10137,49 @@ mod tests {
                 &appearance,
             );
             assert_eq!((rest.glyph, rest.words, rest.close), (1.0, 1.0, 1.0));
+        }
+    }
+
+    /// A growing Tab identifies itself before it shows anything else: its glyph and its words
+    /// appear together, and its close control never shows before them, whichever end the Tab
+    /// grows from.
+    #[test]
+    fn a_growing_tab_should_show_its_glyph_and_words_together_and_no_control_before_them() {
+        let appearance = crate::ui::appearance::ChromeAppearance::prepare(
+            &crate::appearance::ThemeCatalog::default()
+                .resolve(
+                    crate::appearance::AppearanceGeneration::INITIAL,
+                    &crate::appearance::AppearancePreferences::default(),
+                    crate::appearance::SystemAppearance::unavailable(),
+                    &crate::appearance::AvailableFonts::default(),
+                )
+                .expect("the built-in appearance resolves")
+                .chrome,
+        );
+        let close_button = px(20.0);
+        let close_clearance = close_button + appearance.spacing(TAB_TRAILING_GAP);
+        for grows_from_end in [false, true] {
+            for title in [None, Some(px(32.0)), Some(px(99.0))] {
+                for step in 0..=100 {
+                    let motion = ItemMotion {
+                        entering: Some(step as f32 / 100.0),
+                        grows_from_end,
+                        ..ItemMotion::default()
+                    };
+                    let reveal =
+                        TabReveal::new(motion, close_button, close_clearance, title, &appearance);
+                    assert_eq!(
+                        reveal.glyph, reveal.words,
+                        "the glyph and the words show as one at {step}%, from the end: \
+                         {grows_from_end}, title {title:?}"
+                    );
+                    assert!(
+                        reveal.close <= reveal.words,
+                        "the close control shows no sooner than the words at {step}%, from the \
+                         end: {grows_from_end}, title {title:?}, got {reveal:?}"
+                    );
+                }
+            }
         }
     }
 
