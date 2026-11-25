@@ -761,9 +761,8 @@ pub(crate) struct TabView {
     /// otherwise the Pane's Starting Directory. A Pane that waits for its name says it in its
     /// Tab and Pane Caption until the shell reports its own.
     pane_places: BTreeMap<PaneId, std::path::PathBuf>,
-    /// The last Focused Pane that was not waiting for its name, and what the Tab said for it.
-    /// The Tab keeps saying that while a Focused Pane after it starts its shell.
-    shown: Option<(PaneId, TabIdentity)>,
+    /// The Panes that joined the layout and are still growing into their place.
+    entering: BTreeSet<PaneId>,
     /// Ends the earliest title wait.
     _title_wait: Option<gpui::Task<()>>,
     /// A Pane of this Tab waited for or used a background start turn at the last reading, so the
@@ -880,7 +879,7 @@ impl TabView {
             _classify: None,
             title_waits: BTreeMap::new(),
             pane_places: BTreeMap::new(),
-            shown: None,
+            entering: BTreeSet::new(),
             _title_wait: None,
             _workspace_status: cx.spawn_in(window, async move |view, cx| {
                 while changes.recv().await.is_ok() {
@@ -1067,45 +1066,15 @@ impl TabView {
     /// What this Tab presents about the Terminal Session its Focused Pane runs, read from that
     /// Pane's caption facts.
     ///
-    /// While the Focused Pane's shell starts, the Tab holds the name it showed for the Pane
-    /// focused before, as it was when the focus left. A Split or a restored Pane taking the
-    /// focus then changes the Tab once, when the new shell names itself.
+    /// The Tab follows its Focused Pane at once. A Pane whose shell is starting has a predicted
+    /// name, so a Split or a restored Pane taking the focus changes the Tab on that action.
     pub(crate) fn tab_identity(&self) -> TabIdentity {
         let focused = self.tab.focused_pane_id();
-        let attention = self.pane_attention.values().copied().sum::<u32>() > 0;
-        let identity = self.pane_identity(focused, attention);
-        if !identity.pending {
-            return identity;
-        }
-        match &self.shown {
-            Some((pane_id, shown))
-                if *pane_id != focused && self.tab.pane(*pane_id).is_some() && shown.is_named() =>
-            {
-                TabIdentity {
-                    attention,
-                    ..shown.clone()
-                }
-            }
-            _ => identity,
-        }
-    }
-
-    /// What Pane `pane_id` would have its Tab say.
-    fn pane_identity(&self, pane_id: PaneId, attention: bool) -> TabIdentity {
         TabIdentity::resolve(
-            self.caption_text(pane_id),
-            self.pane_title(pane_id),
-            attention,
+            self.caption_text(focused),
+            self.pane_title(focused),
+            self.pane_attention.values().copied().sum::<u32>() > 0,
         )
-    }
-
-    /// Remembers what the Tab says for its Focused Pane, unless that Pane waits for its name.
-    fn follow_shown_identity(&mut self) {
-        let focused = self.tab.focused_pane_id();
-        let identity = self.pane_identity(focused, false);
-        if !identity.pending {
-            self.shown = Some((focused, identity));
-        }
     }
 
     /// The title Pane `pane_id` reported, or Terminal.
@@ -1117,9 +1086,10 @@ impl TabView {
     }
 
     /// What Pane `pane_id`'s caption says, and whether it still waits for its shell's first
-    /// name. A starting shell's caption and Tab wait for that name together rather than saying
-    /// Terminal, so the first activity they say is its real name. Meanwhile they say where the
-    /// shell starts.
+    /// name. A starting shell's caption and Tab never say Terminal first. Meanwhile they say
+    /// where the shell starts and predict what it is: the shell it reported, otherwise the
+    /// shell its Machine's other Panes run. That prediction is drawn quietly until the shell
+    /// names itself, and with nothing to predict from they say only where the shell starts.
     fn caption_text(&self, pane_id: PaneId) -> PaneCaptionText {
         let mut text = self.named_caption(pane_id);
         // While its shell starts, a name the Pane has is only provisional, such as the shell's
@@ -1146,6 +1116,17 @@ impl TabView {
                     &place.to_string_lossy(),
                     account.home.as_deref(),
                 ));
+            }
+            if text.has_directory {
+                // A command a startup file runs is no name, so only the shell is predicted.
+                text.label = if text.shell.is_empty() {
+                    crate::terminal::metadata::sanitize_title(
+                        account.shell.as_deref().unwrap_or_default(),
+                    )
+                    .into()
+                } else {
+                    text.shell.clone()
+                };
             }
         }
         text
@@ -1199,7 +1180,6 @@ impl TabView {
         }
         self.title_waits
             .retain(|pane_id, _| self.binding.view(*pane_id).is_some());
-        self.follow_shown_identity();
         if changed {
             cx.emit(TabViewEvent::PresentationChanged {
                 tab_id: self.tab.id(),
@@ -2038,7 +2018,6 @@ impl TabView {
 
     /// Gives each Pane the focus it presents. Returns the Panes whose presentation inputs changed.
     fn sync_terminal_focus(&mut self, cx: &mut Context<Self>) -> BTreeSet<PaneId> {
-        self.follow_shown_identity();
         let focused_terminal_id = self
             .tab
             .pane(self.tab.focused_pane_id())
@@ -2323,6 +2302,12 @@ impl TabView {
                     has_multiple_panes,
                     observed_by: self.pane_observers.get(&pane_id).cloned(),
                     binding: self.caption_controls(pane_id),
+                    growing: if self.entering.contains(&pane_id) {
+                        let inset = self.pane_frames.inset(pane_id);
+                        (inset.left + inset.right).max(px(0.0))
+                    } else {
+                        px(0.0)
+                    },
                 },
                 controls_reveal: hovers
                     .get(&pane_id)
@@ -3305,6 +3290,7 @@ impl TabView {
         self.advance_native_service_hierarchy_generation(cx);
         self.pane_layout_revision += 1;
         self.pane_motion.expect_change();
+        self.entering.insert(pane_id);
         if let Some(terminal) = self.tab.pane(pane_id) {
             self.pane_titles.insert(pane_id, terminal.read(cx).title());
             self.pane_captions
@@ -4170,7 +4156,6 @@ impl Render for TabView {
             },
         };
         let hovers = self.pane_hovers(appearance.active, window, cx);
-        self.sync_pane_caption_views(&hovers, &appearance, cx);
         let places = self
             .pane_layout_size
             .map(|layout_size| {
@@ -4191,7 +4176,12 @@ impl Render for TabView {
         self.pane_frames = self.pane_motion.present(&places, window.scale_factor(), cx);
         if self.pane_frames.moving {
             window.request_animation_frame();
+        } else {
+            self.entering.clear();
         }
+        // The captions read this frame's Pane motion, so a growing Pane's caption knows the
+        // width it reaches.
+        self.sync_pane_caption_views(&hovers, &appearance, cx);
         // A Split's spacer leaves its gap unpainted while Panes move across it. When only the stage
         // stretches the Panes, each spacer paints its gap where the stretch draws it instead.
         self.stretched_split_gaps.clear();
@@ -4352,6 +4342,10 @@ pub(crate) const NAME_WAIT: std::time::Duration = std::time::Duration::from_mill
 /// What assistive technology hears for a Pane or Tab whose shell is still starting.
 pub(crate) const STARTING_NAME: &str = "Starting shell";
 
+/// How opaque a starting shell's predicted name is, in its Tab and Pane Caption, until the shell
+/// names itself.
+pub(crate) const PREDICTED_OPACITY: f32 = 0.55;
+
 /// What one Tab presents about the Terminal Session its Focused Pane runs. A Tab never composes a
 /// path or interprets a title, and leaves a segment empty rather than inventing one.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -4368,8 +4362,8 @@ pub(crate) struct TabIdentity {
     pub(crate) glyph: Option<gpui::SharedString>,
     /// Whether any Pane in the Tab is asking for attention.
     pub(crate) attention: bool,
-    /// The Focused Pane's shell is starting and has not named itself yet, so the Tab waits for
-    /// its first name the same way the Pane Caption does, and says only its place meanwhile.
+    /// The Focused Pane's shell is starting and has not named itself yet, so the activity is a
+    /// prediction, or empty when nothing predicts it.
     pub(crate) pending: bool,
 }
 
@@ -4381,33 +4375,49 @@ impl TabIdentity {
     }
 
     /// Whether the Tab says only where its Terminal Session starts, because the Focused Pane's
-    /// shell is starting and has not said what it is doing.
+    /// shell is starting and nothing predicts what it is.
     pub(crate) fn says_place_alone(&self) -> bool {
-        self.pending && !self.place.is_empty()
+        self.pending && self.activity.is_empty() && !self.place.is_empty()
+    }
+
+    /// Whether the Tab's activity is a prediction, drawn quietly until the shell names itself.
+    pub(crate) fn predicts_activity(&self) -> bool {
+        self.pending && !self.activity.is_empty()
     }
 
     fn resolve(caption: PaneCaptionText, title: gpui::SharedString, attention: bool) -> Self {
-        let (activity, directory) = if caption.label.is_empty() {
-            (caption.name.as_ref(), "")
+        // A starting shell says where it starts and the shell predicted for it, and never a
+        // name it has not earned, such as Terminal. With no place it says nothing.
+        let (activity, place): (gpui::SharedString, gpui::SharedString) = if caption.pending {
+            match (caption.has_directory, caption.label.is_empty()) {
+                (false, _) => Default::default(),
+                (true, true) => (Default::default(), caption.name.clone()),
+                (true, false) => {
+                    let label =
+                        spaceterm_core::labels::Label::from_parts(&caption.label, &caption.name);
+                    (
+                        label.activity.clone().into(),
+                        label.place().to_owned().into(),
+                    )
+                }
+            }
         } else {
-            (caption.label.as_ref(), caption.name.as_ref())
-        };
-        let label = spaceterm_core::labels::Label::from_parts(
-            if activity.is_empty() {
-                title.as_ref()
+            let (activity, directory) = if caption.label.is_empty() {
+                (caption.name.as_ref(), "")
             } else {
-                activity
-            },
-            directory,
-        );
-        // A starting shell's activity is not known yet, so its place stands alone, whatever
-        // provisional activity it repeats.
-        let place = if caption.pending && caption.has_directory {
-            caption.name.clone()
-        } else {
-            label.place().to_owned().into()
+                (caption.label.as_ref(), caption.name.as_ref())
+            };
+            let label = spaceterm_core::labels::Label::from_parts(
+                if activity.is_empty() {
+                    title.as_ref()
+                } else {
+                    activity
+                },
+                directory,
+            );
+            let place = label.place().to_owned().into();
+            (label.activity.into(), place)
         };
-        let activity = label.activity.into();
         Self {
             remote: caption.origin.remote,
             progress: caption.progress,
@@ -4461,8 +4471,10 @@ struct PaneCaptionText {
     progress: TerminalProgress,
     repository: Option<RepositoryCaption>,
     /// The Pane's shell is starting and has not named itself yet. The caption and its Tab say
-    /// where the shell starts and no activity until its first confirmed name.
+    /// where the shell starts and a predicted shell until its first confirmed name.
     pending: bool,
+    /// The shell the Terminal Session said it runs, or empty until it says.
+    shell: gpui::SharedString,
 }
 
 impl PaneCaptionText {
@@ -4491,6 +4503,7 @@ impl PaneCaptionText {
                 progress: facts.progress,
                 repository: facts.repository,
                 pending: false,
+                shell: facts.shell,
             };
         }
         let (leading, name) = split_directory_leaf(&facts.directory);
@@ -4505,6 +4518,7 @@ impl PaneCaptionText {
             progress: facts.progress,
             repository: facts.repository,
             pending: false,
+            shell: facts.shell,
         }
     }
 }
@@ -4538,6 +4552,10 @@ struct PaneCaption {
     observed_by: Option<gpui::SharedString>,
     /// Present when a SpaceTerm Server owns the Pane, which changes what its controls offer.
     binding: Option<WorkspaceCaptionControls>,
+    /// How much wider the Pane gets before it rests, while it grows into the layout. Its
+    /// caption is laid out that much wider than it is drawn, from its leading edge, so its
+    /// name keeps the room it has at rest and only its far end is still out of view.
+    growing: Pixels,
 }
 
 /// A Pane's caption. It reads no Pane state of its own, so the frames a Pane draws for its
@@ -4634,13 +4652,10 @@ fn render_pane_caption(
                     control.background,
                 );
             }
-            let layout = CaptionLayout::resolve(
-                &caption,
-                bounds.size.width,
-                controls_reveal,
-                window,
-                &appearance,
-            );
+            // A Pane growing in lays its caption out at the width it reaches.
+            let room = gpui::size(bounds.size.width + caption.growing, bounds.size.height);
+            let layout =
+                CaptionLayout::resolve(&caption, room.width, controls_reveal, window, &appearance);
             let content = render_pane_caption_content(
                 caption,
                 controls_reveal,
@@ -4670,11 +4685,18 @@ fn render_pane_caption(
                 .rounded_tr(pane_radius)
                 .child(content)
                 .into_any_element();
-            content.layout_as_root(bounds.size.map(gpui::AvailableSpace::Definite), window, cx);
-            content.prepaint_at(bounds.origin, window, cx);
+            content.layout_as_root(room.map(gpui::AvailableSpace::Definite), window, cx);
+            // What reaches past the Pane as drawn neither shows nor takes the pointer.
+            window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+                content.prepaint_at(bounds.origin, window, cx);
+            });
             content
         },
-        |_, mut content, window, cx| content.paint(window, cx),
+        |bounds, mut content, window, cx| {
+            window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+                content.paint(window, cx);
+            });
+        },
     )
     .w_full()
     .h(caption_height)
@@ -4709,6 +4731,7 @@ fn render_pane_caption_content(
         has_multiple_panes,
         binding,
         observed_by,
+        growing: _,
     } = caption;
     let color = paint.foreground;
     let button_paint = |value: crate::appearance::SemanticPaint| {
@@ -5200,19 +5223,23 @@ fn render_caption_identity(
                         appearance,
                     )),
             )
-            .when(
-                layout.show_label && !text.label.is_empty() && !pending,
-                |row| {
-                    row.child(
-                        div()
-                            .debug_selector(move || format!("pane-caption-label-{}", pane_id.get()))
-                            .min_w_0()
-                            .truncate()
-                            .text_color(gpui_color(color))
-                            .child(text.label),
-                    )
-                },
-            );
+            .when(layout.show_label && !text.label.is_empty(), |row| {
+                row.child(
+                    div()
+                        .debug_selector(move || format!("pane-caption-label-{}", pane_id.get()))
+                        .min_w_0()
+                        .truncate()
+                        .text_color(gpui_color(color))
+                        // A starting shell's label is a prediction, drawn quietly.
+                        .when(pending, |label| label.opacity(PREDICTED_OPACITY))
+                        .child(text.label),
+                )
+                .when(pending, |row| {
+                    row.child(div().debug_selector(move || {
+                        format!("pane-caption-label-predicted-{}", pane_id.get())
+                    }))
+                })
+            });
     } else {
         caption_content = caption_content
             .child(render_pane_status(
@@ -7188,6 +7215,7 @@ mod tests {
             origin,
             directory: directory.to_owned().into(),
             label: label.to_owned().into(),
+            shell: Default::default(),
             glyph: None,
             running: false,
             progress: TerminalProgress::None,

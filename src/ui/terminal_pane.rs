@@ -1542,6 +1542,7 @@ impl TerminalPane {
             origin: PaneOrigin::from_context(&metadata.context),
             directory: directory.into(),
             label: label.into(),
+            shell: sanitize_title(&metadata.shell_name).into(),
             glyph,
             running: running.is_some(),
             progress: super::terminal_status::TerminalProgress::from_metadata(
@@ -5933,6 +5934,8 @@ pub(crate) struct PaneCaptionFacts {
     pub(crate) origin: PaneOrigin,
     pub(crate) directory: SharedString,
     pub(crate) label: SharedString,
+    /// The shell the Terminal Session runs, or empty until it says.
+    pub(crate) shell: SharedString,
     /// The glyph the program reported for itself, replacing the Terminal Session's own.
     pub(crate) glyph: Option<SharedString>,
     pub(crate) running: bool,

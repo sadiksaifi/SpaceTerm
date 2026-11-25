@@ -2079,7 +2079,7 @@ impl TabManager {
         // only where the shell starts, or nothing when nothing says where that is.
         let named =
             !identity.pending && (identity.is_named() || !self.unnamed_since.contains_key(&tab_id));
-        let worded = named || identity.says_place_alone();
+        let worded = named || identity.says_place_alone() || identity.predicts_activity();
         // A Tab growing in offers its close control once the control shows whole, so no part of
         // it cut off by the Tab's slot takes a press or reaches assistive technology.
         let close_control = if role != TabItemRole::InBar || reveal.close <= 0.0 {
@@ -3459,34 +3459,48 @@ fn render_tab_identity(
         .when(reveal.naming, |words| {
             words.child(div().debug_selector(move || format!("tab-name-pending-{}", tab_id.get())))
         });
-    // A starting shell has not said what it is doing, so its Tab says only where it starts.
+    // A starting shell has not said what it is doing. Its Tab says the shell predicted for it
+    // quietly, or only where it starts when nothing predicts one.
     let place_alone = identity.says_place_alone();
+    let predicted = identity.predicts_activity();
+    let quiet = move |part: gpui::Div| {
+        part.when(predicted, |part| {
+            part.opacity(super::tab_view::PREDICTED_OPACITY)
+        })
+    };
     if !place_alone {
-        words = words.child(
-            div()
-                .debug_selector(move || format!("tab-activity-{}", tab_id.get()))
-                .flex_shrink_0()
-                .min_w_0()
-                .when(has_place, |activity| {
-                    activity.max_w(relative(TAB_ACTIVITY_MAXIMUM_SHARE))
-                })
-                .truncate()
-                .child(if identity.activity.is_empty() {
-                    gpui::SharedString::from("Terminal")
-                } else {
-                    identity.activity.clone()
-                }),
-        );
+        words = words
+            .child(quiet(
+                div()
+                    .debug_selector(move || format!("tab-activity-{}", tab_id.get()))
+                    .flex_shrink_0()
+                    .min_w_0()
+                    .when(has_place, |activity| {
+                        activity.max_w(relative(TAB_ACTIVITY_MAXIMUM_SHARE))
+                    })
+                    .truncate()
+                    .child(if identity.activity.is_empty() {
+                        gpui::SharedString::from("Terminal")
+                    } else {
+                        identity.activity.clone()
+                    }),
+            ))
+            .when(predicted, |words| {
+                words.child(
+                    div()
+                        .debug_selector(move || format!("tab-activity-predicted-{}", tab_id.get())),
+                )
+            });
     }
     if has_place {
         words = words
             .when(!place_alone, |words| {
-                words.child(
+                words.child(quiet(
                     div()
                         .flex_shrink_0()
                         .mx(appearance.spacing(TAB_TRAILING_GAP))
                         .child("·"),
-                )
+                ))
             })
             .child(
                 div()
@@ -9484,139 +9498,118 @@ mod tests {
         );
     }
 
-    /// A Split's new Pane takes the focus while its shell starts. The Tab keeps saying what the
-    /// Pane it showed is doing until the new shell names itself.
+    /// A Split's new Pane takes the focus, and its Tab names it on the keypress: the shell its
+    /// Machine starts, and where the Pane starts. The shell name stays quiet until the shell
+    /// reports, and only then counts as the Pane's own.
     #[gpui::test]
-    fn a_split_should_keep_its_tabs_name_until_the_new_shell_names_itself(cx: &mut TestAppContext) {
+    fn a_split_should_name_its_tab_for_the_new_pane_at_once(cx: &mut TestAppContext) {
         use crate::terminal::metadata::TitleProvenance;
         let (manager, _records, cx) = tab_manager(cx);
-        let title = |cx: &mut VisualTestContext| {
+        let identity = |cx: &mut VisualTestContext| {
             manager.read_with(cx, |manager, cx| {
-                manager.tabs.active_tab().read(cx).tab_title().to_string()
+                let identity = manager.tabs.active_tab().read(cx).tab_identity();
+                (identity.pending, identity.one_line().to_string())
             })
         };
         report_metadata(cx, 1, 1, |metadata| {
+            metadata.shell_name = Arc::from("zsh");
             metadata.directory.path = Arc::from("/srv/app");
-            metadata.title.value = Arc::from("vim");
+            metadata.title.value = Arc::from("sleep 7");
             metadata.title.provenance = TitleProvenance::TerminalControl;
         });
         cx.run_until_parked();
-        assert_eq!(title(cx), "vim \u{b7} app");
-
+        assert_eq!(identity(cx), (false, "sleep 7 \u{b7} app".to_owned()));
         let core = cx.update(|_, cx| {
             cx.global::<crate::ui::workspace_manager::tests::LocalCore>()
                 .clone()
         });
         // A Pane a person creates starts its shell as it opens.
         core.panes.start_opened_panes_quietly();
+
         cx.dispatch_action(SplitRight);
         cx.run_until_parked();
-        let pane = core.panes.pane(core.panes.opened_at(1));
+
+        let second = core.panes.opened_at(1);
+        let place = core
+            .edits
+            .applied_inventory()
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| &tab.panes)
+            .find(|pane| pane.id == second)
+            .and_then(|pane| pane.starting_directory.file_name())
+            .expect("the second Pane starts in a named folder")
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(
-            title(cx),
-            "vim \u{b7} app",
-            "the Tab keeps its name while the new Pane's shell starts"
+            identity(cx),
+            (true, format!("zsh \u{b7} {place}")),
+            "the Tab names the new Pane before its shell reports anything"
+        );
+        assert!(
+            cx.debug_bounds("tab-activity-predicted-1").is_some(),
+            "the predicted shell name is drawn quietly"
         );
 
         report_metadata(cx, 2, 1, |metadata| {
+            metadata.shell_name = Arc::from("zsh");
             metadata.directory.path = Arc::from("/srv/api");
             metadata.title.value = Arc::from("zsh");
             metadata.title.provenance = TitleProvenance::TerminalControl;
         });
-        pane.end_startup();
+        core.panes.pane(second).end_startup();
         cx.run_until_parked();
-        assert_eq!(
-            title(cx),
-            "zsh \u{b7} api",
-            "the Tab follows its Focused Pane once that Pane's shell names itself"
-        );
+        assert_eq!(identity(cx), (false, "zsh \u{b7} api".to_owned()));
+        assert!(cx.debug_bounds("tab-activity-predicted-1").is_none());
     }
 
-    /// Previous Pane moves the focus without reordering the focus history. A Split of the Pane
-    /// it lands on keeps that Pane's name on the Tab, not the name of the Pane used last.
+    /// A Pane growing in lays its caption out for the width it reaches, so its name never loses
+    /// room to controls that join part of the way, and only its far end is still out of view.
     #[gpui::test]
-    fn a_split_after_previous_pane_should_keep_the_name_its_tab_showed(cx: &mut TestAppContext) {
+    fn a_growing_panes_caption_name_should_never_shrink(cx: &mut TestAppContext) {
         use crate::terminal::metadata::TitleProvenance;
+        cx.update(|cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
         let (manager, _records, cx) = tab_manager(cx);
-        let title = |cx: &mut VisualTestContext| {
-            manager.read_with(cx, |manager, cx| {
-                manager.tabs.active_tab().read(cx).tab_title().to_string()
-            })
-        };
-        let name = |cx: &mut VisualTestContext, session: usize, title: &str, directory: &str| {
-            report_metadata(cx, session, 1, |metadata| {
-                metadata.directory.path = Arc::from(directory);
-                metadata.title.value = Arc::from(title);
-                metadata.title.provenance = TitleProvenance::TerminalControl;
-            });
-            cx.run_until_parked();
-        };
-        name(cx, 1, "vim", "/srv/a");
-        cx.dispatch_action(SplitRight);
+        report_metadata(cx, 1, 1, |metadata| {
+            metadata.shell_name = Arc::from("zsh");
+            metadata.directory.path = Arc::from("/srv/app");
+            metadata.title.value = Arc::from("zsh");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+        });
         cx.run_until_parked();
-        name(cx, 2, "top", "/srv/b");
-        cx.dispatch_action(SplitRight);
-        cx.run_until_parked();
-        name(cx, 3, "htop", "/srv/c");
-        cx.dispatch_action(crate::ui::FocusPreviousPane);
-        cx.run_until_parked();
-        assert_eq!(
-            title(cx),
-            "top \u{b7} b",
-            "Previous Pane lands on the second Pane"
-        );
-
+        finish_slides(cx);
         let core = cx.update(|_, cx| {
             cx.global::<crate::ui::workspace_manager::tests::LocalCore>()
                 .clone()
         });
-        // A Pane a person creates starts its shell as it opens.
         core.panes.start_opened_panes_quietly();
+
         cx.dispatch_action(SplitRight);
         cx.run_until_parked();
-
-        assert_eq!(
-            title(cx),
-            "top \u{b7} b",
-            "the Tab keeps the name it showed while the new Pane's shell starts"
-        );
-    }
-
-    /// The Tab holds the name it showed when a Split took the focus. What the Pane it split from
-    /// does meanwhile changes nothing on the Tab until the new shell names itself.
-    #[gpui::test]
-    fn a_split_should_hold_its_tabs_name_while_the_pane_it_came_from_changes(
-        cx: &mut TestAppContext,
-    ) {
-        use crate::terminal::metadata::TitleProvenance;
-        let (manager, _records, cx) = tab_manager(cx);
-        let title = |cx: &mut VisualTestContext| {
-            manager.read_with(cx, |manager, cx| {
-                manager.tabs.active_tab().read(cx).tab_title().to_string()
-            })
-        };
-        let name = |cx: &mut VisualTestContext, generation: u64, title: &str| {
-            report_metadata(cx, 1, generation, |metadata| {
-                metadata.directory.path = Arc::from("/srv/app");
-                metadata.title.value = Arc::from(title);
-                metadata.title.provenance = TitleProvenance::TerminalControl;
-            });
-            cx.run_until_parked();
-        };
-        name(cx, 1, "cargo build");
-        let core = cx.update(|_, cx| {
-            cx.global::<crate::ui::workspace_manager::tests::LocalCore>()
-                .clone()
+        let pane = manager.read_with(cx, |manager, cx| {
+            manager.tabs.active_tab().read(cx).focused_pane_id().get()
         });
-        // A Pane a person creates starts its shell as it opens.
-        core.panes.start_opened_panes_quietly();
-        cx.dispatch_action(SplitRight);
-        cx.run_until_parked();
+        let name: &'static str = format!("pane-caption-name-{pane}").leak();
+        let mut drawn = Vec::new();
+        // Short steps, so some frames fall where the Split controls join a Pane this narrow.
+        for _ in 0..90 {
+            if let Some(bounds) = cx.debug_bounds(name) {
+                drawn.push((bounds.origin.x, bounds.size.width));
+            }
+            next_frame_after(3, cx);
+        }
 
-        // The build ends in the first Pane while the new Pane's shell still starts.
-        name(cx, 2, "zsh");
-
-        assert_eq!(title(cx), "cargo build \u{b7} app");
+        assert!(
+            drawn.first().map(|(x, _)| *x) != drawn.last().map(|(x, _)| *x),
+            "the new Pane must move as it grows in, got {drawn:?}"
+        );
+        assert!(
+            drawn
+                .windows(2)
+                .all(|pair| pair[1].1 >= pair[0].1 - px(0.5)),
+            "the name must never get narrower while its Pane grows, got {drawn:?}"
+        );
     }
 
     /// A Focused Pane that says only Terminal, then starts a shell, never borrows the name of a

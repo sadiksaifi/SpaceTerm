@@ -9848,7 +9848,7 @@ fn a_starting_shell_in_the_home_directory_says_the_home_abbreviation(cx: &mut Te
 
     assert_eq!(
         tab_view.read_with(cx, |view, _| view.tab_title()).as_ref(),
-        "~"
+        "zsh \u{b7} ~"
     );
     spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Pane Caption, ~");
 }
@@ -9904,6 +9904,70 @@ fn a_starting_shells_caption_names_its_machine_at_once(cx: &mut TestAppContext) 
         "the starting Pane Caption names its Machine before its shell reports anything"
     );
     spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Pane Caption, work");
+}
+
+/// A starting shell's Tab and Pane Caption say its whole name at once: the shell another Pane
+/// of its Machine published, and where it starts. The shell name is drawn quietly until the
+/// shell reports.
+#[gpui::test]
+fn a_starting_shell_says_the_shell_its_machine_starts(cx: &mut TestAppContext) {
+    use spaceterm_core::pane::metadata;
+    let (harness, cx) = close_harness(cx);
+    let (tab, pane) = harness.manager.read_with(cx, |manager, cx| {
+        manager
+            .active_tab_manager()
+            .expect("an active Workspace")
+            .read(cx)
+            .active_terminal_identity(cx)
+    });
+    let tab_view = harness.manager.read_with(cx, |manager, cx| {
+        manager
+            .active_tab_manager()
+            .expect("an active Workspace")
+            .read(cx)
+            .active_tab_view()
+    });
+    let mut inventory = close_published();
+    inventory.revision = 2;
+    inventory.workspaces[0].tabs[1].panes[0].presentation = Some(Box::new(metadata::Snapshot {
+        revision: 1,
+        shell_name: "fish".into(),
+        title: "fish".into(),
+        title_provenance: metadata::TitleProvenance::Fallback,
+        directory: "/server/work".into(),
+        directory_provenance: metadata::DirectoryProvenance::Initial,
+        user: None,
+        host: None,
+        home: None,
+        freshness: metadata::Freshness::Live,
+        finished_commands: 0,
+        prompt_zone: metadata::PromptZone::Unknown,
+        command: None,
+        title_activity: false,
+        title_glyph: metadata::TitleGlyph::Reported,
+        progress: metadata::Progress::None,
+    }));
+    harness.publish(inventory, cx);
+
+    harness.panes.pane(CLOSE_ROOT_PANE).start_shell();
+    settle_panes(cx);
+
+    let shows =
+        |cx: &mut VisualTestContext, selector: String| cx.debug_bounds(selector.leak()).is_some();
+    assert_eq!(
+        tab_view.read_with(cx, |view, _| view.tab_title()).as_ref(),
+        "fish \u{b7} work"
+    );
+    assert!(
+        tab_view.read_with(cx, |view, _| view.tab_identity().pending),
+        "the shell name is a prediction until the shell reports"
+    );
+    assert!(shows(cx, format!("tab-activity-predicted-{}", tab.get())));
+    assert!(
+        shows(cx, format!("pane-caption-label-{}", pane.get()))
+            && shows(cx, format!("pane-caption-label-predicted-{}", pane.get())),
+        "the Pane Caption says the predicted shell name quietly"
+    );
 }
 
 /// A Starting Directory is written without the invisible characters Terminal Metadata never

@@ -1206,6 +1206,8 @@ mod core_workspaces {
         pub(crate) user: Option<Arc<str>>,
         pub(crate) host: Option<Arc<str>>,
         pub(crate) home: Option<Arc<str>>,
+        /// The shell the Machine's Panes run, which a Pane it starts next most likely runs too.
+        pub(crate) shell: Option<Arc<str>>,
     }
 
     impl WorkspacePaneSessions {
@@ -1272,11 +1274,12 @@ mod core_workspaces {
             let mut account = self.account.borrow_mut();
             let account = &mut *account;
             for (known, published) in [
-                (&mut account.user, &published.user),
-                (&mut account.host, &published.host),
-                (&mut account.home, &published.home),
+                (&mut account.user, published.user.as_deref()),
+                (&mut account.host, published.host.as_deref()),
+                (&mut account.home, published.home.as_deref()),
+                (&mut account.shell, Some(published.shell_name.as_str())),
             ] {
-                if let Some(published) = published.as_deref().filter(|value| !value.is_empty())
+                if let Some(published) = published.filter(|value| !value.is_empty())
                     && known.as_deref() != Some(published)
                 {
                     *known = Some(published.into());
