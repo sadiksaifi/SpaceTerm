@@ -573,6 +573,69 @@ fn optimistic_split_preserves_published_repository_and_close_control_facts() {
     }
 }
 
+/// A pending Split and a pending Tab present the Starting Directory SpaceTerm Core then chooses:
+/// the Pinned Directory, otherwise the source Pane's confirmed directory, wherever the source
+/// Pane's shell says it went.
+#[test]
+fn optimistic_creations_start_where_core_starts_them() {
+    let pinned = std::path::PathBuf::from("/fixture/pinned");
+    for (pin, split) in [(true, true), (true, false), (false, true), (false, false)] {
+        let core = DelayedCore::new();
+        let workspace = core.inventory().workspaces[0].id;
+        let tab = core.inventory().workspaces[0].tabs[0].clone();
+        {
+            let mut delivery = core.0.borrow_mut();
+            if pin {
+                delivery.core.inventory.workspaces[0].pinned_directory = Some(pinned.clone());
+            }
+            delivery
+                .core
+                .present_directory(tab.root_pane, "/fixture/elsewhere".into());
+            delivery.snapshot.inventory = Some(live_inventory(&delivery.core));
+        }
+        let (source, mut model) = model(&core);
+        let control = spaceterm_core::hierarchy::CreateControl::Creator;
+        let mutation = if split {
+            Mutation::SplitPane {
+                workspace,
+                tab: tab.id,
+                source: tab.root_pane,
+                axis: Axis::Right,
+                control,
+            }
+        } else {
+            Mutation::CreateTab {
+                workspace,
+                source: Some(tab.root_pane),
+                control,
+            }
+        };
+        assert_eq!(source.submit(mutation), WorkspaceSubmission::Submitted);
+        let created = |inventory: &Inventory| {
+            inventory.workspaces[0]
+                .tabs
+                .iter()
+                .flat_map(|tab| &tab.panes)
+                .find(|pane| pane.id != tab.root_pane)
+                .expect("the created Pane")
+                .starting_directory
+                .clone()
+        };
+
+        let projected = created(&source.presentation_inventory().unwrap());
+        core.finish(true, true);
+        let confirmed = created(&model.poll().inventory.unwrap());
+
+        assert_eq!(
+            projected, confirmed,
+            "the pending Pane starts where Core starts it (pinned: {pin}, split: {split})"
+        );
+        if pin {
+            assert_eq!(confirmed, pinned);
+        }
+    }
+}
+
 #[test]
 fn optimistic_split_of_a_pending_tab_dispatches_only_after_its_real_parent_exists() {
     let core = DelayedCore::new();

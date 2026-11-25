@@ -701,6 +701,40 @@ fn new_pane(id: Id, source: Option<Id>, side: Side, directory: std::path::PathBu
     }
 }
 
+/// Where SpaceTerm Core starts a Pane created from `source`, as far as this client can tell before
+/// Core answers: the Pinned Directory, otherwise the directory Core confirmed for the source
+/// Pane, otherwise its Starting Directory. A directory the source Pane's shell only reported
+/// starts nothing. In a Worktree, Core keeps the Pane inside it, which this client judges by the
+/// paths as written, and Core's answer corrects.
+fn launch_directory(
+    workspace: &Workspace,
+    source: Option<&Pane>,
+    worktree: Option<&std::path::Path>,
+) -> std::path::PathBuf {
+    let pinned = workspace.pinned_directory.as_deref();
+    let Some(root) = worktree else {
+        return pinned
+            .or_else(|| {
+                source.map(|pane| {
+                    pane.confirmed_directory
+                        .as_deref()
+                        .unwrap_or(&pane.starting_directory)
+                })
+            })
+            .map(std::path::Path::to_owned)
+            .unwrap_or_default();
+    };
+    pinned
+        .filter(|pin| pin.starts_with(root))
+        .or_else(|| {
+            source
+                .map(Pane::repository_directory)
+                .filter(|directory| directory.starts_with(root))
+        })
+        .unwrap_or(root)
+        .to_owned()
+}
+
 fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Creation>) {
     if let Mutation::CreateWorkspace {
         name, directory, ..
@@ -800,11 +834,12 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
             });
             let source_pane =
                 source_tab.and_then(|t| t.panes.iter().find(|p| Some(p.id) == *source));
-            let directory = workspace
-                .pinned_directory
-                .clone()
-                .or_else(|| source_pane.map(|p| p.presented_directory().to_owned()))
-                .unwrap_or_default();
+            let directory = match mutation {
+                Mutation::Worktree(Operation::OpenTab { path, .. }) => {
+                    launch_directory(workspace, source_pane, Some(path))
+                }
+                _ => launch_directory(workspace, source_pane, None),
+            };
             let pane = ids.pane.expect("a Tab projection has a Pane");
             workspace.tabs.push(Tab {
                 id: ids.tab.expect("a Tab projection has an identity"),
@@ -854,16 +889,21 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
             let Some(pane) = creation.and_then(|ids| ids.pane) else {
                 return;
             };
-            if let Some(tab) = workspace.tabs.iter_mut().find(|t| t.id == *tab) {
-                let directory = tab
-                    .panes
-                    .iter()
-                    .find(|p| p.id == *source)
-                    .map(|p| p.presented_directory().to_owned())
-                    .unwrap_or_default();
-                tab.panes
-                    .push(new_pane(pane, Some(*source), (*axis).into(), directory));
-            }
+            let Some(index) = workspace.tabs.iter().position(|t| t.id == *tab) else {
+                return;
+            };
+            let scoped = &workspace.tabs[index];
+            let directory = launch_directory(
+                workspace,
+                scoped.panes.iter().find(|p| p.id == *source),
+                scoped.worktree.as_deref(),
+            );
+            workspace.tabs[index].panes.push(new_pane(
+                pane,
+                Some(*source),
+                (*axis).into(),
+                directory,
+            ));
         }
         _ => {}
     }
