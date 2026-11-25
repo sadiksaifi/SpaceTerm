@@ -2308,6 +2308,7 @@ impl TabView {
                     } else {
                         px(0.0)
                     },
+                    edge: None,
                 },
                 controls_reveal: hovers
                     .get(&pane_id)
@@ -4556,6 +4557,9 @@ struct PaneCaption {
     /// caption is laid out that much wider than it is drawn, from its leading edge, so its
     /// name keeps the room it has at rest and only its far end is still out of view.
     growing: Pixels,
+    /// Where the Pane as drawn ends while it grows, which its caption learns as it is laid
+    /// out. A caption part shows only once it lies wholly before this edge.
+    edge: Option<Pixels>,
 }
 
 /// A Pane's caption. It reads no Pane state of its own, so the frames a Pane draws for its
@@ -4657,14 +4661,13 @@ fn render_pane_caption(
             let layout =
                 CaptionLayout::resolve(&caption, room.width, controls_reveal, window, &appearance);
             // A growing Pane shows a caption part only once it holds all of it.
-            let edge = (caption.growing > px(0.0)).then(|| bounds.right());
+            caption.edge = (caption.growing > px(0.0)).then(|| bounds.right());
             let content = render_pane_caption_content(
                 caption,
                 controls_reveal,
                 view,
                 crate::desktop_profile::DesktopPresentation::get(cx),
                 layout,
-                edge,
                 &appearance,
                 paint,
             );
@@ -4720,7 +4723,6 @@ fn render_pane_caption_content(
     view: gpui::WeakEntity<TabView>,
     presentation: &crate::desktop_profile::DesktopPresentation,
     layout: CaptionLayout,
-    edge: Option<Pixels>,
     appearance: &super::appearance::ChromeAppearance,
     paint: crate::appearance::CaptionPaint,
 ) -> AnyElement {
@@ -4736,6 +4738,7 @@ fn render_pane_caption_content(
         binding,
         observed_by,
         growing: _,
+        edge,
     } = caption;
     let color = paint.foreground;
     let button_paint = |value: crate::appearance::SemanticPaint| {
