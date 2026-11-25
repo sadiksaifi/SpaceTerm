@@ -10427,3 +10427,54 @@ fn paste_confirmation_cancels_a_press_after_focus_moves_to_a_background_control(
         )]
     );
 }
+
+/// A starting Pane of a paired Machine names the host its own Terminal Metadata then names: the
+/// host the Machine published, and the Saved Connection's name only when it published none. A
+/// starting caption that named another host would change, and move its path, a moment later.
+#[test]
+fn a_starting_panes_origin_should_name_the_host_its_metadata_will() {
+    use spaceterm_core::pane::metadata;
+    let remote = crate::terminal::metadata::RemoteTerminalMetadataContext::new(
+        "Build box".to_owned(),
+        crate::domain::RemoteDirectory::home(),
+    );
+    for host in [Some("ci-01.local"), None] {
+        let published = metadata::Snapshot {
+            revision: 1,
+            shell_name: "zsh".into(),
+            title: "zsh".into(),
+            title_provenance: metadata::TitleProvenance::Fallback,
+            directory: "/home/alex".into(),
+            directory_provenance: metadata::DirectoryProvenance::Initial,
+            user: Some("alex".into()),
+            host: host.map(Into::into),
+            home: Some("/home/alex".into()),
+            freshness: metadata::Freshness::Live,
+            finished_commands: 0,
+            prompt_zone: metadata::PromptZone::Unknown,
+            command: None,
+            title_activity: false,
+            title_glyph: metadata::TitleGlyph::Reported,
+            progress: metadata::Progress::None,
+        };
+        let reported = crate::terminal::core_metadata::decode(published, None, Some(&remote))
+            .expect("the published metadata decodes");
+        let reported = PaneOrigin::from_context(&reported.context);
+
+        let starting = PaneOrigin::of_machine(Some("alex"), host, Some("Build box"));
+
+        assert_eq!(
+            (
+                starting.user.as_ref(),
+                starting.host.as_ref(),
+                starting.remote
+            ),
+            (
+                reported.user.as_ref(),
+                reported.host.as_ref(),
+                reported.remote
+            ),
+            "published host {host:?}"
+        );
+    }
+}
