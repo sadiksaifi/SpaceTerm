@@ -3399,28 +3399,36 @@ impl TabReveal {
             appearance.spacing(TAB_ITEM_MINIMUM_WIDTH),
             appearance.spacing(TAB_ITEM_WIDTH),
         ];
-        let whole_at = |part: &dyn Fn(Pixels) -> (Pixels, Pixels)| {
+        // A part that ends at a fixed distance from either end of the Tab needs the largest
+        // share of it at one of those two widths. One that ends where its own content does
+        // needs the most at `also`, the width at which that content first fits.
+        let whole_at = |part: &dyn Fn(Pixels) -> (Pixels, Pixels), also: Option<Pixels>| {
             widths
-                .iter()
+                .into_iter()
+                .chain(also.map(|width| width.clamp(widths[0], widths[1])))
                 .map(|width| {
-                    let (start, end) = part(*width);
+                    let (start, end) = part(width);
                     if motion.grows_from_end {
-                        1.0 - start / *width
+                        1.0 - start / width
                     } else {
-                        end / *width
+                        end / width
                     }
                 })
                 .fold(0.0, f32::max)
         };
         Self {
-            glyph: motion.reveal(whole_at(&|_| (leading, leading + glyph))),
-            words: motion.reveal(whole_at(&|width| {
-                let room = width - trailing - close_clearance;
-                (words, title.map_or(room, |title| (words + title).min(room)))
-            })),
-            close: motion.reveal(whole_at(&|width| {
-                (width - trailing - close_button, width - trailing)
-            })),
+            glyph: motion.reveal(whole_at(&|_| (leading, leading + glyph), None)),
+            words: motion.reveal(whole_at(
+                &|width| {
+                    let room = width - trailing - close_clearance;
+                    (words, title.map_or(room, |title| (words + title).min(room)))
+                },
+                title.map(|title| words + title + trailing + close_clearance),
+            )),
+            close: motion.reveal(whole_at(
+                &|width| (width - trailing - close_button, width - trailing),
+                None,
+            )),
         }
     }
 }
@@ -9684,6 +9692,74 @@ mod tests {
         );
     }
 
+    /// A Pane growing in from below shows no part of its caption until the Pane as drawn is
+    /// tall enough to hold it, so its edge never cuts through the caption.
+    #[gpui::test]
+    fn a_pane_growing_downward_should_show_its_caption_only_once_it_holds_it(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::terminal::metadata::TitleProvenance;
+        cx.update(|cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+        let (manager, _records, cx) = tab_manager(cx);
+        report_metadata(cx, 1, 1, |metadata| {
+            metadata.shell_name = Arc::from("zsh");
+            metadata.directory.path = Arc::from("/srv/app");
+            metadata.title.value = Arc::from("zsh");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+        });
+        cx.run_until_parked();
+        finish_slides(cx);
+        let core = cx.update(|_, cx| {
+            cx.global::<crate::ui::workspace_manager::tests::LocalCore>()
+                .clone()
+        });
+        core.panes.start_opened_panes_quietly();
+
+        cx.dispatch_action(SplitDown);
+        cx.run_until_parked();
+        let pane = manager.read_with(cx, |manager, cx| {
+            manager.tabs.active_tab().read(cx).focused_pane_id().get()
+        });
+        let surface: &'static str = format!("pane-surface-{pane}").leak();
+        let parts: Vec<&'static str> = [
+            "pane-caption-name",
+            "pane-caption-status",
+            "pane-controls-clip",
+        ]
+        .into_iter()
+        .map(|part| &*format!("{part}-{pane}").leak())
+        .collect();
+        let mut heights = Vec::new();
+        let mut past = Vec::new();
+        for _ in 0..90 {
+            if let Some(surface) = cx.debug_bounds(surface) {
+                heights.push(surface.size.height);
+                for part in &parts {
+                    if let Some(bounds) = cx.debug_bounds(part)
+                        && bounds.bottom() > surface.bottom() + px(0.5)
+                    {
+                        past.push((*part, bounds.bottom(), surface.bottom()));
+                    }
+                }
+            }
+            next_frame_after(3, cx);
+        }
+        finish_slides(cx);
+
+        assert!(
+            heights.first() < heights.last(),
+            "the new Pane must grow taller, got {heights:?}"
+        );
+        assert!(
+            past.is_empty(),
+            "no caption part may reach below the Pane as drawn, got {past:?}"
+        );
+        assert!(
+            parts.iter().all(|part| cx.debug_bounds(part).is_some()),
+            "the settled Pane shows its caption"
+        );
+    }
+
     /// A Focused Pane that says only Terminal, then starts a shell, never borrows the name of a
     /// Pane the Tab was not showing. The Tab says where the new shell starts.
     #[gpui::test]
@@ -9988,12 +10064,18 @@ mod tests {
         let leading = appearance.spacing(TAB_ITEM_LEFT_PADDING);
         let trailing = appearance.spacing(TAB_ITEM_RIGHT_PADDING);
         let glyph = appearance.icons.metrics(IconRole::Status).glyph_size;
-        for (grows_from_end, title) in [
-            (false, None),
-            (true, None),
-            (false, Some(px(32.0))),
-            (true, Some(px(32.0))),
-        ] {
+        // Titles that fit the narrowest Tab, that fit only a wider one, and that fit none.
+        let titles = [
+            None,
+            Some(px(32.0)),
+            Some(px(81.0)),
+            Some(px(99.0)),
+            Some(px(400.0)),
+        ];
+        let cases = titles
+            .into_iter()
+            .flat_map(|title| [(false, title), (true, title)]);
+        for (grows_from_end, title) in cases {
             for step in 0..=100 {
                 let presence = step as f32 / 100.0;
                 let motion = ItemMotion {
@@ -10003,10 +10085,12 @@ mod tests {
                 };
                 let reveal =
                     TabReveal::new(motion, close_button, close_clearance, title, &appearance);
-                for width in [
-                    appearance.spacing(TAB_ITEM_MINIMUM_WIDTH),
-                    appearance.spacing(TAB_ITEM_WIDTH),
-                ] {
+                // Every width a Tab grows toward, from its readable minimum to its roomy width.
+                let narrowest = f32::from(appearance.spacing(TAB_ITEM_MINIMUM_WIDTH));
+                let roomy = f32::from(appearance.spacing(TAB_ITEM_WIDTH));
+                let widths =
+                    (0..=66).map(|step| px(narrowest + (roomy - narrowest) * step as f32 / 66.0));
+                for width in widths {
                     // The part of a Tab `width` wide that its slot shows.
                     let shown = width * presence;
                     let (visible_start, visible_end) = if grows_from_end {
