@@ -636,6 +636,75 @@ fn optimistic_creations_start_where_core_starts_them() {
     }
 }
 
+/// A Machine's account is learned from every Pane its inventory lists, also a Pane of a Workspace
+/// this client does not present, so a Pane started next is named from it.
+#[test]
+fn a_machines_account_is_learned_from_a_workspace_nobody_presents() {
+    use spaceterm_core::pane::metadata;
+    let core = DelayedCore::new();
+    let (_source, mut model) = model(&core);
+    assert!(model.sessions().account().shell.is_none());
+    {
+        let mut delivery = core.0.borrow_mut();
+        // Another client creates a Workspace, which this client never attaches.
+        delivery
+            .core
+            .apply(
+                OTHER_DEVICE,
+                1,
+                Mutation::CreateWorkspace {
+                    name: "Elsewhere".into(),
+                    directory: None,
+                    control: spaceterm_core::hierarchy::CreateControl::Creator,
+                },
+                std::path::Path::new("/fixture/home"),
+                |_| true,
+            )
+            .unwrap();
+        let pane = delivery.core.inventory.workspaces[1].tabs[0].root_pane;
+        delivery.core.present_presentation(
+            pane,
+            Some(Box::new(metadata::Snapshot {
+                revision: 1,
+                shell_name: "fish".into(),
+                title: "fish".into(),
+                title_provenance: metadata::TitleProvenance::Fallback,
+                directory: "/fixture/home".into(),
+                directory_provenance: metadata::DirectoryProvenance::Initial,
+                user: Some("alex".into()),
+                host: Some("studio".into()),
+                home: Some("/fixture/home".into()),
+                freshness: metadata::Freshness::Live,
+                finished_commands: 0,
+                prompt_zone: metadata::PromptZone::Unknown,
+                command: None,
+                title_activity: false,
+                title_glyph: metadata::TitleGlyph::Reported,
+                progress: metadata::Progress::None,
+            })),
+        );
+        delivery.snapshot.inventory = Some(live_inventory(&delivery.core));
+    }
+
+    model.poll();
+
+    let account = model.sessions().account();
+    assert_eq!(
+        (
+            account.user.as_deref(),
+            account.host.as_deref(),
+            account.home.as_deref(),
+            account.shell.as_deref(),
+        ),
+        (
+            Some("alex"),
+            Some("studio"),
+            Some("/fixture/home"),
+            Some("fish")
+        )
+    );
+}
+
 /// A pending unpinned Workspace starts its first Pane in the Machine's home, which SpaceTerm Core
 /// then chooses and which the Machine's published Terminal Metadata names.
 #[test]

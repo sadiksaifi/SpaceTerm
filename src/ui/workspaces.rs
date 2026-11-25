@@ -1208,6 +1208,8 @@ mod core_workspaces {
         pub(crate) home: Option<Arc<str>>,
         /// The shell the Machine's Panes run, which a Pane it starts next most likely runs too.
         pub(crate) shell: Option<Arc<str>>,
+        /// How many times any of these changed, for a view to know when to draw again.
+        pub(crate) revision: u64,
     }
 
     impl WorkspacePaneSessions {
@@ -1283,6 +1285,7 @@ mod core_workspaces {
                     && known.as_deref() != Some(published)
                 {
                     *known = Some(published.into());
+                    account.revision += 1;
                 }
             }
         }
@@ -2981,6 +2984,18 @@ mod core_workspaces {
                 *self.edits.machine.borrow_mut() = Some(core);
             }
             let (snapshot, standing_in) = self.edits.read();
+            // Every Pane the Machine lists names its account, whichever Workspaces this client
+            // presents, so a Pane started next is named from it at once.
+            for published in snapshot
+                .inventory
+                .iter()
+                .flat_map(|inventory| &inventory.workspaces)
+                .flat_map(|workspace| &workspace.tabs)
+                .flat_map(|tab| &tab.panes)
+                .filter_map(|pane| pane.presentation.as_deref())
+            {
+                self.sessions.learn_account(published);
+            }
             if snapshot.connected
                 && !standing_in
                 && let Some(inventory) = &snapshot.inventory

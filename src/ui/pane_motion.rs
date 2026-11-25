@@ -144,6 +144,13 @@ impl PaneFrames {
         )
     }
 
+    /// How tall the Pane `pane_id` is drawn, which is less than its place while it grows in.
+    pub(crate) fn drawn_height(&self, pane_id: PaneId) -> Option<Pixels> {
+        self.frames
+            .get(&pane_id)
+            .map(|(_, frame)| frame.size.height)
+    }
+
     /// How far the Pane `pane_id` is drawn inside each edge of its laid-out place, in whole device
     /// pixels so that offsetting by one edge and back again by the sum of two keeps a size exact.
     /// Outward distances are negative.

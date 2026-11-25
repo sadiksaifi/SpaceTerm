@@ -763,6 +763,9 @@ pub(crate) struct TabView {
     pane_places: BTreeMap<PaneId, std::path::PathBuf>,
     /// The Panes that joined the layout and are still growing into their place.
     entering: BTreeSet<PaneId>,
+    /// The revision of the Machine's account this Tab last drew, which a starting Pane's
+    /// caption reads.
+    account_revision: u64,
     /// Ends the earliest title wait.
     _title_wait: Option<gpui::Task<()>>,
     /// A Pane of this Tab waited for or used a background start turn at the last reading, so the
@@ -880,6 +883,7 @@ impl TabView {
             title_waits: BTreeMap::new(),
             pane_places: BTreeMap::new(),
             entering: BTreeSet::new(),
+            account_revision: 0,
             _title_wait: None,
             _workspace_status: cx.spawn_in(window, async move |view, cx| {
                 while changes.recv().await.is_ok() {
@@ -2309,6 +2313,11 @@ impl TabView {
                         px(0.0)
                     },
                     edge: None,
+                    covered: self.entering.contains(&pane_id)
+                        && self
+                            .pane_frames
+                            .drawn_height(pane_id)
+                            .is_some_and(|height| height < appearance.caption_height()),
                 },
                 controls_reveal: hovers
                     .get(&pane_id)
@@ -2917,9 +2926,16 @@ impl TabView {
             changed = true;
             cx.notify();
         }
-        for pane in &core_tab.panes {
-            if let Some(published) = &pane.presentation {
-                self.binding.sessions().learn_account(published);
+        // A starting Pane's caption reads its Machine's account, which another Pane may have
+        // just published.
+        let account_revision = self.binding.sessions().account().revision;
+        if self.account_revision != account_revision {
+            self.account_revision = account_revision;
+            if !self.title_waits.is_empty() {
+                cx.emit(TabViewEvent::PresentationChanged {
+                    tab_id: self.tab.id(),
+                });
+                cx.notify();
             }
         }
         let places: BTreeMap<PaneId, std::path::PathBuf> = core_tab
@@ -4560,6 +4576,9 @@ struct PaneCaption {
     /// Where the Pane as drawn ends while it grows, which its caption learns as it is laid
     /// out. A caption part shows only once it lies wholly before this edge.
     edge: Option<Pixels>,
+    /// The Pane as drawn is still shorter than its caption, as when it grows in from below, so
+    /// no caption part shows yet.
+    covered: bool,
 }
 
 /// A Pane's caption. It reads no Pane state of its own, so the frames a Pane draws for its
@@ -4661,7 +4680,11 @@ fn render_pane_caption(
             let layout =
                 CaptionLayout::resolve(&caption, room.width, controls_reveal, window, &appearance);
             // A growing Pane shows a caption part only once it holds all of it.
-            caption.edge = (caption.growing > px(0.0)).then(|| bounds.right());
+            caption.edge = if caption.covered {
+                Some(bounds.left())
+            } else {
+                (caption.growing > px(0.0)).then(|| bounds.right())
+            };
             let content = render_pane_caption_content(
                 caption,
                 controls_reveal,
@@ -4739,6 +4762,7 @@ fn render_pane_caption_content(
         observed_by,
         growing: _,
         edge,
+        covered: _,
     } = caption;
     let color = paint.foreground;
     let button_paint = |value: crate::appearance::SemanticPaint| {
@@ -5006,7 +5030,8 @@ fn render_pane_caption_content(
             },
         )
         .when_some(observed_by, |row, label| {
-            row.child(
+            row.child(whole(
+                edge,
                 div()
                     .id(("pane-observers", pane_id.get()))
                     .debug_selector(move || format!("pane-caption-observers-{}", pane_id.get()))
@@ -5019,7 +5044,7 @@ fn render_pane_caption_content(
                     .truncate()
                     .text_color(gpui_color(paint.secondary))
                     .child(label),
-            )
+            ))
         })
         .child(whole(
             edge,
