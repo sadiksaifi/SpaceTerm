@@ -735,6 +735,19 @@ fn launch_directory(
         .to_owned()
 }
 
+/// The home of the Machine that published `inventory`, which any of its Panes' Terminal Metadata
+/// names, and where SpaceTerm Core starts an unpinned Workspace.
+fn machine_home(inventory: &Inventory) -> Option<std::path::PathBuf> {
+    inventory
+        .workspaces
+        .iter()
+        .flat_map(|workspace| &workspace.tabs)
+        .flat_map(|tab| &tab.panes)
+        .find_map(|pane| pane.presentation.as_ref()?.home.as_deref())
+        .filter(|home| !home.is_empty())
+        .map(Into::into)
+}
+
 fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Creation>) {
     if let Mutation::CreateWorkspace {
         name, directory, ..
@@ -766,7 +779,11 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
                         pane,
                         None,
                         Side::Right,
-                        directory.clone().unwrap_or_default(),
+                        // An unpinned Workspace starts in the Machine's home.
+                        directory
+                            .clone()
+                            .or_else(|| machine_home(inventory))
+                            .unwrap_or_default(),
                     )],
                 }],
             });
@@ -834,19 +851,29 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
             });
             let source_pane =
                 source_tab.and_then(|t| t.panes.iter().find(|p| Some(p.id) == *source));
-            let directory = match mutation {
-                Mutation::Worktree(Operation::OpenTab { path, .. }) => {
-                    launch_directory(workspace, source_pane, Some(path))
-                }
-                _ => launch_directory(workspace, source_pane, None),
+            // A Tab opened in a Worktree belongs to it at once, so an edit that depends on the
+            // pending Tab, such as a Split, starts inside it too.
+            let (directory, membership, worktree, worktree_repository) = match mutation {
+                Mutation::Worktree(Operation::OpenTab { root, path, .. }) => (
+                    launch_directory(workspace, source_pane, Some(path)),
+                    spaceterm_core::hierarchy::WorktreeMembership::Opened,
+                    Some(path.clone()),
+                    Some(root.clone()),
+                ),
+                _ => (
+                    launch_directory(workspace, source_pane, None),
+                    spaceterm_core::hierarchy::WorktreeMembership::Following,
+                    source_tab.and_then(|t| t.worktree.clone()),
+                    source_tab.and_then(|t| t.worktree_repository.clone()),
+                ),
             };
             let pane = ids.pane.expect("a Tab projection has a Pane");
             workspace.tabs.push(Tab {
                 id: ids.tab.expect("a Tab projection has an identity"),
                 root_pane: pane,
-                worktree_membership: spaceterm_core::hierarchy::WorktreeMembership::Following,
-                worktree: source_tab.and_then(|t| t.worktree.clone()),
-                worktree_repository: source_tab.and_then(|t| t.worktree_repository.clone()),
+                worktree_membership: membership,
+                worktree,
+                worktree_repository,
                 panes: vec![new_pane(pane, None, Side::Right, directory)],
             });
         }
