@@ -9853,6 +9853,59 @@ fn a_starting_shell_in_the_home_directory_says_the_home_abbreviation(cx: &mut Te
     spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Pane Caption, ~");
 }
 
+/// A starting shell's Pane Caption names its Machine at once, from what another Pane of that
+/// Machine published, so the starting path never moves aside for it a moment later.
+#[gpui::test]
+fn a_starting_shells_caption_names_its_machine_at_once(cx: &mut TestAppContext) {
+    use spaceterm_core::pane::metadata;
+    let (harness, cx) = close_harness(cx);
+    let (_, pane) = harness.manager.read_with(cx, |manager, cx| {
+        manager
+            .active_tab_manager()
+            .expect("an active Workspace")
+            .read(cx)
+            .active_terminal_identity(cx)
+    });
+    let shows = |cx: &mut VisualTestContext, part: &str| {
+        cx.debug_bounds(format!("pane-caption-{part}-{}", pane.get()).leak())
+            .is_some()
+    };
+    assert!(
+        !shows(cx, "host") && !shows(cx, "account"),
+        "the Pane has published no Machine of its own"
+    );
+    let mut inventory = close_published();
+    inventory.revision = 2;
+    inventory.workspaces[0].tabs[1].panes[0].presentation = Some(Box::new(metadata::Snapshot {
+        revision: 1,
+        shell_name: "zsh".into(),
+        title: "zsh".into(),
+        title_provenance: metadata::TitleProvenance::Fallback,
+        directory: "/server/work".into(),
+        directory_provenance: metadata::DirectoryProvenance::Initial,
+        user: Some("alex".into()),
+        host: Some("studio.local".into()),
+        home: Some("/server".into()),
+        freshness: metadata::Freshness::Live,
+        finished_commands: 0,
+        prompt_zone: metadata::PromptZone::Unknown,
+        command: None,
+        title_activity: false,
+        title_glyph: metadata::TitleGlyph::Reported,
+        progress: metadata::Progress::None,
+    }));
+    harness.publish(inventory, cx);
+
+    harness.panes.pane(CLOSE_ROOT_PANE).start_shell();
+    settle_panes(cx);
+
+    assert!(
+        shows(cx, "host") && shows(cx, "account") && shows(cx, "origin-separator"),
+        "the starting Pane Caption names its Machine before its shell reports anything"
+    );
+    spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Pane Caption, work");
+}
+
 /// A Starting Directory is written without the invisible characters Terminal Metadata never
 /// carries, so its folder reads the same before and after the shell reports it.
 #[gpui::test]

@@ -1194,9 +1194,18 @@ mod core_workspaces {
         /// Whether a Pane these sessions present was explicitly selected, by the person or by
         /// the landing of their own launch. Until then the window presents a view nobody chose.
         selected: Rc<std::cell::Cell<bool>>,
-        /// The Machine's home as its Panes' Terminal Metadata last named it, for abbreviating
-        /// a directory a Pane has not reported itself. It grants no file authority.
-        home: Rc<std::cell::RefCell<Option<Arc<str>>>>,
+        /// The Machine's account as its Panes' Terminal Metadata last named it, for presenting
+        /// a Pane that has published nothing itself. It grants no file authority.
+        account: Rc<std::cell::RefCell<MachineAccount>>,
+    }
+
+    /// The account a Machine's Panes run under, as their Terminal Metadata names it. These are
+    /// presentation strings and grant no authority.
+    #[derive(Clone, Default)]
+    pub(crate) struct MachineAccount {
+        pub(crate) user: Option<Arc<str>>,
+        pub(crate) host: Option<Arc<str>>,
+        pub(crate) home: Option<Arc<str>>,
     }
 
     impl WorkspacePaneSessions {
@@ -1249,19 +1258,29 @@ mod core_workspaces {
                 restart_causes: Arc::default(),
                 this_computer: SharedString::default(),
                 selected: Rc::default(),
-                home: Rc::default(),
+                account: Rc::default(),
             }
         }
 
-        /// The Machine's home, once any of its Panes published Terminal Metadata.
-        pub(crate) fn home(&self) -> Option<Arc<str>> {
-            self.home.borrow().clone()
+        /// The Machine's account, as far as any of its Panes published Terminal Metadata.
+        pub(crate) fn account(&self) -> MachineAccount {
+            self.account.borrow().clone()
         }
 
-        /// Records the home a Pane of this Machine published.
-        pub(crate) fn learn_home(&self, home: &str) {
-            if !home.is_empty() && self.home.borrow().as_deref() != Some(home) {
-                *self.home.borrow_mut() = Some(home.into());
+        /// Records the account a Pane of this Machine published.
+        pub(crate) fn learn_account(&self, published: &spaceterm_core::pane::metadata::Snapshot) {
+            let mut account = self.account.borrow_mut();
+            let account = &mut *account;
+            for (known, published) in [
+                (&mut account.user, &published.user),
+                (&mut account.host, &published.host),
+                (&mut account.home, &published.home),
+            ] {
+                if let Some(published) = published.as_deref().filter(|value| !value.is_empty())
+                    && known.as_deref() != Some(published)
+                {
+                    *known = Some(published.into());
+                }
             }
         }
 

@@ -1126,17 +1126,27 @@ impl TabView {
         // executable before the shell names itself.
         text.pending = self.title_waits.get(&pane_id) == Some(&None)
             || (self.title_waits.contains_key(&pane_id) && !self.pane_named(pane_id));
-        if text.pending
-            && !text.has_directory
-            && let Some(place) = self.pane_places.get(&pane_id)
-        {
-            // The Pane has no Terminal Metadata yet, so its Machine's home comes from the
-            // Panes that have.
-            let home = self.binding.sessions().home();
-            text.place_in(&super::terminal_pane::presented_directory(
-                &place.to_string_lossy(),
-                home.as_deref(),
-            ));
+        if text.pending {
+            // A Pane with no Terminal Metadata yet takes its Machine's account from the Panes
+            // that have, so its caption neither gains its Machine nor abbreviates its home a
+            // moment later.
+            let sessions = self.binding.sessions();
+            let account = sessions.account();
+            if text.origin.user.is_empty() && text.origin.host.is_empty() {
+                text.origin = PaneOrigin::of_machine(
+                    account.user.as_deref(),
+                    account.host.as_deref(),
+                    sessions.remote_name().as_deref(),
+                );
+            }
+            if !text.has_directory
+                && let Some(place) = self.pane_places.get(&pane_id)
+            {
+                text.place_in(&super::terminal_pane::presented_directory(
+                    &place.to_string_lossy(),
+                    account.home.as_deref(),
+                ));
+            }
         }
         text
     }
@@ -2922,8 +2932,8 @@ impl TabView {
             cx.notify();
         }
         for pane in &core_tab.panes {
-            if let Some(home) = pane.presentation.as_ref().and_then(|p| p.home.as_deref()) {
-                self.binding.sessions().learn_home(home);
+            if let Some(published) = &pane.presentation {
+                self.binding.sessions().learn_account(published);
             }
         }
         let places: BTreeMap<PaneId, std::path::PathBuf> = core_tab

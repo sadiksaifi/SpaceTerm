@@ -5951,6 +5951,17 @@ pub(crate) struct PaneOrigin {
 }
 
 impl PaneOrigin {
+    /// The origin of a Pane that has published nothing yet, from the account its Machine's
+    /// other Panes published. `remote` is another computer's Machine as its desktop names it.
+    pub(crate) fn of_machine(user: Option<&str>, host: Option<&str>, remote: Option<&str>) -> Self {
+        use crate::terminal::metadata::sanitize_title;
+        Self {
+            user: sanitize_title(user.unwrap_or_default()).into(),
+            host: sanitize_title(short_hostname(remote.or(host).unwrap_or_default())).into(),
+            remote: remote.is_some(),
+        }
+    }
+
     fn from_context(context: &crate::terminal::metadata::TerminalMetadataContext) -> Self {
         use crate::terminal::metadata::{TerminalOrigin, sanitize_title};
 
