@@ -2034,12 +2034,14 @@ impl TabManager {
         // A Tab growing in lays its parts out at its whole width and shows each once its slot
         // holds all of it, so its slot never cuts through a glyph, a word or a control.
         let reveal = TabReveal::new(motion, close_button_size, close_clearance, appearance);
-        // A Tab that arrived says nothing until its Terminal Session names it, however fast it
-        // grows in, so its first words are its real name. One that never gets a name says
-        // Terminal once its wait ends. While its Focused Pane's shell starts, any name it has is
-        // provisional, such as the shell's executable, so the Tab still says nothing.
+        // A Tab that arrived says nothing of what it is doing until its Terminal Session names
+        // it, however fast it grows in, so the first activity it says is its real name. One that
+        // never gets a name says Terminal once its wait ends. While its Focused Pane's shell
+        // starts, any name it has is provisional, such as the shell's executable, so the Tab says
+        // only where the shell starts, or nothing when nothing says where that is.
         let named =
             !identity.pending && (identity.is_named() || !self.unnamed_since.contains_key(&tab_id));
+        let worded = named || identity.says_place_alone();
         // A Tab growing in offers its close control once the control shows whole, so no part of
         // it cut off by the Tab's slot takes a press or reaches assistive technology.
         let close_control = if role != TabItemRole::InBar || reveal.close <= 0.0 {
@@ -2111,8 +2113,8 @@ impl TabManager {
                 close_clearance,
                 TabIdentityReveal {
                     glyph: reveal.glyph,
-                    words: if named { reveal.words } else { 0.0 },
-                    naming: !named,
+                    words: if worded { reveal.words } else { 0.0 },
+                    naming: !worded,
                 },
                 appearance,
             ))
@@ -3415,8 +3417,11 @@ fn render_tab_identity(
         .opacity(reveal.words)
         .when(reveal.naming, |words| {
             words.child(div().debug_selector(move || format!("tab-name-pending-{}", tab_id.get())))
-        })
-        .child(
+        });
+    // A starting shell has not said what it is doing, so its Tab says only where it starts.
+    let place_alone = identity.says_place_alone();
+    if !place_alone {
+        words = words.child(
             div()
                 .debug_selector(move || format!("tab-activity-{}", tab_id.get()))
                 .flex_shrink_0()
@@ -3431,14 +3436,17 @@ fn render_tab_identity(
                     identity.activity.clone()
                 }),
         );
+    }
     if has_place {
         words = words
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .mx(appearance.spacing(TAB_TRAILING_GAP))
-                    .child("·"),
-            )
+            .when(!place_alone, |words| {
+                words.child(
+                    div()
+                        .flex_shrink_0()
+                        .mx(appearance.spacing(TAB_TRAILING_GAP))
+                        .child("·"),
+                )
+            })
             .child(
                 div()
                     .debug_selector(move || format!("tab-place-{}", tab_id.get()))
@@ -9375,10 +9383,11 @@ mod tests {
     }
 
     /// A new Tab whose shell is starting has a provisional name, the shell's executable and the
-    /// directory it reported before its first prompt. The Tab says nothing, and its accessible
-    /// name says the shell is starting, until the Session's startup ends, and then says the name.
+    /// directory it reported before its first prompt. The Tab says only that directory, and its
+    /// accessible name says the shell is starting, until the Session's startup ends, and then
+    /// says the name.
     #[gpui::test]
-    fn a_starting_shells_provisional_name_stays_off_its_tab_until_startup_ends(
+    fn a_starting_shells_provisional_activity_stays_off_its_tab_until_startup_ends(
         cx: &mut TestAppContext,
     ) {
         use crate::terminal::metadata::TitleProvenance;
@@ -9404,17 +9413,17 @@ mod tests {
             cx.executor().advance_clock(TAB_NAME_WAIT * 2);
             cx.run_until_parked();
             assert!(
-                cx.debug_bounds("tab-name-pending-2").is_some(),
-                "a provisional name stays off the Tab while the shell starts"
+                cx.debug_bounds("tab-activity-2").is_none()
+                    && cx.debug_bounds("tab-place-2").is_some(),
+                "a provisional activity stays off the Tab while the shell starts"
             );
             let identity = manager.read_with(cx, |manager, cx| {
                 manager.tabs.active_tab().read(cx).tab_identity()
             });
-            assert!(identity.pending, "the Tab's identity waits for the shell");
-            assert!(
-                identity.is_named(),
-                "the Tab holds a provisional name: {:?}",
-                identity.one_line()
+            assert_eq!(
+                (identity.pending, identity.one_line().to_string()),
+                (true, "app".to_owned()),
+                "the Tab waits for the shell and says the directory it reported"
             );
             spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Starting shell");
         }
@@ -9422,7 +9431,7 @@ mod tests {
         pane.end_startup();
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds("tab-name-pending-2").is_none(),
+            cx.debug_bounds("tab-activity-2").is_some(),
             "the Tab says its name once the shell's startup ends"
         );
         let identity = manager.read_with(cx, |manager, cx| {

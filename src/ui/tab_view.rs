@@ -757,6 +757,9 @@ pub(crate) struct TabView {
     /// starts; once it started, when it did. Their Tab and Pane Caption wait for the first
     /// real name together, at most [`NAME_WAIT`] after the start.
     title_waits: BTreeMap<PaneId, Option<std::time::Instant>>,
+    /// Where each Pane that waits for its name starts its shell, as its caption writes a
+    /// directory. The Pane's Tab and Pane Caption say it until the shell reports its own.
+    starting_places: BTreeMap<PaneId, gpui::SharedString>,
     /// Ends the earliest title wait.
     _title_wait: Option<gpui::Task<()>>,
     /// A Pane of this Tab waited for or used a background start turn at the last reading, so the
@@ -872,6 +875,7 @@ impl TabView {
             losses: BTreeMap::new(),
             _classify: None,
             title_waits: BTreeMap::new(),
+            starting_places: BTreeMap::new(),
             _title_wait: None,
             _workspace_status: cx.spawn_in(window, async move |view, cx| {
                 while changes.recv().await.is_ok() {
@@ -1076,13 +1080,20 @@ impl TabView {
 
     /// What Pane `pane_id`'s caption says, and whether it still waits for its shell's first
     /// name. A starting shell's caption and Tab wait for that name together rather than saying
-    /// Terminal, so their first words are its real name.
+    /// Terminal, so the first activity they say is its real name. Meanwhile they say where the
+    /// shell starts.
     fn caption_text(&self, pane_id: PaneId) -> PaneCaptionText {
         let mut text = self.named_caption(pane_id);
         // While its shell starts, a name the Pane has is only provisional, such as the shell's
         // executable before the shell names itself.
         text.pending = self.title_waits.get(&pane_id) == Some(&None)
             || (self.title_waits.contains_key(&pane_id) && !self.pane_named(pane_id));
+        if text.pending
+            && !text.has_directory
+            && let Some(place) = self.starting_places.get(&pane_id)
+        {
+            text.place_in(place);
+        }
         text
     }
 
@@ -1134,6 +1145,11 @@ impl TabView {
         }
         self.title_waits
             .retain(|pane_id, _| self.binding.view(*pane_id).is_some());
+        let places = self.read_starting_places(cx);
+        if self.starting_places != places {
+            self.starting_places = places;
+            changed = true;
+        }
         if changed {
             cx.emit(TabViewEvent::PresentationChanged {
                 tab_id: self.tab.id(),
@@ -1153,6 +1169,18 @@ impl TabView {
                 let _ = view.update_in(cx, |view, window, cx| view.track_title_waits(window, cx));
             })
         });
+    }
+
+    /// Where each Pane that waits for its name starts its shell, as the inventory presents it.
+    fn read_starting_places(&self, cx: &App) -> BTreeMap<PaneId, gpui::SharedString> {
+        self.title_waits
+            .keys()
+            .filter_map(|pane_id| {
+                let directory = self.binding.presented_directory(*pane_id)?;
+                let terminal = self.tab.pane(*pane_id)?;
+                Some((*pane_id, terminal.read(cx).caption_directory(&directory)))
+            })
+            .collect()
     }
 
     /// Records unread attention for one Pane as its Terminal Session would report it.
@@ -4281,6 +4309,12 @@ impl TabIdentity {
         !self.place.is_empty() || !(self.activity.is_empty() || self.activity == "Terminal")
     }
 
+    /// Whether the Tab says only where its Terminal Session starts, because the Focused Pane's
+    /// shell is starting and has not said what it is doing.
+    pub(crate) fn says_place_alone(&self) -> bool {
+        self.pending && !self.place.is_empty()
+    }
+
     fn resolve(caption: PaneCaptionText, title: gpui::SharedString, attention: bool) -> Self {
         let (activity, directory) = if caption.label.is_empty() {
             (caption.name.as_ref(), "")
@@ -4295,7 +4329,13 @@ impl TabIdentity {
             },
             directory,
         );
-        let place = label.place().to_owned().into();
+        // A starting shell's activity is not known yet, so its place stands alone, whatever
+        // provisional activity it repeats.
+        let place = if caption.pending && caption.has_directory {
+            caption.name.clone()
+        } else {
+            label.place().to_owned().into()
+        };
         let activity = label.activity.into();
         Self {
             remote: caption.origin.remote,
@@ -4319,6 +4359,10 @@ impl TabIdentity {
             line.push_str(&format!("[{percent}%] "));
         } else if self.progress != TerminalProgress::None {
             line.push_str(&format!("[{:?}] ", self.progress));
+        }
+        if self.says_place_alone() {
+            line.push_str(&self.place);
+            return line.into();
         }
         line.push_str(if self.activity.is_empty() {
             "Terminal"
@@ -4353,6 +4397,14 @@ struct PaneCaptionText {
 impl PaneCaptionText {
     fn from_terminal(terminal: &TerminalPane) -> Self {
         Self::from_facts(terminal.caption())
+    }
+
+    /// Places a caption that reported no directory in `directory`, keeping its name as its label.
+    fn place_in(&mut self, directory: &str) {
+        let (leading, leaf) = split_directory_leaf(directory);
+        self.label = std::mem::replace(&mut self.name, leaf);
+        self.directory = leading;
+        self.has_directory = true;
     }
 
     fn from_facts(facts: super::terminal_pane::PaneCaptionFacts) -> Self {
@@ -4783,8 +4835,8 @@ fn render_pane_caption_content(
         };
     }
     // While the shell starts, assistive technology hears that rather than a name the caption
-    // does not show yet.
-    let caption_name = if text.pending {
+    // does not show yet. A caption that shows where the shell starts is named for that place.
+    let caption_name = if text.pending && !text.has_directory {
         format!("Pane Caption, {STARTING_NAME}")
     } else {
         format!("Pane Caption, {}", text.name)
@@ -5021,11 +5073,13 @@ fn render_caption_identity(
             color,
             appearance,
         ));
-    // A shell that is starting shows no words until its first confirmed name, as its Tab does,
-    // so neither says Terminal first and then something else.
+    // A shell that is starting says nothing of what it is doing until its first confirmed name,
+    // as its Tab does, so neither says Terminal first and then something else. It says where it
+    // starts meanwhile, and shows no words when nothing says where that is.
     let pending = text.pending;
-    let waiting = move |segment: gpui::Div| segment.when(pending, |segment| segment.opacity(0.0));
-    caption_content = caption_content.when(pending, |row| {
+    let unplaced = pending && !text.has_directory;
+    let waiting = move |segment: gpui::Div| segment.when(unplaced, |segment| segment.opacity(0.0));
+    caption_content = caption_content.when(unplaced, |row| {
         row.child(
             div().debug_selector(move || format!("pane-caption-name-pending-{}", pane_id.get())),
         )
@@ -5033,21 +5087,21 @@ fn render_caption_identity(
     if text.has_directory {
         caption_content = caption_content
             .when(layout.show_directory && !text.directory.is_empty(), |row| {
-                row.child(waiting(
+                row.child(
                     div()
                         .debug_selector(move || format!("pane-caption-directory-{}", pane_id.get()))
                         .flex_shrink_0()
                         .text_color(gpui_color(color))
                         .child(text.directory),
-                ))
+                )
             })
-            .child(waiting(
+            .child(
                 div()
                     .debug_selector(move || format!("pane-caption-name-{}", pane_id.get()))
                     .min_w_0()
                     .truncate()
                     .child(text.name),
-            ))
+            )
             .when(layout.show_status_separator, |row| {
                 row.child(
                     div()
@@ -5072,16 +5126,19 @@ fn render_caption_identity(
                         appearance,
                     )),
             )
-            .when(layout.show_label && !text.label.is_empty(), |row| {
-                row.child(waiting(
-                    div()
-                        .debug_selector(move || format!("pane-caption-label-{}", pane_id.get()))
-                        .min_w_0()
-                        .truncate()
-                        .text_color(gpui_color(color))
-                        .child(text.label),
-                ))
-            });
+            .when(
+                layout.show_label && !text.label.is_empty() && !pending,
+                |row| {
+                    row.child(
+                        div()
+                            .debug_selector(move || format!("pane-caption-label-{}", pane_id.get()))
+                            .min_w_0()
+                            .truncate()
+                            .text_color(gpui_color(color))
+                            .child(text.label),
+                    )
+                },
+            );
     } else {
         caption_content = caption_content
             .child(render_pane_status(

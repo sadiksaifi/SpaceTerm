@@ -9679,8 +9679,8 @@ fn close_pane_should_ask_when_core_verifies_a_running_command(cx: &mut TestAppCo
     assert!(harness.closes().is_empty());
 }
 
-/// A shell that is starting shows one waiting presentation in its Tab and its Pane Caption, for
-/// as long as it starts. Neither says Terminal first and then its real name.
+/// A shell that is starting says nothing of what it is doing in its Tab and its Pane Caption,
+/// for as long as it starts. Neither says Terminal first and then its real name.
 #[gpui::test]
 fn a_starting_shell_waits_for_its_name_in_its_tab_and_caption(cx: &mut TestAppContext) {
     let (harness, cx) = close_harness(cx);
@@ -9691,35 +9691,86 @@ fn a_starting_shell_waits_for_its_name_in_its_tab_and_caption(cx: &mut TestAppCo
             .read(cx)
             .active_terminal_identity(cx)
     });
-    let tab_pending: &'static str = format!("tab-name-pending-{}", tab.get()).leak();
-    let caption_pending: &'static str = format!("pane-caption-name-pending-{}", pane.get()).leak();
+    let tab_activity: &'static str = format!("tab-activity-{}", tab.get()).leak();
+    let caption_label: &'static str = format!("pane-caption-label-{}", pane.get()).leak();
+    let caption_name: &'static str = format!("pane-caption-name-{}", pane.get()).leak();
+    // The Tab and the Pane Caption say where the shell starts, and no activity.
+    let waiting = |cx: &mut VisualTestContext| {
+        cx.debug_bounds(tab_activity).is_none()
+            && cx.debug_bounds(caption_label).is_none()
+            && cx.debug_bounds(caption_name).is_some()
+    };
     harness.panes.pane(CLOSE_ROOT_PANE).start_shell();
     settle_panes(cx);
-    assert!(cx.debug_bounds(caption_pending).is_some());
-    assert!(cx.debug_bounds(tab_pending).is_some());
+    assert!(waiting(cx));
 
     // A slow start never falls back to Terminal while it is still starting.
     cx.executor()
         .advance_clock(std::time::Duration::from_secs(2));
     settle_panes(cx);
-    assert!(cx.debug_bounds(caption_pending).is_some());
-    assert!(cx.debug_bounds(tab_pending).is_some());
+    assert!(waiting(cx));
 
     // The shell attached with a blank first screen and no name yet. Both keep waiting.
     harness.panes.pane(CLOSE_ROOT_PANE).reconnect();
     settle_panes(cx);
-    assert!(
-        cx.debug_bounds(caption_pending).is_some(),
-        "a blank first screen is no name"
-    );
-    assert!(cx.debug_bounds(tab_pending).is_some());
-    spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Pane Caption, Starting shell");
+    assert!(waiting(cx), "a blank first screen is no name");
+    spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Pane Caption, work");
     cx.executor()
         .advance_clock(std::time::Duration::from_secs(2));
     settle_panes(cx);
     assert!(
-        cx.debug_bounds(caption_pending).is_none() && cx.debug_bounds(tab_pending).is_none(),
-        "a started shell that never names itself says Terminal on both once its wait ends"
+        cx.debug_bounds(tab_activity).is_some(),
+        "a started shell that never names itself says Terminal once its wait ends"
+    );
+    spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Pane Caption, Terminal");
+}
+
+/// A starting shell's Tab and Pane Caption say where the shell starts at once, before the shell
+/// reports anything. What the shell is doing still waits for the shell to name itself.
+#[gpui::test]
+fn a_starting_shell_shows_its_starting_directory_in_its_tab_and_caption(cx: &mut TestAppContext) {
+    let (harness, cx) = close_harness(cx);
+    let (tab, pane) = harness.manager.read_with(cx, |manager, cx| {
+        manager
+            .active_tab_manager()
+            .expect("an active Workspace")
+            .read(cx)
+            .active_terminal_identity(cx)
+    });
+    let tab_view = harness.manager.read_with(cx, |manager, cx| {
+        manager
+            .active_tab_manager()
+            .expect("an active Workspace")
+            .read(cx)
+            .active_tab_view()
+    });
+    let of_tab = |part: &str| -> &'static str { format!("tab-{part}-{}", tab.get()).leak() };
+    let of_caption =
+        |part: &str| -> &'static str { format!("pane-caption-{part}-{}", pane.get()).leak() };
+
+    // The published Pane starts in `/server/work`.
+    harness.panes.pane(CLOSE_ROOT_PANE).start_shell();
+    settle_panes(cx);
+
+    assert_eq!(
+        tab_view.read_with(cx, |view, _| view.tab_title()).as_ref(),
+        "work",
+        "the Tab says the Starting Directory's folder alone"
+    );
+    assert!(cx.debug_bounds(of_tab("place")).is_some());
+    assert!(
+        cx.debug_bounds(of_tab("activity")).is_none()
+            && cx.debug_bounds(of_tab("name-pending")).is_none(),
+        "the Tab shows its place and no activity yet"
+    );
+    spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Pane Caption, work");
+    assert!(
+        cx.debug_bounds(of_caption("name-pending")).is_none(),
+        "the Pane Caption shows the Starting Directory"
+    );
+    assert!(
+        cx.debug_bounds(of_caption("label")).is_none(),
+        "the Pane Caption says no activity before the shell names itself"
     );
 }
 
@@ -9736,18 +9787,21 @@ fn a_shell_that_attached_in_one_reading_still_waits_for_its_name(cx: &mut TestAp
             .read(cx)
             .active_terminal_identity(cx)
     });
-    let tab_pending: &'static str = format!("tab-name-pending-{}", tab.get()).leak();
-    let caption_pending: &'static str = format!("pane-caption-name-pending-{}", pane.get()).leak();
+    let tab_activity: &'static str = format!("tab-activity-{}", tab.get()).leak();
+    let caption_label: &'static str = format!("pane-caption-label-{}", pane.get()).leak();
+    // The Tab and the Pane Caption say where the shell starts, and no activity.
+    let waiting = |cx: &mut VisualTestContext| {
+        cx.debug_bounds(tab_activity).is_none() && cx.debug_bounds(caption_label).is_none()
+    };
     harness.panes.pane(CLOSE_ROOT_PANE).attach_quietly();
     settle_panes(cx);
-    assert!(cx.debug_bounds(caption_pending).is_some());
-    assert!(cx.debug_bounds(tab_pending).is_some());
+    assert!(waiting(cx));
+    spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Pane Caption, work");
     // A startup longer than the name wait still waits.
     cx.executor()
         .advance_clock(std::time::Duration::from_secs(6));
     settle_panes(cx);
-    assert!(cx.debug_bounds(caption_pending).is_some());
-    assert!(cx.debug_bounds(tab_pending).is_some());
+    assert!(waiting(cx));
 
     harness.panes.pane(CLOSE_ROOT_PANE).end_startup();
     settle_panes(cx);
@@ -9755,9 +9809,10 @@ fn a_shell_that_attached_in_one_reading_still_waits_for_its_name(cx: &mut TestAp
         .advance_clock(std::time::Duration::from_secs(2));
     settle_panes(cx);
     assert!(
-        cx.debug_bounds(caption_pending).is_none() && cx.debug_bounds(tab_pending).is_none(),
+        cx.debug_bounds(tab_activity).is_some(),
         "a shell past startup that never named itself says Terminal once its wait ends"
     );
+    spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Pane Caption, Terminal");
 }
 
 /// An approved Tab close hides its exact membership and focuses the surviving Tab immediately.
@@ -14897,9 +14952,12 @@ mod workspace_repositories {
         );
         assert_ne!(created, before, "the new Tab is active");
         assert!(
-            cx.debug_bounds(format!("tab-name-pending-{}", created.get()).leak())
-                .is_some(),
-            "the new Tab must wait for its name instead of saying Terminal"
+            cx.debug_bounds(format!("tab-activity-{}", created.get()).leak())
+                .is_none()
+                && cx
+                    .debug_bounds(format!("tab-place-{}", created.get()).leak())
+                    .is_some(),
+            "the new Tab must say where it starts and wait for its name instead of saying Terminal"
         );
     }
 

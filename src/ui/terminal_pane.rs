@@ -1501,6 +1501,13 @@ impl TerminalPane {
         )
     }
 
+    /// How this Pane's caption writes `directory`, a directory on its Machine that its Terminal
+    /// Session has not reported. The text is for presentation only.
+    pub(crate) fn caption_directory(&self, directory: &std::path::Path) -> SharedString {
+        let directory = crate::terminal::metadata::sanitize_title(&directory.to_string_lossy());
+        compact_home_directory(&directory, self.metadata().context.home()).into()
+    }
+
     pub(crate) fn caption(&self) -> PaneCaptionFacts {
         use crate::terminal::metadata::{CommandState, TitleProvenance, sanitize_title};
 
