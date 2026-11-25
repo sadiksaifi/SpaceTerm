@@ -1596,20 +1596,6 @@ mod core_workspaces {
                 .find_map(|(&pane_id, &id)| (self.edits.canonical(id) == core).then_some(pane_id))
         }
 
-        /// The directory the inventory presents for Pane `pane_id`, which is where its shell
-        /// starts until its Terminal Session reports one. A pending creation presents the
-        /// directory it expects. `None` when nothing says where the Pane is.
-        pub(crate) fn presented_directory(&self, pane_id: PaneId) -> Option<PathBuf> {
-            let core = self.core_pane(pane_id)?;
-            let tab = self.presentation_tab()?;
-            let directory = tab
-                .panes
-                .iter()
-                .find(|pane| pane.id == core)?
-                .presented_directory();
-            (!directory.as_os_str().is_empty()).then(|| directory.to_owned())
-        }
-
         /// Where the keyboard rests while a screen replaces the Pane.
         pub(crate) fn screen_focus(&self, pane_id: PaneId) -> Option<&gpui::FocusHandle> {
             self.screen_focus.get(&pane_id)

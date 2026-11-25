@@ -9491,6 +9491,56 @@ mod tests {
         );
     }
 
+    /// Previous Pane moves the focus without reordering the focus history. A Split of the Pane
+    /// it lands on keeps that Pane's name on the Tab, not the name of the Pane used last.
+    #[gpui::test]
+    fn a_split_after_previous_pane_should_keep_the_name_its_tab_showed(cx: &mut TestAppContext) {
+        use crate::terminal::metadata::TitleProvenance;
+        let (manager, _records, cx) = tab_manager(cx);
+        let title = |cx: &mut VisualTestContext| {
+            manager.read_with(cx, |manager, cx| {
+                manager.tabs.active_tab().read(cx).tab_title().to_string()
+            })
+        };
+        let name = |cx: &mut VisualTestContext, session: usize, title: &str, directory: &str| {
+            report_metadata(cx, session, 1, |metadata| {
+                metadata.directory.path = Arc::from(directory);
+                metadata.title.value = Arc::from(title);
+                metadata.title.provenance = TitleProvenance::TerminalControl;
+            });
+            cx.run_until_parked();
+        };
+        name(cx, 1, "vim", "/srv/a");
+        cx.dispatch_action(SplitRight);
+        cx.run_until_parked();
+        name(cx, 2, "top", "/srv/b");
+        cx.dispatch_action(SplitRight);
+        cx.run_until_parked();
+        name(cx, 3, "htop", "/srv/c");
+        cx.dispatch_action(crate::ui::FocusPreviousPane);
+        cx.run_until_parked();
+        assert_eq!(
+            title(cx),
+            "top \u{b7} b",
+            "Previous Pane lands on the second Pane"
+        );
+
+        cx.dispatch_action(SplitRight);
+        cx.run_until_parked();
+        let core = cx.update(|_, cx| {
+            cx.global::<crate::ui::workspace_manager::tests::LocalCore>()
+                .clone()
+        });
+        core.panes.pane(core.panes.opened_at(3)).attach_quietly();
+        cx.run_until_parked();
+
+        assert_eq!(
+            title(cx),
+            "top \u{b7} b",
+            "the Tab keeps the name it showed while the new Pane's shell starts"
+        );
+    }
+
     /// How opaque the window painted a chip whose bounds are `chip`, if it painted one there.
     fn chip_opacity_at(chip: gpui::Bounds<Pixels>, cx: &mut VisualTestContext) -> Option<f32> {
         cx.update(|window, _| {

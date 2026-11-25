@@ -757,9 +757,13 @@ pub(crate) struct TabView {
     /// starts; once it started, when it did. Their Tab and Pane Caption wait for the first
     /// real name together, at most [`NAME_WAIT`] after the start.
     title_waits: BTreeMap<PaneId, Option<std::time::Instant>>,
-    /// Where each Pane that waits for its name starts its shell, as its caption writes a
-    /// directory. The Pane's Tab and Pane Caption say it until the shell reports its own.
-    starting_places: BTreeMap<PaneId, gpui::SharedString>,
+    /// The directory the inventory presents for each Pane, as its caption writes a directory.
+    /// A Pane that waits for its name says it in its Tab and Pane Caption, as where its shell
+    /// starts, until the shell reports its own.
+    pane_places: BTreeMap<PaneId, gpui::SharedString>,
+    /// The Focused Pane that last named this Tab: one with a real name that was not waiting
+    /// for it. It keeps naming the Tab while a Focused Pane after it starts its shell.
+    named_by: Option<PaneId>,
     /// Ends the earliest title wait.
     _title_wait: Option<gpui::Task<()>>,
     /// A Pane of this Tab waited for or used a background start turn at the last reading, so the
@@ -875,7 +879,8 @@ impl TabView {
             losses: BTreeMap::new(),
             _classify: None,
             title_waits: BTreeMap::new(),
-            starting_places: BTreeMap::new(),
+            pane_places: BTreeMap::new(),
+            named_by: None,
             _title_wait: None,
             _workspace_status: cx.spawn_in(window, async move |view, cx| {
                 while changes.recv().await.is_ok() {
@@ -1071,25 +1076,32 @@ impl TabView {
         )
     }
 
-    /// The Pane that names the Tab: the Focused Pane, or while its shell starts, the Pane focused
-    /// most recently before it that has a name. A Split or a restored Pane taking the focus then
-    /// keeps the name the Tab showed, rather than dropping it until the new shell names itself.
+    /// The Pane that names the Tab: the Focused Pane, or while its shell starts, the Pane that
+    /// named the Tab before it. A Split or a restored Pane taking the focus then keeps the name
+    /// the Tab showed, rather than dropping it until the new shell names itself.
     fn naming_pane(&self) -> PaneId {
         let focused = self.tab.focused_pane_id();
         if !self.caption_text(focused).pending {
             return focused;
         }
-        self.tab
-            .focus_history()
-            .iter()
-            .rev()
-            .copied()
-            .find(|pane_id| {
-                *pane_id != focused
-                    && self.pane_named(*pane_id)
-                    && !self.caption_text(*pane_id).pending
+        self.named_by
+            .filter(|pane_id| {
+                *pane_id != focused && self.tab.pane(*pane_id).is_some() && self.names_tab(*pane_id)
             })
             .unwrap_or(focused)
+    }
+
+    /// Whether Pane `pane_id` has a real name and no longer waits for one.
+    fn names_tab(&self, pane_id: PaneId) -> bool {
+        self.pane_named(pane_id) && !self.caption_text(pane_id).pending
+    }
+
+    /// Remembers the Focused Pane as the one naming the Tab, once it has a name of its own.
+    fn follow_naming_pane(&mut self) {
+        let focused = self.tab.focused_pane_id();
+        if self.names_tab(focused) {
+            self.named_by = Some(focused);
+        }
     }
 
     /// The title Pane `pane_id` reported, or Terminal.
@@ -1112,7 +1124,7 @@ impl TabView {
             || (self.title_waits.contains_key(&pane_id) && !self.pane_named(pane_id));
         if text.pending
             && !text.has_directory
-            && let Some(place) = self.starting_places.get(&pane_id)
+            && let Some(place) = self.pane_places.get(&pane_id)
         {
             text.place_in(place);
         }
@@ -1167,11 +1179,7 @@ impl TabView {
         }
         self.title_waits
             .retain(|pane_id, _| self.binding.view(*pane_id).is_some());
-        let places = self.read_starting_places(cx);
-        if self.starting_places != places {
-            self.starting_places = places;
-            changed = true;
-        }
+        self.follow_naming_pane();
         if changed {
             cx.emit(TabViewEvent::PresentationChanged {
                 tab_id: self.tab.id(),
@@ -1191,18 +1199,6 @@ impl TabView {
                 let _ = view.update_in(cx, |view, window, cx| view.track_title_waits(window, cx));
             })
         });
-    }
-
-    /// Where each Pane that waits for its name starts its shell, as the inventory presents it.
-    fn read_starting_places(&self, cx: &App) -> BTreeMap<PaneId, gpui::SharedString> {
-        self.title_waits
-            .keys()
-            .filter_map(|pane_id| {
-                let directory = self.binding.presented_directory(*pane_id)?;
-                let terminal = self.tab.pane(*pane_id)?;
-                Some((*pane_id, terminal.read(cx).caption_directory(&directory)))
-            })
-            .collect()
     }
 
     /// Records unread attention for one Pane as its Terminal Session would report it.
@@ -2022,6 +2018,7 @@ impl TabView {
 
     /// Gives each Pane the focus it presents. Returns the Panes whose presentation inputs changed.
     fn sync_terminal_focus(&mut self, cx: &mut Context<Self>) -> BTreeSet<PaneId> {
+        self.follow_naming_pane();
         let focused_terminal_id = self
             .tab
             .pane(self.tab.focused_pane_id())
@@ -2913,6 +2910,33 @@ impl TabView {
             self.pane_observers = observers;
             changed = true;
             cx.notify();
+        }
+        let places: BTreeMap<PaneId, gpui::SharedString> = core_tab
+            .panes
+            .iter()
+            .filter_map(|pane| {
+                let pane_id = self.binding.local_pane(pane.id)?;
+                let directory = pane.presented_directory();
+                if directory.as_os_str().is_empty() {
+                    return None;
+                }
+                let terminal = self.tab.pane(pane_id)?;
+                Some((pane_id, terminal.read(cx).caption_directory(directory)))
+            })
+            .collect();
+        if self.pane_places != places {
+            // Only a Pane that waits for its name says its place from here.
+            let shown = self
+                .title_waits
+                .keys()
+                .any(|pane_id| self.pane_places.get(pane_id) != places.get(pane_id));
+            self.pane_places = places;
+            if shown {
+                cx.emit(TabViewEvent::PresentationChanged {
+                    tab_id: self.tab.id(),
+                });
+                cx.notify();
+            }
         }
         changed |= self.remove_absent_panes(core_tab, window, cx);
         let retired = self
