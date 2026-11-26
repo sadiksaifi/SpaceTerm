@@ -3745,7 +3745,7 @@ impl TabManager {
     pub(crate) fn reconcile(
         &mut self,
         workspace: &spaceterm_core::hierarchy::Workspace,
-        removal: super::workspaces::WorkspaceRemoval,
+        removal: super::workspaces::WorkspaceRemoval<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -3863,7 +3863,7 @@ impl TabManager {
     fn remove_absent_tabs(
         &mut self,
         workspace: &spaceterm_core::hierarchy::Workspace,
-        removal: super::workspaces::WorkspaceRemoval,
+        removal: super::workspaces::WorkspaceRemoval<'_>,
         close_keyboard: Option<TabId>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -3879,15 +3879,20 @@ impl TabManager {
                     .is_some_and(|core| !workspace.tabs.iter().any(|tab| tab.id == core))
             })
             .collect();
-        let opens_successor = close_keyboard.is_some_and(|closed| absent.contains(&closed));
-        let mut removed = false;
+        let active = self.tabs.active_tab_id();
+        let keyboard_tab = absent.iter().copied().find(|&tab_id| {
+            self.tabs
+                .tab(tab_id)
+                .is_some_and(|view| view.read(cx).holds_keyboard(window, cx))
+        });
+        let mut opens_successor = close_keyboard.is_some_and(|closed| absent.contains(&closed));
+        let mut moves_keyboard = false;
+        let removed = !absent.is_empty();
         for tab_id in absent {
             let optimistic = self.binding.optimistically_removing(tab_id);
-            let own = removal == super::workspaces::WorkspaceRemoval::OwnClose;
-            let held_keyboard = self
-                .tabs
-                .tab(tab_id)
-                .is_some_and(|view| view.read(cx).holds_keyboard(window, cx));
+            let own = matches!(removal, super::workspaces::WorkspaceRemoval::OwnClose { confirmation, .. }
+                if self.tabs.tab(tab_id).is_some_and(|view| view.read(cx).ends_with(confirmation)));
+            let held_keyboard = keyboard_tab == Some(tab_id);
             if optimistic {
                 let was_active = self.tabs.active_tab_id() == tab_id;
                 // The Tab its Panes merge into presents them now, which fences this Tab's own
@@ -3915,25 +3920,20 @@ impl TabManager {
                         self.tabs
                             .active_tab()
                             .update(cx, |view, cx| view.activate_without_focus(cx));
-                        if held_keyboard && !opens_successor {
-                            self.focus(window, cx);
-                        }
+                        moves_keyboard |= held_keyboard;
                     }
                     self.sync_terminal_focus_blocker(cx);
                 }
             } else {
                 // The server's answer can arrive before this reconciliation, so the closed Tab
                 // leaves here without being parked; its successor still opens once below.
-                let activate_next = own && held_keyboard && !opens_successor;
-                self.close_tab_activating(tab_id, activate_next, window, cx);
+                opens_successor |= own && held_keyboard && tab_id == active;
+                self.close_tab_activating(tab_id, false, window, cx);
             }
             // Another client's close asks the server for no Pane here, but the keyboard that was
             // in the Tab it removed still needs a place, so it rests in the Active Tab's Focused
             // Pane without selecting it. Typing anywhere else stays where it is.
-            if !own && held_keyboard && !self.close_workspace_requested {
-                self.focus(window, cx);
-            }
-            removed = true;
+            moves_keyboard |= !own && held_keyboard;
         }
         // The person's close opens the Tab that takes its place, which selects its Focused Pane
         // and so starts a retained shell there.
@@ -3941,6 +3941,8 @@ impl TabManager {
             self.tabs
                 .active_tab()
                 .update(cx, |view, cx| view.open_focused_pane(window, cx));
+        } else if moves_keyboard && !self.close_workspace_requested {
+            self.focus(window, cx);
         }
         removed
     }

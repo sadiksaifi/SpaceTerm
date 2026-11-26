@@ -3169,6 +3169,18 @@ impl TabView {
             .all(|(pane_id, _)| self.binding.closing(pane_id))
     }
 
+    /// Whether the accepted close names all the Panes this Tab presents.
+    pub(crate) fn ends_with(
+        &self,
+        confirmation: &spaceterm_core::hierarchy::CloseConfirmation,
+    ) -> bool {
+        self.tab.panes_with_ids().all(|(id, _)| {
+            self.binding
+                .core_pane(id)
+                .is_some_and(|pane| confirmation.panes.iter().any(|closed| closed.id == pane))
+        })
+    }
+
     /// Whether this Tab presents the server Pane.
     pub(crate) fn holds_pane(&self, core: spaceterm_core::hierarchy::Id) -> bool {
         self.binding.holds(core)

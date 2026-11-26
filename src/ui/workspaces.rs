@@ -3891,9 +3891,31 @@ mod core_workspaces {
     /// close moves the keyboard to what remains, as a local close does; another client's change
     /// never does.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(crate) enum WorkspaceRemoval {
+    pub(crate) enum WorkspaceRemoval<'a> {
         Published,
-        OwnClose,
+        OwnClose {
+            target: MachineCloseTarget,
+            confirmation: &'a CoreCloseConfirmation,
+        },
+    }
+
+    impl WorkspaceRemoval<'_> {
+        pub(crate) fn closes_workspace(self, workspace: Id) -> bool {
+            let Self::OwnClose {
+                target,
+                confirmation,
+            } = self
+            else {
+                return false;
+            };
+            let affected = match target {
+                MachineCloseTarget::Pane { workspace, .. }
+                | MachineCloseTarget::Tab { workspace, .. }
+                | MachineCloseTarget::KillWorkspace { workspace }
+                | MachineCloseTarget::Worktree { workspace, .. } => workspace,
+            };
+            workspace == affected && confirmation.removes_workspace
+        }
     }
 
     /// What one authoritative reading and its pending presentation changed.

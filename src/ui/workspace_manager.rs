@@ -2923,16 +2923,16 @@ impl WorkspaceManager {
             return;
         };
         self.reconcile_parked_workspaces(key, window, cx);
-        // Approved closes already moved presentation. Published membership never replaces newer focus.
-        let removal = if poll.accepted.as_ref().is_some_and(|accepted| {
-            matches!(
-                accepted.mutation,
-                spaceterm_core::hierarchy::Mutation::Close { .. }
-            )
-        }) {
-            super::workspaces::WorkspaceRemoval::OwnClose
-        } else {
-            super::workspaces::WorkspaceRemoval::Published
+        // An accepted close can arrive alongside unrelated membership changes.
+        let removal = match poll.accepted.as_ref().map(|accepted| &accepted.mutation) {
+            Some(spaceterm_core::hierarchy::Mutation::Close {
+                target,
+                confirmation,
+            }) => super::workspaces::WorkspaceRemoval::OwnClose {
+                target: *target,
+                confirmation,
+            },
+            _ => super::workspaces::WorkspaceRemoval::Published,
         };
         let inventory_applied = poll.inventory.is_some();
         if let Some(inventory) = poll.inventory {
@@ -3235,7 +3235,7 @@ impl WorkspaceManager {
         &mut self,
         key: MachineKey,
         inventory: &spaceterm_core::hierarchy::Inventory,
-        removal: super::workspaces::WorkspaceRemoval,
+        removal: super::workspaces::WorkspaceRemoval<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -4781,7 +4781,7 @@ impl WorkspaceManager {
     fn remove_workspace(
         &mut self,
         workspace_id: WorkspaceId,
-        removal: super::workspaces::WorkspaceRemoval,
+        removal: super::workspaces::WorkspaceRemoval<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -4824,16 +4824,16 @@ impl WorkspaceManager {
             cx.notify();
             return;
         }
-        let confirmed = self
+        let facts = self
             .binding
             .owning(workspace_id)
-            .and_then(|binding| binding.facts(workspace_id))
-            .is_some_and(|facts| facts.confirmed);
+            .and_then(|binding| binding.facts(workspace_id));
+        let confirmed = facts.is_some_and(|facts| facts.confirmed);
+        let own = facts.is_some_and(|facts| removal.closes_workspace(facts.core));
         if let Some(binding) = self.binding.owning_mut(workspace_id) {
             binding.forget(workspace_id);
         }
         self.pending_final_tab_closes.remove(&workspace_id);
-        let own = removal == super::workspaces::WorkspaceRemoval::OwnClose;
         let held_keyboard = self
             .workspaces
             .workspace(workspace_id)

@@ -2078,6 +2078,49 @@ fn a_direct_close_of_a_live_idle_pane_opens_the_replacement_after_acceptance(
     assert!(cx.debug_bounds("modal-action-close-confirm").is_none());
 }
 
+#[gpui::test]
+fn a_direct_close_acceptance_does_not_open_a_tab_for_an_unrelated_removal(cx: &mut TestAppContext) {
+    use crate::terminal::core_session::CorePaneStatus;
+    use spaceterm_core::hierarchy::{ConfirmedControl, Outcome};
+
+    let (harness, cx) = close_harness(cx);
+    let remaining_tab = [44; 32];
+    let remaining_pane = [45; 32];
+    let mut inventory = close_inventory(
+        2,
+        &[
+            (CLOSE_ROOT_TAB, &[(CLOSE_ROOT_PANE, Some([31; 32]))]),
+            (CLOSE_SECOND_TAB, &[(CLOSE_SECOND_PANE, Some([33; 32]))]),
+            (remaining_tab, &[(remaining_pane, None)]),
+        ],
+    );
+    inventory.close.as_mut().unwrap().controls = vec![ConfirmedControl {
+        pane: CLOSE_SECOND_PANE,
+        session: Some([33; 32]),
+        owner: [1; 32],
+        epoch: 1,
+    }];
+    harness.publish(inventory, cx);
+    harness.panes.pane(CLOSE_SECOND_PANE).reconnect();
+    let replacement = harness.panes.pane(remaining_pane);
+    replacement.set(CorePaneStatus::Restored);
+    settle_panes(cx);
+    focus_active_workspace(&harness.manager, cx);
+    click("tab-close-button-2", cx);
+    assert_eq!(harness.closes().len(), 1);
+
+    // This client's inactive Tab closes and another client removes the Active Tab in the
+    // same publication. The dormant Pane must stay dormant.
+    harness.edits.answer(Outcome::Accepted {
+        target: CLOSE_SECOND_TAB,
+    });
+    harness.publish(
+        close_inventory(3, &[(remaining_tab, &[(remaining_pane, None)])]),
+        cx,
+    );
+    assert_eq!(replacement.selections(), 0);
+}
+
 /// The shell the person asked to close exits while the neutral confirmation of a refused own
 /// close is open, as the native `read -k` case ends with a signal. The confirmation gives way to
 /// one notice that names no other client, and that notice presents the refusal's outcome, so no
