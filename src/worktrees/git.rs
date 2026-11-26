@@ -67,6 +67,8 @@ pub(crate) enum WorktreeRemoveError {
     Unchecked,
     #[error("git could not remove the Worktree")]
     Failed,
+    #[error("git exceeded its Worktree removal deadline")]
+    Interrupted,
 }
 
 /// One Worktree as it was when the person was asked to remove it: git's administrative
@@ -447,6 +449,7 @@ impl LocalWorktreeGit {
         arguments.extend(["--", path]);
         match self.git(root, &arguments, &mut Vec::new(), cancellation) {
             Ok(exit) if exit.success() => Ok(()),
+            Err(RepositoryReadError::TimedOut) => Err(WorktreeRemoveError::Interrupted),
             _ => Err(WorktreeRemoveError::Failed),
         }
     }
@@ -477,6 +480,9 @@ impl LocalWorktreeGit {
         arguments.extend_from_slice(options);
         match self.git(root, &arguments, &mut Vec::new(), cancellation) {
             Ok(exit) if exit.success() => Ok(()),
+            Err(RepositoryReadError::TimedOut) => Err(WorktreeCreateError::Core(
+                spaceterm_core::worktree::Error::Interrupted,
+            )),
             _ => Err(WorktreeCreateError::Failed),
         }
     }

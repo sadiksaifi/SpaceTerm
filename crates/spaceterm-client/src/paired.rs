@@ -164,14 +164,7 @@ impl PairedMachine {
             return Err(CoreError::ServiceBusy);
         }
         let link = self.work.link_with(
-            |events| {
-                let connection = self.connector.connect_with(wait)?;
-                let admitted = self.admit_connection(connection, wait)?;
-                if wait.ended() {
-                    return Err(CoreError::ServiceBusy);
-                }
-                admitted.start(events)
-            },
+            |events| self.open_work_link(wait, events),
             Some(&|| wait.is_cancelled()),
             Some(wait.deadline()),
         );
@@ -179,6 +172,24 @@ impl PairedMachine {
             return Err(CoreError::ServiceBusy);
         }
         link
+    }
+
+    /// Admits an independent link so its initial inventory is newer than the caller's receipt.
+    pub(crate) fn fresh_work_link(&self, wait: &WaitLimit) -> Result<CoreLink, CoreError> {
+        self.open_work_link(wait, Arc::new(|_| {}))
+    }
+
+    fn open_work_link(
+        &self,
+        wait: &WaitLimit,
+        events: Arc<dyn LinkSink>,
+    ) -> Result<CoreLink, CoreError> {
+        let connection = self.connector.connect_with(wait)?;
+        let admitted = self.admit_connection(connection, wait)?;
+        if wait.ended() {
+            return Err(CoreError::ServiceBusy);
+        }
+        admitted.start(events)
     }
 
     /// Gives this pairing's Workspace edits their own durable writer. The journal is bound to

@@ -156,22 +156,49 @@ pub fn confirm_acknowledgement(
     link: &CoreLink,
     sequence: u64,
     deadline: Instant,
-    mut exchange: impl FnMut(Operation, Instant) -> Result<ReplyBody, EditError>,
+    exchange: impl FnMut(Operation, Instant) -> Result<ReplyBody, EditError>,
 ) -> Result<(), CoreError> {
     journal.verify_storage()?;
+    if acknowledgement_confirmed(link, sequence, deadline, exchange) {
+        journal.settled(sequence)?;
+    }
+    Ok(())
+}
+
+/// Repeats a durable acknowledgement only when it cannot cover the pending or next edit.
+/// Core retires receipts cumulatively and may reuse lower sequences after a reset.
+pub fn acknowledge_prior_outcome(
+    link: &CoreLink,
+    last: Option<&RetainedOutcome>,
+    pending: Option<&ClientOperation>,
+    offered_sequence: u64,
+) -> Result<(), LinkError> {
+    let next = pending.map_or(offered_sequence, |pending| {
+        pending.sequence.min(offered_sequence)
+    });
+    if let Some(last) = last.filter(|last| last.sequence < next) {
+        link.acknowledge(last.sequence)?;
+    }
+    Ok(())
+}
+
+fn acknowledgement_confirmed(
+    link: &CoreLink,
+    sequence: u64,
+    deadline: Instant,
+    mut exchange: impl FnMut(Operation, Instant) -> Result<ReplyBody, EditError>,
+) -> bool {
     if link.acknowledge(sequence).is_err() {
-        return Ok(());
+        return false;
     }
     let until = deadline.min(Instant::now() + Duration::from_secs(2));
     loop {
         match exchange(Operation::Resolve { sequence }, until) {
-            Err(EditError::Request(RequestError::Refused(Refusal::Missing))) => {
-                return journal.settled(sequence);
-            }
+            Err(EditError::Request(RequestError::Refused(Refusal::Missing))) => return true,
             Ok(ReplyBody::Outcome(_)) if Instant::now() < until => {
                 std::thread::sleep(Duration::from_millis(10));
             }
-            _ => return Ok(()),
+            _ => return false,
         }
     }
 }
@@ -212,10 +239,13 @@ impl WorkspaceEditor {
         if self.journal.pending().is_some() {
             return Err(EditError::Unconfirmed);
         }
-        let (link, inventory) = self.reconciled_link(&wait)?;
+        // A cached offer may predate retirement even when its sequence differs from the
+        // retired one. Admission after retirement gives the edit its own current offer.
+        let fresh = self.journal.last().is_some();
+        let (link, inventory) = self.reconciled_link(&wait, fresh)?;
         check_wait(&wait, EditError::Deadline)?;
         self.journal.submit(inventory.next_sequence, mutation)?;
-        let result = self.dispatch(&link, &wait);
+        let result = self.dispatch(&link, &wait, fresh);
         if matches!(result, Err(EditError::Deadline)) {
             self.journal.abandon()?;
         }
@@ -228,11 +258,11 @@ impl WorkspaceEditor {
         wait: impl Into<WaitLimit>,
     ) -> Result<Option<RetainedOutcome>, EditError> {
         let wait = wait.into();
-        let (link, _) = self.reconciled_link(&wait)?;
+        let (link, _) = self.reconciled_link(&wait, false)?;
         if self.journal.pending().is_none() {
             return Ok(None);
         }
-        self.dispatch(&link, &wait).map(Some)
+        self.dispatch(&link, &wait, false).map(Some)
     }
 
     /// Resolves a pending edit without dispatching it again. Missing leaves the edit pending
@@ -242,7 +272,7 @@ impl WorkspaceEditor {
         wait: impl Into<WaitLimit>,
     ) -> Result<Option<EditProgress>, EditError> {
         let wait = wait.into();
-        let (link, _) = self.reconciled_link(&wait)?;
+        let (link, _) = self.reconciled_link(&wait, false)?;
         if self.journal.pending().is_none() {
             return Ok(None);
         }
@@ -270,10 +300,15 @@ impl WorkspaceEditor {
     fn reconciled_link(
         &self,
         wait: &WaitLimit,
+        fresh: bool,
     ) -> Result<(CoreLink, Arc<InventoryRevision>), EditError> {
         self.journal.verify_storage()?;
         check_wait(wait, EditError::Deadline)?;
-        let link = self.machine.link_with_limit(wait);
+        let link = if fresh {
+            self.machine.fresh_work_link(wait)
+        } else {
+            self.machine.link_with_limit(wait)
+        };
         check_wait(wait, EditError::Deadline)?;
         let link = link?;
         let inventory = loop {
@@ -283,9 +318,12 @@ impl WorkspaceEditor {
                 break inventory;
             }
         };
-        if let Some(last) = self.journal.last() {
-            link.acknowledge(last.sequence)?;
-        }
+        acknowledge_prior_outcome(
+            &link,
+            self.journal.last(),
+            self.journal.pending(),
+            inventory.next_sequence,
+        )?;
         Ok((link, inventory))
     }
 
@@ -293,6 +331,7 @@ impl WorkspaceEditor {
         &mut self,
         link: &CoreLink,
         wait: &WaitLimit,
+        confirm: bool,
     ) -> Result<RetainedOutcome, EditError> {
         match dispatch_original(
             &mut self.journal,
@@ -301,7 +340,17 @@ impl WorkspaceEditor {
             |_, outcome, ()| {
                 // The receipt is already durable. If this link cannot accept the ack,
                 // the next usable link sends it again from the same journal.
-                let _ = link.acknowledge(outcome.sequence);
+                if confirm {
+                    // Keep the independent link alive while its acknowledgement leaves.
+                    acknowledgement_confirmed(
+                        link,
+                        outcome.sequence,
+                        wait.deadline(),
+                        |op, until| request_by(link, op, &wait.earlier(until)),
+                    );
+                } else {
+                    let _ = link.acknowledge(outcome.sequence);
+                }
                 Ok(())
             },
         )? {
@@ -419,6 +468,10 @@ mod tests {
     }
 
     fn inventory(link: &CoreLink) {
+        inventory_offering(link, 1);
+    }
+
+    fn inventory_offering(link: &CoreLink, next_sequence: u64) {
         receive(
             link,
             CoreMessage::Inventory(Box::new(InventoryRevision {
@@ -428,7 +481,7 @@ mod tests {
                     workspaces: Vec::new(),
                     close: None,
                 },
-                next_sequence: 1,
+                next_sequence,
             })),
         );
     }
@@ -648,6 +701,50 @@ mod tests {
     }
 
     #[test]
+    fn mobile_retry_does_not_acknowledge_a_receipt_covering_the_pending_edit() {
+        for old_sequence in [1, 4] {
+            let machine = machine(NoConnector);
+            let (link, wake) = link(&machine);
+            inventory_offering(&link, 7);
+            let mut editor = machine
+                .workspace_edits(Box::<JournalBytes>::default())
+                .unwrap();
+            editor.journal.submit(old_sequence, mutation()).unwrap();
+            editor
+                .journal
+                .retire(RetainedOutcome {
+                    sequence: old_sequence,
+                    mutation: mutation(),
+                    outcome: Outcome::Accepted { target: [7; 32] },
+                })
+                .unwrap();
+            editor.journal.submit(1, mutation()).unwrap();
+
+            std::thread::scope(|scope| {
+                scope.spawn(move || {
+                    let ClientMessage::Request(request) = sent(&link, &wake) else {
+                        panic!("an earlier receipt must not be acknowledged on retry");
+                    };
+                    assert!(matches!(
+                        request.operation,
+                        Operation::Mutate { sequence: 1, .. }
+                    ));
+                    assert!(
+                        link.next_frame().is_none(),
+                        "an earlier acknowledgement was queued"
+                    );
+                    link.close();
+                });
+                assert!(matches!(
+                    editor.retry(Instant::now() + Duration::from_secs(2)),
+                    Err(EditError::Request(RequestError::Link(_)))
+                ));
+            });
+            assert_eq!(editor.journal.pending().unwrap().sequence, 1);
+        }
+    }
+
+    #[test]
     fn mobile_returns_a_confirmed_receipt_and_resends_its_acknowledgement() {
         struct CloseOnRetire {
             link: CoreLink,
@@ -706,7 +803,7 @@ mod tests {
         assert!(editor.journal().pending().is_none());
         assert_eq!(editor.journal().last(), Some(&receipt));
         let (reconnected, wake) = link(&machine);
-        inventory(&reconnected);
+        inventory_offering(&reconnected, 2);
         assert!(
             editor
                 .resolve(Instant::now() + Duration::from_secs(2))
