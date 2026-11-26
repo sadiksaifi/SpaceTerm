@@ -140,6 +140,28 @@ class ReleaseNotesTests(unittest.TestCase):
         self.assertIn("**updates:** Preserve active sessions", text)
         self.assertNotIn("Initial", text)
 
+    def test_notes_follow_release_ancestry_when_commit_times_tie_or_go_backwards(self):
+        earlier = "2026-11-26T19:00:00Z"
+        later = "2026-11-26T20:00:00Z"
+        self.git("commit", "-qm", "feat: previous release change", "--allow-empty", date=later)
+        self.git("tag", "-am", "Previous desktop release", "v0.12.9", date=later)
+        self.git(
+            "commit", "-qm", "fix: change for the earlier clock", "--allow-empty", date=earlier
+        )
+        self.git("tag", "-am", "Desktop release", "v0.12.10", date=later)
+        self.git("commit", "-qm", "feat: change in the same second", "--allow-empty", date=earlier)
+        self.git("tag", "-am", "Next desktop release", "v0.12.11", date=later)
+
+        for tag, included, excluded in (
+            ("v0.12.10", "Change for the earlier clock", "Previous release change"),
+            ("v0.12.11", "Change in the same second", "Change for the earlier clock"),
+        ):
+            with self.subTest(tag=tag):
+                self.git("checkout", "-q", tag)
+                text = notes(self.root, tag=tag)
+                self.assertIn(included, text)
+                self.assertNotIn(excluded, text)
+
     def test_notes_require_a_stable_release_tag_at_head(self):
         self.git("tag", "-a", "v1.0.0", "-m", "Release")
         self.git("commit", "-qm", "feat: unreleased", "--allow-empty")

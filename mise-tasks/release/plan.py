@@ -13,7 +13,7 @@ def run(version, notes):
     release_plan.PLAN.parent.mkdir(parents=True, exist_ok=True)
     release_plan.PLAN.write_text(release_plan.encode(plan))
     if notes:
-        release.write_notes()
+        release.write_notes(tag=tag)
     print(f"Planned {tag} at {plan['source']}")
 
 
