@@ -24,11 +24,19 @@ pub enum Capability {
     MergeTab,
     /// Work: close an idle Pane or Tab independently of its control grants.
     CloseIfIdle,
+    /// Work: read a batch of Pane previews without opening channels.
+    PanePreview,
+    /// Work: report Machine-observed foreground and close activity in inventory.
+    PaneActivity,
+    /// Work: report the repository's default branch in the Worktree context.
+    WorktreeDefaultBranch,
+    /// Work: move a Tab within its Workspace's shared order.
+    ReorderTab,
 }
 
 impl Capability {
     /// Every capability, in declaration order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 12] = [
         Self::UpdateFacts,
         Self::Install,
         Self::Restart,
@@ -37,6 +45,10 @@ impl Capability {
         Self::MovePaneToTab,
         Self::MergeTab,
         Self::CloseIfIdle,
+        Self::PanePreview,
+        Self::PaneActivity,
+        Self::WorktreeDefaultBranch,
+        Self::ReorderTab,
     ];
 
     /// The lane that carries it and the first version that has it.
@@ -48,6 +60,10 @@ impl Capability {
             }
             Self::Install | Self::Restart | Self::Uninstall => (Lane::Service, V1_0),
             Self::CloseIfIdle => (Lane::Work, ProtocolVersion { major: 1, minor: 5 }),
+            Self::PanePreview
+            | Self::PaneActivity
+            | Self::WorktreeDefaultBranch
+            | Self::ReorderTab => (Lane::Work, ProtocolVersion { major: 1, minor: 6 }),
         }
     }
 }

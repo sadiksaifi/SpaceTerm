@@ -223,7 +223,21 @@ impl Outbox {
         result: Result<ReplyBody, Refusal>,
     ) -> Result<(), OutboxError> {
         let bulk = matches!(&result, Ok(body) if body.bulk());
-        let result = result.map(|body| body.for_selected(self.shared.work));
+        let result = result.and_then(|body| {
+            if let ReplyBody::Outcome(outcome) = &body
+                && matches!(
+                    outcome.mutation,
+                    crate::hierarchy::Mutation::ReorderTab { .. }
+                )
+                && self.shared.work
+                    < crate::protocol::capability::Capability::ReorderTab
+                        .since()
+                        .1
+            {
+                return Err(Refusal::Unsupported);
+            }
+            Ok(body.for_selected(self.shared.work))
+        });
         let frames = encode(&CoreMessage::Reply(Box::new(Reply { id, result })))?;
         self.with(|state| {
             state.open()?;

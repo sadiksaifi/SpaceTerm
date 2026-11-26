@@ -6,6 +6,8 @@ An idle Pane or Tab controlled by this client closes directly. The desktop asks 
 
 Work 1.5 lets a client request an idle-only Pane or Tab close independent of its control grants. Core requires fresh review if the close would end running work or remove a Workspace. The journal represents this request with an empty control list in the existing Close Mutation, so released readers can still read the journal and resolve its receipt. The selected work version determines whether the client can send the request.
 
+Work 1.6 inventory reports the Machine's last observation of each Pane's foreground and whether closing its exact Terminal Session would end work. Core samples after terminal activity and rechecks known processes that can exit without output. Clients can use this observation to decide whether to ask. Core reads the same facts again at close admission.
+
 At admission, Core also checks for unanswered input and native processes that the close would end. This includes running, suspended, and disowned work in the terminal session. Core can skip confirmation for a verified helper launched exclusively from the owning zsh's automatic prompt hooks.
 
 Closing the last Pane closes its Tab. Closing the final Tab removes its Workspace and uses Workspace-level confirmation. The client activates another attached Workspace when one exists; otherwise it closes the Workspace Window and remains available in its menu bar or status area. Explicit Detach preserves Core-owned work and may leave an empty attachment view.

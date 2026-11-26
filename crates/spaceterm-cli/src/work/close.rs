@@ -31,7 +31,7 @@ pub fn review(
         .inventory
         .close_confirmation(target)
         .ok_or(Code::Changed)?;
-    let mut idle = true;
+    let mut idle = snapshot.inventory.close_would_end_work(target) != Some(true);
     let mut sessions = Vec::new();
     let mut others = Vec::new();
     for reviewed in &confirmation.panes {

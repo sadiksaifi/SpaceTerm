@@ -98,6 +98,30 @@ pub struct Placement {
 }
 
 impl Inventory {
+    /// Whether the latest Machine observation verified running work in the exact Sessions that
+    /// this close would end. `None` means the inventory lacks a matching observation.
+    /// Core checks again when it admits an idle-only close. Workspace removal still needs consent.
+    pub fn close_would_end_work(&self, target: CloseTarget) -> Option<bool> {
+        let confirmed = self.close_confirmation(target)?;
+        let mut complete = true;
+        for pane in confirmed.panes {
+            let activity = self
+                .workspaces
+                .iter()
+                .flat_map(|workspace| &workspace.tabs)
+                .flat_map(|tab| &tab.panes)
+                .find(|entry| entry.id == pane.id)
+                .and_then(|entry| entry.activity)
+                .filter(|activity| activity.session == pane.session);
+            match activity {
+                Some(activity) if activity.needs_close_review => return Some(true),
+                None => complete = false,
+                _ => {}
+            }
+        }
+        complete.then_some(false)
+    }
+
     /// Where created work `id` sits, as a Reveal shows it: a Workspace shows its Root Tab's Root
     /// Pane, and a Tab its Root Pane.
     pub fn placement(&self, id: Id) -> Option<Placement> {
@@ -211,6 +235,23 @@ pub struct Workspace {
     pub tabs: Vec<Tab>,
 }
 impl Workspace {
+    /// Moves a Tab to its zero-based final position in this Workspace, keeping its identity,
+    /// Panes, and Worktree membership.
+    pub fn reorder_tab(&mut self, tab: Id, index: u16) -> Result<(), Outcome> {
+        let Some(from) = self.tabs.iter().position(|candidate| candidate.id == tab) else {
+            return Err(Outcome::Missing);
+        };
+        let to = usize::from(index);
+        if to >= self.tabs.len() {
+            return Err(Outcome::Invalid);
+        }
+        if from != to {
+            let tab = self.tabs.remove(from);
+            self.tabs.insert(to, tab);
+        }
+        Ok(())
+    }
+
     /// The Main Worktree of the repository this Workspace is in.
     pub fn repository(&self) -> Option<&Path> {
         self.placed_tab()?.worktree_repository.as_deref()
@@ -397,6 +438,24 @@ pub struct PaneObservers {
     pub others: u32,
 }
 
+/// Who owned the PTY foreground when the Machine last observed the Terminal Session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Foreground {
+    #[default]
+    Unknown,
+    Shell,
+    Program,
+}
+
+/// The live Machine observation used to prepare an exact-session close.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneActivity {
+    pub session: Option<Id>,
+    pub foreground: Foreground,
+    /// Core also checks submitted input and other work that closing the Session would end.
+    pub needs_close_review: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pane {
     pub id: Id,
@@ -414,6 +473,9 @@ pub struct Pane {
     pub presentation: Option<Box<crate::pane::metadata::Snapshot>>,
     /// Live observation presence, excluded from retained Organization.
     pub observers: PaneObservers,
+    /// Published in the work 1.6 inventory frame. Older peers and retained inventory omit it.
+    #[serde(skip)]
+    pub activity: Option<PaneActivity>,
     pub confirmed_directory: Option<PathBuf>,
     /// The creator reserves control even before measured first use starts a shell.
     pub creator: Option<Id>,
@@ -562,6 +624,12 @@ pub enum Mutation {
         version: u64,
         directory: Option<PathBuf>,
     },
+    /// Move a Tab to its zero-based final position in the Workspace. Requires work 1.6.
+    ReorderTab {
+        workspace: Id,
+        tab: Id,
+        index: u16,
+    },
 }
 impl Mutation {
     /// Requests a Pane or Tab close without confirmation, regardless of control ownership.
@@ -576,6 +644,16 @@ impl Mutation {
 
     pub fn is_close_if_idle(&self) -> bool {
         matches!(self, Self::Close { confirmation, .. } if confirmation.is_close_if_idle())
+    }
+
+    /// The work capability a peer needs before accepting this edit.
+    pub fn required_capability(&self) -> Option<crate::protocol::capability::Capability> {
+        use crate::protocol::capability::Capability;
+        match self {
+            Self::ReorderTab { .. } => Some(Capability::ReorderTab),
+            _ if self.is_close_if_idle() => Some(Capability::CloseIfIdle),
+            _ => None,
+        }
     }
 
     /// Who controls what this mutation creates, for those that create work.

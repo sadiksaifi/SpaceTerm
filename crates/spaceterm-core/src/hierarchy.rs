@@ -74,6 +74,7 @@ impl State {
                         p.repository_directory = None;
                         p.presentation = None;
                         p.observers = PaneObservers::default();
+                        p.activity = None;
                     }
                 }
             }
@@ -140,6 +141,7 @@ impl State {
                             repository_directory: None,
                             presentation: None,
                             observers: Default::default(),
+                            activity: None,
                             confirmed_directory: None,
                             creator: None,
                         }],
@@ -171,6 +173,7 @@ impl State {
             pane.repository_directory = None;
             pane.presentation = None;
             pane.observers = PaneObservers::default();
+            pane.activity = None;
         }
         crate::organization::Organization::new(retained)
     }
@@ -280,6 +283,7 @@ impl State {
                 repository_directory: None,
                 presentation: None,
                 observers: Default::default(),
+                activity: None,
                 confirmed_directory: None,
                 creator,
             }],
@@ -526,6 +530,7 @@ impl State {
                             repository_directory: None,
                             presentation: None,
                             observers: Default::default(),
+                            activity: None,
                             confirmed_directory: None,
                             creator,
                         }],
@@ -600,6 +605,7 @@ impl State {
                         repository_directory: None,
                         presentation: None,
                         observers: Default::default(),
+                        activity: None,
                         confirmed_directory: None,
                         creator,
                     }],
@@ -655,6 +661,7 @@ impl State {
                     repository_directory: None,
                     presentation: None,
                     observers: Default::default(),
+                    activity: None,
                     confirmed_directory: None,
                     creator,
                 });
@@ -714,6 +721,24 @@ impl State {
                     return Ok(refusal);
                 }
                 *into
+            }
+            Mutation::ReorderTab {
+                workspace,
+                tab,
+                index,
+            } => {
+                let Some(workspace) = self
+                    .inventory
+                    .workspaces
+                    .iter_mut()
+                    .find(|candidate| candidate.id == *workspace)
+                else {
+                    return Ok(Outcome::Missing);
+                };
+                if let Err(outcome) = workspace.reorder_tab(*tab, *index) {
+                    return Ok(outcome);
+                }
+                *tab
             }
             Mutation::RenameWorkspace {
                 workspace,

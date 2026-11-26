@@ -231,6 +231,25 @@ impl<T> TabCollection<T> {
         Ok(true)
     }
 
+    /// Mirrors Core's order within each Worktree without changing selection or membership.
+    pub(crate) fn align_order(&mut self, tabs: &[TabId]) -> bool {
+        let ranks: BTreeMap<_, _> = tabs
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(position, tab)| (tab, position))
+            .collect();
+        let rank = |tab: &TabEntry<T>| ranks.get(&tab.id).copied().unwrap_or(usize::MAX);
+        let mut changed = false;
+        for group in self.tabs.chunk_by_mut(|a, b| a.scope == b.scope) {
+            if !group.is_sorted_by_key(rank) {
+                group.sort_by_key(rank);
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// The Tab one step from the Active Tab, wrapping around the ends of the Active Worktree.
     pub(crate) fn neighbor_of_active_tab(&self, step: TabStep) -> TabId {
         let siblings = self.indices_in(self.active_scope());

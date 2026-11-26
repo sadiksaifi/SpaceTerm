@@ -171,7 +171,7 @@ impl PendingEdits {
         let presented = creation.is_some()
             || matches!(
                 mutation,
-                Mutation::MovePane { .. } | Mutation::MergeTab { .. }
+                Mutation::MovePane { .. } | Mutation::MergeTab { .. } | Mutation::ReorderTab { .. }
             );
         self.edits.push_back(Edit {
             mutation,
@@ -656,6 +656,7 @@ fn references(mutation: &Mutation) -> Vec<Id> {
             }
             ids
         }
+        Mutation::ReorderTab { workspace, tab, .. } => vec![*workspace, *tab],
         Mutation::MergeTab {
             workspace,
             tab,
@@ -711,6 +712,10 @@ fn remap(mutation: &mut Mutation, id: impl Fn(Id) -> Id) {
                 *pane = id(*pane);
             }
         }
+        Mutation::ReorderTab { workspace, tab, .. } => {
+            *workspace = id(*workspace);
+            *tab = id(*tab);
+        }
         Mutation::MergeTab {
             workspace,
             tab,
@@ -740,6 +745,7 @@ fn new_pane(id: Id, source: Option<Id>, side: Side, directory: std::path::PathBu
         repository_directory: None,
         presentation: None,
         observers: Default::default(),
+        activity: None,
         confirmed_directory: None,
         creator: None,
     }
@@ -865,6 +871,7 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
         | Mutation::SplitPane { workspace, .. }
         | Mutation::MovePane { workspace, .. }
         | Mutation::MergeTab { workspace, .. }
+        | Mutation::ReorderTab { workspace, .. }
         | Mutation::Worktree(Operation::OpenTab { workspace, .. }) => *workspace,
         _ => return,
     };
@@ -872,6 +879,9 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
         return;
     };
     match mutation {
+        Mutation::ReorderTab { tab, index, .. } => {
+            let _ = workspace.reorder_tab(*tab, *index);
+        }
         Mutation::RenameWorkspace { name, version, .. } => {
             workspace.name.clone_from(name);
             workspace.name_version = *version;

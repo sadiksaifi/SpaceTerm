@@ -14,7 +14,7 @@ pub struct Generations {
 
 /// SpaceTerm Core's data root.
 #[rustfmt::skip]
-pub const CORE_DATA: Generations = Generations { oldest: 1, current: 1 };
+pub const CORE_DATA: Generations = Generations { oldest: 1, current: 2 };
 /// The CLI's state root, `clients/cli` under SpaceTerm Core's data root.
 #[rustfmt::skip]
 pub const CLI_STATE: Generations = Generations { oldest: 1, current: 1 };
@@ -24,4 +24,4 @@ pub const DESKTOP_CONFIG: Generations = Generations { oldest: 1, current: 1 };
 /// The desktop's state root: Saved Connections, Client View State, Workspace order, presentation
 /// context and update history.
 #[rustfmt::skip]
-pub const DESKTOP_STATE: Generations = Generations { oldest: 1, current: 1 };
+pub const DESKTOP_STATE: Generations = Generations { oldest: 1, current: 2 };

@@ -104,16 +104,17 @@ impl AdmittedConnection {
                     self.outbox.reply(request.id, Err(Refusal::Unsupported))?;
                     return Ok(None);
                 }
-                let idle_close_supported = match &request.operation {
-                    Operation::CloseIfIdle { confirmation, .. } => {
-                        let (_, since) =
-                            crate::protocol::capability::Capability::CloseIfIdle.since();
-                        self.outbox.work() >= since && confirmation.is_close_if_idle()
-                    }
+                let close_uses_correct_operation = match &request.operation {
+                    Operation::CloseIfIdle { confirmation, .. } => confirmation.is_close_if_idle(),
                     Operation::Mutate { mutation, .. } => !mutation.is_close_if_idle(),
                     _ => true,
                 };
-                if !idle_close_supported {
+                if !close_uses_correct_operation
+                    || request
+                        .operation
+                        .required_capability()
+                        .is_some_and(|capability| self.outbox.work() < capability.since().1)
+                {
                     self.outbox.reply(request.id, Err(Refusal::Unsupported))?;
                     return Ok(None);
                 }

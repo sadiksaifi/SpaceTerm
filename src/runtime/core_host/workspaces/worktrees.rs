@@ -1589,6 +1589,49 @@ mod tests {
         host.shutdown().unwrap();
     }
 
+    #[test]
+    fn worktree_context_reports_no_default_when_the_local_branch_was_deleted() {
+        let git = GitFixture::new();
+        git.git(&["branch", "trunk"]);
+        git.git(&["update-ref", "refs/remotes/origin/trunk", "HEAD"]);
+        git.git(&[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/trunk",
+        ]);
+        git.git(&["config", "init.defaultBranch", "main"]);
+        let mut prototype = host();
+        prototype.directory = git.0.clone();
+        let mut host = WorkspaceHost::new(prototype);
+        create_workspace(&mut host, 1);
+        let context = Read::ContextWithDefault {
+            root: git.0.clone(),
+        };
+
+        assert!(matches!(
+            read_worktree(&mut host, context.clone()),
+            Ok(ReadReply::ContextWithDefault { default_branch: Some(branch), .. })
+                if branch == "trunk"
+        ));
+
+        git.git(&["branch", "-D", "trunk"]);
+        assert!(matches!(
+            read_worktree(&mut host, context.clone()),
+            Ok(ReadReply::ContextWithDefault {
+                default_branch: None,
+                ..
+            })
+        ));
+
+        git.git(&["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"]);
+        assert!(matches!(
+            read_worktree(&mut host, context),
+            Ok(ReadReply::ContextWithDefault { default_branch: Some(branch), .. })
+                if branch == "main"
+        ));
+        host.shutdown().unwrap();
+    }
+
     /// New Worktree reads a repository with more branches than it offers, and offers as many as
     /// it can.
     #[test]

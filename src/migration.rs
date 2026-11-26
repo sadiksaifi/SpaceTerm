@@ -109,7 +109,8 @@ pub(crate) const STATE: Registry = Registry {
         ],
     },
     generations: generations::DESKTOP_STATE,
-    steps: &[],
+    // Generation 2 admits ReorderTab in the client journal. Prior records need no rewrite.
+    steps: &[&[]],
     files: &[STATE_RULES, migration::client_files::RULES],
 };
 

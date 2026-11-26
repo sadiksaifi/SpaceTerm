@@ -422,6 +422,7 @@ pub(crate) struct WorkspaceRoot {
 #[derive(Clone, Copy)]
 struct WorkspaceStripControls {
     edits: bool,
+    reorder: bool,
     edits_reason: &'static str,
 }
 
@@ -1350,7 +1351,7 @@ impl TabManager {
             .tab_reorder
             .finish(&self.tab_bar_scroll_handle, &ids, cx);
         if let Some((tab_id, position)) = landing {
-            self.move_tab(tab_id, position, cx);
+            self.move_tab(tab_id, position, window, cx);
         }
         cx.notify();
     }
@@ -1402,14 +1403,63 @@ impl TabManager {
         self.tabs.iter().map(|(tab_id, _)| tab_id).collect()
     }
 
-    fn move_tab(&mut self, tab_id: TabId, position: usize, cx: &mut Context<Self>) {
-        let moved = self.tabs.move_tab(tab_id, position);
-        Self::present_tab_move(moved, cx);
+    fn move_tab(
+        &mut self,
+        tab_id: TabId,
+        position: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.binding.shared_order() {
+            let moved = self.tabs.move_tab(tab_id, position);
+            Self::present_tab_move(moved, cx);
+            return;
+        }
+        let Ok(scope) = self.tabs.scope_of(tab_id) else {
+            return;
+        };
+        let Some((landing, _)) = self.tabs.tabs_in(scope).nth(position) else {
+            return;
+        };
+        if landing == tab_id || !self.binding.editability().available() {
+            return;
+        }
+        let Some(submission) = self
+            .binding
+            .core_tab(tab_id)
+            .zip(self.binding.core_tab(landing))
+            .and_then(|(tab, landing)| self.binding.reorder_tab(tab, landing))
+        else {
+            return;
+        };
+        self.present_tab_submission(submission, "Couldn\u{2019}t Move Tab", None, window, cx);
     }
 
-    fn step_tab(&mut self, tab_id: TabId, step: TabStep, cx: &mut Context<Self>) {
-        let moved = self.tabs.step_tab(tab_id, step);
-        Self::present_tab_move(moved, cx);
+    fn step_tab(
+        &mut self,
+        tab_id: TabId,
+        step: TabStep,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.binding.shared_order() {
+            let moved = self.tabs.step_tab(tab_id, step);
+            Self::present_tab_move(moved, cx);
+            return;
+        }
+        let Ok(scope) = self.tabs.scope_of(tab_id) else {
+            return;
+        };
+        let Some(position) = self.tabs.tabs_in(scope).position(|(id, _)| id == tab_id) else {
+            return;
+        };
+        let landing = match step {
+            TabStep::Previous => position.checked_sub(1),
+            TabStep::Next => Some(position + 1),
+        };
+        if let Some(landing) = landing {
+            self.move_tab(tab_id, landing, window, cx);
+        }
     }
 
     fn present_tab_move(moved: Result<bool, TabError>, cx: &mut Context<Self>) {
@@ -1652,12 +1702,17 @@ impl TabManager {
         }
     }
 
-    fn move_active_tab(&mut self, step: TabStep, cx: &mut Context<Self>) {
-        if self.tabs.move_active_tab(step) {
-            self.scroll_active_tab_into_view();
-            cx.emit(TabManagerEvent::PresentationChanged);
-            cx.notify();
+    fn move_active_tab(&mut self, step: TabStep, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.binding.shared_order() {
+            if self.tabs.move_active_tab(step) {
+                self.scroll_active_tab_into_view();
+                cx.emit(TabManagerEvent::PresentationChanged);
+                cx.notify();
+            }
+            return;
         }
+        self.step_tab(self.tabs.active_tab_id(), step, window, cx);
+        self.scroll_active_tab_into_view();
     }
 
     fn close_tab(&mut self, tab_id: TabId, window: &mut Window, cx: &mut Context<Self>) {
@@ -1784,8 +1839,8 @@ impl TabManager {
             TabMenuCommand::NewTab => self.create_tab(window, cx),
             TabMenuCommand::SplitRight => self.split_tab(tab_id, SplitAxis::Horizontal, window, cx),
             TabMenuCommand::SplitDown => self.split_tab(tab_id, SplitAxis::Vertical, window, cx),
-            TabMenuCommand::MoveLeft => self.step_tab(tab_id, TabStep::Previous, cx),
-            TabMenuCommand::MoveRight => self.step_tab(tab_id, TabStep::Next, cx),
+            TabMenuCommand::MoveLeft => self.step_tab(tab_id, TabStep::Previous, window, cx),
+            TabMenuCommand::MoveRight => self.step_tab(tab_id, TabStep::Next, window, cx),
             TabMenuCommand::Close => self.request_close_tab(tab_id, false, cx),
         }
     }
@@ -1858,12 +1913,12 @@ impl TabManager {
         self.step_active_tab(TabStep::Previous, window, cx);
     }
 
-    fn on_move_tab_right(&mut self, _: &MoveTabRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_active_tab(TabStep::Next, cx);
+    fn on_move_tab_right(&mut self, _: &MoveTabRight, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_active_tab(TabStep::Next, window, cx);
     }
 
-    fn on_move_tab_left(&mut self, _: &MoveTabLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_active_tab(TabStep::Previous, cx);
+    fn on_move_tab_left(&mut self, _: &MoveTabLeft, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_active_tab(TabStep::Previous, window, cx);
     }
 
     /// The copy of a dragged Tab that follows the pointer, at the size its Tab was painted.
@@ -3615,16 +3670,31 @@ impl TabManager {
         cx: &mut Context<Self>,
     ) {
         let saved = saved.reconcile(workspace);
+        let shared_order = self.binding.shared_order();
         for (position, tab) in saved.tabs.iter().enumerate() {
             let Some(id) = self.binding.local_tab(tab.tab) else {
                 continue;
             };
-            let _ = self.tabs.move_tab(id, position);
+            if !shared_order {
+                let _ = self.tabs.move_tab(id, position);
+            }
             if let Some(view) = self.tabs.tab(id) {
                 view.update(cx, |view, cx| view.restore_layout(&tab.layout, cx));
             }
         }
+        if shared_order {
+            self.align_shared_order(workspace);
+        }
         cx.notify();
+    }
+
+    fn align_shared_order(&mut self, workspace: &spaceterm_core::hierarchy::Workspace) -> bool {
+        let order = workspace
+            .tabs
+            .iter()
+            .filter_map(|tab| self.binding.local_tab(tab.id))
+            .collect::<Vec<_>>();
+        self.tabs.align_order(&order)
     }
 
     /// Leaves this client's view of this server Workspace's Tabs for the next window, by server
@@ -3808,6 +3878,9 @@ impl TabManager {
             changed |= view.update(cx, |view, cx| view.reconcile(tab, window, cx));
         }
         changed |= self.remove_absent_tabs(workspace, removal, close_keyboard, window, cx);
+        if self.binding.shared_order() {
+            changed |= self.align_shared_order(workspace);
+        }
         let retired = self
             .parked_tabs
             .keys()
@@ -4371,7 +4444,7 @@ impl TabManager {
         if let StripDrop::NewTab { position } = drop
             && let Some(new_tab) = created.and_then(|target| self.binding.local_tab(target))
         {
-            self.move_tab(new_tab, position, cx);
+            self.move_tab(new_tab, position, window, cx);
             self.tab_reorder.land_incoming(new_tab, position);
             self.scroll_active_tab_into_view();
         }
@@ -4648,6 +4721,7 @@ impl TabManager {
         let editability = self.binding.editability();
         WorkspaceStripControls {
             edits: editability.available(),
+            reorder: !self.binding.shared_order() || editability.available(),
             edits_reason: editability.explanation(),
         }
     }
@@ -4701,7 +4775,7 @@ fn tab_menu_entries(
             MenuEntry::action("Move Tab Left", TabMenuCommand::MoveLeft),
             &MoveTabLeft,
         )
-        .disabled(first)
+        .disabled(first || !binding.reorder)
         .icon(|foreground, size| {
             Icon::new(IconName::ArrowLeft, size, foreground).into_any_element()
         })
@@ -4710,7 +4784,7 @@ fn tab_menu_entries(
             MenuEntry::action("Move Tab Right", TabMenuCommand::MoveRight),
             &MoveTabRight,
         )
-        .disabled(last)
+        .disabled(last || !binding.reorder)
         .icon(|foreground, size| {
             Icon::new(IconName::ArrowRight, size, foreground).into_any_element()
         })
@@ -5423,6 +5497,17 @@ mod tests {
     fn standalone_tab_manager(
         cx: &mut TestAppContext,
     ) -> (Entity<TabManager>, &mut VisualTestContext) {
+        let (manager, _, cx) = standalone_tab_manager_with_edits(cx);
+        (manager, cx)
+    }
+
+    fn standalone_tab_manager_with_edits(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<TabManager>,
+        Rc<crate::ui::workspaces::testing::ScriptedEdits>,
+        &mut VisualTestContext,
+    ) {
         use crate::ui::workspaces::testing::{ScriptedEdits, ScriptedPanes};
         use crate::ui::workspaces::{WorkspaceEditSource, WorkspacePaneSessions, WorkspaceTabs};
 
@@ -5444,7 +5529,7 @@ mod tests {
         let (_, state) = crate::ui::workspaces::WorkspacePaneOpener::open(&*panes, root.root_pane)
             .expect("the Root Pane opens");
         let binding = WorkspaceTabs::new(
-            WorkspaceEditSource::new(edits as Rc<_>),
+            WorkspaceEditSource::new(Rc::clone(&edits) as Rc<_>),
             sessions,
             workspace.id,
         );
@@ -5471,7 +5556,7 @@ mod tests {
             manager.update(cx, |manager, cx| manager.focus(window, cx));
         });
         cx.run_until_parked();
-        (manager, cx)
+        (manager, edits, cx)
     }
 
     fn open_tab_manager(
@@ -7104,6 +7189,50 @@ mod tests {
             manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
             TabId::new(3),
             "moving a Tab should keep it active"
+        );
+    }
+
+    #[gpui::test]
+    fn the_desktop_moves_shared_tabs_and_follows_published_order(cx: &mut TestAppContext) {
+        use spaceterm_core::hierarchy::Mutation;
+
+        cx.update(crate::ui::init).unwrap();
+        let (manager, edits, cx) = standalone_tab_manager_with_edits(cx);
+        edits.set_shared_tab_order();
+        cx.dispatch_action(NewTab);
+        cx.run_until_parked();
+        let workspace = &edits.applied_inventory().workspaces[0];
+        let active = workspace.tabs[1].id;
+        cx.dispatch_action(MoveTabLeft);
+        cx.run_until_parked();
+
+        assert!(matches!(
+            edits.submitted().last(),
+            Some(Mutation::ReorderTab { workspace: id, tab, index: 0 })
+                if *id == workspace.id && *tab == active
+        ));
+        assert_eq!(tab_order(&manager, cx), vec![2, 1]);
+
+        let mut next = edits.applied_inventory();
+        let workspace = &mut next.workspaces[0];
+        assert_eq!(workspace.tabs[0].id, active);
+        workspace.reorder_tab(active, 1).unwrap();
+        next.revision += 1;
+        edits.set_inventory(next.clone());
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.reconcile(
+                    &next.workspaces[0],
+                    super::super::workspaces::WorkspaceRemoval::Published,
+                    window,
+                    cx,
+                );
+            });
+        });
+        assert_eq!(tab_order(&manager, cx), vec![1, 2]);
+        assert_eq!(
+            manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
+            TabId::new(2)
         );
     }
 

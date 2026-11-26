@@ -48,6 +48,7 @@ fn inventory() -> Inventory {
                     repository_directory: None,
                     presentation: None,
                     observers: Default::default(),
+                    activity: None,
                     confirmed_directory: None,
                     creator: None,
                 }],
@@ -2470,6 +2471,7 @@ fn with_hidden_tab(
             repository_directory: None,
             presentation: presentation.map(Box::new),
             observers: Default::default(),
+            activity: None,
             confirmed_directory: None,
             creator: None,
         }],
@@ -2606,6 +2608,7 @@ fn with_detached_workspace() -> Inventory {
         repository_directory: None,
         presentation: presentation.map(Box::new),
         observers: Default::default(),
+        activity: None,
         confirmed_directory: None,
         creator: None,
     };
@@ -2848,6 +2851,7 @@ fn server_pane(id: [u8; 32], source: Option<[u8; 32]>) -> Pane {
         repository_directory: None,
         presentation: None,
         observers: Default::default(),
+        activity: None,
         confirmed_directory: None,
         creator: None,
     }

@@ -12,6 +12,17 @@ use super::*;
 use crate::terminal::accessibility::AccessibilityOrigin;
 use libghostty_vt::screen::GridRef;
 
+/// Visible rows copied on demand without advancing render state or publishing a frame.
+pub(crate) struct PreviewGrid {
+    pub(crate) columns: u16,
+    pub(crate) cropped: bool,
+    pub(crate) foreground: Color,
+    pub(crate) background: Color,
+    pub(crate) palette: [Color; 256],
+    pub(crate) reversed: bool,
+    pub(crate) rows: Vec<(RowSnapshot, bool)>,
+}
+
 pub(super) struct HistoryTracker {
     current: HistorySnapshot,
     columns: u16,
@@ -147,7 +158,8 @@ impl TerminalEmulator {
         let rows = (first..end)
             .map(|position| {
                 let y = u32::try_from(position - history.oldest).unwrap_or(u32::MAX);
-                self.history_row(y, columns, &mut links).map_err(error)
+                self.grid_row(y, columns, Point::Screen, Some(&mut links))
+                    .map_err(error)
             })
             .collect::<Result<_, _>>()?;
         Ok(Some(HistoryPage {
@@ -157,23 +169,52 @@ impl TerminalEmulator {
         }))
     }
 
-    fn history_row(
+    pub(crate) fn preview_grid(&self) -> Result<Option<PreviewGrid>, Error> {
+        use spaceterm_core::protocol::preview;
+
+        if self.terminal.mode(Mode::SYNC_OUTPUT)? || self.prompt_redraw.waiting() {
+            return Ok(None);
+        }
+        let full_columns = self.terminal.cols()?;
+        let full_rows = self.terminal.rows()?;
+        let columns = full_columns.min(preview::MAX_COLUMNS);
+        let rows = (0..u32::from(full_rows.min(preview::MAX_ROWS)))
+            .map(|y| self.grid_row(y, columns, Point::Viewport, None))
+            .collect::<Result<Vec<_>, _>>()?;
+        let appearance = &self.applied_appearance.appearance.colors;
+        Ok(Some(PreviewGrid {
+            columns,
+            cropped: full_columns > columns || usize::from(full_rows) > rows.len(),
+            foreground: self
+                .terminal
+                .fg_color()?
+                .map_or(appearance.foreground, Color::from),
+            background: self
+                .terminal
+                .bg_color()?
+                .map_or(appearance.background, Color::from),
+            palette: self.terminal.color_palette()?.0.map(Color::from),
+            reversed: self.terminal.mode(Mode::REVERSE_COLORS)?,
+            rows,
+        }))
+    }
+
+    fn grid_row(
         &self,
         y: u32,
         columns: u16,
-        links: &mut Links,
+        point: impl Fn(PointCoordinate) -> Point,
+        mut links: Option<&mut Links>,
     ) -> Result<(RowSnapshot, bool), Error> {
         let wrapped = self
             .terminal
-            .grid_ref(Point::Screen(PointCoordinate { x: 0, y }))?
+            .grid_ref(point(PointCoordinate { x: 0, y }))?
             .row()?
             .is_wrapped()?;
-        let mut graphemes = vec!['\0'; 8];
+        let mut graphemes = vec!['\0'; 16];
         let mut cells = Vec::with_capacity(usize::from(columns));
         for x in 0..columns {
-            let reference = self
-                .terminal
-                .grid_ref(Point::Screen(PointCoordinate { x, y }))?;
+            let reference = self.terminal.grid_ref(point(PointCoordinate { x, y }))?;
             let cell = reference.cell()?;
             let style = reference.style()?;
             let spacer_tail = cell.wide()? == CellWide::SpacerTail;
@@ -181,6 +222,11 @@ impl TerminalEmulator {
             if !spacer_tail && cell.has_text()? {
                 let count = match reference.graphemes(&mut graphemes) {
                     Ok(count) => count,
+                    Err(Error::OutOfSpace { .. }) if links.is_none() => {
+                        // Previews never allocate in proportion to a combining sequence.
+                        graphemes[0] = char::from_u32(cell.codepoint()?).unwrap_or('\u{fffd}');
+                        1
+                    }
                     Err(Error::OutOfSpace { required }) => {
                         graphemes.resize(required, '\0');
                         reference.graphemes(&mut graphemes)?
@@ -216,19 +262,22 @@ impl TerminalEmulator {
                 selected: false,
                 spacer_tail,
                 semantic_content: cell_semantic(cell.semantic_content()?),
-                hyperlink: if cell.has_hyperlink()? {
-                    self.history_hyperlink(&reference, links)
-                } else {
-                    None
+                hyperlink: match links.as_deref_mut() {
+                    Some(links) if cell.has_hyperlink()? => {
+                        self.history_hyperlink(&reference, links)
+                    }
+                    _ => None,
                 },
             });
         }
-        let detected = crate::terminal::hyperlink::detect_url_cells(
-            cells.iter().map(|cell| cell.text.as_str()),
-        );
-        for (cell, detected) in cells.iter_mut().zip(detected) {
-            if cell.hyperlink.is_none() {
-                cell.hyperlink = detected;
+        if links.is_some() {
+            let detected = crate::terminal::hyperlink::detect_url_cells(
+                cells.iter().map(|cell| cell.text.as_str()),
+            );
+            for (cell, detected) in cells.iter_mut().zip(detected) {
+                if cell.hyperlink.is_none() {
+                    cell.hyperlink = detected;
+                }
             }
         }
         Ok((cells.into(), wrapped))

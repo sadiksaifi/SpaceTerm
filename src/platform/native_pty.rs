@@ -166,6 +166,11 @@ pub trait SessionProbe: Send + Sync {
     fn shell_foreground(&self) -> io::Result<bool> {
         Err(io::Error::other("the PTY foreground is unavailable"))
     }
+    /// Whether the foreground is still the owning shell, including when its process execs another
+    /// program without changing its process group.
+    fn close_foreground(&self) -> io::Result<bool> {
+        self.shell_foreground()
+    }
     /// Whether any process other than the shell runs in its terminal session: a running or
     /// stopped job, a background job, or any other child. An error means it could not be read.
     fn others(&self) -> io::Result<bool>;

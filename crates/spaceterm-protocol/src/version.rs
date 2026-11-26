@@ -18,8 +18,9 @@ pub struct ProtocolVersion {
 /// [`crate::protocol::Kind::DetailedUpdateFacts`] message of
 /// [`crate::update::facts::MINOR_DETAILED_FACTS`]. Work 1.3 adds the restarting input refusal.
 /// Work 1.4 adds the background start of [`crate::pane::MINOR_PREPARE`].
-/// Work 1.5 adds [`crate::protocol::Operation::CloseIfIdle`].
-pub const WORK: ProtocolVersion = ProtocolVersion { major: 1, minor: 5 };
+/// Work 1.5 adds [`crate::protocol::Operation::CloseIfIdle`]. Work 1.6 adds Pane previews,
+/// foreground activity in inventory, the Worktree default branch, and shared Tab reorder.
+pub const WORK: ProtocolVersion = ProtocolVersion { major: 1, minor: 6 };
 /// The work protocol major carried in build documents.
 pub const MAJOR: u16 = WORK.major;
 

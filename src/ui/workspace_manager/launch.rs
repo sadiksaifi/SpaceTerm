@@ -1794,6 +1794,7 @@ pub(crate) mod testing {
                                 repository_directory: None,
                                 presentation: None,
                                 observers: Default::default(),
+                                activity: None,
                                 confirmed_directory: None,
                                 creator: None,
                             }],

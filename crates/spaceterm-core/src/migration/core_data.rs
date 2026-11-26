@@ -49,7 +49,8 @@ const RULES: &[FileRule] = &[
 pub const REGISTRY: Registry = Registry {
     admission: crate::migration::Admission::GenerationOne,
     generations: generations::CORE_DATA,
-    steps: &[],
+    // Generation 2 admits ReorderTab outcomes. Prior organization needs no rewrite.
+    steps: &[&[]],
     files: &[RULES],
 };
 

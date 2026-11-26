@@ -6,7 +6,7 @@ mod error;
 pub mod service;
 
 pub use error::{AuthenticatedStatus, CoreError};
-pub use spaceterm_protocol::{attachments, hierarchy, pane, protocol, update};
+pub use spaceterm_protocol::{attachments, hierarchy, pane, protocol, update, worktree};
 
 pub mod admission;
 

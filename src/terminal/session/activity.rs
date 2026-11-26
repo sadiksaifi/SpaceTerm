@@ -1,7 +1,8 @@
-//! Work observations and receipt generations for the idle-restart lease of ADR 0065.
+//! Observations of work that closing or restarting a Terminal Session would end.
 //! The native reader and host admission stamp activity before worker processing.
 use super::*;
 use crate::platform::native_pty::SessionProbe;
+use spaceterm_core::hierarchy::Foreground;
 use std::io;
 
 /// How long a Terminal Session has no input and no output before it can have no work going on:
@@ -20,6 +21,14 @@ pub(super) struct ActivityState {
     /// Lines submitted, such as by Enter, counted where input is accepted and before the worker
     /// writes them, so a close the host admits after that input sees it.
     submitted: Submissions,
+    /// Latest close observation sampled by the Terminal Session worker.
+    close: CloseActivity,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CloseActivity {
+    pub(crate) foreground: Foreground,
+    pub(crate) needs_close_review: bool,
 }
 
 /// The ordered evidence that answers each submitted line. Input reaches the worker in the order
@@ -198,6 +207,7 @@ impl Default for ActivityState {
             prompt: PromptProgress::default(),
             probe: None,
             submitted: Submissions::default(),
+            close: CloseActivity::default(),
         }
     }
 }
@@ -247,9 +257,26 @@ impl TerminalRuntime {
     }
 
     /// Whether current facts verify work that a direct close of this Terminal Session would end.
-    /// See [`TerminalEventPublisher::running_work`].
     pub(crate) fn running_work(&self) -> bool {
         self.event_publisher.running_work()
+    }
+
+    /// Last observed close facts published by the Terminal Session worker.
+    pub(crate) fn close_activity(&self) -> CloseActivity {
+        let state = self
+            .event_publisher
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if state.stopped {
+            return CloseActivity::default();
+        }
+        CloseActivity {
+            needs_close_review: state.activity.close.needs_close_review
+                || state.activity.submitted.pending()
+                || state.activity.prompt.command_running,
+            ..state.activity.close
+        }
     }
 
     /// Whether this Terminal Session has work going on at `now`, by [`work_going_on`]. A
@@ -306,6 +333,15 @@ impl TerminalEventPublisher {
     pub(super) fn set_probe(&self, probe: Option<Arc<dyn SessionProbe>>) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         state.activity.set_probe(probe);
+    }
+
+    pub(super) fn has_close_probe(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .activity
+            .probe
+            .is_some()
     }
 
     pub(super) fn note_activity(&self, now: Instant, empty_prompt: bool, progress: PromptProgress) {
@@ -389,7 +425,7 @@ impl TerminalEventPublisher {
 
     /// Rechecks foreground work, unanswered input, and live session processes before a close.
     /// Disowned processes can still belong to the terminal session and end with it.
-    pub(super) fn running_work(&self) -> bool {
+    fn observe_close_activity(&self) -> (CloseActivity, bool) {
         let (probe, prompt, submitted, stopped) = {
             let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
             (
@@ -400,18 +436,46 @@ impl TerminalEventPublisher {
             )
         };
         if stopped {
-            return false;
+            return (CloseActivity::default(), false);
         }
-        if prompt.command_running || submitted {
-            return true;
+        let foreground = match probe.as_ref().map(|probe| probe.close_foreground()) {
+            Some(Ok(true)) => Foreground::Shell,
+            Some(Ok(false)) => Foreground::Program,
+            _ => Foreground::Unknown,
+        };
+        let submitted_work = prompt.command_running || submitted;
+        let native_work = foreground == Foreground::Program
+            || (!submitted_work
+                && probe.is_some_and(|probe| {
+                    if foreground == Foreground::Shell && prompt.zone == ShellZone::AtPrompt {
+                        matches!(probe.close_work(), Ok(true))
+                    } else {
+                        matches!(probe.others(), Ok(true))
+                    }
+                }));
+        (
+            CloseActivity {
+                foreground,
+                needs_close_review: native_work || submitted_work,
+            },
+            native_work,
+        )
+    }
+
+    /// Publishes the same facts used by close admission. Return whether currently observed
+    /// processes can make this stale without producing another input or output event.
+    pub(super) fn publish_close_activity(&self) -> bool {
+        let (observed, native_work) = self.observe_close_activity();
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if state.activity.close != observed {
+            state.activity.close = observed;
+            super::subscriptions::notify(state);
         }
-        probe.is_some_and(|probe| match probe.shell_foreground() {
-            Ok(false) => true,
-            Ok(true) if prompt.zone == ShellZone::AtPrompt => {
-                matches!(probe.close_work(), Ok(true))
-            }
-            _ => matches!(probe.others(), Ok(true)),
-        })
+        native_work
+    }
+
+    pub(super) fn running_work(&self) -> bool {
+        self.observe_close_activity().0.needs_close_review
     }
 }
 

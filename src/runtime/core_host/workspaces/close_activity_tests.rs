@@ -1,8 +1,10 @@
 //! A close that asks nobody first rechecks the exact Terminal Session's activity when SpaceTerm
 //! Core admits it, after every input it accepted before.
 use super::*;
-use crate::runtime::core_host::tests::{await_text, command, host, size, workspace_inventory};
-use spaceterm_core::hierarchy::{CloseTarget, Mutation, Outcome};
+use crate::runtime::core_host::tests::{
+    await_text, command, host, host_with_shell, size, workspace_inventory,
+};
+use spaceterm_core::hierarchy::{CloseTarget, Foreground, Mutation, Outcome};
 
 /// A started own Root Pane beside a second Tab, and the direct close of that Pane.
 fn own_pane(host: &mut WorkspaceHost) -> (Lease, CloseTarget) {
@@ -101,6 +103,63 @@ fn a_direct_close_right_after_enter_asks_for_review_and_ends_nothing() {
         2,
         "the Pane and its command stay"
     );
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn inventory_publishes_a_foreground_program_without_shell_integration() {
+    use spaceterm_core::protocol::{CoreMessage, RawFrame, frame::Assembler, version::WORK};
+
+    let mut host = WorkspaceHost::new(host_with_shell(
+        "/bin/bash",
+        native_pty_factory(Arc::default()),
+    ));
+    let (lease, target) = own_pane(&mut host);
+    let observer = [2; 32];
+    let outbox = Outbox::new(Arc::new(|| {}), WORK);
+    HostCommands::connected(&mut host, observer, observer, &outbox);
+    let mut assembler = Assembler::default();
+    let mut wait = |host: &mut WorkspaceHost, foreground| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            HostCommands::tick(host, Instant::now());
+            while let Some((frame, _)) = outbox.next_frame() {
+                let frame = RawFrame::parse(&frame).unwrap();
+                let Some(CoreMessage::Inventory(revision)) = assembler.core(frame).unwrap() else {
+                    continue;
+                };
+                let pane = &revision.inventory.workspaces[0].tabs[0].panes[0];
+                if pane.activity.is_some_and(|activity| {
+                    activity.session == Some(lease.session) && activity.foreground == foreground
+                }) {
+                    assert!(
+                        pane.presentation
+                            .as_ref()
+                            .is_none_or(|pane| pane.command.is_none())
+                    );
+                    return revision.inventory;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "inventory never reported {foreground:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    assert_eq!(
+        wait(&mut host, Foreground::Shell).close_would_end_work(target),
+        Some(false)
+    );
+    assert!(matches!(
+        command(&mut host, 1, lease, "exec /bin/sleep 30"),
+        Reply::Unchanged
+    ));
+    assert_eq!(
+        wait(&mut host, Foreground::Program).close_would_end_work(target),
+        Some(true)
+    );
+    assert_eq!(direct_close(&mut host, target), Outcome::StaleConfirmation);
     host.shutdown().unwrap();
 }
 

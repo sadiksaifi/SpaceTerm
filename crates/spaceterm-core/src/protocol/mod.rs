@@ -12,5 +12,5 @@ pub use spaceterm_protocol::protocol::{
     Operation, Page, PaneEvent, PaneMessage, Ping, Pong, RawFrame, Refusal, Reply, ReplyBody,
     Request, RequestId, Restored, RunDoubt, RunId, RunReceipt, RunRefusal, RunReply, RunState,
     ScreenUpdate, SessionState, Takeover, View, WireMessage, frame, inventory_1_0, limits, message,
-    operation, screen, version,
+    operation, preview, screen, version,
 };

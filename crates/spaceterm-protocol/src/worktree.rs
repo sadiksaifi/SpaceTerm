@@ -237,6 +237,11 @@ pub enum Read {
         root: PathBuf,
         location: String,
     },
+    /// The Worktree context with the owning Machine's default branch. Requires work 1.6.
+    /// Clients on older connections can use `Context`.
+    ContextWithDefault {
+        root: PathBuf,
+    },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ReadReply {
@@ -251,6 +256,13 @@ pub enum ReadReply {
     LocationTemplate,
     Location(PathBuf),
     Removal(Removal),
+    ContextWithDefault {
+        settings: Settings,
+        home: PathBuf,
+        branches: Branches,
+        /// The default local branch, if the Machine resolved it and its local ref still exists.
+        default_branch: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -305,6 +305,7 @@ impl WorkspaceEdits for UnavailableEdits {
         WorkspaceSnapshot {
             inventory: None,
             connected: false,
+            shared_tab_order: true,
             pending: false,
             pending_operation: None,
             rejected: None,

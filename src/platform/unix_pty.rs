@@ -590,6 +590,18 @@ impl SessionProbe for ShellSession {
         Ok(foreground == self.session.leader.process)
     }
 
+    fn close_foreground(&self) -> io::Result<bool> {
+        if !self.shell_foreground()? {
+            return Ok(false);
+        }
+        // Preserve the process-group observation when the optional image cannot be read.
+        Ok(self.image.as_ref().is_none_or(|shell| {
+            self.host
+                .process_image(self.session.leader)
+                .map_or(true, |image| image == *shell)
+        }))
+    }
+
     fn others(&self) -> io::Result<bool> {
         self.session_work(None)
     }

@@ -116,6 +116,10 @@ mod core_workspaces {
         /// Rendering reads this for every control, so it copies no hierarchy.
         fn availability(&self) -> (bool, bool);
 
+        fn shared_tab_order(&self) -> bool {
+            self.snapshot().shared_tab_order
+        }
+
         /// Dispatches one Original Operation, or refuses while offline or resolving another one.
         /// WorkspaceEditSource owns the connected interactions waiting to dispatch.
         fn submit(&self, mutation: Mutation) -> bool;
@@ -142,6 +146,10 @@ mod core_workspaces {
 
         fn availability(&self) -> (bool, bool) {
             Self::availability(self)
+        }
+
+        fn shared_tab_order(&self) -> bool {
+            Self::shared_tab_order(self)
         }
 
         fn submit(&self, mutation: Mutation) -> bool {
@@ -1836,6 +1844,21 @@ mod core_workspaces {
             self.edits.editability()
         }
 
+        pub(crate) fn shared_order(&self) -> bool {
+            self.edits.transport().shared_tab_order()
+        }
+
+        /// Moves a Tab to the Workspace position occupied by its landing Tab in the strip.
+        pub(crate) fn reorder_tab(&self, tab: Id, landing: Id) -> Option<WorkspaceSubmission> {
+            let workspace = self.presentation_workspace()?;
+            let index = workspace.tabs.iter().position(|tab| tab.id == landing)?;
+            Some(self.edits.submit(Mutation::ReorderTab {
+                workspace: workspace.id,
+                tab,
+                index: u16::try_from(index).ok()?,
+            }))
+        }
+
         /// Asks the server to move one of the server Tab `tab`'s Panes to `destination`.
         pub(crate) fn move_pane(
             &self,
@@ -1934,8 +1957,8 @@ mod core_workspaces {
         sessions: WorkspacePaneSessions,
         /// Each server Workspace and the local Workspace presenting it.
         workspaces: BTreeMap<WorkspaceId, WorkspaceFacts>,
-        /// The inventory revision this client has applied.
-        revision: Option<u64>,
+        /// The inventory revision and Tab-order contract this client has applied.
+        revision: Option<(u64, bool)>,
         presentation: Option<Inventory>,
         connected: bool,
         connection_error: Option<spaceterm_core::CoreError>,
@@ -2673,6 +2696,7 @@ mod core_workspaces {
             Ok(WorkspaceCloseApproval {
                 target,
                 scope,
+                running_work: inventory.close_would_end_work(target) == Some(true),
                 workspace: workspace.name.clone(),
                 tabs: workspace
                     .tabs
@@ -3035,20 +3059,21 @@ mod core_workspaces {
                 self.standing_in = standing_in;
                 poll.changed = true;
             }
+            let revision = |inventory: &Inventory| (inventory.revision, snapshot.shared_tab_order);
             if let Some(inventory) = snapshot
                 .inventory
                 .as_ref()
-                .filter(|inventory| self.revision != Some(inventory.revision))
+                .filter(|inventory| self.revision != Some(revision(inventory)))
                 .filter(|_| standing_in)
             {
                 // The retained copy names only what the server last confirmed, so it never
                 // initializes or reconciles attachments.
-                self.revision = Some(inventory.revision);
+                self.revision = Some(revision(inventory));
                 poll.changed = true;
             } else if let Some(inventory) = snapshot
                 .inventory
                 .as_ref()
-                .filter(|inventory| self.revision != Some(inventory.revision))
+                .filter(|inventory| self.revision != Some(revision(inventory)))
             {
                 // A new client's first view presents the server's first Workspace. Retained
                 // choices, including a deliberately empty view, always win.
@@ -3061,7 +3086,7 @@ mod core_workspaces {
                         return poll;
                     }
                 }
-                self.revision = Some(inventory.revision);
+                self.revision = Some(revision(inventory));
                 poll.changed = true;
             }
             let completed = self.edits.pending.borrow_mut().take_completions();
@@ -3402,7 +3427,8 @@ mod core_workspaces {
                 | Mutation::CreateTab { .. }
                 | Mutation::SplitPane { .. }
                 | Mutation::MovePane { .. }
-                | Mutation::MergeTab { .. } => None,
+                | Mutation::MergeTab { .. }
+                | Mutation::ReorderTab { .. } => None,
                 // A stale close is answered with its own outcome rather than a field conflict.
                 Mutation::Close { .. } | Mutation::Worktree(_) => None,
                 // Ending Sessions edits no field, and its refusals reach Settings directly.
@@ -3587,6 +3613,7 @@ mod core_workspaces {
         confirmation: CoreCloseConfirmation,
         controls: Option<Vec<ConfirmedControl>>,
         scope: WorkspaceCloseScope,
+        running_work: bool,
         /// The Tabs that hold the reviewed Panes.
         tabs: usize,
         /// The Workspace's name as the server published it.
@@ -3632,7 +3659,7 @@ mod core_workspaces {
             &self,
             directly_closable: impl Fn(Id, bool) -> bool,
         ) -> Option<Self> {
-            if self.scope == WorkspaceCloseScope::Workspace {
+            if self.scope == WorkspaceCloseScope::Workspace || self.running_work {
                 return None;
             }
             let controls = self.controls.as_ref()?;
@@ -4698,6 +4725,7 @@ mod core_workspaces {
                     snapshot: Mutex::new(WorkspaceSnapshot {
                         inventory,
                         connected: true,
+                        shared_tab_order: false,
                         pending: false,
                         pending_operation: None,
                         rejected: None,
@@ -4738,6 +4766,10 @@ mod core_workspaces {
 
             pub(crate) fn set_inventory(&self, inventory: Inventory) {
                 self.publish(|snapshot| snapshot.inventory = Some(inventory));
+            }
+
+            pub(crate) fn set_shared_tab_order(&self) {
+                self.publish(|snapshot| snapshot.shared_tab_order = true);
             }
 
             pub(crate) fn set_connected(&self, connected: bool) {
@@ -4844,6 +4876,10 @@ mod core_workspaces {
             fn snapshot(&self) -> WorkspaceSnapshot {
                 self.settle();
                 self.snapshot.lock().expect("snapshot").clone()
+            }
+
+            fn shared_tab_order(&self) -> bool {
+                self.snapshot.lock().expect("snapshot").shared_tab_order
             }
 
             fn availability(&self) -> (bool, bool) {

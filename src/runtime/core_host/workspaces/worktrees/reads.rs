@@ -15,8 +15,15 @@ const READS: usize = 32;
 
 /// A read of one connection, by its request id.
 type Key = (Id, RequestId);
+
+#[derive(PartialEq, Eq)]
+enum ReadKind {
+    Context,
+    Other(std::mem::Discriminant<Read>),
+}
+
 struct Job {
-    kind: std::mem::Discriminant<Read>,
+    kind: ReadKind,
     token: CancellationToken,
     result: std::sync::mpsc::Receiver<Result<PreparedRead, Error>>,
     worker: std::thread::JoinHandle<()>,
@@ -71,7 +78,10 @@ impl Reads {
     ) -> Result<(), Error> {
         self.retiring.retain(|job| !job.worker.is_finished());
         let (connection, _) = key;
-        let kind = std::mem::discriminant(&read);
+        let kind = match read {
+            Read::Context { .. } | Read::ContextWithDefault { .. } => ReadKind::Context,
+            _ => ReadKind::Other(std::mem::discriminant(&read)),
+        };
         if self.jobs.len() + self.retiring.len() >= READS
             || self
                 .jobs
@@ -175,13 +185,22 @@ fn read_git(
     let (git, home) = git(None, token, WRITE_TIMEOUT)?;
     let mut approval = None;
     let reply = match read {
-        Read::Context { root } => {
-            list(&git, &root, token)?;
-            let branches = git.branches(&root, token).map_err(|_| Error::Unavailable)?;
-            ReadReply::Context {
-                settings,
-                home,
-                branches,
+        Read::Context { ref root } | Read::ContextWithDefault { ref root } => {
+            list(&git, root, token)?;
+            let branches = git.branches(root, token).map_err(|_| Error::Unavailable)?;
+            if matches!(read, Read::ContextWithDefault { .. }) {
+                ReadReply::ContextWithDefault {
+                    settings,
+                    home,
+                    branches,
+                    default_branch: git.default_branch(root, token),
+                }
+            } else {
+                ReadReply::Context {
+                    settings,
+                    home,
+                    branches,
+                }
             }
         }
         Read::Location { root, location } => {

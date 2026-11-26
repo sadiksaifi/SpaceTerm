@@ -54,6 +54,7 @@ pub(crate) fn pane(id: Id, source: Option<Id>, axis: Axis) -> Pane {
         repository_directory: None,
         presentation: None,
         observers: Default::default(),
+        activity: None,
         confirmed_directory: None,
         creator: None,
     }

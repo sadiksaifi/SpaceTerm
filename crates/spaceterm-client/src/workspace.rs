@@ -5,7 +5,7 @@ pub use journal::{ClientJournal, ClientOperation, JournalStore};
 
 use crate::{
     CoreError, PairedMachine, WaitLimit,
-    connection::link::{CoreLink, LinkError, RequestError, supports_close_if_idle},
+    connection::link::{CoreLink, LinkError, RequestError, supports_work},
     hierarchy::{Mutation, Outcome, RetainedOutcome},
     protocol::{InventoryRevision, Operation, Refusal, ReplyBody},
 };
@@ -244,7 +244,10 @@ impl WorkspaceEditor {
         let fresh = self.journal.last().is_some();
         let (link, inventory) = self.reconciled_link(&wait, fresh)?;
         check_wait(&wait, EditError::Deadline)?;
-        if mutation.is_close_if_idle() && !supports_close_if_idle(link.work()) {
+        if mutation
+            .required_capability()
+            .is_some_and(|capability| !supports_work(link.work(), capability))
+        {
             return Err(CoreError::Unsupported.into());
         }
         self.journal.submit(inventory.next_sequence, mutation)?;

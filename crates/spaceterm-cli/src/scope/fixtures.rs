@@ -96,6 +96,7 @@ fn tab(byte: u8, pane: u8, path: &str, activity: &str) -> Tab {
             repository_directory: Some(path.into()),
             presentation: Some(Box::new(presentation)),
             observers: Default::default(),
+            activity: None,
             creator: None,
         }],
     }

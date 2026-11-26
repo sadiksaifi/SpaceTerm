@@ -405,6 +405,11 @@ impl WorkspaceHost {
             .flat_map(|w| &mut w.tabs)
             .flat_map(|t| &mut t.panes)
         {
+            pane.activity = Some(
+                self.panes
+                    .get(&pane.id)
+                    .map_or_else(Default::default, CorePaneHost::close_activity),
+            );
             let observers = self
                 .panes
                 .get(&pane.id)
@@ -488,6 +493,7 @@ impl WorkspaceHost {
                 directory_unavailable: false,
                 failed_directory_session: None,
                 dormant: None,
+                last_preview: None,
                 names: Arc::clone(&self.prototype.names),
                 notifier: self.prototype.notifier.clone(),
                 session_context: self.prototype.session_context.clone(),
@@ -1309,6 +1315,20 @@ impl HostCommands for WorkspaceHost {
         self.directories.cancel((connection, id));
         self.cancel_worktree_read(connection, id);
     }
+    fn pane_previews(&self, panes: Vec<Id>, id: RequestId, outbox: &Outbox) -> Dispatch {
+        super::preview::read(
+            panes,
+            |pane| match self.state.pane(pane) {
+                Some(_) => self.panes.get(&pane).map_or(
+                    super::preview::Source::NotStarted,
+                    super::preview::Source::Pane,
+                ),
+                None => super::preview::Source::Missing,
+            },
+            id,
+            outbox,
+        )
+    }
     fn settled_reads(&mut self) -> Vec<super::SettledRead> {
         let mut settled = self.directories.settled_reads();
         settled.extend(self.settled_worktree_reads());
@@ -1355,7 +1375,7 @@ impl HostCommands for WorkspaceHost {
             return super::publish::Observed::Gone { last: None, event };
         };
         let observed = host.observe(device, lease);
-        let presented = host.metadata_changed();
+        let presented = host.presentation_changed();
         let gone = matches!(observed, super::publish::Observed::Gone { .. });
         if gone {
             let _ = self.synchronize();
@@ -1474,7 +1494,11 @@ impl HostCommands for WorkspaceHost {
     }
     fn observe_session(&mut self, pane: Id, session: Id) -> super::publish::Observed {
         match self.panes.get_mut(&pane) {
-            Some(host) => host.observe_session(session),
+            Some(host) => {
+                let observed = host.observe_session(session);
+                self.observed_change |= host.presentation_changed();
+                observed
+            }
             None => super::publish::Observed::Gone {
                 last: None,
                 event: PaneEvent::Ended,
@@ -1654,6 +1678,97 @@ mod tests {
             }
         }
         messages
+    }
+
+    #[test]
+    fn tab_reorder_preserves_identity_and_reaches_another_client() {
+        use spaceterm_core::protocol::{CoreMessage, ReplyBody};
+        let (mut host, memory) = journaled();
+        let device = [1; 32];
+        let observer = [2; 32];
+        let workspace = host.state.inventory.workspaces[0].id;
+        assert!(accepted(&host.request(
+            device,
+            device,
+            Request::Mutate {
+                sequence: 1,
+                mutation: Mutation::CreateTab {
+                    workspace,
+                    source: None,
+                    control: spaceterm_core::hierarchy::CreateControl::Creator,
+                },
+            },
+        )));
+        let pane = host.state.inventory.workspaces[0].tabs[1].root_pane;
+        let Reply::Attached { lease } = host.request(
+            device,
+            device,
+            Request::SelectPane {
+                pane,
+                explicit: true,
+                size: size(),
+                style: None,
+            },
+        ) else {
+            panic!("the Pane must have a live Terminal Session")
+        };
+        let outbox = Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK);
+        HostCommands::connected(&mut host, observer, observer, &outbox);
+        let messages = drain(&outbox);
+        let [CoreMessage::Inventory(before)] = messages.as_slice() else {
+            panic!("the second client must receive its initial inventory")
+        };
+        let before = &before.inventory.workspaces[0];
+        let tab = before.tabs[1].id;
+        let mover = Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK);
+        HostCommands::connected(&mut host, device, device, &mover);
+        let _ = drain(&mover);
+        let id = RequestId(1);
+        mover.begin(id).unwrap();
+        let mutation = Mutation::ReorderTab {
+            workspace,
+            tab,
+            index: 0,
+        };
+        let Dispatch::After(work) =
+            HostCommands::mutate(&mut host, device, device, id, 2, Some(mutation))
+        else {
+            panic!("the edit must reply after it is retained")
+        };
+        host.sync.reply(&mover, id, work).unwrap();
+        host.sync.flush().unwrap();
+        assert!(matches!(
+            drain(&mover).as_slice(),
+            [CoreMessage::Inventory(_), CoreMessage::Reply(reply)]
+                if matches!(&reply.result, Ok(ReplyBody::Outcome(result))
+                    if result.outcome == Outcome::Accepted { target: tab })
+        ));
+        let messages = drain(&outbox);
+        let [CoreMessage::Inventory(after)] = messages.as_slice() else {
+            panic!("the second client must receive the new Tab order")
+        };
+        let reordered = &after.inventory.workspaces[0];
+        assert_eq!(reordered.root_tab, before.root_tab);
+        assert_eq!(
+            reordered.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+            [before.tabs[1].id, before.tabs[0].id]
+        );
+        assert_eq!(reordered.tabs[0].root_pane, pane);
+        assert!(
+            after
+                .inventory
+                .close
+                .as_ref()
+                .unwrap()
+                .sessions
+                .iter()
+                .any(|entry| { entry.id == pane && entry.session == Some(lease.session) })
+        );
+        assert_eq!(
+            memory.retained().unwrap().shared.inventory.workspaces[0].tabs[0].id,
+            tab
+        );
+        host.shutdown().unwrap();
     }
 
     #[test]

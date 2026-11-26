@@ -137,6 +137,8 @@ impl LinkSink for Wakes {
 pub(crate) struct WorkspaceSnapshot {
     pub inventory: Option<Inventory>,
     pub connected: bool,
+    /// The last admitted Work connection's Tab-order contract, also kept while offline.
+    pub shared_tab_order: bool,
     pub pending: bool,
     pub pending_operation: Option<Mutation>,
     pub rejected: Option<Mutation>,
@@ -227,6 +229,7 @@ impl WorkspaceClient {
         let snapshot = Arc::new(PublishedSnapshot::new(WorkspaceSnapshot {
             inventory: None,
             connected: false,
+            shared_tab_order: true,
             pending: false,
             pending_operation: None,
             rejected: None,
@@ -310,6 +313,13 @@ impl WorkspaceClient {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         (state.connected, state.pending)
+    }
+    pub(crate) fn shared_tab_order(&self) -> bool {
+        self.snapshot
+            .value
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .shared_tab_order
     }
     /// Offline submissions are refused here even if an action's rendered enabled state is stale.
     pub(crate) fn submit(&self, mutation: Mutation) -> bool {
@@ -441,6 +451,11 @@ fn run(
             wakes.link.store(false, Ordering::Release);
             // Validate the transport before opening this client's retained writers.
             let link = core.link(&|| !alive.load(Ordering::Acquire))?;
+            let shared_tab_order = link.work().is_some_and(|work| {
+                work >= spaceterm_core::protocol::capability::Capability::ReorderTab
+                    .since()
+                    .1
+            });
             let attachments = core.attachments()?;
             if !watched {
                 attachments.watch(Arc::downgrade(&released));
@@ -479,6 +494,7 @@ fn run(
             journal.forgotten_presented(forgotten_presented)?;
             state.publish(|s| {
                 s.inventory = Some(initial.inventory.clone());
+                s.shared_tab_order = shared_tab_order;
                 s.pending = journal.pending().is_some();
                 s.pending_operation = journal.pending().map(|p| p.mutation.clone());
                 if let Some((sequence, mutation)) = active.as_ref()
@@ -512,6 +528,10 @@ fn run(
             loop {
                 match events.recv() {
                     Ok(Event::Edit(mutation)) => {
+                        if !shared_tab_order && matches!(mutation, Mutation::ReorderTab { .. }) {
+                            reject(&state, mutation);
+                            continue;
+                        }
                         if !reconciled {
                             match reconcile_retired(&link, journal.last()) {
                                 Ok(true) => {
@@ -657,6 +677,7 @@ mod tests {
         let state = Arc::new(PublishedSnapshot::new(WorkspaceSnapshot {
             inventory: None,
             connected: true,
+            shared_tab_order: false,
             pending: false,
             pending_operation: None,
             rejected: None,
@@ -700,6 +721,7 @@ mod tests {
         let state = Arc::new(PublishedSnapshot::new(WorkspaceSnapshot {
             inventory: None,
             connected: true,
+            shared_tab_order: false,
             pending: false,
             pending_operation: None,
             rejected: None,
