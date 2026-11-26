@@ -943,19 +943,22 @@ fn interactive_input_uses_controlling_size_and_terminal_visible_appearance() {
         host.request([1; 32], [1; 32], Request::Style { lease, style }),
         Reply::Unchanged
     ));
-    host.request(
-        [1; 32],
-        [1; 32],
-        Request::Resize {
-            lease,
-            size: PaneSize {
-                columns: 91,
-                rows: 31,
-                cell_width: 9,
-                cell_height: 19,
+    assert!(matches!(
+        host.request(
+            [1; 32],
+            [1; 32],
+            Request::Resize {
+                lease,
+                size: PaneSize {
+                    columns: 91,
+                    rows: 31,
+                    cell_width: 9,
+                    cell_height: 19,
+                },
             },
-        },
-    );
+        ),
+        Reply::Unchanged
+    ));
     focus(&mut host, lease, 1, FocusTarget::Terminal);
     input(
         &mut host,
@@ -996,7 +999,9 @@ fn interactive_input_uses_controlling_size_and_terminal_visible_appearance() {
     assert!(
         lines(&screen)
             .iter()
-            .any(|row| row.trim_end() == "SIZE:31 91")
+            .any(|row| row.trim_end() == "SIZE:31 91"),
+        "the child must read the size the Controlling Client set; fixture screen: {:?}",
+        lines(&screen)
     );
     host.shutdown().unwrap();
 }

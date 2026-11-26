@@ -2161,8 +2161,42 @@ mod tests {
         drop(original);
         // Linux devpts reuses both the index and inode number after the master closes,
         // even while a slave descriptor still refers to the removed inode instance.
-        let (replacement, reader, terminator) = spawn();
-        assert_eq!(replacement.probe.slave.as_ref().unwrap(), &path);
+        // devpts hands out the lowest free index, and other processes on the host open and
+        // close terminals meanwhile. Hold each lower index they free until the original's
+        // index comes back, and wait out a process that holds that index for a moment.
+        let index = |path: &std::path::Path| -> u32 {
+            path.strip_prefix("/dev/pts")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .parse()
+                .unwrap()
+        };
+        let close = |(pty, reader, terminator): (SpawnedPty, _, PtyTerminator)| {
+            terminator.terminate().unwrap();
+            drop(reader);
+            drop(pty);
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut lower = Vec::new();
+        let (replacement, reader, terminator) = loop {
+            let candidate = spawn();
+            let slave = candidate.0.probe.slave.clone().unwrap();
+            if slave == path {
+                break candidate;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "devpts never handed {path:?} out again; the last terminal was {slave:?}"
+            );
+            if index(&slave) < index(&path) {
+                lower.push(candidate);
+            } else {
+                close(candidate);
+                thread::sleep(Duration::from_millis(10));
+            }
+        };
+        lower.into_iter().for_each(close);
         let replacement_mode = if before.mode() & 0o7777 == 0o600 {
             0o640
         } else {
