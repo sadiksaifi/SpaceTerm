@@ -601,6 +601,7 @@ impl DirectConnections {
         result
     }
 
+    /// Lists retained unpairs and cancelled enrollment cleanups, including dismissed notices.
     pub fn pending_unpairs(&self) -> Vec<PendingUnpair> {
         let state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         state.document.pending.iter().filter(|p| !matches!(p.authority, records::Authority::Enrollment { .. }) || p.cancel_requested).map(|pending| PendingUnpair {
@@ -637,6 +638,53 @@ impl DirectConnections {
         }
         drop(state);
         self.0.notify();
+    }
+
+    /// Stops retrying a cancelled enrollment, removes its local key if unused elsewhere,
+    /// and frees its slot.
+    /// Pass a key from [`Self::pending_unpairs`] whose `enrollment_cleanup` is true.
+    /// The Machine may still approve the device or already have it approved. This action
+    /// does not ask the Machine to revoke it. A cancellation already in flight may finish.
+    ///
+    /// Use only after explicit confirmation. The credential store may request interaction.
+    /// If saving the removal fails after key deletion, retry this action to free the slot.
+    pub fn abandon_enrollment_cleanup(&self, key: UnpairKey) -> Result<(), DirectError> {
+        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !state.inventory_loaded {
+            return Err(DirectError::StorageUnavailable);
+        }
+        let record = state
+            .document
+            .pending
+            .iter()
+            .find(|record| record.operation == key && record.cancel_requested)
+            .ok_or(DirectError::InvalidRequest)?;
+        let records::Authority::Enrollment { credential, .. } = record.authority else {
+            return Err(DirectError::InvalidRequest);
+        };
+        let shared = state
+            .document
+            .routes
+            .iter()
+            .any(|r| r.credential == credential)
+            || state.document.pending.iter().any(|record| {
+                record.operation != key && record.credential_key() == Some(credential)
+            });
+        if !shared {
+            // Synchronize the known snapshot before deleting a key that a failed save
+            // could have transferred to a published route.
+            if state.persistence_error && !self.0.save(&mut state) {
+                return Err(DirectError::StorageUnavailable);
+            }
+            drop(state);
+            credentials::remove_asked(self.0.credentials.as_ref(), &credential)
+                .map_err(worker::credential_error)?;
+            state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        }
+        let result = self.0.retire_pending(&mut state, key);
+        drop(state);
+        self.0.notify();
+        result
     }
 
     pub fn unpair_self(&self, id: &DirectRouteId) -> Result<(), DirectError> {
@@ -877,6 +925,24 @@ pub trait AccountRevocation: Send + Sync {
 }
 
 impl Inner {
+    fn retire_pending(&self, state: &mut State, key: UnpairKey) -> Result<(), DirectError> {
+        let Some(index) = state
+            .document
+            .pending
+            .iter()
+            .position(|p| p.operation == key)
+        else {
+            return Ok(());
+        };
+        let record = state.document.pending.remove(index);
+        if !self.save(state) {
+            state.document.pending.insert(index, record);
+            return Err(DirectError::StorageUnavailable);
+        }
+        state.pending.remove(&key);
+        Ok(())
+    }
+
     fn notify(&self) {
         // Every change the views hear of may also make worker jobs due.
         self.work.wake();

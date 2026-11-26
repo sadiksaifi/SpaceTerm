@@ -8,4 +8,4 @@ Local removal and confirmed revocation have distinct outcomes. An unconfirmed re
 
 A revoked device may authenticate only to resolve its exact admitted revocation or confirm that its exact pairing is already revoked. The client retains a validated receipt before retiring the native credential reference. Failed credential cleanup remains pending and preserves newer or unrelated credentials, connections and attachments.
 
-Cancelled or interrupted enrollment retains only its exact claim, pinned Machine ID, endpoint and credential reference for restricted cancellation. It retains no Invitation Link. If approval won the race, cancellation revokes only the pairing created by that claim.
+Cancelled or interrupted enrollment retains only its exact claim, pinned Machine ID, endpoint and credential reference for restricted cancellation. It retains no Invitation Link. If approval won the race, cancellation revokes only the pairing created by that claim. A person can explicitly abandon enrollment cleanup and reclaim its slot. The client removes the local credential for that enrollment and the Machine may still approve the claim or retain the pairing.

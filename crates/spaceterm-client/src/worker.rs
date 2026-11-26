@@ -635,6 +635,14 @@ fn recover(owner: &Arc<Inner>, mut pending: PendingRecord, interaction: Interact
     // No network effect precedes retaining the exact request, including after a failed save.
     {
         let mut state = owner.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !state
+            .document
+            .pending
+            .iter()
+            .any(|p| p.operation == pending.operation)
+        {
+            return;
+        }
         if state.persistence_error && !owner.save(&mut state) {
             return;
         }
@@ -735,16 +743,7 @@ fn recover(owner: &Arc<Inner>, mut pending: PendingRecord, interaction: Interact
     let mut state = owner.state.lock().unwrap_or_else(|e| e.into_inner());
     match result {
         Ok(true) => {
-            let old = state.document.clone();
-            state
-                .document
-                .pending
-                .retain(|p| p.operation != pending.operation);
-            if owner.save(&mut state) {
-                state.pending.remove(&pending.operation);
-            } else {
-                state.document = old;
-            }
+            let _ = owner.retire_pending(&mut state, pending.operation);
         }
         Ok(false) => {
             if let Some(retry) = state.pending.get_mut(&pending.operation)
@@ -1038,7 +1037,9 @@ fn complete_enrollment(owner: &DirectConnections, id: JoinId, saved: SavedRoute)
 #[cfg(any(test, feature = "test-support"))]
 #[allow(dead_code)]
 pub(super) mod enrollment_tests {
-    use super::super::tests::{Answer, Credentials, MemoryRecords, Network};
+    #[cfg(test)]
+    use super::super::tests::await_condition;
+    use super::super::tests::{Answer, Credentials, MemoryRecords, Network, saved};
     use super::*;
     use crate::records::PrivateRecords;
     use crate::tests::RecordingFile;
@@ -1143,6 +1144,15 @@ pub(super) mod enrollment_tests {
 
     impl Unjoined {
         fn new(label: &str, stage: EnrollmentStage, expires: u64) -> Self {
+            Self::with_records(label, stage, expires, Arc::new(MemoryRecords::default()))
+        }
+
+        fn with_records(
+            label: &str,
+            stage: EnrollmentStage,
+            expires: u64,
+            records: Arc<dyn Records>,
+        ) -> Self {
             use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
             let credentials = Arc::new(Credentials::default());
             let network = Arc::new(EnrollmentNetwork {
@@ -1151,11 +1161,11 @@ pub(super) mod enrollment_tests {
                 calls: Mutex::default(),
                 claims: Mutex::default(),
                 cancellations: Mutex::default(),
-                paired: super::super::tests::saved(1, 5).route.paired,
+                paired: saved(1, 5).route.paired,
             });
             let owner = DirectConnections::new(
                 "spaceterm-development",
-                Arc::new(MemoryRecords::default()),
+                records,
                 credentials.clone(),
                 network.clone(),
                 None,
@@ -1433,6 +1443,100 @@ pub(super) mod enrollment_tests {
                     .contains_key(&credential)
             );
         }
+    }
+
+    #[test]
+    fn abandoning_an_unreachable_enrollment_makes_room_for_a_new_join() {
+        let records = Arc::new(MemoryRecords::default());
+        let mut document = Document::default();
+        document.routes = (2..=128).map(|id| saved(id, id)).collect();
+        records.save(&document).unwrap();
+        let expires = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 60;
+        let unjoined =
+            Unjoined::with_records("Server 1", EnrollmentStage::Claim, expires, records.clone());
+        let invitation = unjoined.text.clone();
+        let unreachable = direct::Endpoint::parse("192.0.2.1", 9231).unwrap();
+        let fixture = unjoined.join(Some(unreachable));
+        let credential = fixture.original().credential_key().unwrap();
+        assert_eq!(
+            fixture.owner.abandon_enrollment_cleanup(fixture.id),
+            Err(DirectError::InvalidRequest)
+        );
+
+        fixture.owner.cancel_join(fixture.id).unwrap();
+        await_condition(|| !fixture.network.cancellations.lock().unwrap().is_empty());
+        let pending = fixture.owner.pending_unpairs().pop().unwrap();
+        assert!(pending.enrollment_cleanup);
+        let blocked = fixture
+            .owner
+            .join(invitation.clone(), None, "Test device".into())
+            .unwrap();
+        await_condition(|| {
+            matches!(
+                fixture.owner.join_status(blocked),
+                Some(JoinStatus::Failed(DirectError::Capacity))
+            )
+        });
+
+        fixture
+            .owner
+            .abandon_enrollment_cleanup(pending.key)
+            .unwrap();
+
+        assert!(fixture.owner.pending_unpairs().is_empty());
+        assert!(
+            !fixture
+                .credentials
+                .values
+                .lock()
+                .unwrap()
+                .contains_key(&credential)
+        );
+        let replacement = fixture
+            .owner
+            .join(invitation, None, "Test device".into())
+            .unwrap();
+        await_condition(
+            || matches!(fixture.owner.join_status(replacement), Some(JoinStatus::Approved(id)) if id == replacement),
+        );
+        let document = records.load().unwrap();
+        assert!(document.pending.is_empty());
+        assert!(
+            document
+                .routes
+                .iter()
+                .any(|saved| saved.route.id == replacement)
+        );
+    }
+
+    #[test]
+    fn abandonment_can_be_retried_after_a_record_save_fails() {
+        let filesystem = Arc::new(RecordingFile::default());
+        let records = Arc::new(PrivateRecords::new(filesystem.clone()));
+        let fixture =
+            Unjoined::with_records("Server 1", EnrollmentStage::Claim, 1, records.clone())
+                .join(None);
+        fixture.owner.cancel_join(fixture.id).unwrap();
+        await_condition(|| !fixture.network.cancellations.lock().unwrap().is_empty());
+        filesystem.files.lock().unwrap().prepare_error = Some(());
+
+        assert_eq!(
+            fixture.owner.abandon_enrollment_cleanup(fixture.id),
+            Err(DirectError::StorageUnavailable)
+        );
+        assert_eq!(fixture.owner.pending_unpairs()[0].key, fixture.id);
+        assert_eq!(records.load().unwrap().pending[0].operation, fixture.id);
+
+        filesystem.files.lock().unwrap().prepare_error = None;
+        fixture
+            .owner
+            .abandon_enrollment_cleanup(fixture.id)
+            .unwrap();
+        assert!(records.load().unwrap().pending.is_empty());
     }
 
     #[test]
