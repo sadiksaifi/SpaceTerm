@@ -34,7 +34,6 @@ impl TerminalEmulator {
         crate::terminal::session::PromptProgress {
             fresh: prompt.fresh,
             command_running: self.metadata.owned_command_running(),
-            no_jobs: prompt.no_jobs,
             zone: match prompt.zone {
                 None => crate::terminal::session::ShellZone::Starting,
                 Some(PromptZone::Prompt | PromptZone::CommandInput) => {

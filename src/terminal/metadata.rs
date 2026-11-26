@@ -65,8 +65,6 @@ pub(crate) struct OwnedPrompt {
     pub(crate) input_bytes: u64,
     /// Fresh prompts the owning shell drew, ever. A redraw does not count.
     pub(crate) fresh: u64,
-    /// The owning shell reported an empty job table at this fresh prompt.
-    pub(crate) no_jobs: bool,
 }
 
 /// One marker a pending run follows, in the order the shell wrote it.
@@ -788,7 +786,6 @@ impl MetadataTracker {
                 self.finishing = false;
                 self.owned_prompt.input_bytes = std::mem::take(&mut self.typeahead);
                 self.owned_prompt.fresh += 1;
-                self.owned_prompt.no_jobs = option(fields, "jobs") == Some("0");
                 Marker::PromptStart
             }
             ("B" | "I", _) => {
@@ -799,7 +796,6 @@ impl MetadataTracker {
             }
             ("C", Some(_)) => {
                 self.owned_prompt.zone = Some(PromptZone::CommandOutput);
-                self.owned_prompt.no_jobs = false;
                 self.finishing = false;
                 Marker::CommandStart {
                     // A cmdline that does not decode never matches a command.
@@ -809,7 +805,6 @@ impl MetadataTracker {
             }
             ("D", Some(_)) => {
                 self.owned_prompt.zone = Some(PromptZone::CommandOutput);
-                self.owned_prompt.no_jobs = false;
                 self.finishing = true;
                 Marker::CommandFinished {
                     exit_status: exit_status(fields),
@@ -1674,7 +1669,6 @@ mod tests {
                 zone: Some(PromptZone::CommandInput),
                 input_bytes: 0,
                 fresh: 1,
-                no_jobs: false,
             }
         );
         tracker.note_input(2);

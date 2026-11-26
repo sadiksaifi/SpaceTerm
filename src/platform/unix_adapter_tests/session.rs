@@ -338,18 +338,13 @@ impl Drop for ShellStartupDirectory {
 }
 
 #[test]
-fn direct_close_distinguishes_zsh_prompt_helpers_from_tracked_jobs() {
-    const NAME: &str = "terminal::session::unix_adapter_tests::direct_close_distinguishes_zsh_prompt_helpers_from_tracked_jobs";
+fn direct_close_protects_zsh_background_and_disowned_work() {
+    const NAME: &str = "terminal::session::unix_adapter_tests::direct_close_protects_zsh_background_and_disowned_work";
     if crate::platform::unix_pty::isolate_real_pty_test(NAME) {
         return;
     }
     let _isolation = crate::platform::unix_pty::lock_real_pty_test();
     let startup = ShellStartupDirectory::new();
-    std::fs::write(
-        startup.path().join(".zshrc"),
-        "precmd() { if [[ -z $helper ]]; then sleep 60 &! helper=$!; fi }\n",
-    )
-    .unwrap();
     let (session, events, _) = TerminalRuntime::start(
         native_pty_adapter_factory(),
         test_launch_planner(startup.path()),
@@ -364,7 +359,7 @@ fn direct_close_distinguishes_zsh_prompt_helpers_from_tracked_jobs() {
     wait_for_shell_prompt(&session, &events);
     assert!(
         !session.running_work(),
-        "a disowned prompt helper leaves the first prompt idle"
+        "a bare shell at its first prompt closes directly"
     );
 
     for (command, working) in [
@@ -372,6 +367,7 @@ fn direct_close_distinguishes_zsh_prompt_helpers_from_tracked_jobs() {
         ("sleep 60 &", true),
         ("kill -STOP $!", true),
         ("kill -KILL $!; wait $!", false),
+        ("sleep 60 &!", true),
     ] {
         let before = session.metadata_snapshot().unwrap().finished_commands;
         enter_command(&session, command);

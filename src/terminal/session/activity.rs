@@ -16,7 +16,6 @@ pub(super) struct ActivityState {
     /// The owning shell waited at its own empty prompt after `last`.
     empty_prompt: bool,
     command_running: bool,
-    no_jobs: bool,
     probe: Option<Arc<dyn SessionProbe>>,
     /// Lines submitted, such as by Enter, counted where input is accepted and before the worker
     /// writes them, so a close the host admits after that input sees it.
@@ -188,7 +187,6 @@ pub(crate) struct PromptProgress {
     pub(crate) fresh: u64,
     pub(crate) zone: ShellZone,
     pub(crate) command_running: bool,
-    pub(crate) no_jobs: bool,
 }
 
 impl Default for ActivityState {
@@ -198,7 +196,6 @@ impl Default for ActivityState {
             last: None,
             empty_prompt: false,
             command_running: false,
-            no_jobs: false,
             probe: None,
             submitted: Submissions::default(),
         }
@@ -216,7 +213,6 @@ impl ActivityState {
         self.last = Some(now);
         self.empty_prompt = empty_prompt;
         self.command_running = progress.command_running;
-        self.no_jobs = progress.no_jobs;
         self.submitted.prompted(progress.fresh);
     }
 }
@@ -391,15 +387,14 @@ impl TerminalEventPublisher {
         }
     }
 
-    /// Rechecks foreground work, unanswered input, and jobs before a direct close.
-    /// An owned prompt with an empty job table can share the session with disowned helpers.
+    /// Rechecks foreground work, unanswered input, and live session processes before a close.
+    /// Disowned processes can still belong to the terminal session and end with it.
     pub(super) fn running_work(&self) -> bool {
-        let (probe, working, no_jobs, stopped) = {
+        let (probe, working, stopped) = {
             let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
             (
                 state.activity.probe.clone(),
                 state.activity.command_running || state.activity.submitted.pending(),
-                state.activity.empty_prompt && state.activity.no_jobs,
                 state.stopped,
             )
         };
@@ -409,11 +404,8 @@ impl TerminalEventPublisher {
         if working {
             return true;
         }
-        probe.is_some_and(|probe| match probe.shell_foreground() {
-            Ok(false) => true,
-            Ok(true) if no_jobs => false,
-            _ => matches!(probe.others(), Ok(true)),
-        })
+        Self::program_holds(probe.as_deref())
+            || probe.is_some_and(|probe| matches!(probe.others(), Ok(true)))
     }
 }
 
