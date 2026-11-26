@@ -102,6 +102,13 @@ pub enum Operation {
     /// connection closes, so an uninstall confirmed against these Sessions ends no other.
     /// Account-local connections only.
     Sessions { fence: bool },
+    /// A journaled Pane or Tab close that requires idle Sessions without binding control grants.
+    /// The confirmation carries the empty control list written in the Original Operation.
+    CloseIfIdle {
+        sequence: u64,
+        target: crate::hierarchy::CloseTarget,
+        confirmation: crate::hierarchy::CloseConfirmation,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

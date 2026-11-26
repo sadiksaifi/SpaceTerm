@@ -623,6 +623,88 @@ fn a_claim_past_the_channel_bound_is_refused_and_the_connection_continues() {
     drop(channels);
 }
 
+#[test]
+fn an_idle_close_requires_its_work_1_5_request_with_the_idle_marker() {
+    use crate::hierarchy::{CloseConfirmation, CloseTarget, ConfirmedPane, Mutation};
+    use crate::protocol::frame::{Assembler, encode_client};
+    use crate::protocol::version::ProtocolVersion;
+    use crate::protocol::{ClientMessage, CoreMessage, RawFrame, Request};
+
+    let pane = [3; 32];
+    let target = CloseTarget::Pane {
+        workspace: [1; 32],
+        tab: [2; 32],
+        pane,
+    };
+    let explicit = CloseConfirmation {
+        boot: [4; 32],
+        panes: vec![ConfirmedPane {
+            id: pane,
+            session: Some([5; 32]),
+        }],
+        removes_tab: false,
+        removes_workspace: false,
+        own_controls: None,
+    };
+    let idle = CloseConfirmation {
+        own_controls: Some(Vec::new()),
+        ..explicit.clone()
+    };
+    let idle_close = Operation::CloseIfIdle {
+        sequence: 1,
+        target,
+        confirmation: idle.clone(),
+    };
+    for (minor, operation, admitted) in [
+        (4, idle_close.clone(), false),
+        (
+            5,
+            Operation::Mutate {
+                sequence: 1,
+                mutation: Mutation::Close {
+                    target,
+                    confirmation: idle,
+                },
+            },
+            false,
+        ),
+        (
+            5,
+            Operation::CloseIfIdle {
+                sequence: 1,
+                target,
+                confirmation: explicit,
+            },
+            false,
+        ),
+        (5, idle_close, true),
+    ] {
+        let mut harness = Harness::selecting(None, ProtocolVersion { major: 1, minor });
+        let id = RequestId(1);
+        let message = ClientMessage::Request(Box::new(Request { id, operation }));
+        let frame = encode_client(&message).unwrap().frames.remove(0);
+        let inbound = harness
+            .connection
+            .receive(RawFrame::parse(&frame).unwrap(), Instant::now())
+            .unwrap();
+        if admitted {
+            assert!(
+                matches!(inbound, Some(super::admitted::Inbound::Request(request)) if request.id == id && matches!(request.operation, Operation::CloseIfIdle { .. }))
+            );
+        } else {
+            assert!(inbound.is_none());
+            let (frame, _) = harness.connection.outbox().next_frame().unwrap();
+            let reply = Assembler::default()
+                .core(RawFrame::parse(&frame).unwrap())
+                .unwrap();
+            assert!(
+                matches!(reply, Some(CoreMessage::Reply(reply)) if reply.id == id && matches!(reply.result, Err(Refusal::Unsupported)))
+            );
+            assert!(!harness.connection.outbox().is_closing());
+        }
+    }
+}
+
 /// A background start that arrives on a connection whose admission selected work 1.3 is refused
 /// before its channel opens or the service sees it. The connection continues, and the same
 /// channel number stays available. Work 1.4 admits it.

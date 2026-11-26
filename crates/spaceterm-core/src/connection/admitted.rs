@@ -104,6 +104,19 @@ impl AdmittedConnection {
                     self.outbox.reply(request.id, Err(Refusal::Unsupported))?;
                     return Ok(None);
                 }
+                let idle_close_supported = match &request.operation {
+                    Operation::CloseIfIdle { confirmation, .. } => {
+                        let (_, since) =
+                            crate::protocol::capability::Capability::CloseIfIdle.since();
+                        self.outbox.work() >= since && confirmation.is_close_if_idle()
+                    }
+                    Operation::Mutate { mutation, .. } => !mutation.is_close_if_idle(),
+                    _ => true,
+                };
+                if !idle_close_supported {
+                    self.outbox.reply(request.id, Err(Refusal::Unsupported))?;
+                    return Ok(None);
+                }
                 if let Some(channel) = introduced(&request.operation) {
                     if channel.0 <= self.highest_channel {
                         return Err(Fatal::ProtocolViolation);

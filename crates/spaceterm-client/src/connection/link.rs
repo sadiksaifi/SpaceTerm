@@ -45,6 +45,9 @@ pub enum LinkError {
     /// The link stays usable. The message exceeded a protocol bound and was not sent.
     #[error("the message exceeds a protocol bound")]
     OutOfBounds,
+    /// The request requires a later work protocol. The link stays usable.
+    #[error("the request is unsupported by the selected work protocol")]
+    Unsupported,
     /// The link stays usable. The channel was not claimed, was claimed twice, or has ended.
     #[error("the channel is not claimed")]
     Unclaimed,
@@ -67,7 +70,7 @@ impl From<LinkError> for crate::CoreError {
             // The link stays usable; a brief stall is worth a retry.
             LinkError::Busy => Self::Protocol,
             LinkError::Unclaimed => Self::StaleControl,
-            LinkError::OutOfBounds => Self::Unsupported,
+            LinkError::OutOfBounds | LinkError::Unsupported => Self::Unsupported,
             LinkError::Closed
             | LinkError::Unresponsive
             | LinkError::Stalled
@@ -84,6 +87,13 @@ impl From<RequestError> for crate::CoreError {
             RequestError::Link(error) => error.into(),
         }
     }
+}
+
+pub(crate) fn supports_close_if_idle(
+    work: Option<crate::protocol::version::ProtocolVersion>,
+) -> bool {
+    let (_, since) = crate::protocol::capability::Capability::CloseIfIdle.since();
+    work.is_some_and(|work| work >= since)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -745,6 +755,25 @@ impl State {
         operation: Operation,
         waiter: Waiter,
     ) -> Result<RequestId, LinkError> {
+        let operation = match operation {
+            Operation::Mutate {
+                sequence,
+                mutation:
+                    crate::hierarchy::Mutation::Close {
+                        target,
+                        confirmation,
+                    },
+            } if confirmation.is_close_if_idle() => Operation::CloseIfIdle {
+                sequence,
+                target,
+                confirmation,
+            },
+            operation => operation,
+        };
+        if matches!(operation, Operation::CloseIfIdle { .. }) && !supports_close_if_idle(self.work)
+        {
+            return Err(LinkError::Unsupported);
+        }
         if self.requests.len() >= limits::MAX_REQUESTS_IN_FLIGHT {
             return Err(LinkError::Busy);
         }

@@ -5,7 +5,7 @@ pub use journal::{ClientJournal, ClientOperation, JournalStore};
 
 use crate::{
     CoreError, PairedMachine, WaitLimit,
-    connection::link::{CoreLink, LinkError, RequestError},
+    connection::link::{CoreLink, LinkError, RequestError, supports_close_if_idle},
     hierarchy::{Mutation, Outcome, RetainedOutcome},
     protocol::{InventoryRevision, Operation, Refusal, ReplyBody},
 };
@@ -244,6 +244,9 @@ impl WorkspaceEditor {
         let fresh = self.journal.last().is_some();
         let (link, inventory) = self.reconciled_link(&wait, fresh)?;
         check_wait(&wait, EditError::Deadline)?;
+        if mutation.is_close_if_idle() && !supports_close_if_idle(link.work()) {
+            return Err(CoreError::Unsupported.into());
+        }
         self.journal.submit(inventory.next_sequence, mutation)?;
         let result = self.dispatch(&link, &wait, fresh);
         if matches!(result, Err(EditError::Deadline)) {
@@ -537,6 +540,93 @@ mod tests {
                 .err(),
             Some(DirectError::Transport)
         );
+    }
+
+    #[test]
+    fn idle_close_requires_work_1_5_before_journaling_and_retires_the_exact_outcome() {
+        use crate::hierarchy::{CloseConfirmation, CloseTarget, ConfirmedPane};
+        use crate::protocol::version::ProtocolVersion;
+
+        let pane = [3; 32];
+        let target = CloseTarget::Pane {
+            workspace: [1; 32],
+            tab: [2; 32],
+            pane,
+        };
+        let mutation = Mutation::close_if_idle(
+            target,
+            CloseConfirmation {
+                boot: [4; 32],
+                panes: vec![ConfirmedPane {
+                    id: pane,
+                    session: None,
+                }],
+                removes_tab: false,
+                removes_workspace: false,
+                own_controls: None,
+            },
+        );
+        for minor in [4, 5] {
+            let machine = machine(NoConnector);
+            let (link, wake) = link(&machine);
+            link.select_work(ProtocolVersion { major: 1, minor });
+            inventory(&link);
+            let mut editor = machine
+                .workspace_edits(Box::<JournalBytes>::default())
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            if minor == 4 {
+                assert_eq!(
+                    editor.submit(mutation.clone(), deadline),
+                    Err(EditError::Core(CoreError::Unsupported))
+                );
+                assert!(editor.journal().pending().is_none());
+                assert!(link.next_frame().is_none());
+                continue;
+            }
+            let outcome = RetainedOutcome {
+                sequence: 1,
+                mutation: mutation.clone(),
+                outcome: Outcome::Accepted { target: pane },
+            };
+            std::thread::scope(|scope| {
+                let expected = &outcome;
+                scope.spawn(move || {
+                    let ClientMessage::Request(request) = sent(&link, &wake) else {
+                        panic!("expected a request")
+                    };
+                    let Operation::CloseIfIdle {
+                        sequence,
+                        target: asked,
+                        confirmation,
+                    } = request.operation
+                    else {
+                        panic!("expected CloseIfIdle")
+                    };
+                    assert_eq!(asked, target);
+                    assert_eq!(sequence, expected.sequence);
+                    assert_eq!(
+                        Mutation::Close {
+                            target: asked,
+                            confirmation
+                        },
+                        expected.mutation
+                    );
+                    receive(
+                        &link,
+                        CoreMessage::Reply(Box::new(Reply {
+                            id: request.id,
+                            result: Ok(ReplyBody::Outcome(expected.clone())),
+                        })),
+                    );
+                });
+                assert_eq!(
+                    editor.submit(mutation.clone(), deadline),
+                    Ok(outcome.clone())
+                );
+            });
+            assert_eq!(editor.journal().last(), Some(&outcome));
+        }
     }
 
     #[test]

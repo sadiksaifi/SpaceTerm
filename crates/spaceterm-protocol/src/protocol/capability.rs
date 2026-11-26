@@ -22,11 +22,13 @@ pub enum Capability {
     MovePaneToTab,
     /// Work: merge a Tab back into another Tab as a Pane.
     MergeTab,
+    /// Work: close an idle Pane or Tab independently of its control grants.
+    CloseIfIdle,
 }
 
 impl Capability {
     /// Every capability, in declaration order.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::UpdateFacts,
         Self::Install,
         Self::Restart,
@@ -34,6 +36,7 @@ impl Capability {
         Self::SwapPanes,
         Self::MovePaneToTab,
         Self::MergeTab,
+        Self::CloseIfIdle,
     ];
 
     /// The lane that carries it and the first version that has it.
@@ -44,6 +47,7 @@ impl Capability {
                 (Lane::Work, V1_0)
             }
             Self::Install | Self::Restart | Self::Uninstall => (Lane::Service, V1_0),
+            Self::CloseIfIdle => (Lane::Work, ProtocolVersion { major: 1, minor: 5 }),
         }
     }
 }
