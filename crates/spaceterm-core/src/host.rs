@@ -368,7 +368,10 @@ impl PaneService for HostService {
                 self.inner.sessions(),
             )));
         }
-        if matches!(operation, Operation::Claim(_) | Operation::Mutate { .. }) {
+        if matches!(
+            operation,
+            Operation::Claim(_) | Operation::Mutate { .. } | Operation::CloseIfIdle { .. }
+        ) {
             self.requested.store(true, Ordering::Release);
         }
         if (self.fence.load(Ordering::Acquire) || self.uninstalling.is_some())
@@ -3738,6 +3741,44 @@ mod idle_restart_tests {
         assert_eq!(world.delivered.load(Ordering::SeqCst), 1);
         assert_eq!(world.grant([5; 32], [6; 32]), Err(CoreError::Changed));
         assert!(!world.lane.idle_granted());
+    }
+    #[test]
+    fn an_idle_close_after_the_lease_refuses_the_final_stop_grant() {
+        use crate::hierarchy::{CloseConfirmation, CloseTarget, ConfirmedPane};
+
+        let world = World::with_native(crate::protocol::version::WORK.minor, true, true, false);
+        world.lease().unwrap();
+        let pane = [9; 32];
+        // This Pane has no Session, so closing it leaves the leased Session set intact.
+        let close = Operation::CloseIfIdle {
+            sequence: 1,
+            target: CloseTarget::Pane {
+                workspace: [7; 32],
+                tab: [8; 32],
+                pane,
+            },
+            confirmation: CloseConfirmation {
+                boot: [6; 32],
+                panes: vec![ConfirmedPane {
+                    id: pane,
+                    session: None,
+                }],
+                removes_tab: false,
+                removes_workspace: false,
+                own_controls: Some(Vec::new()),
+            },
+        };
+        let dispatch = world
+            .lane
+            .panes
+            .lock()
+            .unwrap()
+            .request(&world.peer, RequestId(1), close);
+        assert!(matches!(
+            dispatch,
+            Dispatch::Reply(result) if matches!(*result, Ok(crate::protocol::ReplyBody::Done))
+        ));
+        assert_eq!(world.grant([5; 32], [6; 32]), Err(CoreError::Changed));
     }
     #[test]
     fn input_after_the_grant_gets_a_typed_restarting_refusal_and_no_delivery() {
