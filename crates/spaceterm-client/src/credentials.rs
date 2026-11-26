@@ -22,6 +22,7 @@ pub trait CredentialStore: Send + Sync {
 
     fn insert(&self, key: &[u8; 32], secret: &[u8]) -> Result<(), CredentialError>;
 
+    /// Removes the item if present. An absent item counts as success.
     fn remove(&self, key: &[u8; 32], interaction: Interaction) -> Result<(), CredentialError>;
 }
 

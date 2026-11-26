@@ -618,7 +618,7 @@ fn retained_fixture_routes(
     (connections, ids, CredentialLock(credentials), records)
 }
 
-fn await_condition(mut condition: impl FnMut() -> bool) {
+pub(super) fn await_condition(mut condition: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !condition() {
         assert!(
