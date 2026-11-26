@@ -38,6 +38,10 @@ pub trait Carrier: Send {
     fn offer(&mut self, frame: &[u8], priority: Priority) -> Result<Offer, CarrierError>;
     /// Writes buffered bytes without blocking.
     fn flush(&mut self) -> Result<Flush, CarrierError>;
+    /// Whether bulk bytes can still leave this carrier after a flush reports no pending frames.
+    fn bulk_may_retransmit(&self) -> bool {
+        false
+    }
     /// The next whole frame, if one arrived. `Ok(None)` means wait for readiness.
     fn receive(&mut self) -> Result<Option<RawFrame>, CarrierError>;
     /// The descriptors the I/O thread waits on before calling the carrier again.

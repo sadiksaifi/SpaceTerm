@@ -27,14 +27,27 @@ impl WorkspaceHost {
     pub(super) fn subscribe(&mut self, device: Id, connection: Id, outbox: Outbox) {
         self.repositories.subscribe(connection);
         self.publication.subscribe(device, connection, outbox);
+        self.reconcile_close_activity_demand();
         self.publish();
     }
 
     /// Forgets a closed connection and the replies it can no longer receive.
     pub(super) fn unsubscribe(&mut self, connection: Id) {
         self.publication.unsubscribe(connection);
+        self.reconcile_close_activity_demand();
         self.waiting
             .retain(|waiting| waiting.connection != connection);
+    }
+
+    fn reconcile_close_activity_demand(&mut self) {
+        let enabled = self.publication.wants_pane_activity();
+        if self.prototype.close_activity_demand == enabled {
+            return;
+        }
+        self.prototype.set_close_activity_demand(enabled);
+        for host in self.panes.values_mut() {
+            host.set_close_activity_demand(enabled);
+        }
     }
 
     /// Stages the current inventory for every connection that has not received it. It is pushed

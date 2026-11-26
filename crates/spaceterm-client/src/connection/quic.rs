@@ -1601,6 +1601,16 @@ impl QuicCarrier {
 /// Stream bytes read at once.
 const READ_CHUNK: usize = 64 * 1024;
 
+impl Drop for QuicCarrier {
+    fn drop(&mut self) {
+        if !self.client {
+            // The driver's close can leave after a server aborts a transfer. A packet built
+            // before the abort can still hold stream data, so the close must not retry it.
+            self.driver.state.stashed = None;
+        }
+    }
+}
+
 impl Carrier for QuicCarrier {
     fn offer(&mut self, frame: &[u8], priority: Priority) -> Result<Offer, CarrierError> {
         if self.closing {
@@ -1685,6 +1695,12 @@ impl Carrier for QuicCarrier {
             return Err(error);
         }
         Ok(None)
+    }
+
+    fn bulk_may_retransmit(&self) -> bool {
+        // QUIC can pace or retransmit stream bytes after taking every frame from our queue.
+        // This transport does not report acknowledgements for ranges of an open stream.
+        !self.client
     }
 
     fn readiness(&self) -> Readiness {

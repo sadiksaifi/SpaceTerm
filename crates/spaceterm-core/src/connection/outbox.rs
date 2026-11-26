@@ -129,7 +129,8 @@ struct State {
     previews: BTreeMap<RequestId, Arc<()>>,
     /// The in-progress L2 message is a preview, including a frame held by the I/O loop.
     writing_preview: bool,
-    /// The carrier accepted preview bytes and has not finished flushing its buffers.
+    /// The carrier can still send preview bytes. QUIC does not expose acknowledgements for bytes
+    /// on an open stream, so its first offered preview keeps this set until the connection ends.
     buffered_preview: bool,
     /// A partially sent preview cannot be replaced by a refusal on the same stream.
     aborted: bool,

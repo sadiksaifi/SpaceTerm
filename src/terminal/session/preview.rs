@@ -10,7 +10,7 @@ const MAX_PREVIEW_WAIT: Duration = Duration::from_secs(1);
 
 pub(crate) enum PreviewCapture {
     Live(Option<Box<PreviewGrid>>),
-    Ended(Option<Arc<ScreenSnapshot>>),
+    Ended,
 }
 
 pub(super) struct PreviewRead {
@@ -33,7 +33,7 @@ impl TerminalRuntime {
             deadline: Instant::now() + MAX_PREVIEW_WAIT,
         };
         if let Some(commands) = &self.commands {
-            // A worker that stops before reading drops this request and settles its fallback.
+            // A worker that stops before reading drops this request and returns its status.
             let _ = commands.send(Command::ReadPreview(read));
         }
         Ok(())
@@ -68,7 +68,7 @@ impl TerminalWorker {
 impl PreviewRead {
     fn finish(mut self, grid: Option<PreviewGrid>) {
         if let Some(answer) = self.answer.take() {
-            self.events.finish_preview(false);
+            self.events.finish_preview();
             answer(PreviewCapture::Live(grid.map(Box::new)));
         }
     }
@@ -77,7 +77,8 @@ impl PreviewRead {
 impl Drop for PreviewRead {
     fn drop(&mut self) {
         if let Some(answer) = self.answer.take() {
-            answer(PreviewCapture::Ended(self.events.finish_preview(true)));
+            self.events.finish_preview();
+            answer(PreviewCapture::Ended);
         }
     }
 }

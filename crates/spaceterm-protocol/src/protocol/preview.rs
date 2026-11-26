@@ -30,7 +30,8 @@ pub enum State {
     },
     Ended {
         session: Option<Id>,
-        /// The last screen kept by the running Machine, if it kept one.
+        /// The last screen kept by the Machine, if any. An unsuccessful shell exit or End All
+        /// Sessions discards the screen.
         screen: Option<Screen>,
     },
 }

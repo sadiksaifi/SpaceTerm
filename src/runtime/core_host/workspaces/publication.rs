@@ -9,6 +9,7 @@ use super::journal::{Journal, Revision};
 use spaceterm_core::connection::outbox::Outbox;
 use spaceterm_core::hierarchy::Inventory;
 use spaceterm_core::protocol::InventoryRevision;
+use spaceterm_core::protocol::capability::Capability;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Mutex, MutexGuard};
 
@@ -56,6 +57,14 @@ impl Publication {
 
     pub(super) fn unsubscribe(&self, connection: Id) {
         self.state().subscribers.remove(&connection);
+    }
+
+    pub(super) fn wants_pane_activity(&self) -> bool {
+        let (_, since) = Capability::PaneActivity.since();
+        self.state()
+            .subscribers
+            .values()
+            .any(|subscriber| subscriber.outbox.work() >= since)
     }
 
     /// The clients with a subscribed connection.

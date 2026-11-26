@@ -997,6 +997,12 @@ impl TerminalRuntime {
         }
     }
 
+    pub(crate) fn set_close_activity_demand(&self, enabled: bool) {
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::SetCloseActivityDemand(enabled));
+        }
+    }
+
     pub fn update_appearance(&self, update: TerminalAppearanceUpdate) {
         let Some(commands) = &self.commands else {
             return;
@@ -1122,6 +1128,7 @@ enum Command {
     /// A hidden Terminal Session reports metadata that changed while it was paced.
     PublishMetadata,
     PublishCloseActivity,
+    SetCloseActivityDemand(bool),
     PublishPendingScreen,
     MetadataStatusTick,
     GraphicsAnimationTick,
@@ -1207,6 +1214,7 @@ impl Command {
             Self::PasteConfirmationExpired
             | Self::PublishMetadata
             | Self::PublishCloseActivity
+            | Self::SetCloseActivityDemand(..)
             | Self::PublishPendingScreen
             | Self::MetadataStatusTick
             | Self::GraphicsAnimationTick
@@ -1247,6 +1255,7 @@ impl fmt::Debug for Command {
             Self::PublishAccessibility => "PublishAccessibility",
             Self::PublishMetadata => "PublishMetadata",
             Self::PublishCloseActivity => "PublishCloseActivity",
+            Self::SetCloseActivityDemand(..) => "SetCloseActivityDemand",
             Self::PublishPendingScreen => "PublishPendingScreen",
             Self::MetadataStatusTick => "MetadataStatusTick",
             Self::GraphicsAnimationTick => "GraphicsAnimationTick",
@@ -1902,8 +1911,17 @@ impl TerminalWorker {
             Command::PublishAccessibility => self.publish_accessibility(true),
             Command::PublishMetadata => self.publish_metadata_changed(),
             Command::PublishCloseActivity => {
-                if self.events.publish_close_activity() {
-                    self.schedules.refresh_close_activity(self.schedules.now());
+                self.events.publish_close_activity();
+                self.schedules.refresh_close_activity(self.schedules.now());
+                true
+            }
+            Command::SetCloseActivityDemand(enabled) => {
+                self.schedules.set_close_activity_demand(
+                    enabled && self.events.has_close_probe(),
+                    self.schedules.now(),
+                );
+                if !enabled {
+                    self.events.clear_close_activity();
                 }
                 true
             }
@@ -1979,9 +1997,7 @@ impl TerminalWorker {
         if let Some(state) = self.schedules.update_line(now, mode) {
             self.events.set_line(state);
         }
-        if self.events.has_close_probe() {
-            self.schedules.request_close_activity(now);
-        }
+        self.schedules.request_close_activity(now);
     }
 
     fn line_transition(&mut self) {

@@ -2,13 +2,13 @@
 
 use super::CorePaneHost;
 use super::screen_encoder::preview_rows;
-use crate::terminal::emulator::{PreviewGrid, ScreenSnapshot};
+use crate::terminal::emulator::PreviewGrid;
 use crate::terminal::session::PreviewCapture;
 use spaceterm_core::connection::outbox::{Outbox, PreviewReply};
 use spaceterm_core::connection::service::Dispatch;
 use spaceterm_core::connection::sync::SyncWorker;
 use spaceterm_core::hierarchy::Id;
-use spaceterm_core::protocol::preview::{self, PanePreview, Screen, State};
+use spaceterm_core::protocol::preview::{PanePreview, Screen, State};
 use spaceterm_core::protocol::{Refusal, ReplyBody, RequestId};
 use spaceterm_terminal_client::snapshot::ColorValue;
 use std::sync::{Arc, Mutex};
@@ -99,7 +99,7 @@ pub(super) fn read<'a>(
                 index,
                 Ok(State::Ended {
                     session: dormant.session.map(|target| target.session),
-                    screen: pane.last_preview.clone(),
+                    screen: None,
                 }),
             );
         } else {
@@ -123,9 +123,9 @@ fn captured(session: Id, capture: PreviewCapture) -> State {
             session,
             screen: grid.as_deref().map(current),
         },
-        PreviewCapture::Ended(screen) => State::Ended {
+        PreviewCapture::Ended => State::Ended {
             session: Some(session),
-            screen: screen.as_deref().and_then(published),
+            screen: None,
         },
     }
 }
@@ -146,35 +146,4 @@ fn current(grid: &PreviewGrid) -> Screen {
             &grid.palette,
         ),
     }
-}
-
-pub(super) fn published(screen: &ScreenSnapshot) -> Option<Screen> {
-    let columns = screen.size.cols.min(preview::MAX_COLUMNS);
-    let row_count = screen.size.rows.min(preview::MAX_ROWS);
-    if columns == 0 || row_count == 0 || screen.rows.is_empty() {
-        return None;
-    }
-    Some(Screen {
-        columns,
-        row_count,
-        cropped: columns < screen.size.cols || row_count < screen.size.rows,
-        foreground: screen.colors.foreground.rgb(),
-        background: screen.colors.background.rgb(),
-        reversed: screen.colors.reversed,
-        rows: preview_rows(
-            screen
-                .rows
-                .iter()
-                .take(usize::from(row_count))
-                .enumerate()
-                .map(|(index, row)| {
-                    (
-                        row.as_ref(),
-                        screen.row_soft_wrapped.get(index).copied().unwrap_or(false),
-                    )
-                }),
-            columns,
-            &screen.colors.palette,
-        ),
-    })
 }

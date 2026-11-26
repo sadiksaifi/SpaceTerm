@@ -112,6 +112,16 @@ fn inventory_publishes_a_foreground_program_without_shell_integration() {
 }
 
 #[test]
+fn inventory_observes_a_foreground_program_that_starts_without_terminal_output() {
+    // The shell holds the foreground through the input settle reads. The timed builtin
+    // then hands it to sleep without writing anything to the terminal.
+    check_foreground_without_shell_integration(
+        "read -r -s -t 2 ignored; /bin/sleep 10",
+        Foreground::Program,
+    );
+}
+
+#[test]
 fn inventory_reports_ambiguous_foreground_when_a_job_shares_the_shell_group() {
     check_foreground_without_shell_integration("set +m; /bin/sleep 10", Foreground::Unknown);
 }

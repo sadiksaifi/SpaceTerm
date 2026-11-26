@@ -516,10 +516,10 @@ impl WorkspaceHost {
                 directory_unavailable: false,
                 failed_directory_session: None,
                 dormant: None,
-                last_preview: None,
                 preview_cleared: None,
                 names: Arc::clone(&self.prototype.names),
                 notifier: self.prototype.notifier.clone(),
+                close_activity_demand: self.prototype.close_activity_demand,
                 session_context: self.prototype.session_context.clone(),
             };
             self.panes.insert(id, host);

@@ -1,4 +1,4 @@
-//! A Pane preview stays revocable until its final frame reaches the carrier.
+//! A Pane preview stays revocable while the connection can send more of it.
 
 use super::*;
 use crate::connection::carrier::{Carrier, CarrierError, Flush, Offer};
@@ -118,7 +118,7 @@ impl Outbox {
             return carrier.flush();
         }
         let flushed = carrier.flush()?;
-        state.buffered_preview = flushed.pending;
+        state.buffered_preview = flushed.pending || carrier.bulk_may_retransmit();
         Ok(flushed)
     }
 }

@@ -261,7 +261,16 @@ impl WorkerSchedules {
         self.line.transition(now);
     }
 
+    pub(super) fn set_close_activity_demand(&mut self, enabled: bool, now: Instant) {
+        self.line.activity_demand = enabled;
+        self.line.activity_due = enabled.then_some(now);
+        self.line.activity_not_before = now;
+    }
+
     pub(super) fn request_close_activity(&mut self, now: Instant) {
+        if !self.line.activity_demand {
+            return;
+        }
         let request = now.max(self.line.activity_not_before);
         self.line.activity_due = Some(
             self.line
@@ -271,7 +280,10 @@ impl WorkerSchedules {
     }
 
     pub(super) fn refresh_close_activity(&mut self, now: Instant) {
-        self.line.activity_due = Some(now + CLOSE_ACTIVITY_REFRESH);
+        self.line.activity_due = self
+            .line
+            .activity_demand
+            .then(|| now + CLOSE_ACTIVITY_REFRESH);
     }
 
     pub(super) fn note_line_output(&mut self, now: Instant) {
@@ -627,7 +639,9 @@ struct LineSchedule {
     unread_output: Option<Instant>,
     /// When the latest read happened.
     last_read: Option<Instant>,
-    /// A coalesced close-facts sample, or a recheck of processes that can exit silently.
+    /// A negotiated inventory subscriber needs periodic foreground observations.
+    activity_demand: bool,
+    /// A coalesced activity observation or a recheck for a silent foreground change.
     activity_due: Option<Instant>,
     activity_not_before: Instant,
 }
@@ -640,6 +654,7 @@ impl LineSchedule {
             settle: None,
             unread_output: None,
             last_read: None,
+            activity_demand: false,
             activity_due: None,
             activity_not_before: now,
         }

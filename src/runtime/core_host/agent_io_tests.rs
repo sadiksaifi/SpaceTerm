@@ -772,7 +772,7 @@ const OBSERVER: Peer = Peer {
 };
 
 #[test]
-fn pane_previews_read_hidden_output_and_keep_the_last_ended_screen() {
+fn pane_previews_read_hidden_output_and_discard_it_when_the_shell_fails() {
     use spaceterm_core::connection::link::{CoreLink, LinkError, PendingReply};
     use spaceterm_core::protocol::preview::{PanePreview, State};
     use spaceterm_core::protocol::screen::StyleRef;
@@ -988,19 +988,28 @@ fn pane_previews_read_hidden_output_and_keep_the_last_ended_screen() {
     );
 
     write(&mut served, 5, vec![text("exit 7\r")]);
+    let ended = State::Ended {
+        session: Some(lease.session),
+        screen: None,
+    };
     let until = Instant::now() + DEADLINE;
     loop {
         served.tick(Instant::now());
         let previews = read(&mut served, &agent, &link, vec![pane]);
-        if matches!(&previews[0].state, State::Ended {session: Some(session), screen: Some(screen)} if *session == lease.session && has_output(screen, "PREVIEW-settled"))
-        {
+        if matches!(previews[0].state, State::Ended { .. }) {
+            assert_eq!(previews[0].state, ended);
             break;
         }
-        assert!(Instant::now() < until, "the ended screen remains readable");
+        assert!(
+            Instant::now() < until,
+            "the preview did not report the shell exit"
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
     served.tick(Instant::now());
     assert_eq!(served.host().running_lease(pane), None);
+    let previews = read(&mut served, &agent, &link, vec![pane]);
+    assert_eq!(previews[0].state, ended);
     served.shutdown().unwrap();
 }
 

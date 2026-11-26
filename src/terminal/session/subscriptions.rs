@@ -83,10 +83,9 @@ impl TerminalEventPublisher {
         !std::mem::replace(&mut state.preview_pending, true)
     }
 
-    pub(super) fn finish_preview(&self, fallback: bool) -> Option<Arc<ScreenSnapshot>> {
+    pub(super) fn finish_preview(&self) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         state.preview_pending = false;
-        if fallback { state.screen.clone() } else { None }
     }
 
     pub(super) fn client_effect(&self, request: ClientEffectRequest) {

@@ -325,13 +325,14 @@ pub struct CorePaneHost {
     directory_unavailable: bool,
     failed_directory_session: Option<PaneTarget>,
     dormant: Option<DormantPane>,
-    last_preview: Option<spaceterm_core::protocol::preview::Screen>,
     /// The Session whose output End All Sessions cleared before native cleanup started.
     preview_cleared: Option<[u8; 32]>,
     /// Shared by every Pane of one server, so each names its Controlling Client the same way.
     names: Arc<std::sync::Mutex<control::ClientNames>>,
     /// Makes each started Terminal Session's notifier, which wakes the connections presenting it.
     notifier: Option<dispatch::SessionNotifiers>,
+    /// A negotiated inventory subscriber needs current Pane activity facts.
+    close_activity_demand: bool,
     /// What each started Terminal Session tells the CLI inside it about this server.
     session_context: Option<Arc<CoreSessionContext>>,
 }
@@ -457,6 +458,12 @@ impl CorePaneHost {
             needs_close_review: activity.needs_close_review,
         }
     }
+    fn set_close_activity_demand(&mut self, enabled: bool) {
+        self.close_activity_demand = enabled;
+        if let Some(pane) = self.pane.as_ref().filter(|pane| !pane.ended) {
+            pane.runtime.set_close_activity_demand(enabled);
+        }
+    }
     /// This Pane's running Terminal Session, if one has not ended.
     pub(crate) fn live_session(&self) -> Option<[u8; 32]> {
         self.pane
@@ -478,10 +485,10 @@ impl CorePaneHost {
             directory_unavailable: false,
             failed_directory_session: None,
             dormant: None,
-            last_preview: None,
             preview_cleared: None,
             names: Arc::default(),
             notifier: None,
+            close_activity_demand: false,
             session_context: None,
         })
     }
@@ -517,10 +524,10 @@ impl CorePaneHost {
             directory_unavailable: false,
             failed_directory_session: None,
             dormant: None,
-            last_preview: None,
             preview_cleared: None,
             names: Arc::default(),
             notifier: None,
+            close_activity_demand: false,
             session_context: None,
         })
     }

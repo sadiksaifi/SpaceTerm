@@ -344,6 +344,14 @@ impl TerminalEventPublisher {
             .is_some()
     }
 
+    pub(super) fn clear_close_activity(&self) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .activity
+            .close = CloseActivity::default();
+    }
+
     pub(super) fn note_activity(&self, now: Instant, empty_prompt: bool, progress: PromptProgress) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         state.activity.note(now, empty_prompt, progress);
@@ -425,7 +433,7 @@ impl TerminalEventPublisher {
 
     /// Rechecks foreground work, unanswered input, and live session processes before a close.
     /// Disowned processes can still belong to the terminal session and end with it.
-    fn observe_close_activity(&self, read: CloseActivityRead) -> (CloseActivity, bool) {
+    fn observe_close_activity(&self, read: CloseActivityRead) -> CloseActivity {
         let (probe, prompt, submitted, stopped) = {
             let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
             (
@@ -436,7 +444,7 @@ impl TerminalEventPublisher {
             )
         };
         if stopped {
-            return (CloseActivity::default(), false);
+            return CloseActivity::default();
         }
         let submitted_work = prompt.command_running || submitted;
         let (foreground, native_work) = probe
@@ -444,30 +452,24 @@ impl TerminalEventPublisher {
             .map_or((Foreground::Unknown, false), |probe| {
                 probe.close_activity(prompt.zone == ShellZone::AtPrompt, read)
             });
-        (
-            CloseActivity {
-                foreground,
-                needs_close_review: native_work || submitted_work,
-            },
-            native_work,
-        )
+        CloseActivity {
+            foreground,
+            needs_close_review: native_work || submitted_work,
+        }
     }
 
-    /// Publishes the same facts used by close admission. Return whether currently observed
-    /// processes can make this stale without producing another input or output event.
-    pub(super) fn publish_close_activity(&self) -> bool {
-        let (observed, native_work) = self.observe_close_activity(CloseActivityRead::Inventory);
+    /// Publishes the same facts used by close admission.
+    pub(super) fn publish_close_activity(&self) {
+        let observed = self.observe_close_activity(CloseActivityRead::Inventory);
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if state.activity.close != observed {
             state.activity.close = observed;
             super::subscriptions::notify(state);
         }
-        native_work
     }
 
     pub(super) fn running_work(&self) -> bool {
         self.observe_close_activity(CloseActivityRead::Admission)
-            .0
             .needs_close_review
     }
 }
