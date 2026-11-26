@@ -71,6 +71,12 @@ impl Publication {
             .map(|subscriber| subscriber.outbox.clone())
     }
 
+    pub(super) fn discard_previews(&self) {
+        for subscriber in self.state().subscribers.values() {
+            subscriber.outbox.discard_previews();
+        }
+    }
+
     /// Pushes `staged` now if its revision is already retained, or once a write retains it.
     pub(super) fn stage(&self, staged: Staged, journal: Option<&Journal>) {
         let mut state = self.state();

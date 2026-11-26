@@ -326,6 +326,8 @@ pub struct CorePaneHost {
     failed_directory_session: Option<PaneTarget>,
     dormant: Option<DormantPane>,
     last_preview: Option<spaceterm_core::protocol::preview::Screen>,
+    /// The Session whose output End All Sessions cleared before native cleanup started.
+    preview_cleared: Option<[u8; 32]>,
     /// Shared by every Pane of one server, so each names its Controlling Client the same way.
     names: Arc<std::sync::Mutex<control::ClientNames>>,
     /// Makes each started Terminal Session's notifier, which wakes the connections presenting it.
@@ -477,6 +479,7 @@ impl CorePaneHost {
             failed_directory_session: None,
             dormant: None,
             last_preview: None,
+            preview_cleared: None,
             names: Arc::default(),
             notifier: None,
             session_context: None,
@@ -515,6 +518,7 @@ impl CorePaneHost {
             failed_directory_session: None,
             dormant: None,
             last_preview: None,
+            preview_cleared: None,
             names: Arc::default(),
             notifier: None,
             session_context: None,

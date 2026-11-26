@@ -18,9 +18,9 @@ use spaceterm_core::pane::LineMode;
 use thiserror::Error;
 
 use crate::platform::native_pty::{
-    NativePtyAdapter, NativePtyAdapterConstructionFailure, NativePtyAdapterFactory,
-    NativePtyAdapterParts, NativePtyExit, NativePtyOperationFailure, NativePtySize,
-    NativePtyTermination, NativePtyWaitFailure, SessionProbe,
+    CloseActivityRead, NativePtyAdapter, NativePtyAdapterConstructionFailure,
+    NativePtyAdapterFactory, NativePtyAdapterParts, NativePtyExit, NativePtyOperationFailure,
+    NativePtySize, NativePtyTermination, NativePtyWaitFailure, SessionProbe,
 };
 use crate::platform::shell_launch::PreparedShellLaunch;
 mod freeze;
@@ -215,6 +215,11 @@ pub(super) trait UnixPtyHost: Send + Sync + 'static {
         self.process_ids()
     }
 
+    /// Candidate IDs for a published observation. The caller must re-read each identity.
+    fn inventory_session_candidates(&self, leader: i32) -> io::Result<Arc<[i32]>> {
+        self.session_candidates(leader).map(Arc::from)
+    }
+
     /// Whether this process's initial environment identifies it as the owning shell's
     /// prompt helper. A missing or unreadable environment supplies no such evidence.
     fn prompt_helper(&self, _process: i32, _marker: &[u8]) -> bool {
@@ -223,6 +228,52 @@ pub(super) trait UnixPtyHost: Send + Sync + 'static {
 
     fn master_read_error(&self, error: &io::Error) -> MasterReadError;
 }
+
+struct ProcessSessionSample {
+    expires: Instant,
+    sessions: Option<BTreeMap<i32, Arc<[i32]>>>,
+}
+
+/// One short-lived process-to-session index for the Machine's inventory workers. Even with many
+/// hidden Panes rechecking work, only one worker enumerates the process population per interval.
+pub(super) fn sample_session_candidates(
+    leader: i32,
+    process_ids: impl FnOnce() -> io::Result<Vec<i32>>,
+    process_session: impl Fn(i32) -> io::Result<Option<i32>>,
+) -> io::Result<Arc<[i32]>> {
+    static SAMPLE: Mutex<Option<ProcessSessionSample>> = Mutex::new(None);
+    let mut sample = SAMPLE.lock().unwrap_or_else(|e| e.into_inner());
+    if sample
+        .as_ref()
+        .is_none_or(|sample| Instant::now() >= sample.expires)
+    {
+        let sessions = (|| {
+            let mut sessions = BTreeMap::<_, Vec<_>>::new();
+            for process in process_ids().ok()? {
+                if let Some(session) = process_session(process).ok()? {
+                    sessions.entry(session).or_default().push(process);
+                }
+            }
+            Some(
+                sessions
+                    .into_iter()
+                    .map(|(session, pids)| (session, Arc::from(pids)))
+                    .collect(),
+            )
+        })();
+        *sample = Some(ProcessSessionSample {
+            expires: Instant::now() + Duration::from_millis(200),
+            sessions,
+        });
+    }
+    sample
+        .as_ref()
+        .and_then(|sample| sample.sessions.as_ref())
+        // A new Session can postdate the sample. There is no negative observation for it yet.
+        .and_then(|sessions| sessions.get(&leader).cloned())
+        .ok_or_else(|| io::Error::other("process membership is unresolved"))
+}
+
 pub(super) trait SlaveFence: Send + Sync {
     /// This snapshot must not retain the permission owner: timeout cleanup can restore the
     /// node even while its validation is stalled in a native query.
@@ -591,7 +642,7 @@ impl SessionProbe for ShellSession {
         Ok(foreground == self.session.leader.process)
     }
 
-    fn close_activity(&self, at_prompt: bool) -> (Foreground, bool) {
+    fn close_activity(&self, at_prompt: bool, read: CloseActivityRead) -> (Foreground, bool) {
         let shell_group = match self.shell_foreground() {
             Ok(false) => return (Foreground::Program, true),
             Ok(true) => true,
@@ -616,7 +667,7 @@ impl SessionProbe for ShellSession {
             .filter(|_| at_prompt && shell_group);
         let mut shared_foreground = false;
         let mut work = false;
-        let complete = self.any_session_member(|member| {
+        let complete = self.any_session_member(read, |member| {
             shared_foreground |= member.process_group == self.session.leader.process;
             if !work {
                 work = !marker.is_some_and(|marker| self.is_prompt_helper(member, marker));
@@ -638,7 +689,7 @@ impl SessionProbe for ShellSession {
     }
 
     fn others(&self) -> io::Result<bool> {
-        self.any_session_member(|_| true)
+        self.any_session_member(CloseActivityRead::Admission, |_| true)
     }
 }
 
@@ -655,6 +706,7 @@ impl ShellSession {
     /// process that could not be read is an error, never a process that is not there.
     fn any_session_member(
         &self,
+        read: CloseActivityRead,
         mut matches: impl FnMut(ProcessObservation) -> bool,
     ) -> io::Result<bool> {
         let leader = self
@@ -664,7 +716,12 @@ impl ShellSession {
         if leader.identity != self.session.leader || leader.session != self.session.session {
             return Err(io::Error::other("shell process ownership is unresolved"));
         }
-        for process in self.host.session_candidates(self.session.session)? {
+        let session = self.session.session;
+        let candidates = match read {
+            CloseActivityRead::Inventory => self.host.inventory_session_candidates(session)?,
+            CloseActivityRead::Admission => Arc::from(self.host.session_candidates(session)?),
+        };
+        for &process in candidates.iter() {
             if process < 1 || process == self.session.leader.process {
                 continue;
             }

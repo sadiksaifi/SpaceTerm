@@ -4,8 +4,9 @@ use super::CorePaneHost;
 use super::screen_encoder::preview_rows;
 use crate::terminal::emulator::{PreviewGrid, ScreenSnapshot};
 use crate::terminal::session::PreviewCapture;
-use spaceterm_core::connection::outbox::Outbox;
+use spaceterm_core::connection::outbox::{Outbox, PreviewReply};
 use spaceterm_core::connection::service::Dispatch;
+use spaceterm_core::connection::sync::SyncWorker;
 use spaceterm_core::hierarchy::Id;
 use spaceterm_core::protocol::preview::{self, PanePreview, Screen, State};
 use spaceterm_core::protocol::{Refusal, ReplyBody, RequestId};
@@ -20,8 +21,7 @@ pub(super) enum Source<'a> {
 
 /// A reply is owed even when some of the Panes' workers end before handling the read.
 struct Batch {
-    outbox: Outbox,
-    request: RequestId,
+    reply: PreviewReply,
     panes: Vec<Id>,
     states: Mutex<Vec<Result<State, Refusal>>>,
 }
@@ -41,9 +41,7 @@ impl Batch {
     }
 
     fn send(self) {
-        let outbox = self.outbox.clone();
-        let request = self.request;
-        let _ = outbox.reply_or_refuse(request, self.result());
+        self.reply.clone().send(self.result());
     }
 }
 
@@ -52,10 +50,13 @@ pub(super) fn read<'a>(
     source: impl Fn(Id) -> Source<'a>,
     request: RequestId,
     outbox: &Outbox,
+    sync: &SyncWorker,
 ) -> Dispatch {
+    let Ok(reply) = outbox.preview_reply(request) else {
+        return Dispatch::reply(Err(Refusal::Failed));
+    };
     let batch = Arc::new(Batch {
-        outbox: outbox.clone(),
-        request,
+        reply,
         states: Mutex::new(vec![Err(Refusal::Failed); panes.len()]),
         panes,
     });
@@ -71,7 +72,15 @@ pub(super) fn read<'a>(
             }
             Source::Pane(pane) => pane,
         };
-        if let Some(live) = &pane.pane {
+        if let Some(session) = pane.preview_cleared {
+            batch.record(
+                index,
+                Ok(State::Ended {
+                    session: Some(session),
+                    screen: None,
+                }),
+            );
+        } else if let Some(live) = &pane.pane {
             let session = live.lease.session;
             let result = live.runtime.read_preview({
                 let batch = Arc::clone(&batch);
@@ -99,10 +108,13 @@ pub(super) fn read<'a>(
     }
     // The last owner replies. If everything settled immediately, the sync worker encodes it
     // without holding the service lock. Otherwise the last terminal worker replies.
-    match Arc::into_inner(batch) {
-        Some(batch) => Dispatch::After(Box::new(move || batch.result())),
-        None => Dispatch::Deferred,
+    if let Some(batch) = Arc::into_inner(batch) {
+        let reply = batch.reply.clone();
+        if sync.submit(move || batch.send()).is_err() {
+            reply.send(Err(Refusal::Failed));
+        }
     }
+    Dispatch::Deferred
 }
 
 fn captured(session: Id, capture: PreviewCapture) -> State {

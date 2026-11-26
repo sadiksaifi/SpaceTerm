@@ -10,7 +10,7 @@ use crate::{
 };
 use spaceterm_core::{
     connection::link::{CoreLink, Health},
-    hierarchy::{Inventory, Mutation},
+    hierarchy::{ConfirmedPane, Inventory, Mutation},
     labels,
 };
 use std::time::{Duration, Instant, SystemTime};
@@ -114,13 +114,18 @@ pub(crate) fn execute(
     now: SystemTime,
 ) -> Result<Reply, Failure> {
     let confirmation = inventory.close.as_ref().ok_or(Code::Changed)?;
-    let observation = postcard::to_allocvec(&(
-        journal.machine_id(),
-        journal.client_id(),
-        confirmation.boot,
-        &confirmation.sessions,
-    ))
-    .map_err(|_| Failure::new(Code::ProtocolError))?;
+    let observation = |sessions: &[ConfirmedPane]| {
+        postcard::to_allocvec(&(
+            journal.machine_id(),
+            journal.client_id(),
+            confirmation.boot,
+            sessions,
+        ))
+        .map_err(|_| Failure::new(Code::ProtocolError))
+    };
+    let mut canonical = confirmation.sessions.clone();
+    canonical.sort_unstable_by_key(|pane| pane.id);
+    let encoded = observation(&canonical)?;
     let mut sessions = Vec::new();
     for reviewed in &confirmation.sessions {
         let Some(session) = reviewed.session else {
@@ -140,7 +145,13 @@ pub(crate) fn execute(
         });
     }
     if let Some(given) = given {
-        offline_token::verify(PURPOSE, &observation, given, now)?;
+        if let Err(error) = offline_token::verify(PURPOSE, &encoded, given, now) {
+            if canonical == confirmation.sessions {
+                return Err(error);
+            }
+            // An already-issued token can still match the same observation in display order.
+            offline_token::verify(PURPOSE, &observation(&confirmation.sessions)?, given, now)?;
+        }
         contract::from_outcome(&journal.submit(Mutation::EndAllSessions {
             confirmation: confirmation.clone(),
         })?)?;
@@ -150,8 +161,7 @@ pub(crate) fn execute(
             text,
         ));
     }
-    let offline_token::Issued { token, expires_at } =
-        offline_token::issue(PURPOSE, &observation, now);
+    let offline_token::Issued { token, expires_at } = offline_token::issue(PURPOSE, &encoded, now);
     let mut text = format!(
         "End {} Terminal Sessions on this machine? Terminal output and Scrollback will be cleared for every client.\nSpaceTerm Core and saved Workspace, Tab, and Pane organization remain.\n",
         sessions.len(),

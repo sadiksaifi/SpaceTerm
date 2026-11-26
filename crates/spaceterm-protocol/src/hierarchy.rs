@@ -313,22 +313,53 @@ impl Workspace {
     /// A refusal changes nothing: `Outcome::Missing` when `tab` does not hold `pane`, and
     /// `Outcome::Invalid` when `pane` is the only Pane of `tab`.
     pub fn move_pane_to_new_tab(&mut self, tab: Id, pane: Id, id: Id) -> Result<(), Outcome> {
+        self.move_pane_to_new_tab_before(tab, pane, id, None)
+    }
+
+    /// Creates the Tab before its surviving landing Tab in the same Worktree, or appends it
+    /// when there is no landing Tab. Checks placement before removing the Pane.
+    pub fn move_pane_to_new_tab_before(
+        &mut self,
+        tab: Id,
+        pane: Id,
+        id: Id,
+        before: Option<Id>,
+    ) -> Result<(), Outcome> {
         let source = self
             .tabs
             .iter()
             .find(|t| t.id == tab)
             .ok_or(Outcome::Missing)?;
+        let index = if let Some(before) = before {
+            let (index, anchor) = self
+                .tabs
+                .iter()
+                .enumerate()
+                .find(|(_, tab)| tab.id == before)
+                .ok_or(Outcome::Missing)?;
+            if anchor.worktree != source.worktree
+                || anchor.worktree_repository != source.worktree_repository
+            {
+                return Err(Outcome::Invalid);
+            }
+            index
+        } else {
+            self.tabs.len()
+        };
         let (worktree, worktree_repository) =
             (source.worktree.clone(), source.worktree_repository.clone());
         let moved = self.take_pane(tab, pane)?;
-        self.tabs.push(Tab {
-            worktree_membership: WorktreeMembership::Following,
-            worktree,
-            worktree_repository,
-            id,
-            root_pane: pane,
-            panes: vec![moved],
-        });
+        self.tabs.insert(
+            index,
+            Tab {
+                worktree_membership: WorktreeMembership::Following,
+                worktree,
+                worktree_repository,
+                id,
+                root_pane: pane,
+                panes: vec![moved],
+            },
+        );
         Ok(())
     }
 
@@ -574,6 +605,21 @@ pub enum PaneDestination {
     NewTab,
     /// The `side` of Pane `pane` in another Tab `tab` of the same Workspace.
     Beside { tab: Id, pane: Id, side: Side },
+    /// A new Tab before this existing Tab in the source Tab's Worktree. Requires work 1.6.
+    NewTabBefore(Id),
+}
+
+impl PaneDestination {
+    pub const fn creates_tab(self) -> bool {
+        matches!(self, Self::NewTab | Self::NewTabBefore(_))
+    }
+
+    pub const fn before(self) -> Option<Id> {
+        match self {
+            Self::NewTabBefore(tab) => Some(tab),
+            _ => None,
+        }
+    }
 }
 /// Who controls work a mutation creates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -699,7 +745,11 @@ impl Mutation {
     pub fn required_capability(&self) -> Option<crate::protocol::capability::Capability> {
         use crate::protocol::capability::Capability;
         match self {
-            Self::ReorderTab { .. } => Some(Capability::ReorderTab),
+            Self::ReorderTab { .. }
+            | Self::MovePane {
+                destination: PaneDestination::NewTabBefore(_),
+                ..
+            } => Some(Capability::ReorderTab),
             _ if self.is_close_if_idle() => Some(Capability::CloseIfIdle),
             _ => None,
         }

@@ -1870,6 +1870,9 @@ mod core_workspaces {
             use spaceterm_core::hierarchy::PaneDestination;
             let destination = match destination {
                 PaneDestination::NewTab => PaneDestination::NewTab,
+                PaneDestination::NewTabBefore(tab) => {
+                    PaneDestination::NewTabBefore(self.edits.canonical(tab))
+                }
                 PaneDestination::Beside { tab, pane, side } => PaneDestination::Beside {
                     tab: self.edits.canonical(tab),
                     pane: self.edits.canonical(pane),
@@ -2726,7 +2729,7 @@ mod core_workspaces {
                 return WorkspaceCloseState::Missing;
             }
             match inventory.close_confirmation(approval.target) {
-                Some(current) if current == approval.confirmation => WorkspaceCloseState::Current,
+                Some(current) if approval.ends_exactly(&current) => WorkspaceCloseState::Current,
                 _ => WorkspaceCloseState::Changed,
             }
         }
@@ -2750,14 +2753,12 @@ mod core_workspaces {
                         && current.removes_tab == approved.removes_tab
                         && current.removes_workspace == approved.removes_workspace
                         && current.panes.len() == approved.panes.len()
-                        && current
-                            .panes
-                            .iter()
-                            .zip(&approved.panes)
-                            .all(|(now, then)| {
+                        && current.panes.iter().all(|now| {
+                            approved.panes.iter().any(|then| {
                                 now.id == then.id
                                     && (now.session.is_none() || now.session == then.session)
                             })
+                        })
                 });
             if ended_only {
                 approval.scope_changed_title()

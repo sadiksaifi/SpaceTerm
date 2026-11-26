@@ -122,7 +122,12 @@ pub fn confirmed(
     target: CloseTarget,
     confirmation: CloseConfirmation,
 ) -> Result<Mutation, Code> {
-    if snapshot.inventory.close_confirmation(target).as_ref() != Some(&confirmation) {
+    if confirmation.own_controls.is_some()
+        || snapshot
+            .inventory
+            .close_confirmation(target)
+            .is_none_or(|current| !current.same_targets(&confirmation))
+    {
         return Err(Code::Changed);
     }
     Ok(Mutation::Close {
@@ -257,5 +262,20 @@ mod tests {
             confirmed(&snapshot, target, confirmation),
             Err(Code::Changed)
         ));
+    }
+
+    #[test]
+    fn reviewed_workspace_close_survives_tab_reorder() {
+        let mut snapshot = fixture();
+        let facts = live(&mut snapshot);
+        let target = CloseTarget::KillWorkspace { workspace: id(1) };
+        let Review::Confirm { confirmation, .. } =
+            review(&snapshot, target, id(5), &facts).unwrap()
+        else {
+            panic!("expected consent")
+        };
+        assert!(confirmation.panes.len() > 1);
+        snapshot.inventory.workspaces[0].tabs.reverse();
+        assert!(confirmed(&snapshot, target, confirmation).is_ok());
     }
 }

@@ -2305,6 +2305,21 @@ mod close {
         tab: ROOT_TAB,
     };
 
+    #[test]
+    fn a_workspace_close_approval_survives_tab_reorder() {
+        let mut published = with_session(split_beside_second_tab(), SPLIT_PANE, [40; 32]);
+        let (mut binding, edits) = binding(published.clone());
+        let target = CloseTarget::KillWorkspace {
+            workspace: WORKSPACE,
+        };
+        let approval = binding.close_approval(target).unwrap();
+        published.workspaces[0].tabs.reverse();
+        published.revision += 1;
+        edits.set_inventory(published);
+        binding.poll();
+        assert_eq!(binding.close_state(&approval), WorkspaceCloseState::Current);
+    }
+
     fn local_tab() -> LocalCloseTarget {
         LocalCloseTarget::Tab {
             workspace_id: first_workspace_id(),

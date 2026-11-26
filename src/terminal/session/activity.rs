@@ -1,7 +1,7 @@
 //! Observations of work that closing or restarting a Terminal Session would end.
 //! The native reader and host admission stamp activity before worker processing.
 use super::*;
-use crate::platform::native_pty::SessionProbe;
+use crate::platform::native_pty::{CloseActivityRead, SessionProbe};
 use spaceterm_core::hierarchy::Foreground;
 use std::io;
 
@@ -425,7 +425,7 @@ impl TerminalEventPublisher {
 
     /// Rechecks foreground work, unanswered input, and live session processes before a close.
     /// Disowned processes can still belong to the terminal session and end with it.
-    fn observe_close_activity(&self, foreground_required: bool) -> (CloseActivity, bool) {
+    fn observe_close_activity(&self, read: CloseActivityRead) -> (CloseActivity, bool) {
         let (probe, prompt, submitted, stopped) = {
             let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
             (
@@ -440,9 +440,9 @@ impl TerminalEventPublisher {
         }
         let submitted_work = prompt.command_running || submitted;
         let (foreground, native_work) = probe
-            .filter(|_| foreground_required || !submitted_work)
+            .filter(|_| read == CloseActivityRead::Inventory || !submitted_work)
             .map_or((Foreground::Unknown, false), |probe| {
-                probe.close_activity(prompt.zone == ShellZone::AtPrompt)
+                probe.close_activity(prompt.zone == ShellZone::AtPrompt, read)
             });
         (
             CloseActivity {
@@ -456,7 +456,7 @@ impl TerminalEventPublisher {
     /// Publishes the same facts used by close admission. Return whether currently observed
     /// processes can make this stale without producing another input or output event.
     pub(super) fn publish_close_activity(&self) -> bool {
-        let (observed, native_work) = self.observe_close_activity(true);
+        let (observed, native_work) = self.observe_close_activity(CloseActivityRead::Inventory);
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if state.activity.close != observed {
             state.activity.close = observed;
@@ -466,7 +466,9 @@ impl TerminalEventPublisher {
     }
 
     pub(super) fn running_work(&self) -> bool {
-        self.observe_close_activity(false).0.needs_close_review
+        self.observe_close_activity(CloseActivityRead::Admission)
+            .0
+            .needs_close_review
     }
 }
 

@@ -30,7 +30,7 @@ pub enum Capability {
     PaneActivity,
     /// Work: report the repository's default branch in the Worktree context.
     WorktreeDefaultBranch,
-    /// Work: move a Tab within its Workspace's shared order.
+    /// Work: move a Tab or place a new Tab from a moved Pane in the Workspace's shared order.
     ReorderTab,
 }
 

@@ -528,7 +528,12 @@ fn run(
             loop {
                 match events.recv() {
                     Ok(Event::Edit(mutation)) => {
-                        if !shared_tab_order && matches!(mutation, Mutation::ReorderTab { .. }) {
+                        if !shared_tab_order
+                            && mutation.required_capability()
+                                == Some(
+                                    spaceterm_core::protocol::capability::Capability::ReorderTab,
+                                )
+                        {
                             reject(&state, mutation);
                             continue;
                         }

@@ -673,7 +673,7 @@ impl State {
                 pane,
                 destination,
             } => {
-                if *destination == PaneDestination::NewTab && self.tab_count() >= MAX_TABS {
+                if destination.creates_tab() && self.tab_count() >= MAX_TABS {
                     return Ok(Outcome::Limit);
                 }
                 let Some(w) = self
@@ -685,9 +685,10 @@ impl State {
                     return Ok(Outcome::Missing);
                 };
                 let moved = match *destination {
-                    PaneDestination::NewTab => {
+                    PaneDestination::NewTab | PaneDestination::NewTabBefore(_) => {
                         let id = new_id()?;
-                        w.move_pane_to_new_tab(*tab, *pane, id).map(|()| id)
+                        w.move_pane_to_new_tab_before(*tab, *pane, id, destination.before())
+                            .map(|()| id)
                     }
                     PaneDestination::Beside {
                         tab: into,
@@ -1253,6 +1254,64 @@ mod tests {
                 Outcome::Accepted { target }
             );
         }
+    }
+
+    #[test]
+    fn a_pane_moves_to_its_landing_gap_in_one_edit() {
+        let directory = Path::new("/tmp");
+        let mut state = State::first(directory).unwrap();
+        let device = [1; 32];
+        let w = &state.inventory.workspaces[0];
+        let (workspace, tab, root) = (w.id, w.root_tab, w.tabs[0].root_pane);
+        let edits = [
+            Mutation::SplitPane {
+                workspace,
+                tab,
+                source: root,
+                axis: Axis::Right,
+                control: CreateControl::Creator,
+            },
+            Mutation::CreateTab {
+                workspace,
+                source: None,
+                control: CreateControl::Creator,
+            },
+        ];
+        let mut targets = Vec::new();
+        for (sequence, mutation) in (1..=2).zip(edits) {
+            let Outcome::Accepted { target } = state
+                .apply(device, sequence, mutation, directory, |_| true)
+                .unwrap()
+            else {
+                panic!("the fixture edit failed")
+            };
+            targets.push(target);
+        }
+        let pane = targets[0];
+        let landing = targets[1];
+        let Outcome::Accepted { target: created } = state
+            .apply(
+                device,
+                3,
+                Mutation::MovePane {
+                    workspace,
+                    tab,
+                    pane,
+                    destination: PaneDestination::NewTabBefore(landing),
+                },
+                directory,
+                |_| true,
+            )
+            .unwrap()
+        else {
+            panic!("the Pane should land in a new Tab at the gap")
+        };
+        let tabs = &state.inventory.workspaces[0].tabs;
+        assert_eq!(
+            tabs.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+            [tab, created, landing]
+        );
+        assert_eq!(tabs[1].root_pane, pane);
     }
 
     #[test]

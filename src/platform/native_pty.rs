@@ -169,7 +169,7 @@ pub trait SessionProbe: Send + Sync {
     }
     /// The foreground holder and whether closing would end native work. A known shell at its
     /// prompt can exclude its verified automatic prompt helpers from the work decision.
-    fn close_activity(&self, _at_prompt: bool) -> (Foreground, bool) {
+    fn close_activity(&self, _at_prompt: bool, _read: CloseActivityRead) -> (Foreground, bool) {
         match self.shell_foreground() {
             Ok(false) => (Foreground::Program, true),
             Ok(true) => (Foreground::Shell, matches!(self.others(), Ok(true))),
@@ -179,6 +179,13 @@ pub trait SessionProbe: Send + Sync {
     /// Whether any process other than the shell runs in its terminal session: a running or
     /// stopped job, a background job, or any other child. An error means it could not be read.
     fn others(&self) -> io::Result<bool>;
+}
+
+/// Admission checks current process membership. Inventory can reuse a recent process list.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CloseActivityRead {
+    Inventory,
+    Admission,
 }
 
 /// Constructs the platform-neutral parts owned by one Native PTY Owner.

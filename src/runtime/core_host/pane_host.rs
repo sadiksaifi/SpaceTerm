@@ -177,6 +177,7 @@ impl CorePaneHost {
         });
         self.dormant = None;
         self.last_preview = None;
+        self.preview_cleared = None;
         Ok(lease)
     }
     /// Selects this Pane for `device`. A selection acquires the Pane only when nobody controls
@@ -252,7 +253,9 @@ impl CorePaneHost {
             // A nonzero exit or a signal keeps the Pane and its control grant, so every client
             // can say why the shell ended. Only the bounded preview outlives the runtime.
             if let Some(end) = pane.end {
-                self.last_preview = pane.screen.as_deref().and_then(super::preview::published);
+                if self.preview_cleared != Some(pane.lease.session) {
+                    self.last_preview = pane.screen.as_deref().and_then(super::preview::published);
+                }
                 self.dormant = Some(DormantPane {
                     device: pane.device,
                     attachment_generation: pane.attachment_generation,
@@ -268,6 +271,21 @@ impl CorePaneHost {
             self.identity = None;
         }
         Ok(())
+    }
+    pub(super) fn discard_preview(&mut self, session: [u8; 32]) {
+        if self
+            .pane
+            .as_ref()
+            .is_some_and(|pane| pane.lease.session == session)
+            || self.dormant.is_some_and(|dormant| {
+                dormant
+                    .session
+                    .is_some_and(|target| target.session == session)
+            })
+        {
+            self.preview_cleared = Some(session);
+            self.last_preview = None;
+        }
     }
     pub(super) fn end_session(&mut self, session: [u8; 32]) -> Result<(), Refusal> {
         let Some(pane) = self.pane.as_ref().filter(|p| p.lease.session == session) else {

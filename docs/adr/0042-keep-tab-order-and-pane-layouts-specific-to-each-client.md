@@ -2,7 +2,7 @@
 
 Each SpaceTerm Core owns its Workspace's Tab order. Work 1.6 clients present the order in Workspace Inventory and move a Tab with a shared edit. The destination is a zero-based Workspace index or a position beside another Tab in the same Worktree. The edit keeps the Tab's identity, Panes, and Worktree. It leaves close approvals for the same Panes and Terminal Sessions valid.
 
-The desktop's Tab bar displays the subsequence for its Active Worktree and sends moves relative to the landing Tab. It uses its saved local arrangement until work admission establishes shared ordering.
+The desktop's Tab bar displays the subsequence for its Active Worktree and sends moves relative to the landing Tab. Dropping a Pane into a gap creates its Tab at that position in one edit. The desktop uses its saved local arrangement until work admission establishes shared ordering.
 
 Each SpaceTerm Client owns its Pane Layouts, including Pane placement, Split axes, and Split ratios. Moving Panes within a Tab or resizing a Split on one client leaves other clients' layouts unchanged. These choices persist across client relaunches and computer reboots, outside ordinary preference import, export, and reset under [ADR 0039](0039-scope-settings-to-the-client-or-selected-server.md).
 

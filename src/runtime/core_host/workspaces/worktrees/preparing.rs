@@ -44,6 +44,11 @@ fn pins(inventory: &Inventory) -> Vec<(Id, PathBuf)> {
         .filter_map(|w| w.pinned_directory.clone().map(|pin| (w.id, pin)))
         .collect()
 }
+
+fn same_affected_tabs(current: &[AffectedTab], reviewed: &[AffectedTab]) -> bool {
+    current.len() == reviewed.len() && current.iter().all(|tab| reviewed.contains(tab))
+}
+
 impl RemovalPlan {
     pub fn apply(&self, device: Id, current: &Inventory, next: &mut State) -> Result<(), Error> {
         // New or changed directory sources require another physical check. Session changes are
@@ -56,14 +61,17 @@ impl RemovalPlan {
                 .close
                 .as_ref()
                 .is_none_or(|close| close.boot != self.review.boot)
-            || current.affected_worktree_tabs_in(
-                &self.review.root,
-                &self.review.path,
-                |directory| {
-                    directory.starts_with(&self.review.path)
-                        || self.contained.iter().any(|path| path == directory)
-                },
-            ) != self.review.tabs
+            || !same_affected_tabs(
+                &current.affected_worktree_tabs_in(
+                    &self.review.root,
+                    &self.review.path,
+                    |directory| {
+                        directory.starts_with(&self.review.path)
+                            || self.contained.iter().any(|path| path == directory)
+                    },
+                ),
+                &self.review.tabs,
+            )
         {
             return Err(Error::Changed);
         }
@@ -222,10 +230,12 @@ pub(super) fn prepare(
                 })
                 .cloned()
                 .collect();
-            if inventory.affected_worktree_tabs_in(&root, &path, |directory| {
-                contained.iter().any(|path| path == directory)
-            }) != approval.review.tabs
-            {
+            if !same_affected_tabs(
+                &inventory.affected_worktree_tabs_in(&root, &path, |directory| {
+                    contained.iter().any(|path| path == directory)
+                }),
+                &approval.review.tabs,
+            ) {
                 return Err(Error::Changed);
             }
             let snapshot = list(&git, &root, &token)?;

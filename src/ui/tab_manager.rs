@@ -4418,6 +4418,16 @@ impl TabManager {
             return;
         };
         let destination = match drop {
+            StripDrop::NewTab { position } if self.binding.shared_order() => {
+                if let Some(landing) = ids.get(position) {
+                    let Some(landing) = self.binding.core_tab(*landing) else {
+                        return;
+                    };
+                    PaneDestination::NewTabBefore(landing)
+                } else {
+                    PaneDestination::NewTab
+                }
+            }
             StripDrop::NewTab { .. } => PaneDestination::NewTab,
             StripDrop::Tab(target) => {
                 // The stage or the Tab can have changed since the drop target appeared.
@@ -4454,7 +4464,9 @@ impl TabManager {
         if let StripDrop::NewTab { position } = drop
             && let Some(new_tab) = created.and_then(|target| self.binding.local_tab(target))
         {
-            self.move_tab(new_tab, position, window, cx);
+            if !self.binding.shared_order() {
+                self.move_tab(new_tab, position, window, cx);
+            }
             self.tab_reorder.land_incoming(new_tab, position);
             self.scroll_active_tab_into_view();
         }
@@ -5876,6 +5888,36 @@ mod tests {
             ),
             "Tab 2 slides aside, the landing chip takes its place, and the new Tab lands there"
         );
+    }
+
+    #[gpui::test]
+    fn dropping_a_pane_in_a_shared_gap_submits_one_positioned_move(cx: &mut TestAppContext) {
+        use spaceterm_core::hierarchy::{Mutation, PaneDestination};
+
+        cx.update(crate::ui::init).unwrap();
+        let (manager, edits, cx) = standalone_tab_manager_with_edits(cx);
+        edits.set_shared_tab_order();
+        for _ in 0..2 {
+            cx.dispatch_action(NewTab);
+            cx.run_until_parked();
+        }
+        cx.dispatch_action(SplitRight);
+        cx.run_until_parked();
+        let before = edits.submitted().len();
+        let landing = edits.applied_inventory().workspaces[0].tabs[1].id;
+        let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
+        let between = point(first.right(), first.center().y);
+        drag_focused_pane(2, &[between, between + point(px(1.0), px(0.0))], cx);
+        finish_slides(cx);
+        cx.simulate_mouse_up(between, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(matches!(
+            &edits.submitted()[before..],
+            [Mutation::MovePane { destination: PaneDestination::NewTabBefore(anchor), .. }]
+                if *anchor == landing
+        ));
+        assert_eq!(tab_order(&manager, cx), vec![1, 4, 2, 3]);
     }
 
     /// Two Tabs that fill a narrow bar, the first holding a second Pane that a drag can carry.

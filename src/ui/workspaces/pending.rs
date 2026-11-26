@@ -152,10 +152,7 @@ impl PendingEdits {
                 tab: None,
                 pane: Some(new_id()?),
             }),
-            Mutation::MovePane {
-                destination: PaneDestination::NewTab,
-                ..
-            } => Some(Creation {
+            Mutation::MovePane { destination, .. } if destination.creates_tab() => Some(Creation {
                 workspace: None,
                 tab: Some(new_id()?),
                 pane: None,
@@ -651,8 +648,10 @@ fn references(mutation: &Mutation) -> Vec<Id> {
             destination,
         } => {
             let mut ids = vec![*workspace, *tab, *pane];
-            if let PaneDestination::Beside { tab, pane, .. } = destination {
-                ids.extend([*tab, *pane]);
+            match destination {
+                PaneDestination::NewTab => {}
+                PaneDestination::NewTabBefore(tab) => ids.push(*tab),
+                PaneDestination::Beside { tab, pane, .. } => ids.extend([*tab, *pane]),
             }
             ids
         }
@@ -717,9 +716,13 @@ fn remap(mutation: &mut Mutation, id: impl Fn(Id) -> Id) {
             *workspace = id(*workspace);
             *tab = id(*tab);
             *pane = id(*pane);
-            if let PaneDestination::Beside { tab, pane, .. } = destination {
-                *tab = id(*tab);
-                *pane = id(*pane);
+            match destination {
+                PaneDestination::NewTab => {}
+                PaneDestination::NewTabBefore(tab) => *tab = id(*tab),
+                PaneDestination::Beside { tab, pane, .. } => {
+                    *tab = id(*tab);
+                    *pane = id(*pane);
+                }
             }
         }
         Mutation::ReorderTab {
@@ -952,11 +955,12 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
         Mutation::MovePane {
             tab,
             pane,
-            destination: PaneDestination::NewTab,
+            destination: destination @ (PaneDestination::NewTab | PaneDestination::NewTabBefore(_)),
             ..
         } => {
             if let Some(id) = creation.and_then(|ids| ids.tab) {
-                let _ = workspace.move_pane_to_new_tab(*tab, *pane, id);
+                let _ =
+                    workspace.move_pane_to_new_tab_before(*tab, *pane, id, destination.before());
             }
         }
         Mutation::MovePane {

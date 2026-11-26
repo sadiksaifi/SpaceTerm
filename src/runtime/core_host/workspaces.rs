@@ -84,6 +84,8 @@ pub struct WorkspaceHost {
     sync: SyncWorker,
     /// Every admitted connection, and the inventory each still waits to receive.
     publication: Arc<publication::Publication>,
+    /// The durable End All Sessions whose in-flight preview reads were already retired.
+    preview_clear: Option<CloseInventory>,
     /// Edits whose replies wait for a Worktree write to settle.
     waiting: Vec<edits::Waiting>,
     /// Revoked devices whose records wait for their Worktree write to settle before they are
@@ -175,6 +177,7 @@ impl WorkspaceHost {
             journal: None,
             sync,
             publication: Arc::default(),
+            preview_clear: None,
             waiting: Vec::new(),
             forgetting: BTreeSet::new(),
             ticker: None,
@@ -229,6 +232,13 @@ impl WorkspaceHost {
             .journal
             .as_ref()
             .map(|journal| journal.submit(next.envelope()));
+        if next.session_ends().is_some_and(|ends| {
+            Some(ends) != self.state.session_ends() && ends.boot == self.prototype.boot
+        }) {
+            // A retained outcome can reach its caller before the next synchronization tick.
+            // Revoke older reads at admission, before this edit can publish its outcome.
+            self.publication.discard_previews();
+        }
         self.state = next;
         self.fresh_panes.retain(|id| self.state.pane(*id).is_some());
         self.organization_prepared = true;
@@ -308,6 +318,19 @@ impl WorkspaceHost {
             && let Some(ends) = self.state.session_ends()
             && ends.boot == self.prototype.boot
         {
+            if self.preview_clear.as_ref() != Some(ends) {
+                self.publication.discard_previews();
+                // Fence every confirmed Session before attempting any native stop. One stop may
+                // fail and leave the other Sessions waiting for the next synchronization.
+                for original in &ends.sessions {
+                    if let Some(session) = original.session
+                        && let Some(host) = self.panes.get_mut(&original.id)
+                    {
+                        host.discard_preview(session);
+                    }
+                }
+                self.preview_clear = Some(ends.clone());
+            }
             for original in &ends.sessions {
                 if let Some(session) = original.session
                     && let Some(host) = self.panes.get_mut(&original.id)
@@ -494,6 +517,7 @@ impl WorkspaceHost {
                 failed_directory_session: None,
                 dormant: None,
                 last_preview: None,
+                preview_cleared: None,
                 names: Arc::clone(&self.prototype.names),
                 notifier: self.prototype.notifier.clone(),
                 session_context: self.prototype.session_context.clone(),
@@ -1316,6 +1340,11 @@ impl HostCommands for WorkspaceHost {
         self.cancel_worktree_read(connection, id);
     }
     fn pane_previews(&self, panes: Vec<Id>, id: RequestId, outbox: &Outbox) -> Dispatch {
+        if self.state.session_ends().is_some_and(|ends| {
+            self.preview_clear.as_ref() != Some(ends) && ends.boot == self.prototype.boot
+        }) {
+            return Dispatch::reply(Err(Refusal::Stale));
+        }
         super::preview::read(
             panes,
             |pane| match self.state.pane(pane) {
@@ -1327,6 +1356,7 @@ impl HostCommands for WorkspaceHost {
             },
             id,
             outbox,
+            &self.sync,
         )
     }
     fn settled_reads(&mut self) -> Vec<super::SettledRead> {

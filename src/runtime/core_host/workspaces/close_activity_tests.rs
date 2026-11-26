@@ -210,7 +210,7 @@ fn an_idle_close_of_an_unclaimed_pane_checks_for_work_before_ending_the_session(
             &mut host,
             2,
             lease,
-            "printf '%s%s\\n' TASK- RUNNING; sleep 30"
+            "printf '\\n%s%s\\n' TASK- RUNNING; sleep 30"
         ),
         Reply::Unchanged
     ));

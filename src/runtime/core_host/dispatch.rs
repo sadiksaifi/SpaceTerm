@@ -251,13 +251,6 @@ impl CorePaneHost {
             pane.runtime
                 .shutdown_and_wait(Duration::from_secs(5))
                 .map_err(|_| CoreError::CleanupUnresolved)?;
-            if self
-                .dormant
-                .is_some_and(|dormant| dormant.session == Some(pane.lease.into()))
-            {
-                pane.drain();
-                self.last_preview = pane.screen.as_deref().and_then(super::preview::published);
-            }
         }
         self.pane = None;
         Ok(())
