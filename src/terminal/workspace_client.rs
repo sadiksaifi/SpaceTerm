@@ -137,7 +137,7 @@ impl LinkSink for Wakes {
 pub(crate) struct WorkspaceSnapshot {
     pub inventory: Option<Inventory>,
     pub connected: bool,
-    /// The last admitted Work connection's Tab-order contract, also kept while offline.
+    /// Shared order applies after the first admission that supports it, including while offline.
     pub shared_tab_order: bool,
     pub pending: bool,
     pub pending_operation: Option<Mutation>,
@@ -229,7 +229,7 @@ impl WorkspaceClient {
         let snapshot = Arc::new(PublishedSnapshot::new(WorkspaceSnapshot {
             inventory: None,
             connected: false,
-            shared_tab_order: true,
+            shared_tab_order: false,
             pending: false,
             pending_operation: None,
             rejected: None,

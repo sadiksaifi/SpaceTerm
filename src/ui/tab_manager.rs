@@ -1410,6 +1410,8 @@ impl TabManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        use spaceterm_core::hierarchy::TabPosition;
+
         if !self.binding.shared_order() {
             let moved = self.tabs.move_tab(tab_id, position);
             Self::present_tab_move(moved, cx);
@@ -1418,20 +1420,28 @@ impl TabManager {
         let Ok(scope) = self.tabs.scope_of(tab_id) else {
             return;
         };
+        let Some(from) = self.tabs.tabs_in(scope).position(|(id, _)| id == tab_id) else {
+            return;
+        };
         let Some((landing, _)) = self.tabs.tabs_in(scope).nth(position) else {
             return;
         };
         if landing == tab_id || !self.binding.editability().available() {
             return;
         }
-        let Some(submission) = self
+        let Some((tab, landing)) = self
             .binding
             .core_tab(tab_id)
             .zip(self.binding.core_tab(landing))
-            .and_then(|(tab, landing)| self.binding.reorder_tab(tab, landing))
         else {
             return;
         };
+        let position = if from < position {
+            TabPosition::After(landing)
+        } else {
+            TabPosition::Before(landing)
+        };
+        let submission = self.binding.reorder_tab(tab, position);
         self.present_tab_submission(submission, "Couldn\u{2019}t Move Tab", None, window, cx);
     }
 
@@ -4567,6 +4577,7 @@ impl TabManager {
     /// Worktree it was presented in, so a pending new Tab never leaves its Worktree's strip.
     pub(crate) fn apply_worktrees(
         &mut self,
+        workspace: &spaceterm_core::hierarchy::Workspace,
         scope: &dyn Fn(spaceterm_core::hierarchy::Id) -> Option<Option<WorktreeId>>,
         cx: &mut Context<Self>,
     ) {
@@ -4588,6 +4599,9 @@ impl TabManager {
                 continue;
             }
             changed = true;
+        }
+        if self.binding.shared_order() {
+            changed |= self.align_shared_order(workspace);
         }
         if changed {
             self.scroll_active_tab_into_view();
@@ -7194,7 +7208,7 @@ mod tests {
 
     #[gpui::test]
     fn the_desktop_moves_shared_tabs_and_follows_published_order(cx: &mut TestAppContext) {
-        use spaceterm_core::hierarchy::Mutation;
+        use spaceterm_core::hierarchy::{Mutation, TabPosition};
 
         cx.update(crate::ui::init).unwrap();
         let (manager, edits, cx) = standalone_tab_manager_with_edits(cx);
@@ -7208,15 +7222,17 @@ mod tests {
 
         assert!(matches!(
             edits.submitted().last(),
-            Some(Mutation::ReorderTab { workspace: id, tab, index: 0 })
-                if *id == workspace.id && *tab == active
+            Some(Mutation::ReorderTab { workspace: id, tab, position: TabPosition::Before(anchor) })
+                if *id == workspace.id && *tab == active && *anchor == workspace.tabs[0].id
         ));
         assert_eq!(tab_order(&manager, cx), vec![2, 1]);
 
         let mut next = edits.applied_inventory();
         let workspace = &mut next.workspaces[0];
         assert_eq!(workspace.tabs[0].id, active);
-        workspace.reorder_tab(active, 1).unwrap();
+        workspace
+            .reorder_tab(active, TabPosition::Index(1))
+            .unwrap();
         next.revision += 1;
         edits.set_inventory(next.clone());
         cx.update(|window, cx| {
@@ -7234,6 +7250,38 @@ mod tests {
             manager.read_with(cx, |manager, _| manager.tabs.active_tab_id()),
             TabId::new(2)
         );
+    }
+
+    #[gpui::test]
+    fn the_desktop_uses_shared_order_after_ungrouping_worktree_tabs(cx: &mut TestAppContext) {
+        cx.update(crate::ui::init).unwrap();
+        let (manager, edits, cx) = standalone_tab_manager_with_edits(cx);
+        edits.set_shared_tab_order();
+        for _ in 0..3 {
+            cx.dispatch_action(NewTab);
+            cx.run_until_parked();
+        }
+        let inventory = edits.applied_inventory();
+        let workspace = &inventory.workspaces[0];
+        cx.update(|_, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.apply_worktrees(
+                    workspace,
+                    &|tab| {
+                        let position = workspace.tabs.iter().position(|entry| entry.id == tab)?;
+                        Some(Some(WorktreeId::new((position % 2 + 1) as u64)))
+                    },
+                    cx,
+                );
+            });
+        });
+        assert_eq!(tab_order(&manager, cx), vec![1, 3, 2, 4]);
+        cx.update(|_, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.apply_worktrees(workspace, &|_| Some(None), cx);
+            });
+        });
+        assert_eq!(tab_order(&manager, cx), vec![1, 2, 3, 4]);
     }
 
     #[gpui::test]

@@ -107,22 +107,12 @@ pub(super) fn read<'a>(
 
 fn captured(session: Id, capture: PreviewCapture) -> State {
     match capture {
-        PreviewCapture::Current(grid) => State::Live {
+        PreviewCapture::Live(grid) => State::Live {
             session,
-            screen: Some(current(&grid)),
+            screen: grid.as_deref().map(current),
         },
-        PreviewCapture::Published {
-            ended: true,
-            screen,
-        } => State::Ended {
+        PreviewCapture::Ended(screen) => State::Ended {
             session: Some(session),
-            screen: screen.as_deref().and_then(published),
-        },
-        PreviewCapture::Published {
-            ended: false,
-            screen,
-        } => State::Live {
-            session,
             screen: screen.as_deref().and_then(published),
         },
     }

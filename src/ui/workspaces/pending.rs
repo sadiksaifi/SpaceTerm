@@ -7,7 +7,7 @@ use crate::terminal::core_session::restart::RECONNECT_LIMIT;
 use crate::terminal::workspace_client::WorkspaceSnapshot;
 use spaceterm_core::hierarchy::{
     CloseConfirmation, CloseTarget, Id, Inventory, Mutation, Outcome, Pane, PaneDestination,
-    RetainedOutcome, Side, Tab, Workspace,
+    RetainedOutcome, Side, Tab, TabPosition, Workspace,
 };
 use spaceterm_core::worktree::Operation;
 use std::collections::{BTreeMap, VecDeque};
@@ -656,7 +656,17 @@ fn references(mutation: &Mutation) -> Vec<Id> {
             }
             ids
         }
-        Mutation::ReorderTab { workspace, tab, .. } => vec![*workspace, *tab],
+        Mutation::ReorderTab {
+            workspace,
+            tab,
+            position,
+        } => {
+            let mut ids = vec![*workspace, *tab];
+            if let TabPosition::Before(anchor) | TabPosition::After(anchor) = position {
+                ids.push(*anchor);
+            }
+            ids
+        }
         Mutation::MergeTab {
             workspace,
             tab,
@@ -712,9 +722,16 @@ fn remap(mutation: &mut Mutation, id: impl Fn(Id) -> Id) {
                 *pane = id(*pane);
             }
         }
-        Mutation::ReorderTab { workspace, tab, .. } => {
+        Mutation::ReorderTab {
+            workspace,
+            tab,
+            position,
+        } => {
             *workspace = id(*workspace);
             *tab = id(*tab);
+            if let TabPosition::Before(anchor) | TabPosition::After(anchor) = position {
+                *anchor = id(*anchor);
+            }
         }
         Mutation::MergeTab {
             workspace,
@@ -879,8 +896,8 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
         return;
     };
     match mutation {
-        Mutation::ReorderTab { tab, index, .. } => {
-            let _ = workspace.reorder_tab(*tab, *index);
+        Mutation::ReorderTab { tab, position, .. } => {
+            let _ = workspace.reorder_tab(*tab, *position);
         }
         Mutation::RenameWorkspace { name, version, .. } => {
             workspace.name.clone_from(name);

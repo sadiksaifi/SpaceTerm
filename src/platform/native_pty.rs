@@ -8,6 +8,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use spaceterm_core::diagnostics::TerminalCounters;
+use spaceterm_core::hierarchy::Foreground;
 use spaceterm_core::pane::LineMode;
 use thiserror::Error;
 
@@ -166,19 +167,18 @@ pub trait SessionProbe: Send + Sync {
     fn shell_foreground(&self) -> io::Result<bool> {
         Err(io::Error::other("the PTY foreground is unavailable"))
     }
-    /// Whether the foreground is still the owning shell, including when its process execs another
-    /// program without changing its process group.
-    fn close_foreground(&self) -> io::Result<bool> {
-        self.shell_foreground()
+    /// The foreground holder and whether closing would end native work. A known shell at its
+    /// prompt can exclude its verified automatic prompt helpers from the work decision.
+    fn close_activity(&self, _at_prompt: bool) -> (Foreground, bool) {
+        match self.shell_foreground() {
+            Ok(false) => (Foreground::Program, true),
+            Ok(true) => (Foreground::Shell, matches!(self.others(), Ok(true))),
+            Err(_) => (Foreground::Unknown, matches!(self.others(), Ok(true))),
+        }
     }
     /// Whether any process other than the shell runs in its terminal session: a running or
     /// stopped job, a background job, or any other child. An error means it could not be read.
     fn others(&self) -> io::Result<bool>;
-
-    /// Whether closing would end work besides the shell and its verified prompt helpers.
-    fn close_work(&self) -> io::Result<bool> {
-        self.others()
-    }
 }
 
 /// Constructs the platform-neutral parts owned by one Native PTY Owner.

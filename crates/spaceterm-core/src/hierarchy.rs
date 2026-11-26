@@ -407,7 +407,7 @@ impl State {
                 };
                 // Control changes do not broaden an explicit End All Sessions approval, so only
                 // the exact Sessions are compared.
-                if live.boot != confirmation.boot || live.sessions != confirmation.sessions {
+                if !live.same_sessions(confirmation) {
                     return Ok(Outcome::StaleConfirmation);
                 }
                 self.session_ends = Some(confirmation.clone());
@@ -725,7 +725,7 @@ impl State {
             Mutation::ReorderTab {
                 workspace,
                 tab,
-                index,
+                position,
             } => {
                 let Some(workspace) = self
                     .inventory
@@ -735,7 +735,7 @@ impl State {
                 else {
                     return Ok(Outcome::Missing);
                 };
-                if let Err(outcome) = workspace.reorder_tab(*tab, *index) {
+                if let Err(outcome) = workspace.reorder_tab(*tab, *position) {
                     return Ok(outcome);
                 }
                 *tab
@@ -1126,6 +1126,134 @@ pub use client_journal::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_relative_reorder_survives_an_intervening_client_move() {
+        let directory = Path::new("/tmp");
+        let mut state = State::first(directory).unwrap();
+        let device = [1; 32];
+        let workspace = state.inventory.workspaces[0].id;
+        for sequence in 1..=3 {
+            state
+                .apply(
+                    device,
+                    sequence,
+                    Mutation::CreateTab {
+                        workspace,
+                        source: None,
+                        control: CreateControl::Creator,
+                    },
+                    directory,
+                    |_| true,
+                )
+                .unwrap();
+        }
+        let tabs = &state.inventory.workspaces[0].tabs;
+        let [first, moving, next, other] = tabs
+            .iter()
+            .map(|tab| tab.id)
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap_or_else(|_| panic!("expected four Tabs"));
+        let client_move = Mutation::ReorderTab {
+            workspace,
+            tab: moving,
+            position: TabPosition::After(next),
+        };
+        state
+            .apply(
+                [2; 32],
+                1,
+                Mutation::ReorderTab {
+                    workspace,
+                    tab: other,
+                    position: TabPosition::Index(0),
+                },
+                directory,
+                |_| true,
+            )
+            .unwrap();
+        assert_eq!(
+            state
+                .apply(device, 4, client_move, directory, |_| true)
+                .unwrap(),
+            Outcome::Accepted { target: moving }
+        );
+        assert_eq!(
+            state.inventory.workspaces[0]
+                .tabs
+                .iter()
+                .map(|tab| tab.id)
+                .collect::<Vec<_>>(),
+            [other, first, next, moving]
+        );
+    }
+
+    #[test]
+    fn reordering_tabs_keeps_approvals_for_the_same_panes_and_sessions() {
+        let directory = Path::new("/tmp");
+        let mut state = State::first(directory).unwrap();
+        let device = [1; 32];
+        let workspace = state.inventory.workspaces[0].id;
+        state
+            .apply(
+                device,
+                1,
+                Mutation::CreateTab {
+                    workspace,
+                    source: None,
+                    control: CreateControl::Creator,
+                },
+                directory,
+                |_| true,
+            )
+            .unwrap();
+        state.inventory.close = Some(CloseInventory {
+            boot: [9; 32],
+            sessions: state.inventory.workspaces[0]
+                .tabs
+                .iter()
+                .enumerate()
+                .map(|(index, tab)| ConfirmedPane {
+                    id: tab.root_pane,
+                    session: Some([index as u8 + 1; 32]),
+                })
+                .collect(),
+            controls: Vec::new(),
+        });
+        let end = Mutation::EndAllSessions {
+            confirmation: state.inventory.close.clone().unwrap(),
+        };
+        let target = CloseTarget::KillWorkspace { workspace };
+        let kill = Mutation::Close {
+            target,
+            confirmation: state.inventory.close_confirmation(target).unwrap(),
+        };
+        let tab = state.inventory.workspaces[0].tabs[1].id;
+        state
+            .apply(
+                [2; 32],
+                1,
+                Mutation::ReorderTab {
+                    workspace,
+                    tab,
+                    position: TabPosition::Index(0),
+                },
+                directory,
+                |_| true,
+            )
+            .unwrap();
+        state.inventory.close.as_mut().unwrap().sessions.reverse();
+        for (mutation, target) in [(end, [9; 32]), (kill, workspace)] {
+            assert_eq!(
+                state
+                    .clone()
+                    .apply(device, 2, mutation, directory, |_| true)
+                    .unwrap(),
+                Outcome::Accepted { target }
+            );
+        }
+    }
 
     #[test]
     fn direct_close_checks_requesting_owner_grant_and_complete_control_coverage() {

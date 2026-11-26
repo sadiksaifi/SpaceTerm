@@ -773,16 +773,16 @@ const OBSERVER: Peer = Peer {
 
 #[test]
 fn pane_previews_read_hidden_output_and_keep_the_last_ended_screen() {
-    use spaceterm_core::connection::link::{CoreLink, LinkError};
+    use spaceterm_core::connection::link::{CoreLink, LinkError, PendingReply};
     use spaceterm_core::protocol::preview::{PanePreview, State};
     use spaceterm_core::protocol::screen::StyleRef;
 
-    fn read(
+    fn request(
         served: &mut Served<WorkspaceHost>,
         agent: &Client,
         link: &CoreLink,
         panes: Vec<[u8; 32]>,
-    ) -> Vec<PanePreview> {
+    ) -> PendingReply {
         let pending = link.read_pane_previews(panes).unwrap();
         let (frame, _) = link.next_frame().unwrap();
         let decoded = Assembler::default()
@@ -797,12 +797,25 @@ fn pane_previews_read_hidden_output_and_keep_the_last_ended_screen() {
             Dispatch::Deferred => {}
             Dispatch::Reply(_) => panic!("the preview encodes outside the service lock"),
         }
+        pending
+    }
+
+    fn pump(agent: &Client, link: &CoreLink) {
+        while let Some((frame, _)) = agent.outbox.next_frame() {
+            let frame = protocol::RawFrame::parse(&frame).unwrap();
+            link.receive(frame, Instant::now()).unwrap();
+        }
+    }
+
+    fn receive(
+        served: &mut Served<WorkspaceHost>,
+        agent: &Client,
+        link: &CoreLink,
+        pending: PendingReply,
+    ) -> Vec<PanePreview> {
         let until = Instant::now() + DEADLINE;
         loop {
-            while let Some((frame, _)) = agent.outbox.next_frame() {
-                let frame = protocol::RawFrame::parse(&frame).unwrap();
-                link.receive(frame, Instant::now()).unwrap();
-            }
+            pump(agent, link);
             if let Some(result) = pending.try_take() {
                 let Ok(ReplyBody::PanePreviews(previews)) = result else {
                     panic!("preview failed: {result:?}");
@@ -813,6 +826,16 @@ fn pane_previews_read_hidden_output_and_keep_the_last_ended_screen() {
             served.tick(Instant::now());
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    fn read(
+        served: &mut Served<WorkspaceHost>,
+        agent: &Client,
+        link: &CoreLink,
+        panes: Vec<[u8; 32]>,
+    ) -> Vec<PanePreview> {
+        let pending = request(served, agent, link, panes);
+        receive(served, agent, link, pending)
     }
 
     let mut binding = WorkspaceHost::new(super::tests::host());
@@ -886,9 +909,9 @@ fn pane_previews_read_hidden_output_and_keep_the_last_ended_screen() {
         vec![text("printf '\\033[31mPREVIEW-%s\\033[0m\\n' hidden\r")],
     );
 
-    let has_output = |screen: &protocol::preview::Screen| {
+    let has_output = |screen: &protocol::preview::Screen, marker: &str| {
         screen.rows.iter().flat_map(|row| &row.runs).any(|run| {
-            run.text.contains("PREVIEW-hidden")
+            run.text.contains(marker)
                 && matches!(run.style, StyleRef::Inline(style) if matches!(style.foreground, pane::Color::Rgb(_)))
         })
     };
@@ -904,7 +927,7 @@ fn pane_previews_read_hidden_output_and_keep_the_last_ended_screen() {
         );
         assert_eq!(previews[0].state, State::NotStarted);
         assert_eq!(previews[2].state, State::Missing);
-        if matches!(&previews[1].state, State::Live {session, screen: Some(screen)} if *session == lease.session && has_output(screen))
+        if matches!(&previews[1].state, State::Live {session, screen: Some(screen)} if *session == lease.session && has_output(screen, "PREVIEW-hidden"))
         {
             break;
         }
@@ -915,12 +938,61 @@ fn pane_previews_read_hidden_output_and_keep_the_last_ended_screen() {
     assert_eq!(served.host().session_size(pane), Some(size()));
     assert_eq!(served.host().running_lease(cold), None);
 
-    write(&mut served, 3, vec![text("exit 7\r")]);
+    // The title proves that the worker consumed the synchronized-update start. Keep the update
+    // open until the preview request has entered the same worker queue as the shell's input.
+    write(
+        &mut served,
+        3,
+        vec![text(concat!(
+            "printf '\\033[?2026h\\033]2;PREVIEW-HOLD\\007'; read -r release; ",
+            "printf '\\033[32mPREVIEW-%s\\033[0m\\033[?2026l\\n' settled\r",
+        ))],
+    );
+    let until = Instant::now() + DEADLINE;
+    loop {
+        served.tick(Instant::now());
+        pump(&agent, &link);
+        if link.inventory().is_some_and(|(_, revision)| {
+            revision
+                .inventory
+                .workspaces
+                .iter()
+                .flat_map(|workspace| &workspace.tabs)
+                .flat_map(|tab| &tab.panes)
+                .any(|entry| {
+                    entry.id == pane
+                        && entry
+                            .presentation
+                            .as_ref()
+                            .is_some_and(|metadata| metadata.title == "PREVIEW-HOLD")
+                })
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "the terminal starts synchronized output"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let pending = request(&mut served, &agent, &link, vec![pane]);
+    write(&mut served, 4, vec![text("done\r")]);
+    let previews = receive(&mut served, &agent, &link, pending);
+    assert!(
+        matches!(
+            &previews[0].state,
+            State::Live {session, screen: Some(screen)}
+                if *session == lease.session && has_output(screen, "PREVIEW-settled")
+        ),
+        "a held read needs the complete synchronized screen: {previews:?}"
+    );
+
+    write(&mut served, 5, vec![text("exit 7\r")]);
     let until = Instant::now() + DEADLINE;
     loop {
         served.tick(Instant::now());
         let previews = read(&mut served, &agent, &link, vec![pane]);
-        if matches!(&previews[0].state, State::Ended {session: Some(session), screen: Some(screen)} if *session == lease.session && has_output(screen))
+        if matches!(&previews[0].state, State::Ended {session: Some(session), screen: Some(screen)} if *session == lease.session && has_output(screen, "PREVIEW-settled"))
         {
             break;
         }

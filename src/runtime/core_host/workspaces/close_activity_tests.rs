@@ -108,6 +108,15 @@ fn a_direct_close_right_after_enter_asks_for_review_and_ends_nothing() {
 
 #[test]
 fn inventory_publishes_a_foreground_program_without_shell_integration() {
+    check_foreground_without_shell_integration("exec /bin/sleep 30", Foreground::Program);
+}
+
+#[test]
+fn inventory_reports_ambiguous_foreground_when_a_job_shares_the_shell_group() {
+    check_foreground_without_shell_integration("set +m; /bin/sleep 10", Foreground::Unknown);
+}
+
+fn check_foreground_without_shell_integration(line: &str, expected: Foreground) {
     use spaceterm_core::protocol::{CoreMessage, RawFrame, frame::Assembler, version::WORK};
 
     let mut host = WorkspaceHost::new(host_with_shell(
@@ -119,7 +128,7 @@ fn inventory_publishes_a_foreground_program_without_shell_integration() {
     let outbox = Outbox::new(Arc::new(|| {}), WORK);
     HostCommands::connected(&mut host, observer, observer, &outbox);
     let mut assembler = Assembler::default();
-    let mut wait = |host: &mut WorkspaceHost, foreground| {
+    let mut wait = |host: &mut WorkspaceHost, foreground, needs_review| {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             HostCommands::tick(host, Instant::now());
@@ -130,7 +139,9 @@ fn inventory_publishes_a_foreground_program_without_shell_integration() {
                 };
                 let pane = &revision.inventory.workspaces[0].tabs[0].panes[0];
                 if pane.activity.is_some_and(|activity| {
-                    activity.session == Some(lease.session) && activity.foreground == foreground
+                    activity.session == Some(lease.session)
+                        && activity.foreground == foreground
+                        && activity.needs_close_review == needs_review
                 }) {
                     assert!(
                         pane.presentation
@@ -148,15 +159,15 @@ fn inventory_publishes_a_foreground_program_without_shell_integration() {
         }
     };
     assert_eq!(
-        wait(&mut host, Foreground::Shell).close_would_end_work(target),
+        wait(&mut host, Foreground::Shell, false).close_would_end_work(target),
         Some(false)
     );
     assert!(matches!(
-        command(&mut host, 1, lease, "exec /bin/sleep 30"),
+        command(&mut host, 1, lease, line),
         Reply::Unchanged
     ));
     assert_eq!(
-        wait(&mut host, Foreground::Program).close_would_end_work(target),
+        wait(&mut host, expected, true).close_would_end_work(target),
         Some(true)
     );
     assert_eq!(direct_close(&mut host, target), Outcome::StaleConfirmation);

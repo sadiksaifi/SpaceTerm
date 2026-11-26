@@ -1848,15 +1848,16 @@ mod core_workspaces {
             self.edits.transport().shared_tab_order()
         }
 
-        /// Moves a Tab to the Workspace position occupied by its landing Tab in the strip.
-        pub(crate) fn reorder_tab(&self, tab: Id, landing: Id) -> Option<WorkspaceSubmission> {
-            let workspace = self.presentation_workspace()?;
-            let index = workspace.tabs.iter().position(|tab| tab.id == landing)?;
-            Some(self.edits.submit(Mutation::ReorderTab {
-                workspace: workspace.id,
+        pub(crate) fn reorder_tab(
+            &self,
+            tab: Id,
+            position: spaceterm_core::hierarchy::TabPosition,
+        ) -> WorkspaceSubmission {
+            self.edits.submit(Mutation::ReorderTab {
+                workspace: self.workspace(),
                 tab,
-                index: u16::try_from(index).ok()?,
-            }))
+                position,
+            })
         }
 
         /// Asks the server to move one of the server Tab `tab`'s Panes to `destination`.

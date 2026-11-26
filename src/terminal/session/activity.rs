@@ -425,7 +425,7 @@ impl TerminalEventPublisher {
 
     /// Rechecks foreground work, unanswered input, and live session processes before a close.
     /// Disowned processes can still belong to the terminal session and end with it.
-    fn observe_close_activity(&self) -> (CloseActivity, bool) {
+    fn observe_close_activity(&self, foreground_required: bool) -> (CloseActivity, bool) {
         let (probe, prompt, submitted, stopped) = {
             let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
             (
@@ -438,21 +438,12 @@ impl TerminalEventPublisher {
         if stopped {
             return (CloseActivity::default(), false);
         }
-        let foreground = match probe.as_ref().map(|probe| probe.close_foreground()) {
-            Some(Ok(true)) => Foreground::Shell,
-            Some(Ok(false)) => Foreground::Program,
-            _ => Foreground::Unknown,
-        };
         let submitted_work = prompt.command_running || submitted;
-        let native_work = foreground == Foreground::Program
-            || (!submitted_work
-                && probe.is_some_and(|probe| {
-                    if foreground == Foreground::Shell && prompt.zone == ShellZone::AtPrompt {
-                        matches!(probe.close_work(), Ok(true))
-                    } else {
-                        matches!(probe.others(), Ok(true))
-                    }
-                }));
+        let (foreground, native_work) = probe
+            .filter(|_| foreground_required || !submitted_work)
+            .map_or((Foreground::Unknown, false), |probe| {
+                probe.close_activity(prompt.zone == ShellZone::AtPrompt)
+            });
         (
             CloseActivity {
                 foreground,
@@ -465,7 +456,7 @@ impl TerminalEventPublisher {
     /// Publishes the same facts used by close admission. Return whether currently observed
     /// processes can make this stale without producing another input or output event.
     pub(super) fn publish_close_activity(&self) -> bool {
-        let (observed, native_work) = self.observe_close_activity();
+        let (observed, native_work) = self.observe_close_activity(true);
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if state.activity.close != observed {
             state.activity.close = observed;
@@ -475,7 +466,7 @@ impl TerminalEventPublisher {
     }
 
     pub(super) fn running_work(&self) -> bool {
-        self.observe_close_activity().0.needs_close_review
+        self.observe_close_activity(false).0.needs_close_review
     }
 }
 

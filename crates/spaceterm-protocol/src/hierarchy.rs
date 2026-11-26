@@ -63,6 +63,25 @@ pub struct CloseInventory {
     pub controls: Vec<ConfirmedControl>,
 }
 
+impl CloseInventory {
+    /// Whether both describe the same boot and exact Sessions, regardless of Tab display order.
+    pub fn same_sessions(&self, other: &Self) -> bool {
+        self.boot == other.boot && same_sessions(&self.sessions, &other.sessions)
+    }
+}
+
+fn same_sessions(a: &[ConfirmedPane], b: &[ConfirmedPane]) -> bool {
+    if a == b {
+        return true;
+    }
+    let sorted = |panes: &[ConfirmedPane]| {
+        let mut targets: Vec<_> = panes.iter().map(|pane| (pane.id, pane.session)).collect();
+        targets.sort_unstable();
+        targets
+    };
+    a.len() == b.len() && sorted(a) == sorted(b)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CloseConfirmation {
     pub boot: Id,
@@ -83,7 +102,7 @@ impl CloseConfirmation {
     /// Whether both name the same boot, Panes, Terminal Sessions and removals.
     pub fn same_targets(&self, other: &Self) -> bool {
         self.boot == other.boot
-            && self.panes == other.panes
+            && same_sessions(&self.panes, &other.panes)
             && self.removes_tab == other.removes_tab
             && self.removes_workspace == other.removes_workspace
     }
@@ -235,13 +254,31 @@ pub struct Workspace {
     pub tabs: Vec<Tab>,
 }
 impl Workspace {
-    /// Moves a Tab to its zero-based final position in this Workspace, keeping its identity,
-    /// Panes, and Worktree membership.
-    pub fn reorder_tab(&mut self, tab: Id, index: u16) -> Result<(), Outcome> {
+    /// Moves a Tab in this Workspace, keeping its identity, Panes, and Worktree membership.
+    pub fn reorder_tab(&mut self, tab: Id, position: TabPosition) -> Result<(), Outcome> {
         let Some(from) = self.tabs.iter().position(|candidate| candidate.id == tab) else {
             return Err(Outcome::Missing);
         };
-        let to = usize::from(index);
+        let to = match position {
+            TabPosition::Index(index) => usize::from(index),
+            TabPosition::Before(anchor) | TabPosition::After(anchor) => {
+                let Some((index, anchor)) =
+                    self.tabs.iter().enumerate().find(|(_, t)| t.id == anchor)
+                else {
+                    return Err(Outcome::Missing);
+                };
+                let moving = &self.tabs[from];
+                if anchor.worktree != moving.worktree
+                    || anchor.worktree_repository != moving.worktree_repository
+                {
+                    return Err(Outcome::Invalid);
+                }
+                match position {
+                    TabPosition::Before(_) => index - usize::from(from < index),
+                    _ => index + usize::from(from > index),
+                }
+            }
+        };
         if to >= self.tabs.len() {
             return Err(Outcome::Invalid);
         }
@@ -624,13 +661,25 @@ pub enum Mutation {
         version: u64,
         directory: Option<PathBuf>,
     },
-    /// Move a Tab to its zero-based final position in the Workspace. Requires work 1.6.
+    /// Move a Tab within its Workspace. Requires work 1.6.
     ReorderTab {
         workspace: Id,
         tab: Id,
-        index: u16,
+        position: TabPosition,
     },
 }
+
+/// A Tab's destination in its Workspace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TabPosition {
+    /// A zero-based final position in the full Workspace order.
+    Index(u16),
+    /// Immediately before another Tab in the same Worktree.
+    Before(Id),
+    /// Immediately after another Tab in the same Worktree.
+    After(Id),
+}
+
 impl Mutation {
     /// Requests a Pane or Tab close without confirmation, regardless of control ownership.
     /// Core rechecks running work in the exact reviewed Sessions. Requires work 1.5.

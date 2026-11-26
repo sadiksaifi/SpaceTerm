@@ -546,6 +546,7 @@ fn end_all_sessions_preserves_independent_grants_unclaimed_panes_and_other_machi
         .flat_map(|tab| &mut tab.panes)
     {
         pane.presentation = None;
+        pane.activity = Some(Default::default());
     }
     end_all(&mut selected, 3, 1);
     let ended = workspace_inventory(&mut selected);

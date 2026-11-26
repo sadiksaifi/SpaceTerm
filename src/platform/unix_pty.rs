@@ -13,6 +13,7 @@ use portable_pty::{
     Child, ChildKiller, CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_system,
 };
 use spaceterm_core::diagnostics::TerminalCounters;
+use spaceterm_core::hierarchy::Foreground;
 use spaceterm_core::pane::LineMode;
 use thiserror::Error;
 
@@ -590,31 +591,72 @@ impl SessionProbe for ShellSession {
         Ok(foreground == self.session.leader.process)
     }
 
-    fn close_foreground(&self) -> io::Result<bool> {
-        if !self.shell_foreground()? {
-            return Ok(false);
+    fn close_activity(&self, at_prompt: bool) -> (Foreground, bool) {
+        let shell_group = match self.shell_foreground() {
+            Ok(false) => return (Foreground::Program, true),
+            Ok(true) => true,
+            Err(_) => false,
+        };
+        let shell_image = self
+            .image
+            .as_ref()
+            .filter(|_| shell_group)
+            .and_then(|shell| {
+                let image = self.host.process_image(self.session.leader).ok()?;
+                Some(image == *shell)
+            });
+        // Exec can replace the owning shell without changing its foreground group.
+        if shell_image == Some(false) {
+            return (Foreground::Program, true);
         }
-        // Preserve the process-group observation when the optional image cannot be read.
-        Ok(self.image.as_ref().is_none_or(|shell| {
-            self.host
-                .process_image(self.session.leader)
-                .map_or(true, |image| image == *shell)
-        }))
+        let known_shell = shell_image == Some(true);
+        let marker = self
+            .prompt_helper_marker
+            .as_deref()
+            .filter(|_| at_prompt && shell_group);
+        let mut shared_foreground = false;
+        let mut work = false;
+        let complete = self.any_session_member(|member| {
+            shared_foreground |= member.process_group == self.session.leader.process;
+            if !work {
+                work = !marker.is_some_and(|marker| self.is_prompt_helper(member, marker));
+            }
+            work && (shared_foreground || !known_shell)
+        });
+        // A PTY names a process group. When another program shares the shell's group, that
+        // reading alone cannot say which process holds the foreground.
+        let foreground = if known_shell
+            && !shared_foreground
+            && complete.is_ok()
+            && matches!(self.shell_foreground(), Ok(true))
+        {
+            Foreground::Shell
+        } else {
+            Foreground::Unknown
+        };
+        (foreground, work)
     }
 
     fn others(&self) -> io::Result<bool> {
-        self.session_work(None)
-    }
-
-    fn close_work(&self) -> io::Result<bool> {
-        self.session_work(self.prompt_helper_marker.as_deref())
+        self.any_session_member(|_| true)
     }
 }
 
 impl ShellSession {
+    fn is_prompt_helper(&self, member: ProcessObservation, marker: &[u8]) -> bool {
+        self.host.prompt_helper(member.identity.process, marker)
+            && matches!(
+                self.host.observe_exactly(member.identity.process),
+                Ok(Some(current)) if current == member
+            )
+    }
+
     /// Reads every visible process exactly, unlike cleanup's best-effort enumeration: a
     /// process that could not be read is an error, never a process that is not there.
-    fn session_work(&self, prompt_helper_marker: Option<&[u8]>) -> io::Result<bool> {
+    fn any_session_member(
+        &self,
+        mut matches: impl FnMut(ProcessObservation) -> bool,
+    ) -> io::Result<bool> {
         let leader = self
             .host
             .observe_exactly(self.session.session)?
@@ -626,17 +668,11 @@ impl ShellSession {
             if process < 1 || process == self.session.leader.process {
                 continue;
             }
-            match self.host.observe_exactly(process)? {
-                Some(observation) if observation.session == self.session.session => {
-                    let helper = prompt_helper_marker
-                        .is_some_and(|marker| self.host.prompt_helper(process, marker));
-                    if !helper
-                        || !matches!(self.host.observe_exactly(process), Ok(Some(current)) if current == observation)
-                    {
-                        return Ok(true);
-                    }
-                }
-                _ => {}
+            if let Some(observation) = self.host.observe_exactly(process)?
+                && observation.session == self.session.session
+                && matches(observation)
+            {
+                return Ok(true);
             }
         }
         if self.host.observe_exactly(self.session.session)? != Some(leader) {

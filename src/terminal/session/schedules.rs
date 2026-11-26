@@ -129,6 +129,7 @@ pub(super) struct WorkerSchedules {
     /// The earliest time a hidden Terminal Session reports metadata again.
     metadata_not_before: Instant,
     graphics_animation: Option<Instant>,
+    pub(super) preview: Option<super::preview::PreviewRead>,
     compression: CompressionSchedule<CompressionActivity>,
     clock: Clock,
 }
@@ -451,6 +452,7 @@ impl WorkerSchedules {
             metadata_presentation_queued: Arc::new(AtomicBool::new(false)),
             metadata_not_before: now,
             graphics_animation: None,
+            preview: None,
             compression: CompressionSchedule::new(),
             clock: Clock::System,
         }

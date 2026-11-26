@@ -1728,7 +1728,7 @@ mod tests {
         let mutation = Mutation::ReorderTab {
             workspace,
             tab,
-            index: 0,
+            position: spaceterm_core::hierarchy::TabPosition::Index(0),
         };
         let Dispatch::After(work) =
             HostCommands::mutate(&mut host, device, device, id, 2, Some(mutation))

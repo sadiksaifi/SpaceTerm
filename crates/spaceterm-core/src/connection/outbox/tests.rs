@@ -924,14 +924,14 @@ fn replies_go_out_as_the_selected_work_version_has_them() {
 
 #[test]
 fn resolving_a_reorder_on_an_older_link_refuses_instead_of_sending_the_new_variant() {
-    use crate::hierarchy::{Mutation, Outcome, RetainedOutcome};
+    use crate::hierarchy::{Mutation, Outcome, RetainedOutcome, TabPosition};
 
     let receipt = RetainedOutcome {
         sequence: 1,
         mutation: Mutation::ReorderTab {
             workspace: [1; 32],
             tab: [2; 32],
-            index: 0,
+            position: TabPosition::Index(0),
         },
         outcome: Outcome::Accepted { target: [2; 32] },
     };

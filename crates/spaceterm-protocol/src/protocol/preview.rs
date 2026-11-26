@@ -25,7 +25,7 @@ pub enum State {
     NotStarted,
     Live {
         session: Id,
-        /// `None` while the first screen has yet to become available.
+        /// `None` if a complete current screen is unavailable before the read's deadline.
         screen: Option<Screen>,
     },
     Ended {

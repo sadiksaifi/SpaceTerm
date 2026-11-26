@@ -1542,9 +1542,11 @@ impl TerminalWorker {
     fn receive_next_command(&mut self) -> Option<Command> {
         // Presentation deadlines must advance even when PTY readers keep the queue nonempty.
         // The emulator separately enforces the prompt cap and synchronized-output inactivity.
-        if !self.release_synchronized_output_if_due(Instant::now()) {
+        let now = Instant::now();
+        if !self.release_synchronized_output_if_due(now) {
             return None;
         }
+        self.settle_preview(now);
         if self
             .input
             .deadline()
@@ -1604,6 +1606,7 @@ impl TerminalWorker {
                 self.emulator.metadata_status_deadline(),
                 self.clipboard.deadline(),
                 self.input.deadline(),
+                self.preview_deadline(),
             ]
             .into_iter()
             .flatten()
@@ -1644,6 +1647,7 @@ impl TerminalWorker {
                     {
                         return None;
                     }
+                    self.settle_preview(now);
                     match self.commands.try_recv() {
                         Ok(command) => return Some(self.note_normal_command(command)),
                         Err(mpsc::TryRecvError::Disconnected) => return None,
@@ -2787,7 +2791,8 @@ impl TerminalWorker {
         send_session_event(&self.events, event)
     }
 
-    fn finish(self) {
+    fn finish(mut self) {
+        drop(self.schedules.preview.take());
         let Self {
             native_pty,
             emulator: _emulator,
