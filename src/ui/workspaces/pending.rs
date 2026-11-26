@@ -7,7 +7,7 @@ use crate::terminal::core_session::restart::RECONNECT_LIMIT;
 use crate::terminal::workspace_client::WorkspaceSnapshot;
 use spaceterm_core::hierarchy::{
     CloseConfirmation, CloseTarget, Id, Inventory, Mutation, Outcome, Pane, PaneDestination,
-    RetainedOutcome, Side, Tab, Workspace,
+    RetainedOutcome, Side, Tab, TabPosition, Workspace,
 };
 use spaceterm_core::worktree::Operation;
 use std::collections::{BTreeMap, VecDeque};
@@ -152,10 +152,7 @@ impl PendingEdits {
                 tab: None,
                 pane: Some(new_id()?),
             }),
-            Mutation::MovePane {
-                destination: PaneDestination::NewTab,
-                ..
-            } => Some(Creation {
+            Mutation::MovePane { destination, .. } if destination.creates_tab() => Some(Creation {
                 workspace: None,
                 tab: Some(new_id()?),
                 pane: None,
@@ -171,7 +168,7 @@ impl PendingEdits {
         let presented = creation.is_some()
             || matches!(
                 mutation,
-                Mutation::MovePane { .. } | Mutation::MergeTab { .. }
+                Mutation::MovePane { .. } | Mutation::MergeTab { .. } | Mutation::ReorderTab { .. }
             );
         self.edits.push_back(Edit {
             mutation,
@@ -651,8 +648,21 @@ fn references(mutation: &Mutation) -> Vec<Id> {
             destination,
         } => {
             let mut ids = vec![*workspace, *tab, *pane];
-            if let PaneDestination::Beside { tab, pane, .. } = destination {
-                ids.extend([*tab, *pane]);
+            match destination {
+                PaneDestination::NewTab => {}
+                PaneDestination::NewTabBefore(tab) => ids.push(*tab),
+                PaneDestination::Beside { tab, pane, .. } => ids.extend([*tab, *pane]),
+            }
+            ids
+        }
+        Mutation::ReorderTab {
+            workspace,
+            tab,
+            position,
+        } => {
+            let mut ids = vec![*workspace, *tab];
+            if let TabPosition::Before(anchor) | TabPosition::After(anchor) = position {
+                ids.push(*anchor);
             }
             ids
         }
@@ -706,9 +716,24 @@ fn remap(mutation: &mut Mutation, id: impl Fn(Id) -> Id) {
             *workspace = id(*workspace);
             *tab = id(*tab);
             *pane = id(*pane);
-            if let PaneDestination::Beside { tab, pane, .. } = destination {
-                *tab = id(*tab);
-                *pane = id(*pane);
+            match destination {
+                PaneDestination::NewTab => {}
+                PaneDestination::NewTabBefore(tab) => *tab = id(*tab),
+                PaneDestination::Beside { tab, pane, .. } => {
+                    *tab = id(*tab);
+                    *pane = id(*pane);
+                }
+            }
+        }
+        Mutation::ReorderTab {
+            workspace,
+            tab,
+            position,
+        } => {
+            *workspace = id(*workspace);
+            *tab = id(*tab);
+            if let TabPosition::Before(anchor) | TabPosition::After(anchor) = position {
+                *anchor = id(*anchor);
             }
         }
         Mutation::MergeTab {
@@ -740,6 +765,7 @@ fn new_pane(id: Id, source: Option<Id>, side: Side, directory: std::path::PathBu
         repository_directory: None,
         presentation: None,
         observers: Default::default(),
+        activity: None,
         confirmed_directory: None,
         creator: None,
     }
@@ -865,6 +891,7 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
         | Mutation::SplitPane { workspace, .. }
         | Mutation::MovePane { workspace, .. }
         | Mutation::MergeTab { workspace, .. }
+        | Mutation::ReorderTab { workspace, .. }
         | Mutation::Worktree(Operation::OpenTab { workspace, .. }) => *workspace,
         _ => return,
     };
@@ -872,6 +899,9 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
         return;
     };
     match mutation {
+        Mutation::ReorderTab { tab, position, .. } => {
+            let _ = workspace.reorder_tab(*tab, *position);
+        }
         Mutation::RenameWorkspace { name, version, .. } => {
             workspace.name.clone_from(name);
             workspace.name_version = *version;
@@ -925,11 +955,12 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
         Mutation::MovePane {
             tab,
             pane,
-            destination: PaneDestination::NewTab,
+            destination: destination @ (PaneDestination::NewTab | PaneDestination::NewTabBefore(_)),
             ..
         } => {
             if let Some(id) = creation.and_then(|ids| ids.tab) {
-                let _ = workspace.move_pane_to_new_tab(*tab, *pane, id);
+                let _ =
+                    workspace.move_pane_to_new_tab_before(*tab, *pane, id, destination.before());
             }
         }
         Mutation::MovePane {

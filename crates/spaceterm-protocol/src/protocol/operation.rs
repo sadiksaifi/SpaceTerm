@@ -109,6 +109,8 @@ pub enum Operation {
         target: crate::hierarchy::CloseTarget,
         confirmation: crate::hierarchy::CloseConfirmation,
     },
+    /// Reads visible text in request order without opening or acting on a Pane channel.
+    PanePreviews { panes: Vec<crate::hierarchy::Id> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -138,6 +140,7 @@ pub enum ReplyBody {
     Run(RunReply),
     /// The live Terminal Session IDs, for `Operation::Sessions`.
     Sessions(Vec<crate::hierarchy::Id>),
+    PanePreviews(Vec<super::preview::PanePreview>),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -262,6 +265,20 @@ pub struct Restored {
 }
 
 impl Operation {
+    /// The work capability this request needs after its transport representation is chosen.
+    pub fn required_capability(&self) -> Option<super::capability::Capability> {
+        use super::capability::Capability;
+        match self {
+            Self::CloseIfIdle { .. } => Some(Capability::CloseIfIdle),
+            Self::Mutate { mutation, .. } => mutation.required_capability(),
+            Self::PanePreviews { .. } => Some(Capability::PanePreview),
+            Self::WorktreeRead(crate::worktree::Read::ContextWithDefault { .. }) => {
+                Some(Capability::WorktreeDefaultBranch)
+            }
+            _ => None,
+        }
+    }
+
     /// Checks the semantic bounds postcard cannot express.
     pub fn validate(&self) -> Result<(), Fatal> {
         match self {
@@ -270,6 +287,7 @@ impl Operation {
                 command.len() <= MAX_RUN_COMMAND_BYTES && !command.chars().any(|c| c.is_control()),
             ),
             Self::ScrollbackPage { rows, .. } => check((1..=limits::MAX_PAGE_ROWS).contains(rows)),
+            Self::PanePreviews { panes } => super::preview::validate_request(panes),
             _ => Ok(()),
         }
     }
@@ -310,12 +328,16 @@ impl ReplyBody {
 
     /// Bulk replies travel at L2 in chunks of at most [`limits::BULK_CHUNK_BYTES`].
     pub fn bulk(&self) -> bool {
-        matches!(self, Self::Page(_) | Self::Graphics(_))
+        matches!(
+            self,
+            Self::Page(_) | Self::Graphics(_) | Self::PanePreviews(_)
+        )
     }
 
     pub fn validate(&self) -> Result<(), Fatal> {
         match self {
             Self::Page(page) => page.validate(),
+            Self::PanePreviews(previews) => super::preview::validate_reply(previews),
             _ => Ok(()),
         }
     }

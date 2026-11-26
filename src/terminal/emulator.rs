@@ -3,6 +3,7 @@ use crate::platform::local_filesystem::{LocalFileEmissionRegistry, LocalFilesyst
 mod compression;
 mod history;
 pub(crate) use history::HistoryPage;
+pub(crate) use history::PreviewGrid;
 mod run;
 
 use std::cell::{Cell, RefCell};

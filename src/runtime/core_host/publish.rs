@@ -336,10 +336,9 @@ impl CorePaneHost {
         Observed::Live(observation)
     }
 
-    /// Whether the Pane's Terminal Metadata changed since the last call. A presented Terminal
-    /// Session carries such a change with its next screen, which only a connection observes, so
-    /// the host learns of it here.
-    pub(super) fn metadata_changed(&mut self) -> bool {
+    /// Whether a presented Terminal Session changed any of its inventory facts since the last
+    /// call. The presenting connection observes the change and rings the Workspace host.
+    pub(super) fn presentation_changed(&mut self) -> bool {
         let Some(pane) = &mut self.pane else {
             return false;
         };
@@ -347,7 +346,11 @@ impl CorePaneHost {
             .runtime
             .metadata_snapshot()
             .map_or(0, |metadata| metadata.revision);
-        std::mem::replace(&mut pane.metadata_revision, revision) != revision
+        let metadata_changed = std::mem::replace(&mut pane.metadata_revision, revision) != revision;
+        let activity = pane.runtime.close_activity();
+        let activity_changed =
+            std::mem::replace(&mut pane.last_close_activity, activity) != activity;
+        metadata_changed || activity_changed
     }
 
     /// Applies a client `View` to the Pane `lease` controls.

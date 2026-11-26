@@ -1,8 +1,9 @@
 //! Serves work requests over an admitted carrier.
 use super::admitted::{AdmittedConnection, Inbound};
-use super::carrier::{Carrier, CarrierError};
+use super::carrier::{Carrier, CarrierError, Flush, Offer, Priority, Readiness};
+use super::outbox::Outbox;
 use super::service::SharedPaneService;
-use crate::protocol::{Fatal, limits};
+use crate::protocol::{Fatal, RawFrame, limits};
 pub use spaceterm_client::connection::io::{Waker, spawn_link, wait_fd};
 use spaceterm_client::connection::io::{drain, wait, write};
 use std::os::fd::RawFd;
@@ -46,7 +47,7 @@ pub fn serve(
     service: &SharedPaneService,
     stopping: &AtomicBool,
 ) {
-    let _ended = Ended {
+    let ended = Ended {
         outbox: connection.outbox().clone(),
         service: Arc::clone(service),
         peer: *connection.peer(),
@@ -88,8 +89,12 @@ pub fn serve(
                 .unwrap_or_else(|e| e.into_inner())
                 .publish(connection.peer());
         }
-        let written = match write(carrier.as_mut(), &mut held, |lowest| {
-            outbox.next_frame_within(lowest)
+        let mut writer = PreviewWriter {
+            carrier: carrier.as_mut(),
+            outbox: &outbox,
+        };
+        let written = match write(&mut writer, &mut held, |lowest| {
+            outbox.next_carrier_frame(lowest)
         }) {
             Ok(written) => written,
             Err(_) => break,
@@ -136,7 +141,43 @@ pub fn serve(
             deadline,
         );
     }
-    drain(carrier.as_mut(), waker);
+    if !ended.outbox.aborted() {
+        drain(
+            &mut PreviewWriter {
+                carrier: carrier.as_mut(),
+                outbox: &ended.outbox,
+            },
+            waker,
+        );
+    }
+}
+
+/// Keeps a refused preview frame subject to End All Sessions while the I/O loop holds it.
+struct PreviewWriter<'a> {
+    carrier: &'a mut dyn Carrier,
+    outbox: &'a Outbox,
+}
+
+impl Carrier for PreviewWriter<'_> {
+    fn offer(&mut self, frame: &[u8], priority: Priority) -> Result<Offer, CarrierError> {
+        self.outbox.offer(self.carrier, frame, priority)
+    }
+
+    fn flush(&mut self) -> Result<Flush, CarrierError> {
+        self.outbox.flush(self.carrier)
+    }
+
+    fn receive(&mut self) -> Result<Option<RawFrame>, CarrierError> {
+        self.carrier.receive()
+    }
+
+    fn readiness(&self) -> Readiness {
+        self.carrier.readiness()
+    }
+
+    fn close(&mut self) {
+        self.carrier.close();
+    }
 }
 
 /// Reports a connection's end to its outbox and service, also when its thread panics, so its
@@ -233,6 +274,7 @@ mod tests {
         room: bool,
         accepted: usize,
         pending: bool,
+        retransmits_bulk: bool,
         closed: bool,
         /// Receives one message for each flush after `close`.
         drained: mpsc::Sender<()>,
@@ -250,6 +292,7 @@ mod tests {
                 room: false,
                 accepted: 0,
                 pending,
+                retransmits_bulk: false,
                 closed: false,
                 drained,
                 bell,
@@ -276,6 +319,9 @@ mod tests {
                 progressed: false,
                 pending: self.pending,
             })
+        }
+        fn bulk_may_retransmit(&self) -> bool {
+            self.retransmits_bulk
         }
         fn receive(&mut self) -> Result<Option<RawFrame>, CarrierError> {
             Ok(None)
@@ -338,6 +384,82 @@ mod tests {
             }
         }
         fn close(&mut self) {}
+    }
+
+    #[test]
+    fn an_end_all_clear_discards_a_preview_frame_held_by_the_writer() {
+        let (bell, _) = UnixStream::pair().unwrap();
+        let mut carrier = BulkBlocked {
+            accepted: Vec::new(),
+            bell,
+        };
+        let outbox = Outbox::new(Arc::new(|| {}), crate::protocol::version::WORK);
+        let id = crate::protocol::RequestId(1);
+        outbox.begin(id).unwrap();
+        outbox
+            .preview_reply(id)
+            .unwrap()
+            .send(Ok(crate::protocol::ReplyBody::PanePreviews(vec![
+                crate::protocol::preview::PanePreview {
+                    pane: [1; 32],
+                    state: crate::protocol::preview::State::NotStarted,
+                },
+            ])));
+        let mut writer = PreviewWriter {
+            carrier: &mut carrier,
+            outbox: &outbox,
+        };
+        let mut held = Vec::new();
+        write(&mut writer, &mut held, |lowest| {
+            outbox.next_carrier_frame(lowest)
+        })
+        .unwrap();
+        assert_eq!(held.len(), 1, "the bulk frame waits outside the outbox");
+
+        outbox.discard_previews();
+
+        assert!(matches!(
+            write(&mut writer, &mut held, |lowest| outbox
+                .next_carrier_frame(lowest)),
+            Err(CarrierError::Closed)
+        ));
+        assert!(outbox.aborted());
+        assert!(carrier.accepted.is_empty());
+    }
+
+    #[test]
+    fn an_end_all_clear_aborts_a_carrier_that_can_still_retransmit_a_preview() {
+        for retransmits_bulk in [false, true] {
+            let (mut carrier, _) = Backpressured::new(false);
+            carrier.room = true;
+            carrier.retransmits_bulk = retransmits_bulk;
+            let outbox = Outbox::new(Arc::new(|| {}), crate::protocol::version::WORK);
+            let id = crate::protocol::RequestId(1);
+            outbox.begin(id).unwrap();
+            outbox
+                .preview_reply(id)
+                .unwrap()
+                .send(Ok(crate::protocol::ReplyBody::PanePreviews(vec![
+                    crate::protocol::preview::PanePreview {
+                        pane: [1; 32],
+                        state: crate::protocol::preview::State::NotStarted,
+                    },
+                ])));
+            let mut writer = PreviewWriter {
+                carrier: &mut carrier,
+                outbox: &outbox,
+            };
+            let written = write(&mut writer, &mut Vec::new(), |lowest| {
+                outbox.next_carrier_frame(lowest)
+            })
+            .unwrap();
+            assert!(!written.pending);
+
+            outbox.discard_previews();
+
+            assert_eq!(outbox.aborted(), retransmits_bulk);
+            assert_eq!(writer.flush().is_err(), retransmits_bulk);
+        }
     }
 
     /// Queued frames by level, taken in priority order down to the level asked for, as the

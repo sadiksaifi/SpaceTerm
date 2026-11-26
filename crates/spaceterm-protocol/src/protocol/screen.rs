@@ -262,7 +262,7 @@ impl Style {
         underline: 0,
     };
 
-    fn valid(&self) -> bool {
+    pub(super) fn valid(&self) -> bool {
         self.flags & !flags::ALL == 0 && self.underline <= MAX_UNDERLINE
     }
 }
@@ -329,7 +329,7 @@ impl Run {
 
     /// Whether explicit lengths cover `text` exactly, on character boundaries and within
     /// [`limits::MAX_CELL_BYTES`]. Walks the lengths without allocating.
-    fn covers_text(&self) -> bool {
+    pub(super) fn covers_text(&self) -> bool {
         let Cells::Explicit(lengths) = &self.cells else {
             return true;
         };

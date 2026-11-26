@@ -11,6 +11,7 @@ pub mod inventory_1_0;
 pub mod limits;
 pub mod message;
 pub mod operation;
+pub mod preview;
 pub mod screen;
 #[cfg(test)]
 mod tests;

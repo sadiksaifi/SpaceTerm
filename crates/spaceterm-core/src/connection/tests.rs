@@ -705,6 +705,45 @@ fn an_idle_close_requires_its_work_1_5_request_with_the_idle_marker() {
     }
 }
 
+#[test]
+fn worktree_default_branch_context_requires_work_1_6() {
+    use crate::protocol::frame::{Assembler, encode_client};
+    use crate::protocol::version::ProtocolVersion;
+    use crate::protocol::{ClientMessage, CoreMessage, RawFrame, Request};
+    use crate::worktree::Read;
+
+    let work = ProtocolVersion { major: 1, minor: 5 };
+    let mut harness = Harness::selecting(None, work);
+    harness.link.select_work(work);
+    let operation = Operation::WorktreeRead(Read::ContextWithDefault {
+        root: "/repo".into(),
+    });
+    assert!(matches!(
+        harness.link.request(operation.clone()),
+        Err(LinkError::Unsupported)
+    ));
+    assert!(harness.link.next_frame().is_none());
+
+    let id = RequestId(1);
+    let message = ClientMessage::Request(Box::new(Request { id, operation }));
+    let frame = encode_client(&message).unwrap().frames.remove(0);
+    assert!(
+        harness
+            .connection
+            .receive(RawFrame::parse(&frame).unwrap(), Instant::now())
+            .unwrap()
+            .is_none()
+    );
+    let (frame, _) = harness.connection.outbox().next_frame().unwrap();
+    let reply = Assembler::default()
+        .core(RawFrame::parse(&frame).unwrap())
+        .unwrap();
+    assert!(
+        matches!(reply, Some(CoreMessage::Reply(reply)) if reply.id == id && matches!(reply.result, Err(Refusal::Unsupported)))
+    );
+    assert!(!harness.connection.outbox().is_closing());
+}
+
 /// A background start that arrives on a connection whose admission selected work 1.3 is refused
 /// before its channel opens or the service sees it. The connection continues, and the same
 /// channel number stays available. Work 1.4 admits it.

@@ -136,7 +136,7 @@ _Avoid_: Update {Machine}
 
 **Machine Settings**: Preferences owned by one SpaceTerm Core and shared by its authorized clients.
 
-**Client View State**: A SpaceTerm Client's presentation choices for Core-owned work, including Workspace and Tab display order, Pane Layouts and Split ratios, Active Workspace, Active Tab, Focused Pane, Zoomed Pane, Selection, Terminal Find, and scroll position.
+**Client View State**: A SpaceTerm Client's presentation choices for Core-owned work, including Workspace display order, Pane Layouts and Split ratios, Active Workspace, Active Tab, Focused Pane, Zoomed Pane, Selection, Terminal Find, and scroll position.
 
 **Controlling Client**: The SpaceTerm Client with authority to supply terminal input and terminal dimensions to a Pane.
 

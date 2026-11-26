@@ -1,7 +1,9 @@
 use std::io;
+use std::sync::Arc;
 
 use crate::platform::unix_pty::{
     MasterReadError, ProcessIdentity, ProcessObservation, ProcessStart, UnixPtyHost,
+    sample_session_candidates,
 };
 
 /// Linux process facts through procfs. Linux reports `EIO` from a PTY master read once every
@@ -190,6 +192,17 @@ impl UnixPtyHost for LinuxPtyHost {
             return Err(io::Error::other("process membership is not visible"));
         }
         self.process_ids()
+    }
+
+    fn inventory_session_candidates(&self, leader: i32) -> io::Result<Arc<[i32]>> {
+        sample_session_candidates(
+            leader,
+            || self.complete_process_ids(),
+            |pid| {
+                self.observe_exactly(pid)
+                    .map(|member| member.map(|member| member.session))
+            },
+        )
     }
 
     fn master_read_error(&self, error: &io::Error) -> MasterReadError {

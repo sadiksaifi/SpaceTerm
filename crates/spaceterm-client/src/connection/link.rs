@@ -89,10 +89,11 @@ impl From<RequestError> for crate::CoreError {
     }
 }
 
-pub(crate) fn supports_close_if_idle(
+pub(crate) fn supports_work(
     work: Option<crate::protocol::version::ProtocolVersion>,
+    capability: crate::protocol::capability::Capability,
 ) -> bool {
-    let (_, since) = crate::protocol::capability::Capability::CloseIfIdle.since();
+    let (_, since) = capability.since();
     work.is_some_and(|work| work >= since)
 }
 
@@ -377,6 +378,15 @@ impl CoreLink {
             id,
             slot,
         })
+    }
+
+    /// Reads visible terminal text for up to [`crate::protocol::preview::MAX_PANES`] distinct
+    /// Panes on this Machine, without opening a channel. The reply is [`ReplyBody::PanePreviews`].
+    pub fn read_pane_previews(
+        &self,
+        panes: Vec<crate::hierarchy::Id>,
+    ) -> Result<PendingReply, LinkError> {
+        self.request(Operation::PanePreviews { panes })
     }
 
     /// Sends a request whose reply `then` receives on the I/O thread. `then` must not block.
@@ -770,7 +780,9 @@ impl State {
             },
             operation => operation,
         };
-        if matches!(operation, Operation::CloseIfIdle { .. }) && !supports_close_if_idle(self.work)
+        if operation
+            .required_capability()
+            .is_some_and(|capability| !supports_work(self.work, capability))
         {
             return Err(LinkError::Unsupported);
         }

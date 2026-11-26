@@ -63,6 +63,25 @@ pub struct CloseInventory {
     pub controls: Vec<ConfirmedControl>,
 }
 
+impl CloseInventory {
+    /// Whether both describe the same boot and exact Sessions, regardless of Tab display order.
+    pub fn same_sessions(&self, other: &Self) -> bool {
+        self.boot == other.boot && same_sessions(&self.sessions, &other.sessions)
+    }
+}
+
+fn same_sessions(a: &[ConfirmedPane], b: &[ConfirmedPane]) -> bool {
+    if a == b {
+        return true;
+    }
+    let sorted = |panes: &[ConfirmedPane]| {
+        let mut targets: Vec<_> = panes.iter().map(|pane| (pane.id, pane.session)).collect();
+        targets.sort_unstable();
+        targets
+    };
+    a.len() == b.len() && sorted(a) == sorted(b)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CloseConfirmation {
     pub boot: Id,
@@ -83,7 +102,7 @@ impl CloseConfirmation {
     /// Whether both name the same boot, Panes, Terminal Sessions and removals.
     pub fn same_targets(&self, other: &Self) -> bool {
         self.boot == other.boot
-            && self.panes == other.panes
+            && same_sessions(&self.panes, &other.panes)
             && self.removes_tab == other.removes_tab
             && self.removes_workspace == other.removes_workspace
     }
@@ -98,6 +117,30 @@ pub struct Placement {
 }
 
 impl Inventory {
+    /// Whether the latest Machine observation verified running work in the exact Sessions that
+    /// this close would end. `None` means the inventory lacks a matching observation.
+    /// Core checks again when it admits an idle-only close. Workspace removal still needs consent.
+    pub fn close_would_end_work(&self, target: CloseTarget) -> Option<bool> {
+        let confirmed = self.close_confirmation(target)?;
+        let mut complete = true;
+        for pane in confirmed.panes {
+            let activity = self
+                .workspaces
+                .iter()
+                .flat_map(|workspace| &workspace.tabs)
+                .flat_map(|tab| &tab.panes)
+                .find(|entry| entry.id == pane.id)
+                .and_then(|entry| entry.activity)
+                .filter(|activity| activity.session == pane.session);
+            match activity {
+                Some(activity) if activity.needs_close_review => return Some(true),
+                None => complete = false,
+                _ => {}
+            }
+        }
+        complete.then_some(false)
+    }
+
     /// Where created work `id` sits, as a Reveal shows it: a Workspace shows its Root Tab's Root
     /// Pane, and a Tab its Root Pane.
     pub fn placement(&self, id: Id) -> Option<Placement> {
@@ -211,6 +254,41 @@ pub struct Workspace {
     pub tabs: Vec<Tab>,
 }
 impl Workspace {
+    /// Moves a Tab in this Workspace, keeping its identity, Panes, and Worktree membership.
+    pub fn reorder_tab(&mut self, tab: Id, position: TabPosition) -> Result<(), Outcome> {
+        let Some(from) = self.tabs.iter().position(|candidate| candidate.id == tab) else {
+            return Err(Outcome::Missing);
+        };
+        let to = match position {
+            TabPosition::Index(index) => usize::from(index),
+            TabPosition::Before(anchor) | TabPosition::After(anchor) => {
+                let Some((index, anchor)) =
+                    self.tabs.iter().enumerate().find(|(_, t)| t.id == anchor)
+                else {
+                    return Err(Outcome::Missing);
+                };
+                let moving = &self.tabs[from];
+                if anchor.worktree != moving.worktree
+                    || anchor.worktree_repository != moving.worktree_repository
+                {
+                    return Err(Outcome::Invalid);
+                }
+                match position {
+                    TabPosition::Before(_) => index - usize::from(from < index),
+                    _ => index + usize::from(from > index),
+                }
+            }
+        };
+        if to >= self.tabs.len() {
+            return Err(Outcome::Invalid);
+        }
+        if from != to {
+            let tab = self.tabs.remove(from);
+            self.tabs.insert(to, tab);
+        }
+        Ok(())
+    }
+
     /// The Main Worktree of the repository this Workspace is in.
     pub fn repository(&self) -> Option<&Path> {
         self.placed_tab()?.worktree_repository.as_deref()
@@ -235,22 +313,53 @@ impl Workspace {
     /// A refusal changes nothing: `Outcome::Missing` when `tab` does not hold `pane`, and
     /// `Outcome::Invalid` when `pane` is the only Pane of `tab`.
     pub fn move_pane_to_new_tab(&mut self, tab: Id, pane: Id, id: Id) -> Result<(), Outcome> {
+        self.move_pane_to_new_tab_before(tab, pane, id, None)
+    }
+
+    /// Creates the Tab before its surviving landing Tab in the same Worktree, or appends it
+    /// when there is no landing Tab. Checks placement before removing the Pane.
+    pub fn move_pane_to_new_tab_before(
+        &mut self,
+        tab: Id,
+        pane: Id,
+        id: Id,
+        before: Option<Id>,
+    ) -> Result<(), Outcome> {
         let source = self
             .tabs
             .iter()
             .find(|t| t.id == tab)
             .ok_or(Outcome::Missing)?;
+        let index = if let Some(before) = before {
+            let (index, anchor) = self
+                .tabs
+                .iter()
+                .enumerate()
+                .find(|(_, tab)| tab.id == before)
+                .ok_or(Outcome::Missing)?;
+            if anchor.worktree != source.worktree
+                || anchor.worktree_repository != source.worktree_repository
+            {
+                return Err(Outcome::Invalid);
+            }
+            index
+        } else {
+            self.tabs.len()
+        };
         let (worktree, worktree_repository) =
             (source.worktree.clone(), source.worktree_repository.clone());
         let moved = self.take_pane(tab, pane)?;
-        self.tabs.push(Tab {
-            worktree_membership: WorktreeMembership::Following,
-            worktree,
-            worktree_repository,
-            id,
-            root_pane: pane,
-            panes: vec![moved],
-        });
+        self.tabs.insert(
+            index,
+            Tab {
+                worktree_membership: WorktreeMembership::Following,
+                worktree,
+                worktree_repository,
+                id,
+                root_pane: pane,
+                panes: vec![moved],
+            },
+        );
         Ok(())
     }
 
@@ -397,6 +506,24 @@ pub struct PaneObservers {
     pub others: u32,
 }
 
+/// Who owned the PTY foreground when the Machine last observed the Terminal Session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Foreground {
+    #[default]
+    Unknown,
+    Shell,
+    Program,
+}
+
+/// The live Machine observation used to prepare an exact-session close.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneActivity {
+    pub session: Option<Id>,
+    pub foreground: Foreground,
+    /// Core also checks submitted input and other work that closing the Session would end.
+    pub needs_close_review: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pane {
     pub id: Id,
@@ -414,6 +541,9 @@ pub struct Pane {
     pub presentation: Option<Box<crate::pane::metadata::Snapshot>>,
     /// Live observation presence, excluded from retained Organization.
     pub observers: PaneObservers,
+    /// Published in the work 1.6 inventory frame. Older peers and retained inventory omit it.
+    #[serde(skip)]
+    pub activity: Option<PaneActivity>,
     pub confirmed_directory: Option<PathBuf>,
     /// The creator reserves control even before measured first use starts a shell.
     pub creator: Option<Id>,
@@ -475,6 +605,21 @@ pub enum PaneDestination {
     NewTab,
     /// The `side` of Pane `pane` in another Tab `tab` of the same Workspace.
     Beside { tab: Id, pane: Id, side: Side },
+    /// A new Tab before this existing Tab in the source Tab's Worktree. Requires work 1.6.
+    NewTabBefore(Id),
+}
+
+impl PaneDestination {
+    pub const fn creates_tab(self) -> bool {
+        matches!(self, Self::NewTab | Self::NewTabBefore(_))
+    }
+
+    pub const fn before(self) -> Option<Id> {
+        match self {
+            Self::NewTabBefore(tab) => Some(tab),
+            _ => None,
+        }
+    }
 }
 /// Who controls work a mutation creates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -562,7 +707,25 @@ pub enum Mutation {
         version: u64,
         directory: Option<PathBuf>,
     },
+    /// Move a Tab within its Workspace. Requires work 1.6.
+    ReorderTab {
+        workspace: Id,
+        tab: Id,
+        position: TabPosition,
+    },
 }
+
+/// A Tab's destination in its Workspace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TabPosition {
+    /// A zero-based final position in the full Workspace order.
+    Index(u16),
+    /// Immediately before another Tab in the same Worktree.
+    Before(Id),
+    /// Immediately after another Tab in the same Worktree.
+    After(Id),
+}
+
 impl Mutation {
     /// Requests a Pane or Tab close without confirmation, regardless of control ownership.
     /// Core rechecks running work in the exact reviewed Sessions. Requires work 1.5.
@@ -576,6 +739,20 @@ impl Mutation {
 
     pub fn is_close_if_idle(&self) -> bool {
         matches!(self, Self::Close { confirmation, .. } if confirmation.is_close_if_idle())
+    }
+
+    /// The work capability a peer needs before accepting this edit.
+    pub fn required_capability(&self) -> Option<crate::protocol::capability::Capability> {
+        use crate::protocol::capability::Capability;
+        match self {
+            Self::ReorderTab { .. }
+            | Self::MovePane {
+                destination: PaneDestination::NewTabBefore(_),
+                ..
+            } => Some(Capability::ReorderTab),
+            _ if self.is_close_if_idle() => Some(Capability::CloseIfIdle),
+            _ => None,
+        }
     }
 
     /// Who controls what this mutation creates, for those that create work.

@@ -546,6 +546,7 @@ fn end_all_sessions_preserves_independent_grants_unclaimed_panes_and_other_machi
         .flat_map(|tab| &mut tab.panes)
     {
         pane.presentation = None;
+        pane.activity = Some(Default::default());
     }
     end_all(&mut selected, 3, 1);
     let ended = workspace_inventory(&mut selected);
@@ -655,6 +656,34 @@ fn end_all_sessions_replay_and_recovered_cleanup_never_end_replacement_sessions(
 
 #[test]
 fn end_all_sessions_drops_output_and_fences_old_input_effects_and_snapshots() {
+    use spaceterm_core::protocol::frame::Assembler;
+    use spaceterm_core::protocol::preview::State as PreviewState;
+    use spaceterm_core::protocol::{CoreMessage, RawFrame};
+
+    fn read_preview(host: &WorkspaceHost, outbox: &Outbox, id: RequestId, pane: Id) {
+        outbox.begin(id).unwrap();
+        assert!(matches!(
+            host.pane_previews(vec![pane], id, outbox),
+            Dispatch::Deferred
+        ));
+    }
+
+    fn preview_reply(outbox: &Outbox, id: RequestId) -> Result<ReplyBody, Refusal> {
+        let until = Instant::now() + Duration::from_secs(12);
+        let mut assembler = Assembler::default();
+        loop {
+            while let Some((frame, _)) = outbox.next_frame() {
+                let frame = RawFrame::parse(&frame).unwrap();
+                if let Some(CoreMessage::Reply(reply)) = assembler.core(frame).unwrap() {
+                    assert_eq!(reply.id, id);
+                    return reply.result;
+                }
+            }
+            assert!(Instant::now() < until, "the preview did not settle");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     let mut host = WorkspaceHost::new(host());
     host.prepare_initial_organization().unwrap();
     let pane = workspace_inventory(&mut host).workspaces[0].tabs[0].root_pane;
@@ -666,6 +695,50 @@ fn end_all_sessions_drops_output_and_fences_old_input_effects_and_snapshots() {
         "stty -echo; printf '\\033[2J\\033[HOLD-SESSION-OUTPUT\\n'\n",
     );
     await_text(&mut host, old, "OLD-SESSION-OUTPUT");
+    let queued = Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK);
+    let probe = Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK);
+    host.connected([3; 32], [3; 32], &queued);
+    host.connected([4; 32], [4; 32], &probe);
+    read_preview(&host, &queued, RequestId(1), pane);
+    // The terminal worker runs both reads in order. When it answers the probe, the first reply
+    // is already in this other connection's outbox, which has not sent any preview bytes.
+    let until = Instant::now() + Duration::from_secs(12);
+    loop {
+        read_preview(&host, &probe, RequestId(1), pane);
+        match preview_reply(&probe, RequestId(1)) {
+            Ok(ReplyBody::PanePreviews(previews)) => {
+                assert!(matches!(
+                    &previews[0].state,
+                    PreviewState::Live { screen: Some(screen), .. }
+                        if screen.rows.iter().flat_map(|row| &row.runs)
+                            .any(|run| run.text.contains("OLD-SESSION-OUTPUT"))
+                ));
+                break;
+            }
+            Err(Refusal::Capacity) if Instant::now() < until => continue,
+            result => panic!("expected the old Session's preview: {result:?}"),
+        }
+    }
+    command(
+        &mut host,
+        1,
+        old,
+        "printf '\\033[?2026h\\033]2;PREVIEW-CLEAR-HOLD\\007'; read -r release\n",
+    );
+    let until = Instant::now() + Duration::from_secs(12);
+    while !host.panes[&pane]
+        .pane
+        .as_ref()
+        .and_then(|pane| pane.runtime.metadata_snapshot())
+        .is_some_and(|metadata| metadata.title.value.as_ref() == "PREVIEW-CLEAR-HOLD")
+    {
+        assert!(
+            Instant::now() < until,
+            "the terminal enters synchronized output"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    read_preview(&host, &queued, RequestId(2), pane);
     focus(&mut host, old, 1, FocusTarget::Terminal);
     let Reply::Paste(PasteOutcome::ConfirmationRequired(approval)) = host.request(
         [1; 32],
@@ -680,7 +753,37 @@ fn end_all_sessions_drops_output_and_fences_old_input_effects_and_snapshots() {
     ) else {
         panic!("unsafe paste requires approval");
     };
-    end_all(&mut host, 2, 1);
+    let confirmation = workspace_inventory(&mut host).close.unwrap();
+    assert!(matches!(host.request([2; 32], [2; 32], Request::Mutate {
+        sequence: 1,
+        mutation: Mutation::EndAllSessions { confirmation },
+    }), Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. })));
+    // The retained outcome can arrive before the native stops, so the preview fence must
+    // already be in place before the synchronization tick runs.
+    assert!(
+        matches!(host.pane_previews(vec![pane], RequestId(3), &queued),
+        Dispatch::Reply(reply) if matches!(*reply, Err(Refusal::Stale)))
+    );
+    assert!(matches!(
+        preview_reply(&queued, RequestId(1)),
+        Err(Refusal::Stale)
+    ));
+    assert!(matches!(
+        preview_reply(&queued, RequestId(2)),
+        Err(Refusal::Stale)
+    ));
+    host.tick(Instant::now());
+    read_preview(&host, &queued, RequestId(1), pane);
+    let Ok(ReplyBody::PanePreviews(previews)) = preview_reply(&queued, RequestId(1)) else {
+        panic!("the kept Pane should have a preview status");
+    };
+    assert_eq!(
+        previews[0].state,
+        PreviewState::Ended {
+            session: Some(old.session),
+            screen: None
+        }
+    );
     let replacement = start(&mut host, 1, pane);
     assert!(matches!(
         screen(&mut host, [1; 32], old),

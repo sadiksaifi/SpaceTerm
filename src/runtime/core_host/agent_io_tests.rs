@@ -771,6 +771,248 @@ const OBSERVER: Peer = Peer {
     pairing: None,
 };
 
+#[test]
+fn pane_previews_read_hidden_output_and_discard_it_when_the_shell_fails() {
+    use spaceterm_core::connection::link::{CoreLink, LinkError, PendingReply};
+    use spaceterm_core::protocol::preview::{PanePreview, State};
+    use spaceterm_core::protocol::screen::StyleRef;
+
+    fn request(
+        served: &mut Served<WorkspaceHost>,
+        agent: &Client,
+        link: &CoreLink,
+        panes: Vec<[u8; 32]>,
+    ) -> PendingReply {
+        let pending = link.read_pane_previews(panes).unwrap();
+        let (frame, _) = link.next_frame().unwrap();
+        let decoded = Assembler::default()
+            .client(protocol::RawFrame::parse(&frame).unwrap())
+            .unwrap();
+        let Some(protocol::ClientMessage::Request(request)) = decoded else {
+            panic!("the link sends one read request");
+        };
+        agent.outbox.begin(request.id).unwrap();
+        match served.request(&OBSERVER, request.id, request.operation) {
+            Dispatch::After(work) => agent.outbox.reply_or_refuse(request.id, work()).unwrap(),
+            Dispatch::Deferred => {}
+            Dispatch::Reply(_) => panic!("the preview encodes outside the service lock"),
+        }
+        pending
+    }
+
+    fn pump(agent: &Client, link: &CoreLink) {
+        while let Some((frame, _)) = agent.outbox.next_frame() {
+            let frame = protocol::RawFrame::parse(&frame).unwrap();
+            link.receive(frame, Instant::now()).unwrap();
+        }
+    }
+
+    fn receive(
+        served: &mut Served<WorkspaceHost>,
+        agent: &Client,
+        link: &CoreLink,
+        pending: PendingReply,
+    ) -> Vec<PanePreview> {
+        let until = Instant::now() + DEADLINE;
+        loop {
+            pump(agent, link);
+            if let Some(result) = pending.try_take() {
+                let Ok(ReplyBody::PanePreviews(previews)) = result else {
+                    panic!("preview failed: {result:?}");
+                };
+                return previews;
+            }
+            assert!(Instant::now() < until, "the preview did not settle");
+            served.tick(Instant::now());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn read(
+        served: &mut Served<WorkspaceHost>,
+        agent: &Client,
+        link: &CoreLink,
+        panes: Vec<[u8; 32]>,
+    ) -> Vec<PanePreview> {
+        let pending = request(served, agent, link, panes);
+        receive(served, agent, link, pending)
+    }
+
+    let mut binding = WorkspaceHost::new(super::tests::host());
+    let workspace = create_workspace(&mut binding, 1);
+    let pane = workspace_inventory(&mut binding)
+        .workspaces
+        .into_iter()
+        .find(|candidate| candidate.id == workspace)
+        .unwrap()
+        .tabs[0]
+        .root_pane;
+    let cold_workspace = create_workspace(&mut binding, 2);
+    let cold = workspace_inventory(&mut binding)
+        .workspaces
+        .into_iter()
+        .find(|workspace| workspace.id == cold_workspace)
+        .unwrap()
+        .tabs[0]
+        .root_pane;
+    let missing = [9; 32];
+    let mut served = Served::new(binding);
+    served.ticker(Arc::new(|| {}));
+    let person = Client::admit(&mut served, CONTROLLER, "Person");
+    let agent = Client::admit(&mut served, OBSERVER, "Agent");
+    let link = CoreLink::new(Arc::new(|_| {}), Arc::new(|| {}), Instant::now());
+    link.select_work(protocol::version::ProtocolVersion { major: 1, minor: 5 });
+    assert!(matches!(
+        link.read_pane_previews(vec![pane]),
+        Err(LinkError::Unsupported)
+    ));
+    assert!(link.next_frame().is_none());
+    link.select_work(protocol::version::WORK);
+
+    let started = person.reply(
+        &mut served,
+        Operation::Claim(protocol::Claim {
+            channel: CHANNEL,
+            attachment: Attachment {
+                workspace,
+                generation: 1,
+            },
+            pane,
+            claim: AttachmentClaim::Select { explicit: true },
+            size: Some(size()),
+            style: None,
+        }),
+    );
+    let Ok(ReplyBody::Claim(ClaimReply::Attached { lease })) = started else {
+        panic!("the person claims the Pane");
+    };
+    person.show(&mut served, CHANNEL, false);
+    let write = |served: &mut Served<WorkspaceHost>, serial, events| {
+        served.input(
+            &CONTROLLER,
+            protocol::Input {
+                channel: CHANNEL,
+                serial,
+                generation: 1,
+                events,
+            },
+        );
+    };
+    write(
+        &mut served,
+        1,
+        vec![InputEvent::Focus(FocusTarget::Terminal)],
+    );
+    write(
+        &mut served,
+        2,
+        vec![text("printf '\\033[31mPREVIEW-%s\\033[0m\\n' hidden\r")],
+    );
+
+    let has_output = |screen: &protocol::preview::Screen, marker: &str| {
+        screen.rows.iter().flat_map(|row| &row.runs).any(|run| {
+            run.text.contains(marker)
+                && matches!(run.style, StyleRef::Inline(style) if matches!(style.foreground, pane::Color::Rgb(_)))
+        })
+    };
+    let until = Instant::now() + DEADLINE;
+    loop {
+        let previews = read(&mut served, &agent, &link, vec![cold, pane, missing]);
+        assert_eq!(
+            previews
+                .iter()
+                .map(|preview| preview.pane)
+                .collect::<Vec<_>>(),
+            [cold, pane, missing]
+        );
+        assert_eq!(previews[0].state, State::NotStarted);
+        assert_eq!(previews[2].state, State::Missing);
+        if matches!(&previews[1].state, State::Live {session, screen: Some(screen)} if *session == lease.session && has_output(screen, "PREVIEW-hidden"))
+        {
+            break;
+        }
+        assert!(Instant::now() < until, "the hidden output is readable");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(served.host().running_lease(pane), Some(lease));
+    assert_eq!(served.host().session_size(pane), Some(size()));
+    assert_eq!(served.host().running_lease(cold), None);
+
+    // The title proves that the worker consumed the synchronized-update start. Keep the update
+    // open until the preview request has entered the same worker queue as the shell's input.
+    write(
+        &mut served,
+        3,
+        vec![text(concat!(
+            "printf '\\033[?2026h\\033]2;PREVIEW-HOLD\\007'; read -r release; ",
+            "printf '\\033[32mPREVIEW-%s\\033[0m\\033[?2026l\\n' settled\r",
+        ))],
+    );
+    let until = Instant::now() + DEADLINE;
+    loop {
+        served.tick(Instant::now());
+        pump(&agent, &link);
+        if link.inventory().is_some_and(|(_, revision)| {
+            revision
+                .inventory
+                .workspaces
+                .iter()
+                .flat_map(|workspace| &workspace.tabs)
+                .flat_map(|tab| &tab.panes)
+                .any(|entry| {
+                    entry.id == pane
+                        && entry
+                            .presentation
+                            .as_ref()
+                            .is_some_and(|metadata| metadata.title == "PREVIEW-HOLD")
+                })
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "the terminal starts synchronized output"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let pending = request(&mut served, &agent, &link, vec![pane]);
+    write(&mut served, 4, vec![text("done\r")]);
+    let previews = receive(&mut served, &agent, &link, pending);
+    assert!(
+        matches!(
+            &previews[0].state,
+            State::Live {session, screen: Some(screen)}
+                if *session == lease.session && has_output(screen, "PREVIEW-settled")
+        ),
+        "a held read needs the complete synchronized screen: {previews:?}"
+    );
+
+    write(&mut served, 5, vec![text("exit 7\r")]);
+    let ended = State::Ended {
+        session: Some(lease.session),
+        screen: None,
+    };
+    let until = Instant::now() + DEADLINE;
+    loop {
+        served.tick(Instant::now());
+        let previews = read(&mut served, &agent, &link, vec![pane]);
+        if matches!(previews[0].state, State::Ended { .. }) {
+            assert_eq!(previews[0].state, ended);
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "the preview did not report the shell exit"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    served.tick(Instant::now());
+    assert_eq!(served.host().running_lease(pane), None);
+    let previews = read(&mut served, &agent, &link, vec![pane]);
+    assert_eq!(previews[0].state, ended);
+    served.shutdown().unwrap();
+}
+
 /// An observer sees a Pane another client controls, even while that client hides it, and never
 /// changes its size, control or effects. Its channel refuses input and every terminal command,
 /// reads Scrollback, and ends with Release or with the Session.

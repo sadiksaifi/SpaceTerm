@@ -284,6 +284,7 @@ mod core_repositories {
             }
             manager.update(cx, |manager, cx| {
                 manager.apply_worktrees(
+                    core,
                     &|tab| {
                         core.tabs
                             .iter()

@@ -340,6 +340,10 @@ pub trait HostCommands: Send {
     /// Stops read `id` of `connection`. It never settles. A directory creation that already
     /// started keeps what it created.
     fn cancel_read(&mut self, _connection: [u8; 32], _id: RequestId) {}
+    /// Reads visible text for Panes in this host's inventory without binding channels.
+    fn pane_previews(&self, _panes: Vec<[u8; 32]>, _id: RequestId, _outbox: &Outbox) -> Dispatch {
+        Dispatch::reply(Err(Refusal::Unsupported))
+    }
     /// The replies of reads that settled since the last call.
     fn settled_reads(&mut self) -> Vec<SettledRead> {
         Vec::new()
@@ -1577,6 +1581,12 @@ impl<H: HostCommands> Served<H> {
             }
             Operation::WorktreeRead(read) => {
                 return self.read(peer, id, HostRead::Worktree(read));
+            }
+            Operation::PanePreviews { panes } => {
+                let Some(connection) = self.connections.get(&peer.connection) else {
+                    return Dispatch::reply(Err(Refusal::Stale));
+                };
+                return self.host.pane_previews(panes, id, &connection.outbox);
             }
             Operation::Shutdown => body(self.command(peer, Request::Shutdown)),
             // Scrollback pages reply from the terminal worker. Direct-network administration never

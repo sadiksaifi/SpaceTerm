@@ -4756,8 +4756,10 @@ impl WorkspaceManager {
                     manager.open_accepted(target, window, cx);
                 });
             }
-            // A rename or a pin changes no membership, so there is nothing to open.
-            Mutation::RenameWorkspace { .. } | Mutation::PinWorkspace { .. } => {}
+            // These edits change no membership or selection.
+            Mutation::RenameWorkspace { .. }
+            | Mutation::PinWorkspace { .. }
+            | Mutation::ReorderTab { .. } => {}
             // The published removal already moved the keyboard to what remains.
             Mutation::Close { .. } | Mutation::Worktree(_) => {}
             // Ended Panes stay where they are. Each one presents Session Ended until someone

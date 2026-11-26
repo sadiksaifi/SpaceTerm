@@ -248,6 +248,50 @@ impl LocalWorktreeGit {
         Ok(branches)
     }
 
+    /// Reads the local counterpart of origin's default branch, or the configured init branch
+    /// when origin has no symbolic HEAD. A deleted local branch has no replacement here.
+    pub(crate) fn default_branch(
+        &self,
+        root: &Path,
+        cancellation: &CancellationToken,
+    ) -> Option<String> {
+        let mut output = Vec::new();
+        let head = self
+            .git(
+                root,
+                &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+                &mut output,
+                cancellation,
+            )
+            .ok()?;
+        let name = match head.code {
+            Some(0) => std::str::from_utf8(&output)
+                .ok()?
+                .strip_suffix('\n')?
+                .strip_prefix("refs/remotes/origin/")?,
+            Some(1) => {
+                output.clear();
+                let configured = self
+                    .git(
+                        root,
+                        &["config", "--null", "--get", "init.defaultBranch"],
+                        &mut output,
+                        cancellation,
+                    )
+                    .ok()?;
+                if !configured.success() {
+                    return None;
+                }
+                std::str::from_utf8(&output).ok()?.strip_suffix('\0')?
+            }
+            _ => return None,
+        };
+        validate_branch_name(name).ok()?;
+        self.ref_exists(root, &format!("refs/heads/{name}"), cancellation)
+            .ok()?
+            .then(|| name.to_owned())
+    }
+
     /// Creates a Worktree at `path` from the repository at `root`. Git creates missing parent
     /// directories. Hooks do not run, so no `post-checkout` setup happens.
     pub(crate) fn create(

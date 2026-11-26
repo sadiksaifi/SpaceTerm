@@ -133,6 +133,29 @@ fn confirmation_dispatches_the_exact_previewed_membership() {
 }
 
 #[test]
+fn tab_reorder_preserves_the_confirmed_session_set() {
+    let mut inventory = live();
+    let mut journal = Journal::default();
+    let review = preview(&inventory, &mut journal);
+    inventory.close.as_mut().unwrap().sessions.reverse();
+    let result = execute(
+        &inventory,
+        &mut journal,
+        core(),
+        Some(token(&review)),
+        now(),
+    )
+    .unwrap();
+    assert_eq!(result.exit(), 0);
+    assert_eq!(
+        journal.0,
+        [Mutation::EndAllSessions {
+            confirmation: inventory.close.unwrap()
+        }]
+    );
+}
+
+#[test]
 fn paired_route_is_refused_before_local_state_or_transport_access() {
     let cli = Cli::try_parse_from([
         "spaceterm",

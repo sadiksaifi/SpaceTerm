@@ -1,7 +1,9 @@
 use std::io;
+use std::sync::Arc;
 
 use crate::platform::unix_pty::{
     MasterReadError, ProcessIdentity, ProcessObservation, ProcessStart, UnixPtyHost,
+    sample_session_candidates,
 };
 
 /// macOS process facts through libproc. A PTY master read after hangup reports end of file.
@@ -221,27 +223,36 @@ impl UnixPtyHost for MacosPtyHost {
     fn session_candidates(&self, leader: i32) -> io::Result<Vec<i32>> {
         let mut members = Vec::new();
         for process in all_process_ids()? {
-            if process < 1 {
-                continue;
-            }
-            // SAFETY: getsid performs a read-only process identity query.
-            let session = unsafe { libc::getsid(process) };
-            if session < 1 {
-                let error = io::Error::last_os_error();
-                if error.raw_os_error() == Some(libc::ESRCH) {
-                    continue;
-                }
-                return Err(error);
-            }
-            if session == leader {
+            if process_session(process)? == Some(leader) {
                 members.push(process);
             }
         }
         Ok(members)
     }
 
+    fn inventory_session_candidates(&self, leader: i32) -> io::Result<Arc<[i32]>> {
+        sample_session_candidates(leader, all_process_ids, process_session)
+    }
+
     fn master_read_error(&self, _error: &io::Error) -> MasterReadError {
         MasterReadError::Failure
+    }
+}
+
+fn process_session(process: i32) -> io::Result<Option<i32>> {
+    if process < 1 {
+        return Ok(None);
+    }
+    // SAFETY: getsid performs a read-only process identity query.
+    let session = unsafe { libc::getsid(process) };
+    if session > 0 {
+        return Ok(Some(session));
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(None)
+    } else {
+        Err(error)
     }
 }
 

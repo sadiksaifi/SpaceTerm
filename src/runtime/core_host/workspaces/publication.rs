@@ -9,6 +9,7 @@ use super::journal::{Journal, Revision};
 use spaceterm_core::connection::outbox::Outbox;
 use spaceterm_core::hierarchy::Inventory;
 use spaceterm_core::protocol::InventoryRevision;
+use spaceterm_core::protocol::capability::Capability;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Mutex, MutexGuard};
 
@@ -58,6 +59,14 @@ impl Publication {
         self.state().subscribers.remove(&connection);
     }
 
+    pub(super) fn wants_pane_activity(&self) -> bool {
+        let (_, since) = Capability::PaneActivity.since();
+        self.state()
+            .subscribers
+            .values()
+            .any(|subscriber| subscriber.outbox.work() >= since)
+    }
+
     /// The clients with a subscribed connection.
     pub(super) fn devices(&self) -> std::collections::BTreeSet<Id> {
         let state = self.state();
@@ -69,6 +78,12 @@ impl Publication {
             .subscribers
             .get(&connection)
             .map(|subscriber| subscriber.outbox.clone())
+    }
+
+    pub(super) fn discard_previews(&self) {
+        for subscriber in self.state().subscribers.values() {
+            subscriber.outbox.discard_previews();
+        }
     }
 
     /// Pushes `staged` now if its revision is already retained, or once a write retains it.

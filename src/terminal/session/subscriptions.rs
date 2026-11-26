@@ -48,6 +48,7 @@ pub(super) struct EventState {
     events: async_channel::Sender<TerminalSessionEvent>,
     notifier: Option<SubscriptionNotifier>,
     screen: Option<Arc<ScreenSnapshot>>,
+    preview_pending: bool,
     finished: Option<Result<TerminalSessionExit, TerminalSessionFailure>>,
     pub(super) stopped: bool,
     pub(super) line: LineState,
@@ -63,6 +64,7 @@ impl From<async_channel::Sender<TerminalSessionEvent>> for TerminalEventPublishe
             events,
             notifier: None,
             screen: None,
+            preview_pending: false,
             finished: None,
             stopped: false,
             line: LineState::default(),
@@ -75,6 +77,17 @@ impl From<async_channel::Sender<TerminalSessionEvent>> for TerminalEventPublishe
 }
 
 impl TerminalEventPublisher {
+    /// One preview request can wait for a Terminal Session's current grid at a time.
+    pub(super) fn begin_preview(&self) -> bool {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        !std::mem::replace(&mut state.preview_pending, true)
+    }
+
+    pub(super) fn finish_preview(&self) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        state.preview_pending = false;
+    }
+
     pub(super) fn client_effect(&self, request: ClientEffectRequest) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         state

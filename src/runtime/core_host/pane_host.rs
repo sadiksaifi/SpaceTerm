@@ -147,6 +147,9 @@ impl CorePaneHost {
                 .as_ref()
                 .map(|notifier| notifier(lease.session)),
         );
+        if self.close_activity_demand {
+            runtime.set_close_activity_demand(true);
+        }
         self.pane = Some(OwnedPane {
             device,
             attachment_generation: None,
@@ -173,8 +176,10 @@ impl CorePaneHost {
             effects: NativeEffects::default(),
             accessibility: accessibility::Accessibility::new(Arc::clone(self.factory.counters())),
             metadata_revision: 0,
+            last_close_activity: Default::default(),
         });
         self.dormant = None;
+        self.preview_cleared = None;
         Ok(lease)
     }
     /// Selects this Pane for `device`. A selection acquires the Pane only when nobody controls
@@ -248,7 +253,7 @@ impl CorePaneHost {
                 .shutdown_and_wait(Duration::from_secs(5))
                 .map_err(|_| Refusal::CleanupUnresolved)?;
             // A nonzero exit or a signal keeps the Pane and its control grant, so every client
-            // can say why the shell ended. Its output goes with the runtime.
+            // can say why the shell ended. Its output goes with the runtime (ADR 0053).
             if let Some(end) = pane.end {
                 self.dormant = Some(DormantPane {
                     device: pane.device,
@@ -265,6 +270,20 @@ impl CorePaneHost {
             self.identity = None;
         }
         Ok(())
+    }
+    pub(super) fn discard_preview(&mut self, session: [u8; 32]) {
+        if self
+            .pane
+            .as_ref()
+            .is_some_and(|pane| pane.lease.session == session)
+            || self.dormant.is_some_and(|dormant| {
+                dormant
+                    .session
+                    .is_some_and(|target| target.session == session)
+            })
+        {
+            self.preview_cleared = Some(session);
+        }
     }
     pub(super) fn end_session(&mut self, session: [u8; 32]) -> Result<(), Refusal> {
         let Some(pane) = self.pane.as_ref().filter(|p| p.lease.session == session) else {

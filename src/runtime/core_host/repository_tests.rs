@@ -1167,6 +1167,8 @@ fn repairing_an_unpinned_root_preserves_missing_worktree_membership_after_reads_
     let mut organization = after.workspaces[0].clone();
     // Live terminal presentation is independent of the repaired saved organization.
     organization.tabs[0].panes[0].presentation = None;
+    organization.tabs[0].panes[0].activity = None;
+    expected.tabs[0].panes[0].activity = None;
     assert_eq!(organization, expected);
     assert!(
         !tree.exists(),

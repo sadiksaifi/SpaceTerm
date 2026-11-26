@@ -507,6 +507,7 @@ fn inventory() -> hierarchy::Inventory {
         repository_directory: None,
         presentation: None,
         observers: Default::default(),
+        activity: None,
         confirmed_directory: Some(PathBuf::from("/home/a")),
         creator: Some([9; 32]),
     };
@@ -631,17 +632,65 @@ fn work_1_0_reads_and_writes_the_inventory_without_the_git_directory_fact() {
 
 #[test]
 fn work_1_1_carries_the_git_directory_fact_in_its_own_kind() {
-    let wire = encode_inventory(git_directory_revision(), version::WORK).unwrap();
+    let wire = encode_inventory(
+        git_directory_revision(),
+        version::ProtocolVersion { major: 1, minor: 1 },
+    )
+    .unwrap();
     assert_eq!(wire.kind, Kind::GitDirectoryInventory);
     assert_eq!(wire.frames[0][4], 0x4b);
     assert_eq!(
         decoded_inventory(&wire.frames),
         git_directory_revision().inventory
     );
+}
+
+#[test]
+fn work_1_6_activity_stays_with_its_pane_and_preserves_released_inventory_bytes() {
+    use hierarchy::{CloseTarget, Foreground, PaneActivity};
+
+    let mut revision = InventoryRevision {
+        inventory: inventory(),
+        next_sequence: 9,
+    };
+    let target = CloseTarget::Pane {
+        workspace: [1; 32],
+        tab: [2; 32],
+        pane: [3; 32],
+    };
+    let work_1_5 = version::ProtocolVersion { major: 1, minor: 5 };
+    let released = encode_inventory(revision.clone(), work_1_5).unwrap();
+    revision.inventory.workspaces[0].tabs[0].panes[0].activity = Some(PaneActivity {
+        session: Some([6; 32]),
+        foreground: Foreground::Program,
+        needs_close_review: true,
+    });
     assert_eq!(
-        encode_core(&CoreMessage::Inventory(Box::new(git_directory_revision()))).unwrap(),
-        wire
+        encode_inventory(revision.clone(), work_1_5).unwrap(),
+        released
     );
+    assert_eq!(
+        decoded_inventory(&released.frames).close_would_end_work(target),
+        None
+    );
+
+    let active = encode_inventory(revision.clone(), version::WORK).unwrap();
+    assert_eq!(active.kind, Kind::PaneActivityInventory);
+    assert_eq!(
+        active,
+        encode_core(&CoreMessage::Inventory(Box::new(revision))).unwrap()
+    );
+    let mut inventory = decoded_inventory(&active.frames);
+    assert_eq!(inventory.close_would_end_work(target), Some(true));
+    assert_eq!(
+        inventory.workspaces[0].tabs[0].panes[0]
+            .activity
+            .unwrap()
+            .foreground,
+        Foreground::Program
+    );
+    inventory.close.as_mut().unwrap().sessions[0].session = Some([7; 32]);
+    assert_eq!(inventory.close_would_end_work(target), None);
 }
 
 /// Claim kinds keep the positions released work 1.3 encodes. Work 1.4 appends Prepare, so a

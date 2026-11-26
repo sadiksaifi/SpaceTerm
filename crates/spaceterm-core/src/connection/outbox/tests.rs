@@ -883,7 +883,11 @@ fn inventory_goes_out_as_the_selected_work_version_has_it() {
     };
     for (work, kind) in [
         (ProtocolVersion { major: 1, minor: 0 }, Kind::Inventory),
-        (crate::protocol::version::WORK, Kind::GitDirectoryInventory),
+        (
+            ProtocolVersion { major: 1, minor: 5 },
+            Kind::GitDirectoryInventory,
+        ),
+        (crate::protocol::version::WORK, Kind::PaneActivityInventory),
     ] {
         let outbox = Outbox::new(Arc::new(|| {}), work);
         outbox.inventory(revision()).unwrap();
@@ -915,5 +919,46 @@ fn replies_go_out_as_the_selected_work_version_has_them() {
             panic!("not a reply");
         };
         assert!(matches!(reply.result, Ok(ReplyBody::Worktree(Err(error))) if error == read));
+    }
+}
+
+#[test]
+fn resolving_a_reorder_on_an_older_link_refuses_instead_of_sending_the_new_variant() {
+    use crate::hierarchy::{Mutation, Outcome, RetainedOutcome, TabPosition};
+
+    let receipt = RetainedOutcome {
+        sequence: 1,
+        mutation: Mutation::ReorderTab {
+            workspace: [1; 32],
+            tab: [2; 32],
+            position: TabPosition::Index(0),
+        },
+        outcome: Outcome::Accepted { target: [2; 32] },
+    };
+    for (work, expected) in [
+        (
+            ProtocolVersion { major: 1, minor: 5 },
+            Err(Refusal::Unsupported),
+        ),
+        (crate::protocol::version::WORK, Ok(receipt.clone())),
+    ] {
+        let outbox = Outbox::new(Arc::new(|| {}), work);
+        let id = RequestId(1);
+        outbox.begin(id).unwrap();
+        outbox
+            .reply(id, Ok(ReplyBody::Outcome(receipt.clone())))
+            .unwrap();
+        let (frame, _) = outbox.next_frame().unwrap();
+        let Some(CoreMessage::Reply(reply)) = Assembler::default()
+            .core(RawFrame::parse(&frame).unwrap())
+            .unwrap()
+        else {
+            panic!("expected a Resolve reply");
+        };
+        let actual = reply.result.map(|body| match body {
+            ReplyBody::Outcome(receipt) => receipt,
+            _ => panic!("expected a retained outcome"),
+        });
+        assert_eq!(actual, expected);
     }
 }

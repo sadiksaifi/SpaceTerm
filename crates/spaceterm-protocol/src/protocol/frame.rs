@@ -15,7 +15,7 @@ use super::message::{
 };
 use super::version::ProtocolVersion;
 use crate::update::facts::UpdateFacts;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 const MORE: u8 = 0x80;
 
@@ -50,6 +50,8 @@ pub enum Kind {
     /// The update facts with what only the Core's update engine knows. Since work
     /// [`crate::update::facts::MINOR_DETAILED_FACTS`].
     DetailedUpdateFacts = 0x4c,
+    /// Work 1.6 inventory adds the latest foreground and close work for each Pane.
+    PaneActivityInventory = 0x4d,
 }
 
 impl Kind {
@@ -77,6 +79,7 @@ impl Kind {
             0x4a => Self::UpdateFacts,
             0x4b => Self::GitDirectoryInventory,
             0x4c => Self::DetailedUpdateFacts,
+            0x4d => Self::PaneActivityInventory,
             _ => return None,
         })
     }
@@ -106,7 +109,9 @@ impl Kind {
             Self::Frame => limits::MAX_UPDATE_BYTES,
             Self::Accessibility => limits::MAX_ACCESSIBILITY_BYTES,
             Self::Pane => limits::MAX_PANE_EVENT_BYTES,
-            Self::Inventory | Self::GitDirectoryInventory => limits::MAX_INVENTORY_BYTES,
+            Self::Inventory | Self::GitDirectoryInventory | Self::PaneActivityInventory => {
+                limits::MAX_INVENTORY_BYTES
+            }
             Self::UpdateFacts => limits::MAX_UPDATE_FACTS_BYTES,
             Self::DetailedUpdateFacts => limits::MAX_DETAILED_UPDATE_FACTS_BYTES,
         }
@@ -238,7 +243,7 @@ pub fn encode_core(message: &CoreMessage) -> Result<WireMessage, EncodeError> {
         CoreMessage::Frame(value) => encode(Kind::Frame, value),
         CoreMessage::Accessibility(value) => encode(Kind::Accessibility, value),
         CoreMessage::Pane(value) => encode(Kind::Pane, value),
-        CoreMessage::Inventory(value) => encode(Kind::GitDirectoryInventory, value),
+        CoreMessage::Inventory(value) => encode_pane_activity_inventory(value),
         CoreMessage::UpdateFacts(value) => encode(Kind::UpdateFacts, value),
         CoreMessage::DetailedUpdateFacts(value) => encode(Kind::DetailedUpdateFacts, value),
         CoreMessage::Ping(value) => encode(Kind::CorePing, value),
@@ -248,8 +253,8 @@ pub fn encode_core(message: &CoreMessage) -> Result<WireMessage, EncodeError> {
 }
 
 /// `revision` as a connection whose admission selected the work version `work` reads it. A
-/// sender never sends anything the selected minor lacks (ADR 0035), so work 1.0 gets the
-/// inventory without `inside_git_directory`. [`encode_core`] encodes the current version.
+/// sender never sends anything the selected minor lacks (ADR 0035). [`encode_core`] encodes
+/// the current version.
 pub fn encode_inventory(
     revision: InventoryRevision,
     work: ProtocolVersion,
@@ -258,7 +263,9 @@ pub fn encode_inventory(
         major: 1,
         minor: super::inventory_1_0::MINOR_GIT_DIRECTORY_INVENTORY,
     };
-    if work >= since {
+    if work >= super::capability::Capability::PaneActivity.since().1 {
+        encode_pane_activity_inventory(&revision)
+    } else if work >= since {
         encode(Kind::GitDirectoryInventory, &revision)
     } else {
         encode(
@@ -266,6 +273,51 @@ pub fn encode_inventory(
             &super::inventory_1_0::InventoryRevision::from(revision),
         )
     }
+}
+
+/// The released inventory shape followed by one activity observation per Pane, in inventory order.
+#[derive(Serialize, Deserialize)]
+struct PaneActivityInventory<Revision> {
+    revision: Revision,
+    activity: Vec<Option<crate::hierarchy::PaneActivity>>,
+}
+
+fn encode_pane_activity_inventory(
+    revision: &InventoryRevision,
+) -> Result<WireMessage, EncodeError> {
+    let activity = revision
+        .inventory
+        .workspaces
+        .iter()
+        .flat_map(|workspace| &workspace.tabs)
+        .flat_map(|tab| &tab.panes)
+        .map(|pane| pane.activity)
+        .collect();
+    encode(
+        Kind::PaneActivityInventory,
+        &PaneActivityInventory { revision, activity },
+    )
+}
+
+fn decode_pane_activity_inventory(body: &[u8]) -> Result<InventoryRevision, DecodeError> {
+    let PaneActivityInventory {
+        mut revision,
+        activity,
+    } = decode::<PaneActivityInventory<InventoryRevision>>(body)?;
+    let mut activity = activity.into_iter();
+    for pane in revision
+        .inventory
+        .workspaces
+        .iter_mut()
+        .flat_map(|workspace| &mut workspace.tabs)
+        .flat_map(|tab| &mut tab.panes)
+    {
+        pane.activity = activity.next().ok_or(DecodeError::OutOfBounds)?;
+    }
+    if activity.next().is_some() {
+        return Err(DecodeError::OutOfBounds);
+    }
+    Ok(revision)
 }
 
 /// Serializes into the first frame's buffer, and splits only a message larger than one frame.
@@ -383,6 +435,9 @@ impl Assembler {
             )),
             Kind::GitDirectoryInventory => {
                 CoreMessage::Inventory(Box::new(decode::<InventoryRevision>(&body)?))
+            }
+            Kind::PaneActivityInventory => {
+                CoreMessage::Inventory(Box::new(decode_pane_activity_inventory(&body)?))
             }
             Kind::UpdateFacts => CoreMessage::UpdateFacts(Box::new(decode::<UpdateFacts>(&body)?)),
             Kind::DetailedUpdateFacts => {

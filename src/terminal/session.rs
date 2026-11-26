@@ -3,6 +3,8 @@ use super::native_services::PastePayload;
 use crate::terminal::key::InputModifiers;
 pub(crate) mod clipboard;
 mod input;
+mod preview;
+pub(crate) use preview::PreviewCapture;
 mod run;
 pub(crate) use run::{Progress, RunAdmission, RunReply};
 mod scrollback;
@@ -10,7 +12,7 @@ pub(crate) use scrollback::ScrollbackReply;
 mod publication;
 pub(crate) use publication::DEFAULT_FRAME_RATE;
 mod activity;
-pub(crate) use activity::{PromptProgress, ShellZone};
+pub(crate) use activity::{CloseActivity, PromptProgress, ShellZone};
 mod subscriptions;
 pub use clipboard::ClipboardCompletion;
 pub use clipboard::{ClientEffectGrant, ClientEffectRequest, ClipboardRequest};
@@ -995,6 +997,12 @@ impl TerminalRuntime {
         }
     }
 
+    pub(crate) fn set_close_activity_demand(&self, enabled: bool) {
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::SetCloseActivityDemand(enabled));
+        }
+    }
+
     pub fn update_appearance(&self, update: TerminalAppearanceUpdate) {
         let Some(commands) = &self.commands else {
             return;
@@ -1079,6 +1087,7 @@ struct ReaderEventBatch {
 enum Command {
     Received(Box<Command>, spaceterm_core::idle_restart::Receipt),
     ReadScrollback(scrollback::ScrollbackRead),
+    ReadPreview(preview::PreviewRead),
     /// Writes one command at the owning shell's empty prompt, or refuses it.
     Run(String, RunReply),
     CoreAccessibilitySelection(Option<AccessibilitySelectionRefs>, mpsc::SyncSender<bool>),
@@ -1118,6 +1127,8 @@ enum Command {
     PublishAccessibility,
     /// A hidden Terminal Session reports metadata that changed while it was paced.
     PublishMetadata,
+    PublishCloseActivity,
+    SetCloseActivityDemand(bool),
     PublishPendingScreen,
     MetadataStatusTick,
     GraphicsAnimationTick,
@@ -1198,9 +1209,12 @@ impl Command {
             | Self::SetFrameRate(..)
             | Self::AppearanceChanged
             | Self::ClearScreenAndScrollback
-            | Self::ReadScrollback(..) => PaneWorkerCommand::Client,
+            | Self::ReadScrollback(..)
+            | Self::ReadPreview(..) => PaneWorkerCommand::Client,
             Self::PasteConfirmationExpired
             | Self::PublishMetadata
+            | Self::PublishCloseActivity
+            | Self::SetCloseActivityDemand(..)
             | Self::PublishPendingScreen
             | Self::MetadataStatusTick
             | Self::GraphicsAnimationTick
@@ -1218,6 +1232,7 @@ impl fmt::Debug for Command {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
             Self::ReadScrollback(..) => "ReadScrollback",
+            Self::ReadPreview(..) => "ReadPreview",
             Self::Received(..) => "Received",
             Self::Run(..) => "Run",
             Self::CoreAccessibilitySelection(..) => "CoreAccessibilitySelection",
@@ -1239,6 +1254,8 @@ impl fmt::Debug for Command {
             Self::AccessibilityContinue => "AccessibilityContinue",
             Self::PublishAccessibility => "PublishAccessibility",
             Self::PublishMetadata => "PublishMetadata",
+            Self::PublishCloseActivity => "PublishCloseActivity",
+            Self::SetCloseActivityDemand(..) => "SetCloseActivityDemand",
             Self::PublishPendingScreen => "PublishPendingScreen",
             Self::MetadataStatusTick => "MetadataStatusTick",
             Self::GraphicsAnimationTick => "GraphicsAnimationTick",
@@ -1534,9 +1551,11 @@ impl TerminalWorker {
     fn receive_next_command(&mut self) -> Option<Command> {
         // Presentation deadlines must advance even when PTY readers keep the queue nonempty.
         // The emulator separately enforces the prompt cap and synchronized-output inactivity.
-        if !self.release_synchronized_output_if_due(Instant::now()) {
+        let now = Instant::now();
+        if !self.release_synchronized_output_if_due(now) {
             return None;
         }
+        self.settle_preview(now);
         if self
             .input
             .deadline()
@@ -1596,6 +1615,7 @@ impl TerminalWorker {
                 self.emulator.metadata_status_deadline(),
                 self.clipboard.deadline(),
                 self.input.deadline(),
+                self.preview_deadline(),
             ]
             .into_iter()
             .flatten()
@@ -1636,6 +1656,7 @@ impl TerminalWorker {
                     {
                         return None;
                     }
+                    self.settle_preview(now);
                     match self.commands.try_recv() {
                         Ok(command) => return Some(self.note_normal_command(command)),
                         Err(mpsc::TryRecvError::Disconnected) => return None,
@@ -1714,6 +1735,7 @@ impl TerminalWorker {
                 result
             }
             Command::ReadScrollback(read) => self.read_scrollback(read),
+            Command::ReadPreview(read) => self.read_preview(read),
             Command::Run(command, reply) => self.process_run(&command, reply),
             Command::CoreAccessibilitySelection(selection, reply) => {
                 match self.emulator.set_accessibility_selection_refs(selection) {
@@ -1888,6 +1910,21 @@ impl TerminalWorker {
             Command::AccessibilityContinue => self.publish_accessibility(false),
             Command::PublishAccessibility => self.publish_accessibility(true),
             Command::PublishMetadata => self.publish_metadata_changed(),
+            Command::PublishCloseActivity => {
+                self.events.publish_close_activity();
+                self.schedules.refresh_close_activity(self.schedules.now());
+                true
+            }
+            Command::SetCloseActivityDemand(enabled) => {
+                self.schedules.set_close_activity_demand(
+                    enabled && self.events.has_close_probe(),
+                    self.schedules.now(),
+                );
+                if !enabled {
+                    self.events.clear_close_activity();
+                }
+                true
+            }
             Command::PublishPendingScreen => self.publish_screen(),
             Command::MetadataStatusTick => self.advance_metadata_status(),
             Command::GraphicsAnimationTick => {
@@ -1955,10 +1992,12 @@ impl TerminalWorker {
     }
 
     fn read_line_mode(&mut self) {
+        let now = self.schedules.now();
         let mode = self.native_pty.line_mode();
-        if let Some(state) = self.schedules.update_line(self.schedules.now(), mode) {
+        if let Some(state) = self.schedules.update_line(now, mode) {
             self.events.set_line(state);
         }
+        self.schedules.request_close_activity(now);
     }
 
     fn line_transition(&mut self) {
@@ -2768,7 +2807,8 @@ impl TerminalWorker {
         send_session_event(&self.events, event)
     }
 
-    fn finish(self) {
+    fn finish(mut self) {
+        drop(self.schedules.preview.take());
         let Self {
             native_pty,
             emulator: _emulator,

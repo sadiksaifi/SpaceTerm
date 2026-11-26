@@ -7,6 +7,8 @@ use spaceterm_core::pane::{LineMode, LineState};
 use std::sync::{Mutex, MutexGuard};
 
 const LINE_SETTLE_INTERVAL: Duration = Duration::from_millis(200);
+const CLOSE_ACTIVITY_INTERVAL: Duration = Duration::from_millis(250);
+const CLOSE_ACTIVITY_REFRESH: Duration = Duration::from_secs(1);
 const ACCESSIBILITY_NORMAL_COMMAND_BURST: u8 = 8;
 const ACCESSIBILITY_PRESENTATION_INTERVAL: Duration = Duration::from_millis(100);
 /// How often a hidden Terminal Session reports changed metadata. A program that retitles its
@@ -127,6 +129,7 @@ pub(super) struct WorkerSchedules {
     /// The earliest time a hidden Terminal Session reports metadata again.
     metadata_not_before: Instant,
     graphics_animation: Option<Instant>,
+    pub(super) preview: Option<super::preview::PreviewRead>,
     compression: CompressionSchedule<CompressionActivity>,
     clock: Clock,
 }
@@ -256,6 +259,31 @@ impl WorkerSchedules {
 
     pub(super) fn line_transition(&mut self, now: Instant) {
         self.line.transition(now);
+    }
+
+    pub(super) fn set_close_activity_demand(&mut self, enabled: bool, now: Instant) {
+        self.line.activity_demand = enabled;
+        self.line.activity_due = enabled.then_some(now);
+        self.line.activity_not_before = now;
+    }
+
+    pub(super) fn request_close_activity(&mut self, now: Instant) {
+        if !self.line.activity_demand {
+            return;
+        }
+        let request = now.max(self.line.activity_not_before);
+        self.line.activity_due = Some(
+            self.line
+                .activity_due
+                .map_or(request, |due| due.min(request)),
+        );
+    }
+
+    pub(super) fn refresh_close_activity(&mut self, now: Instant) {
+        self.line.activity_due = self
+            .line
+            .activity_demand
+            .then(|| now + CLOSE_ACTIVITY_REFRESH);
     }
 
     pub(super) fn note_line_output(&mut self, now: Instant) {
@@ -436,6 +464,7 @@ impl WorkerSchedules {
             metadata_presentation_queued: Arc::new(AtomicBool::new(false)),
             metadata_not_before: now,
             graphics_animation: None,
+            preview: None,
             compression: CompressionSchedule::new(),
             clock: Clock::System,
         }
@@ -455,6 +484,7 @@ impl WorkerSchedules {
             self.graphics_animation,
             self.compression.deadline(),
             self.line.deadline(),
+            self.line.activity_due,
         ]
         .into_iter()
         .flatten()
@@ -482,10 +512,12 @@ impl WorkerSchedules {
         if self.metadata_deadline().is_some_and(|due| now >= due) {
             return Some(Command::PublishMetadata);
         }
+        if self.line.deadline().is_some_and(|deadline| now >= deadline) {
+            return Some(Command::ReadLineMode);
+        }
         self.line
-            .deadline()
-            .is_some_and(|deadline| now >= deadline)
-            .then_some(Command::ReadLineMode)
+            .take_close_activity(now)
+            .then_some(Command::PublishCloseActivity)
     }
 }
 
@@ -607,6 +639,11 @@ struct LineSchedule {
     unread_output: Option<Instant>,
     /// When the latest read happened.
     last_read: Option<Instant>,
+    /// A negotiated inventory subscriber needs periodic foreground observations.
+    activity_demand: bool,
+    /// A coalesced activity observation or a recheck for a silent foreground change.
+    activity_due: Option<Instant>,
+    activity_not_before: Instant,
 }
 
 impl LineSchedule {
@@ -617,6 +654,9 @@ impl LineSchedule {
             settle: None,
             unread_output: None,
             last_read: None,
+            activity_demand: false,
+            activity_due: None,
+            activity_not_before: now,
         }
     }
 
@@ -649,6 +689,16 @@ impl LineSchedule {
             .into_iter()
             .flatten()
             .min()
+    }
+
+    /// Native membership scans are paced separately from Line Mode reads and screen captures.
+    fn take_close_activity(&mut self, now: Instant) -> bool {
+        if self.activity_due.is_none_or(|due| now < due) {
+            return false;
+        }
+        self.activity_due = None;
+        self.activity_not_before = now + CLOSE_ACTIVITY_INTERVAL;
+        true
     }
 
     /// Returns the new state when the mode differs from the last one read.

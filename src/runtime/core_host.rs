@@ -290,6 +290,7 @@ mod observe;
 mod pane_host;
 #[cfg(test)]
 mod pane_host_tests;
+mod preview;
 mod publish;
 mod repositories;
 #[cfg(test)]
@@ -324,10 +325,14 @@ pub struct CorePaneHost {
     directory_unavailable: bool,
     failed_directory_session: Option<PaneTarget>,
     dormant: Option<DormantPane>,
+    /// The Session whose output End All Sessions cleared before native cleanup started.
+    preview_cleared: Option<[u8; 32]>,
     /// Shared by every Pane of one server, so each names its Controlling Client the same way.
     names: Arc<std::sync::Mutex<control::ClientNames>>,
     /// Makes each started Terminal Session's notifier, which wakes the connections presenting it.
     notifier: Option<dispatch::SessionNotifiers>,
+    /// A negotiated inventory subscriber needs current Pane activity facts.
+    close_activity_demand: bool,
     /// What each started Terminal Session tells the CLI inside it about this server.
     session_context: Option<Arc<CoreSessionContext>>,
 }
@@ -409,8 +414,9 @@ struct OwnedPane {
     size: PaneSize,
     effects: NativeEffects,
     accessibility: accessibility::Accessibility,
-    /// The Terminal Metadata revision last reported by [`CorePaneHost::metadata_changed`].
+    /// The Terminal Metadata revision last reported by [`CorePaneHost::presentation_changed`].
     metadata_revision: u64,
+    last_close_activity: crate::terminal::session::CloseActivity,
 }
 fn nonce() -> Result<[u8; 32], CoreError> {
     let mut bytes = [0; 32];
@@ -441,6 +447,23 @@ impl CorePaneHost {
             .filter(|pane| !pane.ended)
             .is_some_and(|pane| pane.runtime.running_work())
     }
+    fn close_activity(&self) -> spaceterm_core::hierarchy::PaneActivity {
+        let Some(pane) = self.pane.as_ref().filter(|pane| !pane.ended) else {
+            return Default::default();
+        };
+        let activity = pane.runtime.close_activity();
+        spaceterm_core::hierarchy::PaneActivity {
+            session: Some(pane.lease.session),
+            foreground: activity.foreground,
+            needs_close_review: activity.needs_close_review,
+        }
+    }
+    fn set_close_activity_demand(&mut self, enabled: bool) {
+        self.close_activity_demand = enabled;
+        if let Some(pane) = self.pane.as_ref().filter(|pane| !pane.ended) {
+            pane.runtime.set_close_activity_demand(enabled);
+        }
+    }
     /// This Pane's running Terminal Session, if one has not ended.
     pub(crate) fn live_session(&self) -> Option<[u8; 32]> {
         self.pane
@@ -462,8 +485,10 @@ impl CorePaneHost {
             directory_unavailable: false,
             failed_directory_session: None,
             dormant: None,
+            preview_cleared: None,
             names: Arc::default(),
             notifier: None,
+            close_activity_demand: false,
             session_context: None,
         })
     }
@@ -499,8 +524,10 @@ impl CorePaneHost {
             directory_unavailable: false,
             failed_directory_session: None,
             dormant: None,
+            preview_cleared: None,
             names: Arc::default(),
             notifier: None,
+            close_activity_demand: false,
             session_context: None,
         })
     }

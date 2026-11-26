@@ -33,6 +33,8 @@ use std::time::Instant;
 
 mod semantics;
 pub use semantics::{SemanticEncoding, SemanticTicket, Semantics};
+mod preview;
+pub use preview::PreviewReply;
 
 /// A Pane's screen state captured under the `PaneService` lock and encoded later outside it.
 /// It owns its snapshot, for example through an `Arc`, and never borrows service state.
@@ -124,6 +126,14 @@ struct State {
     l2_bytes: usize,
     l2_rest: VecDeque<Vec<u8>>,
     l2_rest_reply: Option<RequestId>,
+    previews: BTreeMap<RequestId, Arc<()>>,
+    /// The in-progress L2 message is a preview, including a frame held by the I/O loop.
+    writing_preview: bool,
+    /// The carrier can still send preview bytes. QUIC does not expose acknowledgements for bytes
+    /// on an open stream, so its first offered preview keeps this set until the connection ends.
+    buffered_preview: bool,
+    /// A partially sent preview cannot be replaced by a refusal on the same stream.
+    aborted: bool,
     inventory: Option<Frames>,
     inventory_queued: bool,
     update_facts: Option<Frames>,
@@ -222,11 +232,41 @@ impl Outbox {
         id: RequestId,
         result: Result<ReplyBody, Refusal>,
     ) -> Result<(), OutboxError> {
+        self.reply_with_preview(id, result, None)
+    }
+
+    fn reply_with_preview(
+        &self,
+        id: RequestId,
+        result: Result<ReplyBody, Refusal>,
+        preview: Option<&Arc<()>>,
+    ) -> Result<(), OutboxError> {
         let bulk = matches!(&result, Ok(body) if body.bulk());
-        let result = result.map(|body| body.for_selected(self.shared.work));
+        let result = result.and_then(|body| {
+            if let ReplyBody::Outcome(outcome) = &body
+                && outcome.mutation.required_capability()
+                    == Some(crate::protocol::capability::Capability::ReorderTab)
+                && self.shared.work
+                    < crate::protocol::capability::Capability::ReorderTab
+                        .since()
+                        .1
+            {
+                return Err(Refusal::Unsupported);
+            }
+            Ok(body.for_selected(self.shared.work))
+        });
         let frames = encode(&CoreMessage::Reply(Box::new(Reply { id, result })))?;
         self.with(|state| {
             state.open()?;
+            if let Some(token) = preview
+                && !state
+                    .previews
+                    .get(&id)
+                    .is_some_and(|current| Arc::ptr_eq(current, token))
+            {
+                // End All Sessions already settled this read. The request id may have been reused.
+                return Ok(());
+            }
             if state.requests.get(&id) != Some(&false) {
                 return Err(OutboxError::Misuse);
             }
@@ -241,6 +281,10 @@ impl Outbox {
                 state.l2.push_back((id, frames));
             } else {
                 state.push_l1(Entry::Message(frames, Some(id)))?;
+                if preview.is_some() {
+                    // A preview refusal carries no terminal output to revoke.
+                    state.previews.remove(&id);
+                }
             }
             // The id stays in flight until the reply's last frame is taken for writing.
             state.requests.insert(id, true);
@@ -605,8 +649,26 @@ impl Outbox {
     /// Like [`Self::next_frame`], taking only levels at `lowest` or above, so a refused bulk
     /// frame never holds back a reply or a ping.
     pub fn next_frame_within(&self, lowest: Priority) -> Option<(Vec<u8>, Priority)> {
+        self.take_frame(lowest, false)
+    }
+
+    pub(crate) fn next_carrier_frame(&self, lowest: Priority) -> Option<(Vec<u8>, Priority)> {
+        self.take_frame(lowest, true)
+    }
+
+    fn take_frame(&self, lowest: Priority, carrier: bool) -> Option<(Vec<u8>, Priority)> {
         loop {
-            let taken = self.lock().take(lowest);
+            let taken = {
+                let mut state = self.lock();
+                let taken = state.take(lowest);
+                if !carrier
+                    && matches!(taken, Some(Taken::Frame(_, Priority::L2)))
+                    && state.l2_rest.is_empty()
+                {
+                    state.writing_preview = false;
+                }
+                taken
+            };
             let (ticket, presentation, end) = match taken? {
                 Taken::Frame(frame, priority) => return Some((frame, priority)),
                 Taken::Skip => continue,
@@ -767,6 +829,7 @@ impl State {
     fn answered(&mut self, reply: Option<RequestId>) {
         if let Some(id) = reply {
             self.requests.remove(&id);
+            self.previews.remove(&id);
         }
     }
 
@@ -821,6 +884,7 @@ impl State {
         }
         let (id, frames) = self.l2.pop_front()?;
         self.l2_bytes = self.l2_bytes.saturating_sub(size(&frames));
+        self.writing_preview = self.previews.contains_key(&id);
         Some(self.first(frames, Some(id), Priority::L2))
     }
 

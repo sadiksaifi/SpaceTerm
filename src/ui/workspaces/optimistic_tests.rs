@@ -34,6 +34,7 @@ impl DelayedCore {
                 snapshot: WorkspaceSnapshot {
                     inventory: Some(inventory),
                     connected: true,
+                    shared_tab_order: false,
                     pending: false,
                     pending_operation: None,
                     rejected: None,

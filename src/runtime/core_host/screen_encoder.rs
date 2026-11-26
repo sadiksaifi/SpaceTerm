@@ -861,6 +861,62 @@ fn rgb(color: crate::appearance::Color) -> [u8; 3] {
     [color.r, color.g, color.b]
 }
 
+/// Encodes visible preview rows without a channel, style table, links, or selection.
+pub(super) fn preview_rows<'a>(
+    rows: impl Iterator<Item = (&'a [CellSnapshot], bool)>,
+    columns: u16,
+    palette: &[crate::appearance::Color; 256],
+) -> Vec<wire::Row> {
+    fn resolve(color: pane::Color, palette: &[crate::appearance::Color; 256]) -> pane::Color {
+        match color {
+            pane::Color::Palette(index) => pane::Color::Rgb(rgb(palette[usize::from(index)])),
+            _ => color,
+        }
+    }
+
+    rows.enumerate()
+        .map(|(index, (row, wrapped))| {
+            let mut runs: Vec<Run> = Vec::new();
+            for cell in row.iter().take(usize::from(columns)) {
+                let mut style = StyleFields::of(cell).style();
+                style.flags &= !flags::SELECTED;
+                style.foreground = resolve(style.foreground, palette);
+                style.background = resolve(style.background, palette);
+                style.underline_color = resolve(style.underline_color, palette);
+                let style = if style == Style::DEFAULT {
+                    StyleRef::Default
+                } else {
+                    StyleRef::Inline(style)
+                };
+                if runs.last().is_none_or(|run| run.style != style) {
+                    runs.push(Run {
+                        style,
+                        link: None,
+                        text: String::new(),
+                        cells: Cells::Explicit(Vec::new()),
+                    });
+                }
+                let cell_text = if cell.invisible && !cell.spacer_tail {
+                    " "
+                } else {
+                    text(cell)
+                };
+                if let Some(run) = runs.last_mut()
+                    && let Cells::Explicit(lengths) = &mut run.cells
+                {
+                    run.text.push_str(cell_text);
+                    lengths.push(cell_text.len() as u16);
+                }
+            }
+            wire::Row {
+                index: index as u16,
+                wrapped,
+                runs,
+            }
+        })
+        .collect()
+}
+
 /// Style and link ids the client holds for one channel or one page.
 #[derive(Default)]
 struct Tables {

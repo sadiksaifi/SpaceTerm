@@ -1,8 +1,10 @@
 //! A close that asks nobody first rechecks the exact Terminal Session's activity when SpaceTerm
 //! Core admits it, after every input it accepted before.
 use super::*;
-use crate::runtime::core_host::tests::{await_text, command, host, size, workspace_inventory};
-use spaceterm_core::hierarchy::{CloseTarget, Mutation, Outcome};
+use crate::runtime::core_host::tests::{
+    await_text, command, host, host_with_shell, size, workspace_inventory,
+};
+use spaceterm_core::hierarchy::{CloseTarget, Foreground, Mutation, Outcome};
 
 /// A started own Root Pane beside a second Tab, and the direct close of that Pane.
 fn own_pane(host: &mut WorkspaceHost) -> (Lease, CloseTarget) {
@@ -105,6 +107,84 @@ fn a_direct_close_right_after_enter_asks_for_review_and_ends_nothing() {
 }
 
 #[test]
+fn inventory_publishes_a_foreground_program_without_shell_integration() {
+    check_foreground_without_shell_integration("exec /bin/sleep 30", Foreground::Program);
+}
+
+#[test]
+fn inventory_observes_a_foreground_program_that_starts_without_terminal_output() {
+    // The shell holds the foreground through the input settle reads. The timed builtin
+    // then hands it to sleep without writing anything to the terminal.
+    check_foreground_without_shell_integration(
+        "read -r -s -t 2 ignored; /bin/sleep 10",
+        Foreground::Program,
+    );
+}
+
+#[test]
+fn inventory_reports_ambiguous_foreground_when_a_job_shares_the_shell_group() {
+    check_foreground_without_shell_integration("set +m; /bin/sleep 10", Foreground::Unknown);
+}
+
+fn check_foreground_without_shell_integration(line: &str, expected: Foreground) {
+    use spaceterm_core::protocol::{CoreMessage, RawFrame, frame::Assembler, version::WORK};
+
+    let mut host = WorkspaceHost::new(host_with_shell(
+        "/bin/bash",
+        native_pty_factory(Arc::default()),
+    ));
+    let (lease, target) = own_pane(&mut host);
+    let observer = [2; 32];
+    let outbox = Outbox::new(Arc::new(|| {}), WORK);
+    HostCommands::connected(&mut host, observer, observer, &outbox);
+    let mut assembler = Assembler::default();
+    let mut wait = |host: &mut WorkspaceHost, foreground, needs_review| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            HostCommands::tick(host, Instant::now());
+            while let Some((frame, _)) = outbox.next_frame() {
+                let frame = RawFrame::parse(&frame).unwrap();
+                let Some(CoreMessage::Inventory(revision)) = assembler.core(frame).unwrap() else {
+                    continue;
+                };
+                let pane = &revision.inventory.workspaces[0].tabs[0].panes[0];
+                if pane.activity.is_some_and(|activity| {
+                    activity.session == Some(lease.session)
+                        && activity.foreground == foreground
+                        && activity.needs_close_review == needs_review
+                }) {
+                    assert!(
+                        pane.presentation
+                            .as_ref()
+                            .is_none_or(|pane| pane.command.is_none())
+                    );
+                    return revision.inventory;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "inventory never reported {foreground:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    assert_eq!(
+        wait(&mut host, Foreground::Shell, false).close_would_end_work(target),
+        Some(false)
+    );
+    assert!(matches!(
+        command(&mut host, 1, lease, line),
+        Reply::Unchanged
+    ));
+    assert_eq!(
+        wait(&mut host, expected, true).close_would_end_work(target),
+        Some(true)
+    );
+    assert_eq!(direct_close(&mut host, target), Outcome::StaleConfirmation);
+    host.shutdown().unwrap();
+}
+
+#[test]
 fn an_idle_close_of_an_unclaimed_pane_checks_for_work_before_ending_the_session() {
     let mut host = WorkspaceHost::new(host());
     let (first_lease, target) = own_pane(&mut host);
@@ -140,7 +220,7 @@ fn an_idle_close_of_an_unclaimed_pane_checks_for_work_before_ending_the_session(
             &mut host,
             2,
             lease,
-            "printf '%s%s\\n' TASK- RUNNING; sleep 30"
+            "printf '\\n%s%s\\n' TASK- RUNNING; sleep 30"
         ),
         Reply::Unchanged
     ));

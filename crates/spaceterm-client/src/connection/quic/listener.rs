@@ -1077,8 +1077,11 @@ mod tests {
             unsafe { libc::poll(&mut bell, 1, 10) };
         };
         stream.handshake(deadline).unwrap();
-        // As when the socket's send buffer is full.
-        stream.driver.state.stashed = Some((address, None, vec![0; 16]));
+        // As when the socket's send buffer is full. Watch a separate socket for this datagram
+        // so closing the driver cannot quietly retry it.
+        let observer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        observer.set_nonblocking(true).unwrap();
+        stream.driver.state.stashed = Some((observer.local_addr().unwrap(), None, vec![0; 16]));
         stream.driver.state.retry = Some(Instant::now() + Duration::from_secs(60));
         assert_eq!(stream.driver.stashed_descriptor(), None);
         assert!(stream.driver.stash_deadline().is_some());
@@ -1093,6 +1096,10 @@ mod tests {
         assert_eq!(listener.widen(), Ok(()));
         assert_eq!(listener.demux.shared.sockets().udp.len(), 2);
         drop(waiting.join().unwrap());
+        assert_eq!(
+            observer.recv(&mut [0; 16]).unwrap_err().kind(),
+            ErrorKind::WouldBlock
+        );
         // The client waits for bytes on L0 that never come.
         let _ = client.join();
     }
