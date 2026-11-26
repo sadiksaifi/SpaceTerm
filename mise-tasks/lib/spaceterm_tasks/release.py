@@ -67,20 +67,55 @@ def replace_directory(staged, destination):
     staged.rename(destination)
 
 
-def notes(root=ROOT):
+def notes(root=ROOT, *, tag=None):
     """Markdown notes for the release tagged at HEAD, from its Conventional Commits.
 
     cliff.toml's tag_pattern decides which tags are releases.
     """
     with open(root / "cliff.toml", "rb") as config:
         release_tag = re.compile(tomllib.load(config)["git"]["tag_pattern"])
-    tags = subprocess.run(
-        ["git", "tag", "--points-at", "HEAD"], cwd=root, capture_output=True, text=True
-    ).stdout.split()
-    if not any(release_tag.match(tag) for tag in tags):
+
+    def version(name):
+        return tuple(map(int, name[1:].split(".")))
+
+    at_head = {
+        name
+        for name in checked(
+            ["git", "tag", "--points-at", "HEAD"],
+            "Git could not read release tags at HEAD",
+            cwd=root,
+            text=True,
+        ).splitlines()
+        if release_tag.fullmatch(name)
+    }
+    tag = tag or max(at_head, key=version, default="")
+    if tag not in at_head:
         raise TaskError("release notes require a stable release tag from 0.10.0 at HEAD")
+    current_version = version(tag)
+    ancestors = checked(
+        ["git", "tag", "--merged", "HEAD"],
+        "Git could not read earlier release tags",
+        cwd=root,
+        text=True,
+    ).splitlines()
+    previous = max(
+        (
+            name
+            for name in ancestors
+            if release_tag.fullmatch(name) and version(name) < current_version
+        ),
+        key=version,
+        default=None,
+    )
+    if previous in at_head:
+        return f"No changes since {previous}.\n"
+    # Limit git-cliff to the release's commit range and the tag the template needs to name
+    # its previous release. The first release instead renders its own tag and first-release text.
+    args = ["--tag-pattern", f"^{re.escape(previous or tag)}$"]
+    if previous is not None:
+        args.append(f"{previous}..{tag}")
     result = subprocess.run(
-        ["git-cliff", "--config", "cliff.toml", "--current", "--offline", "--strip", "all"],
+        ["git-cliff", "--config", "cliff.toml", "--offline", "--strip", "all", *args],
         cwd=root,
         capture_output=True,
         text=True,
@@ -90,9 +125,9 @@ def notes(root=ROOT):
     return result.stdout
 
 
-def write_notes(output=NOTES, root=ROOT):
+def write_notes(output=NOTES, root=ROOT, *, tag=None):
     """Write the notes file that the desktop builds embed and the GitHub release body ends with."""
-    text = notes(root)
+    text = notes(root, tag=tag)
     if len(text.encode()) > 64 * 1024:
         raise TaskError("the release notes are larger than the 64 KiB a desktop embeds")
     output = Path(output)

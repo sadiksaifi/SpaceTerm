@@ -41,10 +41,12 @@ class ReleaseNotesTests(unittest.TestCase):
         self.git("init", "-q")
         self.git("commit", "-qm", "Initial", "--allow-empty")
 
-    def git(self, *args):
+    def git(self, *args, date=None):
+        env = {**os.environ, "GIT_COMMITTER_DATE": date} if date else None
         subprocess.run(
             ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", *args],
             cwd=self.root,
+            env=env,
             check=True,
             capture_output=True,
         )
@@ -121,12 +123,61 @@ class ReleaseNotesTests(unittest.TestCase):
         self.assert_embedded_notes(text, "### Features")
         self.assert_release_body(text, "v0.11.2")
 
+    def test_notes_use_desktop_release_history_with_library_tags_at_head_and_between_releases(self):
+        self.git("tag", "-am", "Previous desktop release", "v0.12.2")
+        self.git("commit", "-qm", "feat: add terminal panes", "--allow-empty")
+        self.git("tag", "-am", "Previous library release", "libspaceterm@v0.1.2")
+        self.git("commit", "-qm", "fix(updates): preserve active sessions", "--allow-empty")
+        self.git("tag", "-am", "Desktop release", "v0.12.3", date="2026-11-26T19:00:00Z")
+        expected = notes(self.root)
+        self.git(
+            "tag", "-am", "Library release", "libspaceterm@v0.1.3", date="2026-11-26T20:00:00Z"
+        )
+
+        text = notes(self.root)
+        self.assertEqual(text, expected)
+        self.assertIn("Add terminal panes", text)
+        self.assertIn("**updates:** Preserve active sessions", text)
+        self.assertNotIn("Initial", text)
+
+    def test_notes_follow_release_ancestry_when_commit_times_tie_or_go_backwards(self):
+        earlier = "2026-11-26T19:00:00Z"
+        later = "2026-11-26T20:00:00Z"
+        self.git("commit", "-qm", "feat: previous release change", "--allow-empty", date=later)
+        self.git("tag", "-am", "Previous desktop release", "v0.12.9", date=later)
+        self.git(
+            "commit", "-qm", "fix: change for the earlier clock", "--allow-empty", date=earlier
+        )
+        self.git("tag", "-am", "Desktop release", "v0.12.10", date=later)
+        self.git("commit", "-qm", "feat: change in the same second", "--allow-empty", date=earlier)
+        self.git("tag", "-am", "Next desktop release", "v0.12.11", date=later)
+
+        for tag, included, excluded in (
+            ("v0.12.10", "Change for the earlier clock", "Previous release change"),
+            ("v0.12.11", "Change in the same second", "Change for the earlier clock"),
+        ):
+            with self.subTest(tag=tag):
+                self.git("checkout", "-q", tag)
+                text = notes(self.root, tag=tag)
+                self.assertIn(included, text)
+                self.assertNotIn(excluded, text)
+
     def test_notes_require_a_stable_release_tag_at_head(self):
         self.git("tag", "-a", "v1.0.0", "-m", "Release")
         self.git("commit", "-qm", "feat: unreleased", "--allow-empty")
         self.git("tag", "-a", "v1.1.0-beta.1", "-m", "Prerelease")
         with self.assertRaises(TaskError):
             notes(self.root)
+
+    def test_a_second_release_at_the_same_commit_has_no_new_changes(self):
+        self.git("tag", "-am", "Earlier desktop release", "v0.12.1")
+        self.git("commit", "-qm", "feat: already published", "--allow-empty")
+        self.git("tag", "-am", "Previous desktop release", "v0.12.2")
+        self.git("tag", "-am", "Desktop rebuild", "v0.12.3")
+
+        self.assertEqual(notes(self.root), "No changes since v0.12.2.\n")
+        self.assertEqual(notes(self.root, tag="v0.12.3"), "No changes since v0.12.2.\n")
+        self.assertIn("Already published", notes(self.root, tag="v0.12.2"))
 
     def test_notes_require_a_release_of_the_new_application_at_head(self):
         self.git("tag", "-a", "v0.6.8", "-m", "Release")
