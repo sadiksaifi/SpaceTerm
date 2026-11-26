@@ -33,6 +33,7 @@ impl TerminalEmulator {
         let prompt = self.metadata.owned_prompt();
         crate::terminal::session::PromptProgress {
             fresh: prompt.fresh,
+            command_running: self.metadata.owned_command_running(),
             zone: match prompt.zone {
                 None => crate::terminal::session::ShellZone::Starting,
                 Some(PromptZone::Prompt | PromptZone::CommandInput) => {

@@ -15,6 +15,7 @@ pub(super) struct ActivityState {
     last: Option<Instant>,
     /// The owning shell waited at its own empty prompt after `last`.
     empty_prompt: bool,
+    command_running: bool,
     probe: Option<Arc<dyn SessionProbe>>,
     /// Lines submitted, such as by Enter, counted where input is accepted and before the worker
     /// writes them, so a close the host admits after that input sees it.
@@ -169,9 +170,10 @@ impl Submissions {
 }
 
 /// Where the owning shell is, as its own prompt markers say.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ShellZone {
     /// No prompt of its own yet.
+    #[default]
     Starting,
     /// At its prompt, with or without input.
     AtPrompt,
@@ -180,10 +182,11 @@ pub(crate) enum ShellZone {
 }
 
 /// The owning shell's fresh prompts, ever, and where it is now.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PromptProgress {
     pub(crate) fresh: u64,
     pub(crate) zone: ShellZone,
+    pub(crate) command_running: bool,
 }
 
 impl Default for ActivityState {
@@ -192,6 +195,7 @@ impl Default for ActivityState {
             receipt: spaceterm_core::idle_restart::Activity::new(Instant::now()),
             last: None,
             empty_prompt: false,
+            command_running: false,
             probe: None,
             submitted: Submissions::default(),
         }
@@ -204,11 +208,12 @@ impl ActivityState {
     }
 
     /// Input or output arrived at `now`, after which the owning shell `empty_prompt` waits at
-    /// its own empty prompt or not, having drawn `fresh` fresh prompts.
-    pub(super) fn note(&mut self, now: Instant, empty_prompt: bool, fresh: u64) {
+    /// its own empty prompt or not, with the owning shell's latest activity.
+    pub(super) fn note(&mut self, now: Instant, empty_prompt: bool, progress: PromptProgress) {
         self.last = Some(now);
         self.empty_prompt = empty_prompt;
-        self.submitted.prompted(fresh);
+        self.command_running = progress.command_running;
+        self.submitted.prompted(progress.fresh);
     }
 }
 
@@ -303,9 +308,9 @@ impl TerminalEventPublisher {
         state.activity.set_probe(probe);
     }
 
-    pub(super) fn note_activity(&self, now: Instant, empty_prompt: bool, fresh: u64) {
+    pub(super) fn note_activity(&self, now: Instant, empty_prompt: bool, progress: PromptProgress) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        state.activity.note(now, empty_prompt, fresh);
+        state.activity.note(now, empty_prompt, progress);
     }
 
     /// Records that accepted input submits a line, before the worker writes it.
@@ -382,28 +387,26 @@ impl TerminalEventPublisher {
         }
     }
 
-    /// Whether current facts verify work in this Terminal Session that a direct close would end:
-    /// a fresh read finds a program other than the shell owning the foreground or other processes
-    /// in its terminal session, or a submitted line that nothing answered yet. Facts it cannot
-    /// read verify nothing, so a shell that is starting or waits at its prompt closes directly.
+    /// Whether a program owns the foreground, the shell is running a command, or a submitted
+    /// line has yet to be answered.
+    /// Prompt helpers can share the shell's terminal session while it is idle. The process
+    /// census belongs to the stricter idle-restart check.
     pub(super) fn running_work(&self) -> bool {
-        let (probe, submitted, stopped) = {
+        let (probe, working, stopped) = {
             let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
             (
                 state.activity.probe.clone(),
-                state.activity.submitted.pending(),
+                state.activity.command_running || state.activity.submitted.pending(),
                 state.stopped,
             )
         };
         if stopped {
             return false;
         }
-        if submitted {
+        if working {
             return true;
         }
-        probe.is_some_and(|probe| {
-            matches!(probe.shell_foreground(), Ok(false)) || matches!(probe.others(), Ok(true))
-        })
+        Self::program_holds(probe.as_deref())
     }
 }
 

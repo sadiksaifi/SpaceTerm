@@ -1164,17 +1164,7 @@ impl Command {
         match self {
             Self::Received(command, _) => command.submits_line(),
             Self::Run(..) => true,
-            Self::Key(key) => {
-                key.action != crate::terminal::key::KeyAction::Release
-                    && (matches!(
-                        key.physical_key,
-                        crate::terminal::key::PhysicalKey::Enter
-                            | crate::terminal::key::PhysicalKey::NumpadEnter
-                    ) || key
-                        .text
-                        .as_deref()
-                        .is_some_and(|text| text.contains(['\r', '\n'])))
-            }
+            Self::Key(key) => key.submits_line(),
             _ => false,
         }
     }
@@ -1472,7 +1462,7 @@ impl TerminalWorker {
         });
 
         events.set_probe(native_pty.session_probe());
-        events.note_activity(Instant::now(), false, 0);
+        events.note_activity(Instant::now(), false, PromptProgress::default());
         let mut worker = Self {
             metadata_state,
             native_pty,
@@ -2513,7 +2503,7 @@ impl TerminalWorker {
             self.emulator.at_empty_prompt()
                 && self.input.deadline().is_none()
                 && !self.clipboard.pending(),
-            self.emulator.prompt_progress().fresh,
+            self.emulator.prompt_progress(),
         );
     }
 

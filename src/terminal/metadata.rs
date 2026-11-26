@@ -561,6 +561,10 @@ impl MetadataTracker {
         self.owned_prompt
     }
 
+    pub(crate) fn owned_command_running(&self) -> bool {
+        self.owned_prompt.zone == Some(PromptZone::CommandOutput) && !self.finishing
+    }
+
     /// Counts input written to the PTY, so a run never pastes into a line someone typed.
     pub(crate) fn note_input(&mut self, bytes: usize) {
         let counter = if self.finishing {
@@ -792,6 +796,7 @@ impl MetadataTracker {
             }
             ("C", Some(_)) => {
                 self.owned_prompt.zone = Some(PromptZone::CommandOutput);
+                self.finishing = false;
                 Marker::CommandStart {
                     // A cmdline that does not decode never matches a command.
                     cmdline: option(fields, "cmdline")

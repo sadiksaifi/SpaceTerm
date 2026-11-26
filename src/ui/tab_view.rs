@@ -3226,6 +3226,16 @@ impl TabView {
         })
     }
 
+    pub(crate) fn submitting_line(
+        &self,
+        core: spaceterm_core::hierarchy::Id,
+    ) -> Option<async_channel::Receiver<()>> {
+        self.binding
+            .view(self.binding.local_pane(core)?)?
+            .connection()
+            .submitting_line()
+    }
+
     /// Whether the keyboard rests anywhere in this Tab: its Tab strip item, one of its Panes, or
     /// the screen replacing one of them.
     pub(crate) fn holds_keyboard(&self, window: &Window, cx: &App) -> bool {

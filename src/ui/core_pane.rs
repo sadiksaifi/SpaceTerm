@@ -914,6 +914,10 @@ mod connection {
     pub(crate) trait MachinePaneConnection: Send + Sync {
         fn status(&self) -> CorePaneStatus;
 
+        fn submitting_line(&self) -> Option<async_channel::Receiver<()>> {
+            None
+        }
+
         /// The running version already received over this Pane's authenticated connection.
         fn running_version(&self) -> Option<spaceterm_core::update::facts::Version> {
             self.directory_core()?
@@ -1074,6 +1078,9 @@ mod connection {
     }
 
     impl MachinePaneConnection for CorePaneState {
+        fn submitting_line(&self) -> Option<async_channel::Receiver<()>> {
+            Self::submitting_line(self)
+        }
         fn start_waiting(&self) -> bool {
             Self::start_waiting(self)
         }

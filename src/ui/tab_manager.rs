@@ -4615,6 +4615,16 @@ impl TabManager {
             .unwrap_or(false)
     }
 
+    pub(crate) fn submitting_line(
+        &self,
+        core: spaceterm_core::hierarchy::Id,
+        cx: &App,
+    ) -> Option<async_channel::Receiver<()>> {
+        self.tabs
+            .iter()
+            .find_map(|(_, view)| view.read(cx).submitting_line(core))
+    }
+
     /// Delivers the Active Tab's Focused Pane exit, as its Terminal Session does when the server
     /// ends it.
     #[cfg(test)]

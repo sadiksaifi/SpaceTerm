@@ -7326,10 +7326,8 @@ fn close_confirmation_publishes_text_before_actions_and_contains_accessibility(
     assert_eq!(dialog["aria"]["role"], "AlertDialog");
     assert_eq!(dialog["aria"]["modal"], true);
     let title = tree.text("Close Tab?");
-    let message = tree.text(
-        "The Tab and its Pane close for every client. This ends 1 Terminal Session and stops \
-         its running commands.",
-    );
+    let message =
+        tree.text("The Tab and its Pane close for every client. This ends 1 Terminal Session.");
     let content = tree.descendants(dialog);
     let position = |node: &serde_json::Value| {
         content

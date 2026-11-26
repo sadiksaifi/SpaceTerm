@@ -569,7 +569,7 @@ mod core_workspaces {
         }
 
         pub(crate) fn submit(&self, mutation: Mutation) -> WorkspaceSubmission {
-            match self.enqueue(mutation, None, None) {
+            match self.enqueue(mutation, None, None, None) {
                 Ok(()) => WorkspaceSubmission::Submitted,
                 Err(reason) => WorkspaceSubmission::Refused(reason),
             }
@@ -580,6 +580,7 @@ mod core_workspaces {
             mutation: Mutation,
             reply: Option<async_channel::Sender<Result<RetainedOutcome, WorkspaceRefusalReason>>>,
             owner: Option<std::rc::Weak<std::cell::Cell<Option<u64>>>>,
+            close: Option<SubmittedClose>,
         ) -> Result<(), WorkspaceRefusalReason> {
             self.snapshot();
             let editability = self.editability();
@@ -589,7 +590,9 @@ mod core_workspaces {
             if !mutation.is_bounded() {
                 return Err(WorkspaceRefusalReason::Value);
             }
-            self.pending.borrow_mut().push(mutation, reply, owner)?;
+            self.pending
+                .borrow_mut()
+                .push(mutation, reply, owner, close)?;
             self.dispatch();
             self.subscribers.borrow_mut().retain(|sender| {
                 !matches!(
@@ -609,7 +612,7 @@ mod core_workspaces {
             WorkspaceRefusalReason,
         > {
             let (reply, receiver) = async_channel::bounded(1);
-            self.enqueue(mutation, Some(reply), None)?;
+            self.enqueue(mutation, Some(reply), None, None)?;
             Ok(receiver)
         }
 
@@ -624,7 +627,7 @@ mod core_workspaces {
             WorkspaceRefusalReason,
         > {
             let (reply, receiver) = async_channel::bounded(1);
-            self.enqueue(mutation, Some(reply), Some(owner.0))?;
+            self.enqueue(mutation, Some(reply), Some(owner.0), None)?;
             Ok(receiver)
         }
 
@@ -1957,18 +1960,7 @@ mod core_workspaces {
         repositories: super::CoreRepositories,
         /// The close confirmation a person is reviewing now.
         review: Option<WorkspaceCloseReview>,
-        /// The close this process submitted, the local target a fresh review would reopen, and
-        /// how the person approved it.
-        submitted_close: Option<SubmittedClose>,
-        /// Closes the server refused because what they would end changed after the
-        /// confirmation, each with its outcome's sequence.
-        stale_closes: VecDeque<(MachineCloseTarget, u64)>,
-        /// The stale closes, by outcome sequence, that this client's own close found running
-        /// work in, while every Pane, Terminal Session and control grant it named is unchanged.
-        /// Each keeps what the refusal proved it would end: the boot, the exact Panes and their
-        /// Terminal Sessions, and whether it removes the Tab or Workspace. Only a review of that
-        /// same scope may present the refusal.
-        working_closes: BTreeMap<u64, spaceterm_core::hierarchy::CloseConfirmation>,
+        stale_closes: VecDeque<StaleClose>,
         attachments: spaceterm_core::attachments::Attachments,
         retained_views: Option<crate::ui::client_view_state::RetainedClientViews>,
         saved_views: Option<spaceterm_core::client_view::ClientView>,
@@ -2029,7 +2021,7 @@ mod core_workspaces {
                         .flat_map(|(_, refused)| refused.iter().copied()),
                 )
                 .chain(self.forgotten.map(|_| FORGOTTEN))
-                .chain(self.stale_closes.iter().map(|(_, sequence)| *sequence))
+                .chain(self.stale_closes.iter().map(|close| close.sequence))
                 .chain(
                     self.worktree_failures
                         .iter()
@@ -2066,9 +2058,7 @@ mod core_workspaces {
                 latest: None,
                 repositories: super::CoreRepositories::default(),
                 review: None,
-                submitted_close: None,
                 stale_closes: VecDeque::new(),
-                working_closes: BTreeMap::new(),
                 attachments: spaceterm_core::attachments::Attachments::memory(),
                 retained_views: None,
                 saved_views: None,
@@ -2753,19 +2743,36 @@ mod core_workspaces {
             local: CloseTarget,
             consent: CloseConsent,
         ) -> WorkspaceSubmission {
-            let target = approval.target;
-            let submission = self.ask(Mutation::Close {
-                target,
-                confirmation: approval.confirmation,
-            });
-            if submission == WorkspaceSubmission::Submitted {
-                self.submitted_close = Some(SubmittedClose {
-                    core: target,
+            self.close_after_input(approval, local, consent, Vec::new())
+        }
+
+        pub(crate) fn close_after_input(
+            &mut self,
+            approval: WorkspaceCloseApproval,
+            local: CloseTarget,
+            consent: CloseConsent,
+            submitting_lines: Vec<async_channel::Receiver<()>>,
+        ) -> WorkspaceSubmission {
+            let result = self.edits.enqueue(
+                Mutation::Close {
+                    target: approval.target,
+                    confirmation: approval.confirmation,
+                },
+                None,
+                None,
+                Some(SubmittedClose {
                     local,
                     consent,
-                });
+                    submitting_lines,
+                }),
+            );
+            match result {
+                Ok(()) => {
+                    self.record_submission();
+                    WorkspaceSubmission::Submitted
+                }
+                Err(reason) => WorkspaceSubmission::Refused(reason),
             }
-            submission
         }
 
         /// The oldest failed Worktree operation still to present, and its alert's presentation.
@@ -2812,30 +2819,20 @@ mod core_workspaces {
             OutcomeNotice,
             Option<spaceterm_core::hierarchy::CloseConfirmation>,
         )> {
-            let (target, sequence) = *self.stale_closes.front()?;
-            let local = self
-                .submitted_close
-                .filter(|submitted| submitted.core == target)
-                .map(|submitted| submitted.local);
+            let close = self.stale_closes.front()?;
             Some((
-                target,
-                local,
-                self.notice([sequence]),
-                self.working_closes.get(&sequence).cloned(),
+                close.core,
+                close.local,
+                self.notice([close.sequence]),
+                close.working.clone(),
             ))
         }
         pub(crate) fn take_stale_close(
             &mut self,
         ) -> Option<(MachineCloseTarget, Option<CloseTarget>)> {
-            let (target, sequence) = self.stale_closes.pop_front()?;
-            self.working_closes.remove(&sequence);
-            self.hand(sequence);
-            let local = self
-                .submitted_close
-                .take()
-                .filter(|submitted| submitted.core == target)
-                .map(|submitted| submitted.local);
-            Some((target, local))
+            let close = self.stale_closes.pop_front()?;
+            self.hand(close.sequence);
+            Some((close.core, close.local))
         }
 
         pub(crate) const fn review(&self) -> Option<&WorkspaceCloseReview> {
@@ -3081,6 +3078,7 @@ mod core_workspaces {
                     &completion.outcome,
                     completion.inventory.as_ref(),
                     !completion.optimistic,
+                    completion.close.as_ref(),
                     &mut poll,
                 );
                 poll.changed = true;
@@ -3130,7 +3128,7 @@ mod core_workspaces {
                     }
                     // The answer and the authoritative values come from one snapshot, so a
                     // conflict never names a value an accepted edit has already replaced.
-                    self.settle(outcome, snapshot.inventory.as_ref(), false, &mut poll);
+                    self.settle(outcome, snapshot.inventory.as_ref(), false, None, &mut poll);
                     poll.changed = true;
                 }
             }
@@ -3221,6 +3219,7 @@ mod core_workspaces {
             outcome: &RetainedOutcome,
             inventory: Option<&Inventory>,
             own: bool,
+            close: Option<&SubmittedClose>,
             poll: &mut WorkspacePoll,
         ) {
             let sequence = outcome.sequence;
@@ -3293,21 +3292,18 @@ mod core_workspaces {
                                             .collect::<BTreeSet<_>>()
                             });
                         let queued = unchanged
-                            && self
-                                .submitted_close
-                                .filter(|submitted| submitted.core == *target)
-                                .is_some_and(|submitted| {
-                                    self.edits
-                                        .pending
-                                        .borrow_mut()
-                                        .queue_close(WorkspaceCloseIntent {
-                                            core: *target,
-                                            local: submitted.local,
-                                            keyboard: CloseKeyboard::Unknown,
-                                            review: submitted.consent == CloseConsent::Confirmed,
-                                        })
-                                        .is_ok()
-                                });
+                            && close.is_some_and(|submitted| {
+                                self.edits
+                                    .pending
+                                    .borrow_mut()
+                                    .queue_close(WorkspaceCloseIntent {
+                                        core: *target,
+                                        local: submitted.local,
+                                        keyboard: CloseKeyboard::Unknown,
+                                        review: submitted.consent == CloseConsent::Confirmed,
+                                    })
+                                    .is_ok()
+                            });
                         // An own close the host refused while everything it named is
                         // unchanged found running work, such as a command its own input started.
                         let working = confirmation.own_controls.as_ref().and_then(|reviewed| {
@@ -3328,10 +3324,12 @@ mod core_workspaces {
                         if queued {
                             self.edits.presented(sequence);
                         } else {
-                            if let Some(observed) = working {
-                                self.working_closes.insert(sequence, observed);
-                            }
-                            self.stale_closes.push_back((*target, sequence));
+                            self.stale_closes.push_back(StaleClose {
+                                core: *target,
+                                local: close.map(|submitted| submitted.local),
+                                sequence,
+                                working,
+                            });
                         }
                     }
                     _ => self.edits.presented(sequence),
@@ -3512,23 +3510,22 @@ mod core_workspaces {
         fn ask(&mut self, mutation: Mutation) -> WorkspaceSubmission {
             let submission = self.edits.submit(mutation);
             if submission == WorkspaceSubmission::Submitted {
-                self.pending = true;
-                // A new answer replaces these notices; what they would present stays unseen.
-                let sequences: Vec<u64> = self
-                    .refusals
-                    .drain(..)
-                    .flat_map(|(_, refused)| refused)
-                    .chain(self.stale_closes.drain(..).map(|(_, sequence)| sequence))
-                    .inspect(|sequence| {
-                        self.working_closes.remove(sequence);
-                    })
-                    .collect();
-                for sequence in sequences {
-                    self.edits.release(sequence);
-                }
-                self.submitted_close = None;
+                self.record_submission();
             }
             submission
+        }
+
+        fn record_submission(&mut self) {
+            self.pending = true;
+            // A new answer replaces these notices; what they would present stays unseen.
+            let sequences = self
+                .refusals
+                .drain(..)
+                .flat_map(|(_, refused)| refused)
+                .chain(self.stale_closes.drain(..).map(|close| close.sequence));
+            for sequence in sequences {
+                self.edits.release(sequence);
+            }
         }
     }
 
@@ -3610,6 +3607,14 @@ mod core_workspaces {
                 .map(|pane| pane.id)
         }
 
+        pub(crate) fn live_panes(&self) -> impl Iterator<Item = Id> + '_ {
+            self.confirmation
+                .panes
+                .iter()
+                .filter(|pane| pane.session.is_some())
+                .map(|pane| pane.id)
+        }
+
         /// A direct close binds every reviewed Pane to its exact control grant. A Pane without a
         /// reported grant requires explicit confirmation.
         pub(crate) fn direct_close(
@@ -3678,7 +3683,6 @@ mod core_workspaces {
                 1 => Some("1 Terminal Session".to_owned()),
                 count => Some(format!("{count} Terminal Sessions")),
             };
-            let stops = if sessions == 1 { "its" } else { "their" };
             match self.target {
                 MachineCloseTarget::KillWorkspace { .. } => {
                     let tabs = match self.tabs {
@@ -3719,16 +3723,12 @@ mod core_workspaces {
                     let removal =
                         "This is the only Pane in its Tab, so the Tab closes for every client.";
                     match ends {
-                        Some(ends) => format!(
-                            "{removal} This ends {ends} and stops {stops} running commands."
-                        ),
+                        Some(ends) => format!("{removal} This ends {ends}."),
                         None => format!("{removal} No Terminal Session is running in it."),
                     }
                 }
                 MachineCloseTarget::Pane { .. } => match ends {
-                    Some(ends) => format!(
-                        "This ends {ends} and stops {stops} running commands for every client."
-                    ),
+                    Some(ends) => format!("This ends {ends} for every client."),
                     None => {
                         "The Pane closes for every client. No Terminal Session is running in it."
                             .to_owned()
@@ -3740,9 +3740,7 @@ mod core_workspaces {
                         count => format!("The Tab and its {count} Panes close for every client."),
                     };
                     match ends {
-                        Some(ends) => format!(
-                            "{removal} This ends {ends} and stops {stops} running commands."
-                        ),
+                        Some(ends) => format!("{removal} This ends {ends}."),
                         None => format!("{removal} No Terminal Session is running in it."),
                     }
                 }
@@ -3839,11 +3837,18 @@ mod core_workspaces {
 
     /// A close this process submitted: the server's target, the local target a fresh review
     /// reopens, and how the person approved it.
-    #[derive(Clone, Copy, Debug)]
-    struct SubmittedClose {
-        core: MachineCloseTarget,
+    pub(super) struct SubmittedClose {
         local: CloseTarget,
         consent: CloseConsent,
+        pub(super) submitting_lines: Vec<async_channel::Receiver<()>>,
+    }
+
+    struct StaleClose {
+        core: MachineCloseTarget,
+        local: Option<CloseTarget>,
+        sequence: u64,
+        /// The exact scope whose activity Core could not clear for a direct close.
+        working: Option<CoreCloseConfirmation>,
     }
 
     /// An unapproved close waiting for the exact provisional creation it names.
@@ -3978,6 +3983,7 @@ mod core_workspaces {
             quiet_when_observed: std::sync::atomic::AtomicBool,
             running_version: Mutex<Option<spaceterm_core::update::facts::Version>>,
             unsent: Mutex<Option<crate::terminal::core_session::unsent::UnsentInput>>,
+            submitting_line: Mutex<Option<async_channel::Receiver<()>>>,
         }
 
         impl ScriptedPane {
@@ -4004,7 +4010,14 @@ mod core_workspaces {
                     quiet_when_observed: std::sync::atomic::AtomicBool::new(false),
                     running_version: Mutex::default(),
                     unsent: Mutex::default(),
+                    submitting_line: Mutex::default(),
                 })
+            }
+
+            pub(crate) fn hold_line_submission(&self) -> async_channel::Sender<()> {
+                let (line, receiver) = async_channel::bounded(1);
+                *self.submitting_line.lock().unwrap() = Some(receiver);
+                line
             }
 
             /// The Core reports running `version`.
@@ -4166,6 +4179,14 @@ mod core_workspaces {
         }
 
         impl crate::ui::core_pane::MachinePaneConnection for ScriptedPane {
+            fn submitting_line(&self) -> Option<async_channel::Receiver<()>> {
+                self.submitting_line
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .filter(|line| !line.is_closed())
+                    .cloned()
+            }
             fn status(&self) -> crate::terminal::core_session::CorePaneStatus {
                 *self.status.lock().expect("status")
             }
@@ -4978,7 +4999,9 @@ mod restart_tests {
                 source: Some([3; 32]),
                 control: spaceterm_core::hierarchy::CreateControl::Creator,
             };
-            pending.push(mutation.clone(), Some(reply), None).unwrap();
+            pending
+                .push(mutation.clone(), Some(reply), None, None)
+                .unwrap();
             // Fresh facts no longer report the restart once the Core reconnects.
             assert_eq!(pending.follow_restart(false, reconnected), None);
             if dispatches {
@@ -4986,7 +5009,7 @@ mod restart_tests {
                 assert!(answer.try_recv().is_err());
                 // After the reconnect, an ordinary disconnection refuses what waits again.
                 let (reply, later) = async_channel::bounded(1);
-                pending.push(mutation, Some(reply), None).unwrap();
+                pending.push(mutation, Some(reply), None, None).unwrap();
                 pending.disconnect();
                 assert_eq!(
                     later.try_recv().unwrap().unwrap_err(),

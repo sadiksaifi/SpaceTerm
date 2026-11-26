@@ -3782,23 +3782,51 @@ impl WorkspaceManager {
         if let Some(approval) = direct {
             use super::workspaces::WorkspaceSubmission;
 
+            let submitting_lines: Vec<_> = self
+                .workspaces
+                .workspace(workspace_id)
+                .map(|entry| {
+                    let tabs = entry.payload().read(cx);
+                    approval
+                        .live_panes()
+                        .filter_map(|pane| tabs.submitting_line(pane, cx))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let has_live_panes = approval.live_panes().next().is_some();
             let key = self.binding.owner(workspace_id);
-            let submission = self
-                .binding
-                .owning_mut(workspace_id)
-                .map(|binding| binding.close(approval, target, CloseConsent::Direct));
+            let submission = self.binding.owning_mut(workspace_id).map(|binding| {
+                binding.close_after_input(
+                    approval,
+                    target,
+                    CloseConsent::Direct,
+                    submitting_lines.clone(),
+                )
+            });
             if let Some(WorkspaceSubmission::Refused(reason)) = submission {
                 Self::show_refusal(Self::close_operation(target), reason, window, cx);
             }
-            if submission == Some(WorkspaceSubmission::Submitted) {
+            let submitted = submission == Some(WorkspaceSubmission::Submitted);
+            if submitted && !has_live_panes {
                 self.prepare_close_keyboard(target, held_keyboard, cx);
             }
             if let Some(key) = key {
+                if submitted && !submitting_lines.is_empty() {
+                    cx.spawn_in(window, async move |manager, cx| {
+                        for line in submitting_lines {
+                            let _ = line.recv().await;
+                        }
+                        let _ = manager.update_in(cx, |manager, window, cx| {
+                            manager.sync_workspaces(key, window, cx);
+                        });
+                    })
+                    .detach();
+                }
                 self.sync_workspaces(key, window, cx);
             }
             // A reviewed close that needs no confirmation now still moves the keyboard the
             // person's first request held.
-            if held_keyboard && submission == Some(WorkspaceSubmission::Submitted) {
+            if held_keyboard && submitted && !has_live_panes {
                 self.focus(window, cx);
             }
             return true;
@@ -4290,6 +4318,7 @@ impl WorkspaceManager {
         {
             return false;
         }
+        spaceterm_ui::restore_window_modal_focus(window, cx);
         // A modal that held the keyboard as the refusal returned its Tab or Pane still owes the
         // keyboard to that Tab or Pane.
         let returned = local.is_some_and(|local| {
