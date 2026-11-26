@@ -169,6 +169,11 @@ pub trait SessionProbe: Send + Sync {
     /// Whether any process other than the shell runs in its terminal session: a running or
     /// stopped job, a background job, or any other child. An error means it could not be read.
     fn others(&self) -> io::Result<bool>;
+
+    /// Whether closing would end work besides the shell and its verified prompt helpers.
+    fn close_work(&self) -> io::Result<bool> {
+        self.others()
+    }
 }
 
 /// Constructs the platform-neutral parts owned by one Native PTY Owner.

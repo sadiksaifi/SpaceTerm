@@ -61,13 +61,28 @@ pub(super) fn submit_input(
         Input::ResolvePaste(pending, ..) => pending.focus_generation,
         _ => interaction.focus_generation,
     };
+    let (line, submitted_line) = if matches!(&input, Input::Key(key) if key.submits_line()) {
+        let (line, receiver) = async_channel::bounded(1);
+        (Some(line), Some(receiver))
+    } else {
+        (None, None)
+    };
     let submitted = SubmittedInput {
         epoch,
         focus_generation,
         command: input,
         hidden: state.hidden_input.load(Ordering::Acquire),
+        line,
     };
     let sent = sender.try_send(submitted);
+    if sent.is_ok()
+        && let Some(receiver) = submitted_line
+    {
+        *state
+            .submitting_line
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(receiver);
+    }
     drop(interaction);
     let accepted = sent.is_ok();
     if accepted {
@@ -208,6 +223,8 @@ impl ActiveInput {
             state.invalidate();
             return Err(error);
         }
+        // Keep these receipts open until the whole batch is queued on the shared link.
+        let mut lines = Vec::new();
         let (generation, keys, hidden) = {
             let interaction = state.interaction.lock().unwrap_or_else(|e| e.into_inner());
             if state.epoch.load(Ordering::Acquire) != self.epoch || !interaction.interactive {
@@ -225,6 +242,7 @@ impl ActiveInput {
                 .filter_map(|submitted| match submitted.command {
                     Input::Key(key) => {
                         hidden |= submitted.hidden;
+                        lines.extend(submitted.line);
                         Some(encode_key(key))
                     }
                     _ => None,

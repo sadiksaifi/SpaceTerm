@@ -214,6 +214,12 @@ pub(super) trait UnixPtyHost: Send + Sync + 'static {
         self.process_ids()
     }
 
+    /// Whether this process's initial environment identifies it as the owning shell's
+    /// prompt helper. A missing or unreadable environment supplies no such evidence.
+    fn prompt_helper(&self, _process: i32, _marker: &[u8]) -> bool {
+        false
+    }
+
     fn master_read_error(&self, error: &io::Error) -> MasterReadError;
 }
 pub(super) trait SlaveFence: Send + Sync {
@@ -511,6 +517,7 @@ struct ShellSession {
     frozen: Mutex<Option<freeze::Teardown>>,
     checkpoint: Mutex<Option<freeze::Checkpoint>>,
     image: Option<std::path::PathBuf>,
+    prompt_helper_marker: Option<Box<[u8]>>,
 }
 
 impl SessionProbe for ShellSession {
@@ -583,9 +590,19 @@ impl SessionProbe for ShellSession {
         Ok(foreground == self.session.leader.process)
     }
 
+    fn others(&self) -> io::Result<bool> {
+        self.session_work(None)
+    }
+
+    fn close_work(&self) -> io::Result<bool> {
+        self.session_work(self.prompt_helper_marker.as_deref())
+    }
+}
+
+impl ShellSession {
     /// Reads every visible process exactly, unlike cleanup's best-effort enumeration: a
     /// process that could not be read is an error, never a process that is not there.
-    fn others(&self) -> io::Result<bool> {
+    fn session_work(&self, prompt_helper_marker: Option<&[u8]>) -> io::Result<bool> {
         let leader = self
             .host
             .observe_exactly(self.session.session)?
@@ -599,7 +616,13 @@ impl SessionProbe for ShellSession {
             }
             match self.host.observe_exactly(process)? {
                 Some(observation) if observation.session == self.session.session => {
-                    return Ok(true);
+                    let helper = prompt_helper_marker
+                        .is_some_and(|marker| self.host.prompt_helper(process, marker));
+                    if !helper
+                        || !matches!(self.host.observe_exactly(process), Ok(Some(current)) if current == observation)
+                    {
+                        return Ok(true);
+                    }
                 }
                 _ => {}
             }
@@ -690,6 +713,7 @@ mod ownership_tests {
             frozen: Mutex::new(None),
             checkpoint: Mutex::new(None),
             image: None,
+            prompt_helper_marker: None,
             session: ProcessSessionIdentity {
                 session: 100,
                 leader: shell.identity,
@@ -735,6 +759,7 @@ mod ownership_tests {
                 frozen: Mutex::new(None),
                 checkpoint: Mutex::new(None),
                 image: None,
+                prompt_helper_marker: None,
                 session: ProcessSessionIdentity {
                     session: 100,
                     leader: shell.identity,
@@ -1388,6 +1413,11 @@ fn spawn_command_in_pty(
         .get_argv()
         .first()
         .and_then(|program| std::fs::canonicalize(program).ok());
+    let prompt_owner = command
+        .get_env(crate::terminal::metadata::PromptOwner::ENVIRONMENT)
+        .filter(|owner| !owner.is_empty())
+        .and_then(std::ffi::OsStr::to_str)
+        .map(str::to_owned);
     let mut child = pair
         .slave
         .spawn_command(command)
@@ -1463,6 +1493,11 @@ fn spawn_command_in_pty(
         frozen: Mutex::new(None),
         checkpoint: Mutex::new(None),
         image,
+        prompt_helper_marker: prompt_owner.map(|owner| {
+            format!("SPACETERM_PROMPT_HELPER={owner}:{process_group}")
+                .into_bytes()
+                .into_boxed_slice()
+        }),
     });
     let termination = Arc::new(ChildTermination::new_with_session(
         host,
@@ -4227,6 +4262,7 @@ mod tests {
                     frozen: Mutex::new(None),
                     checkpoint: Mutex::new(None),
                     image: None,
+                    prompt_helper_marker: None,
                     host: test_host(),
                     session: ProcessSessionIdentity {
                         session: 0,

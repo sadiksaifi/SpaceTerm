@@ -644,6 +644,11 @@ pub fn when_window_modal_closes<V: 'static>(
     core::when_window_modal_closes(window, cx, closed)
 }
 
+/// Restores the keyboard after a modal sequence settles, before its next render.
+pub fn restore_window_modal_focus(window: &mut gpui::Window, cx: &mut gpui::App) {
+    core::restore_window_modal_focus(window, cx);
+}
+
 /// Application-owned text and intent colors for the shared modal renderer.
 ///
 /// The scrim, the surface material, its edge, and its internal rules belong to the shared

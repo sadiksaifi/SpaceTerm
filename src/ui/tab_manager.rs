@@ -320,9 +320,11 @@ pub(crate) enum TabManagerEvent {
     ClosePaneRequested {
         tab_id: TabId,
         pane_id: PaneId,
+        shortcut: bool,
     },
     CloseTabRequested {
         tab_id: TabId,
+        shortcut: bool,
     },
     FinalTabCloseRequested {
         final_tab_id: TabId,
@@ -607,10 +609,15 @@ impl TabManager {
             &view,
             window,
             |manager, _, event: &TabViewEvent, window, cx| match event {
-                TabViewEvent::UserClosePaneRequested { tab_id, pane_id } => {
+                TabViewEvent::UserClosePaneRequested {
+                    tab_id,
+                    pane_id,
+                    shortcut,
+                } => {
                     cx.emit(TabManagerEvent::ClosePaneRequested {
                         tab_id: *tab_id,
                         pane_id: *pane_id,
+                        shortcut: *shortcut,
                     });
                 }
                 TabViewEvent::CloseTabRequested { tab_id } => {
@@ -1729,13 +1736,13 @@ impl TabManager {
         }
     }
 
-    fn request_close_tab(&mut self, tab_id: TabId, cx: &mut Context<Self>) {
+    fn request_close_tab(&mut self, tab_id: TabId, shortcut: bool, cx: &mut Context<Self>) {
         // A Tab's close goes up to the Workspace Window, which asks the server after Close
         // Confirmation. Nothing here closes it locally.
         if self.close_workspace_requested || self.tabs.tab(tab_id).is_none() {
             return;
         }
-        cx.emit(TabManagerEvent::CloseTabRequested { tab_id });
+        cx.emit(TabManagerEvent::CloseTabRequested { tab_id, shortcut });
     }
 
     /// Admits a context menu for a Tab without activating it. A Tab mid-drag or a Workspace
@@ -1779,7 +1786,7 @@ impl TabManager {
             TabMenuCommand::SplitDown => self.split_tab(tab_id, SplitAxis::Vertical, window, cx),
             TabMenuCommand::MoveLeft => self.step_tab(tab_id, TabStep::Previous, cx),
             TabMenuCommand::MoveRight => self.step_tab(tab_id, TabStep::Next, cx),
-            TabMenuCommand::Close => self.request_close_tab(tab_id, cx),
+            TabMenuCommand::Close => self.request_close_tab(tab_id, false, cx),
         }
     }
 
@@ -1800,7 +1807,7 @@ impl TabManager {
     }
 
     fn on_close_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
-        self.request_close_tab(self.tabs.active_tab_id(), cx);
+        self.request_close_tab(self.tabs.active_tab_id(), true, cx);
     }
 
     fn on_new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -2131,7 +2138,7 @@ impl TabManager {
                     return;
                 }
                 let _ = close_manager.update(cx, |manager, cx| {
-                    manager.request_close_tab(tab_id, cx);
+                    manager.request_close_tab(tab_id, false, cx);
                 });
             })
             .into_any_element()
@@ -3745,7 +3752,7 @@ impl TabManager {
     pub(crate) fn reconcile(
         &mut self,
         workspace: &spaceterm_core::hierarchy::Workspace,
-        removal: super::workspaces::WorkspaceRemoval,
+        removal: super::workspaces::WorkspaceRemoval<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -3863,7 +3870,7 @@ impl TabManager {
     fn remove_absent_tabs(
         &mut self,
         workspace: &spaceterm_core::hierarchy::Workspace,
-        removal: super::workspaces::WorkspaceRemoval,
+        removal: super::workspaces::WorkspaceRemoval<'_>,
         close_keyboard: Option<TabId>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -3879,15 +3886,20 @@ impl TabManager {
                     .is_some_and(|core| !workspace.tabs.iter().any(|tab| tab.id == core))
             })
             .collect();
-        let opens_successor = close_keyboard.is_some_and(|closed| absent.contains(&closed));
-        let mut removed = false;
+        let active = self.tabs.active_tab_id();
+        let keyboard_tab = absent.iter().copied().find(|&tab_id| {
+            self.tabs
+                .tab(tab_id)
+                .is_some_and(|view| view.read(cx).holds_keyboard(window, cx))
+        });
+        let mut opens_successor = close_keyboard.is_some_and(|closed| absent.contains(&closed));
+        let mut moves_keyboard = false;
+        let removed = !absent.is_empty();
         for tab_id in absent {
             let optimistic = self.binding.optimistically_removing(tab_id);
-            let own = removal == super::workspaces::WorkspaceRemoval::OwnClose;
-            let held_keyboard = self
-                .tabs
-                .tab(tab_id)
-                .is_some_and(|view| view.read(cx).holds_keyboard(window, cx));
+            let own = matches!(removal, super::workspaces::WorkspaceRemoval::OwnClose { confirmation, .. }
+                if self.tabs.tab(tab_id).is_some_and(|view| view.read(cx).ends_with(confirmation)));
+            let held_keyboard = keyboard_tab == Some(tab_id);
             if optimistic {
                 let was_active = self.tabs.active_tab_id() == tab_id;
                 // The Tab its Panes merge into presents them now, which fences this Tab's own
@@ -3915,25 +3927,20 @@ impl TabManager {
                         self.tabs
                             .active_tab()
                             .update(cx, |view, cx| view.activate_without_focus(cx));
-                        if held_keyboard && !opens_successor {
-                            self.focus(window, cx);
-                        }
+                        moves_keyboard |= held_keyboard;
                     }
                     self.sync_terminal_focus_blocker(cx);
                 }
             } else {
                 // The server's answer can arrive before this reconciliation, so the closed Tab
                 // leaves here without being parked; its successor still opens once below.
-                let activate_next = own && held_keyboard && !opens_successor;
-                self.close_tab_activating(tab_id, activate_next, window, cx);
+                opens_successor |= own && held_keyboard && tab_id == active;
+                self.close_tab_activating(tab_id, false, window, cx);
             }
             // Another client's close asks the server for no Pane here, but the keyboard that was
             // in the Tab it removed still needs a place, so it rests in the Active Tab's Focused
             // Pane without selecting it. Typing anywhere else stays where it is.
-            if !own && held_keyboard && !self.close_workspace_requested {
-                self.focus(window, cx);
-            }
-            removed = true;
+            moves_keyboard |= !own && held_keyboard;
         }
         // The person's close opens the Tab that takes its place, which selects its Focused Pane
         // and so starts a retained shell there.
@@ -3941,6 +3948,8 @@ impl TabManager {
             self.tabs
                 .active_tab()
                 .update(cx, |view, cx| view.open_focused_pane(window, cx));
+        } else if moves_keyboard && !self.close_workspace_requested {
+            self.focus(window, cx);
         }
         removed
     }
@@ -4613,6 +4622,16 @@ impl TabManager {
             .iter()
             .find_map(|(_, view)| view.read(cx).pane_closes_directly(core, live_session, cx))
             .unwrap_or(false)
+    }
+
+    pub(crate) fn submitting_line(
+        &self,
+        core: spaceterm_core::hierarchy::Id,
+        cx: &App,
+    ) -> Option<async_channel::Receiver<()>> {
+        self.tabs
+            .iter()
+            .find_map(|(_, view)| view.read(cx).submitting_line(core))
     }
 
     /// Delivers the Active Tab's Focused Pane exit, as its Terminal Session does when the server

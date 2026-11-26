@@ -1161,15 +1161,8 @@ fn key_count(records: &TestTerminalSessionRecords) -> usize {
         .count()
 }
 
-/// The direct close hides the Tab and opens its neighbor at once. When the server refuses it for
-/// work in the unchanged Pane, as with zsh's `read -k` blocked in a shell without shell
-/// integration, the refused Tab returns with the selection and the keyboard it had, so the
-/// neutral confirmation's Cancel leaves the next key in the shell the person asked to close.
-/// Confirming a later review ends exactly that Pane's Session.
 #[gpui::test]
-fn cancel_after_a_refused_own_close_returns_the_tab_and_keyboard_it_closed(
-    cx: &mut TestAppContext,
-) {
+fn cmd_w_keeps_the_tab_selected_until_core_admits_the_close(cx: &mut TestAppContext) {
     use spaceterm_core::hierarchy::{CloseTarget as MachineCloseTarget, ConfirmedControl};
     use spaceterm_core::hierarchy::{Mutation, Outcome};
 
@@ -1205,23 +1198,34 @@ fn cancel_after_a_refused_own_close_returns_the_tab_and_keyboard_it_closed(
     cx.simulate_keystrokes("a");
     let closing_session = last_key_session(&records).expect("the closing shell reads keys");
 
-    cx.simulate_keystrokes("cmd-w");
+    let line = harness.panes.pane(CLOSE_ROOT_PANE).hold_line_submission();
+    cx.simulate_keystrokes("enter cmd-w cmd-w");
     redraw(cx);
-    assert_ne!(
+    assert_eq!(
         identity(cx),
         original,
-        "the direct close opens the neighbor at once"
+        "the Pane and Tab remain selected while Enter is queued"
+    );
+    assert!(harness.closes().is_empty(), "Close cannot overtake Enter");
+    drop(line);
+    redraw(cx);
+    assert_eq!(
+        identity(cx),
+        original,
+        "the Tab stays selected while Core checks the line"
     );
     assert_eq!(harness.closes().len(), 1);
     harness.edits.answer(Outcome::StaleConfirmation);
     harness.publish(idle.clone(), cx);
     settle_panes(cx);
-    assert!(
-        spaceterm_ui::a11y_testing::A11yTree::read(cx)
-            .find("Close Pane?")
-            .is_some()
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+    assert!(tree.find("Close Pane?").is_some());
+    assert!(tree.find_text("This is the only Pane in its Tab, so the Tab closes for every client. This ends 1 Terminal Session.").is_some());
+    assert_eq!(
+        identity(cx),
+        original,
+        "confirmation keeps the Tab selected"
     );
-    assert_eq!(identity(cx), original, "the refused Tab returns selected");
 
     click("modal-action-close-cancel", cx);
     settle_panes(cx);
@@ -1251,7 +1255,14 @@ fn cancel_after_a_refused_own_close_returns_the_tab_and_keyboard_it_closed(
     harness.publish(idle, cx);
     settle_panes(cx);
     click("modal-action-close-confirm", cx);
+    settle_panes(cx);
+    assert_ne!(
+        identity(cx).0,
+        original.0,
+        "Confirm closes the Tab immediately"
+    );
     let closes = harness.closes();
+    assert_eq!(closes.len(), 3, "Confirm submits one reviewed close");
     let Some(Mutation::Close {
         target,
         confirmation,
@@ -1267,10 +1278,114 @@ fn cancel_after_a_refused_own_close_returns_the_tab_and_keyboard_it_closed(
     assert_eq!(confirmation.panes[0].session, Some([31; 32]));
 }
 
-/// The same refusal of a split's Pane returns the focus and keyboard to that Pane, not to the
-/// Pane that remained beside it.
 #[gpui::test]
-fn cancel_after_a_refused_own_pane_close_returns_the_focus_to_that_pane(cx: &mut TestAppContext) {
+fn rapid_cmd_w_closes_each_idle_tab_in_order(cx: &mut TestAppContext) {
+    use spaceterm_core::hierarchy::{ConfirmedControl, Mutation, Outcome};
+    let (harness, cx) = close_harness(cx);
+    let third_tab = [44; 32];
+    let third_pane = [45; 32];
+    let last_tab = [46; 32];
+    let last_pane = [47; 32];
+    let tabs: &[([u8; 32], &[WorkspaceClosePane])] = &[
+        (CLOSE_ROOT_TAB, &[(CLOSE_ROOT_PANE, Some([31; 32]))]),
+        (CLOSE_SECOND_TAB, &[(CLOSE_SECOND_PANE, Some([33; 32]))]),
+        (third_tab, &[(third_pane, Some([35; 32]))]),
+        (last_tab, &[(last_pane, None)]),
+    ];
+    let inventory = |start| {
+        let mut inventory = close_inventory(2 + start as u64, &tabs[start..]);
+        inventory.close.as_mut().unwrap().controls = tabs[start..]
+            .iter()
+            .map(|(_, panes)| ConfirmedControl {
+                pane: panes[0].0,
+                session: panes[0].1,
+                owner: [1; 32],
+                epoch: 1,
+            })
+            .collect();
+        inventory
+    };
+    harness.publish(inventory(0), cx);
+    for pane in [CLOSE_SECOND_PANE, third_pane] {
+        harness.panes.pane(pane).reconnect();
+    }
+    settle_panes(cx);
+    focus_active_workspace(&harness.manager, cx);
+    let original = close_identity(&harness, cx);
+    cx.simulate_keystrokes("cmd-w cmd-w cmd-w");
+    redraw(cx);
+    assert_eq!(close_identity(&harness, cx), original);
+
+    for (index, (tab, panes)) in tabs[..3].iter().enumerate() {
+        let closes = harness.closes();
+        assert_eq!(closes.len(), index + 1);
+        assert!(
+            matches!(closes.last(), Some(Mutation::Close { target: spaceterm_core::hierarchy::CloseTarget::Pane { tab: closed, .. }, .. }) if closed == tab)
+        );
+        harness
+            .edits
+            .answer(Outcome::Accepted { target: panes[0].0 });
+        harness.publish(inventory(index + 1), cx);
+    }
+    assert_eq!(harness.closes().len(), 3);
+    assert!(cx.debug_bounds("modal-action-close-confirm").is_none());
+}
+
+#[gpui::test]
+fn selecting_another_tab_discards_buffered_close_shortcuts(cx: &mut TestAppContext) {
+    use spaceterm_core::hierarchy::{ConfirmedControl, Outcome};
+
+    let (harness, cx) = close_harness(cx);
+    let tabs: &[([u8; 32], &[WorkspaceClosePane])] = &[
+        (CLOSE_ROOT_TAB, &[(CLOSE_ROOT_PANE, Some([31; 32]))]),
+        (CLOSE_SECOND_TAB, &[(CLOSE_SECOND_PANE, Some([33; 32]))]),
+        ([44; 32], &[([45; 32], None)]),
+    ];
+    let root_control = ConfirmedControl {
+        pane: CLOSE_ROOT_PANE,
+        session: Some([31; 32]),
+        owner: [1; 32],
+        epoch: 1,
+    };
+    let second_control = ConfirmedControl {
+        pane: CLOSE_SECOND_PANE,
+        session: Some([33; 32]),
+        ..root_control.clone()
+    };
+    let mut before = close_inventory(2, tabs);
+    before.close.as_mut().unwrap().controls = vec![root_control, second_control.clone()];
+    harness.publish(before, cx);
+    harness.panes.pane(CLOSE_SECOND_PANE).reconnect();
+    settle_panes(cx);
+    focus_active_workspace(&harness.manager, cx);
+    let original = close_identity(&harness, cx);
+
+    cx.simulate_keystrokes("cmd-w cmd-w");
+    redraw(cx);
+    assert_eq!(harness.closes().len(), 1);
+    click("tab-item-2-inactive", cx);
+    settle_panes(cx);
+    let selected = close_identity(&harness, cx);
+    assert_ne!(selected.0, original.0);
+
+    harness.edits.answer(Outcome::Accepted {
+        target: CLOSE_ROOT_PANE,
+    });
+    let mut after = close_inventory(3, &tabs[1..]);
+    after.close.as_mut().unwrap().controls = vec![second_control];
+    harness.publish(after, cx);
+    assert_eq!(close_identity(&harness, cx), selected);
+    assert_eq!(
+        harness.closes().len(),
+        1,
+        "the buffered press cannot close the selected Tab"
+    );
+    assert!(cx.debug_bounds("modal-action-close-confirm").is_none());
+}
+
+/// Cancel restores keyboard focus to the Pane under confirmation.
+#[gpui::test]
+fn cancel_after_a_refused_own_pane_close_preserves_that_pane(cx: &mut TestAppContext) {
     use spaceterm_core::hierarchy::{CloseTarget as MachineCloseTarget, Mutation, Outcome};
 
     let records = TestTerminalSessionRecords::default();
@@ -1295,11 +1410,10 @@ fn cancel_after_a_refused_own_pane_close_returns_the_focus_to_that_pane(cx: &mut
 
     cx.simulate_keystrokes("cmd-w");
     redraw(cx);
-    assert_eq!(identity(cx).0, original.0);
-    assert_ne!(
-        identity(cx).1,
-        original.1,
-        "the direct close focuses the split at once"
+    assert_eq!(
+        identity(cx),
+        original,
+        "the original split stays focused until Core answers"
     );
     harness.edits.answer(Outcome::StaleConfirmation);
     harness.publish(inventory.clone(), cx);
@@ -1829,10 +1943,8 @@ fn reviewing_after_a_split_joins_confirms_only_what_the_fresh_confirmation_shows
     );
 }
 
-/// A split's own direct close is refused for work while a paired Machine's confirmation holds
-/// the keyboard. The refused Pane takes the focus back beneath that confirmation, and the
-/// keyboard still owes it: once the paired confirmation's Cancel closes it, the neutral review
-/// opens over the refused Pane, and its Cancel leaves the next key in that Pane's shell.
+/// A split's refusal waits for another Machine's confirmation. Cancel in the subsequent close
+/// confirmation returns the keyboard to the original split.
 #[gpui::test]
 fn a_refused_split_close_beneath_another_machines_confirmation_returns_its_keyboard(
     cx: &mut TestAppContext,
@@ -1854,11 +1966,7 @@ fn a_refused_split_close_beneath_another_machines_confirmation_returns_its_keybo
     cx.simulate_keystrokes("cmd-w");
     redraw(cx);
     assert_eq!(harness.closes().len(), 1);
-    assert_ne!(
-        close_identity(&harness, cx).1,
-        original.1,
-        "the direct close focuses the split at once"
-    );
+    assert_eq!(close_identity(&harness, cx), original);
     open_paired_kill(&harness, remote_key, cx);
     harness.edits.answer(Outcome::StaleConfirmation);
     harness.publish(inventory.clone(), cx);
@@ -1919,12 +2027,9 @@ fn a_refused_split_close_beneath_another_machines_confirmation_returns_its_keybo
     );
 }
 
-/// A person who clicks the Tab a direct close opened in its place chose that Tab, even though it
-/// was already selected. A later refusal reviews the close without taking the selection back,
-/// and its Cancel leaves the keyboard in the Tab the person chose, so the next key never reaches
-/// the shell the person asked to close.
+/// A refusal keeps a Tab the person selects while the direct close is pending.
 #[gpui::test]
-fn a_refusal_keeps_the_successor_tab_a_person_clicked(cx: &mut TestAppContext) {
+fn a_close_refusal_keeps_the_tab_a_person_selected_while_waiting(cx: &mut TestAppContext) {
     use spaceterm_core::hierarchy::Outcome;
 
     let records = TestTerminalSessionRecords::default();
@@ -1951,14 +2056,11 @@ fn a_refusal_keeps_the_successor_tab_a_person_clicked(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-w");
     redraw(cx);
     assert_eq!(harness.closes().len(), 1);
-    let successor = close_identity(&harness, cx);
-    assert_ne!(
-        successor.0, original.0,
-        "the direct close opens the neighbor"
-    );
-    click(format!("tab-item-{}-active", successor.0.get()).leak(), cx);
+    assert_eq!(close_identity(&harness, cx), original);
+    click("tab-item-2-inactive", cx);
     settle_panes(cx);
-    assert_eq!(close_identity(&harness, cx), successor);
+    let successor = close_identity(&harness, cx);
+    assert_ne!(successor.0, original.0);
 
     harness.edits.answer(Outcome::StaleConfirmation);
     harness.publish(idle, cx);
@@ -1992,11 +2094,9 @@ fn a_refusal_keeps_the_successor_tab_a_person_clicked(cx: &mut TestAppContext) {
     assert_eq!(harness.closes().len(), 1, "Cancel closes nothing");
 }
 
-/// A person who clicks the split a direct close focused in its place chose that Pane, even
-/// though it was already focused. A later refusal reviews the close without taking the focus
-/// back, and its Cancel leaves the next key in the Pane the person chose.
+/// Cancel keeps a split the person selects while the direct close is pending.
 #[gpui::test]
-fn a_refusal_keeps_the_successor_pane_a_person_clicked(cx: &mut TestAppContext) {
+fn a_close_refusal_keeps_the_pane_a_person_focused_while_waiting(cx: &mut TestAppContext) {
     use spaceterm_core::hierarchy::Outcome;
 
     let records = TestTerminalSessionRecords::default();
@@ -2011,14 +2111,12 @@ fn a_refusal_keeps_the_successor_pane_a_person_clicked(cx: &mut TestAppContext) 
     cx.simulate_keystrokes("cmd-w");
     redraw(cx);
     assert_eq!(harness.closes().len(), 1);
+    assert_eq!(close_identity(&harness, cx), original);
+    cx.dispatch_action(crate::ui::FocusPaneRight);
+    settle_panes(cx);
     let successor = close_identity(&harness, cx);
     assert_eq!(successor.0, original.0);
-    assert_ne!(
-        successor.1, original.1,
-        "the direct close focuses the split"
-    );
-    click(format!("pane-surface-{}", successor.1.get()).leak(), cx);
-    settle_panes(cx);
+    assert_ne!(successor.1, original.1);
     cx.simulate_keystrokes("b");
     let chosen_session = last_key_session(&records).expect("the chosen shell reads keys");
 
@@ -2051,76 +2149,81 @@ fn a_refusal_keeps_the_successor_pane_a_person_clicked(cx: &mut TestAppContext) 
     assert_eq!(harness.closes().len(), 1, "Cancel closes nothing");
 }
 
-/// A person who clicks inside the terminal of the Tab a direct close selected in its place chose
-/// that Tab. A later refusal reviews the close without returning the closed Tab, and its Cancel
-/// leaves the keyboard in the chosen Tab.
 #[gpui::test]
-fn a_refusal_keeps_the_successor_tab_whose_terminal_a_person_clicked(cx: &mut TestAppContext) {
+fn a_direct_close_of_a_live_idle_pane_opens_the_replacement_after_acceptance(
+    cx: &mut TestAppContext,
+) {
+    use crate::terminal::core_session::CorePaneStatus;
     use spaceterm_core::hierarchy::Outcome;
 
-    let records = TestTerminalSessionRecords::default();
-    let (harness, cx) = close_harness_recording(records.clone(), cx);
-    let idle = close_idle_tabs();
-    harness.publish(idle.clone(), cx);
-    harness.panes.pane(CLOSE_SECOND_PANE).reconnect();
+    let (harness, cx) = close_harness(cx);
+    let mut idle = close_idle_tabs();
+    idle.close.as_mut().unwrap().sessions[1].session = None;
+    harness.publish(idle, cx);
+    let replacement = harness.panes.pane(CLOSE_SECOND_PANE);
+    replacement.set(CorePaneStatus::Restored);
     settle_panes(cx);
     focus_active_workspace(&harness.manager, cx);
     let original = close_identity(&harness, cx);
-    cx.simulate_keystrokes("a");
-    let closing_session = last_key_session(&records).expect("the closing shell reads keys");
-    let closing_keys = |records: &TestTerminalSessionRecords| {
-        records
-            .commands()
-            .iter()
-            .filter(|call| {
-                call.session_id == closing_session
-                    && matches!(call.command, RecordedCommand::Key(_))
-            })
-            .count()
-    };
-
     cx.simulate_keystrokes("cmd-w");
     redraw(cx);
     assert_eq!(harness.closes().len(), 1);
-    let successor = close_identity(&harness, cx);
-    assert_ne!(
-        successor.0, original.0,
-        "the direct close opens the neighbor"
-    );
-    click(format!("pane-surface-{}", successor.1.get()).leak(), cx);
-    settle_panes(cx);
-    assert_eq!(close_identity(&harness, cx), successor);
+    assert_eq!(close_identity(&harness, cx), original);
+    assert_eq!(replacement.selections(), 0);
 
-    harness.edits.answer(Outcome::StaleConfirmation);
-    harness.publish(idle, cx);
-    settle_panes(cx);
-    assert!(
-        spaceterm_ui::a11y_testing::A11yTree::read(cx)
-            .find("Close Pane?")
-            .is_some(),
-        "the refusal is reviewed"
+    harness.edits.answer(Outcome::Accepted {
+        target: CLOSE_ROOT_PANE,
+    });
+    harness.publish(
+        close_inventory(3, &[(CLOSE_SECOND_TAB, &[(CLOSE_SECOND_PANE, None)])]),
+        cx,
     );
-    assert_eq!(
-        close_identity(&harness, cx),
-        successor,
-        "the refusal keeps the chosen Tab"
-    );
+    assert_ne!(close_identity(&harness, cx).0, original.0);
+    assert_eq!(replacement.selections(), 1);
+    assert!(cx.debug_bounds("modal-action-close-confirm").is_none());
+}
 
-    click("modal-action-close-cancel", cx);
+#[gpui::test]
+fn a_direct_close_acceptance_does_not_open_a_tab_for_an_unrelated_removal(cx: &mut TestAppContext) {
+    use crate::terminal::core_session::CorePaneStatus;
+    use spaceterm_core::hierarchy::{ConfirmedControl, Outcome};
+
+    let (harness, cx) = close_harness(cx);
+    let remaining_tab = [44; 32];
+    let remaining_pane = [45; 32];
+    let mut inventory = close_inventory(
+        2,
+        &[
+            (CLOSE_ROOT_TAB, &[(CLOSE_ROOT_PANE, Some([31; 32]))]),
+            (CLOSE_SECOND_TAB, &[(CLOSE_SECOND_PANE, Some([33; 32]))]),
+            (remaining_tab, &[(remaining_pane, None)]),
+        ],
+    );
+    inventory.close.as_mut().unwrap().controls = vec![ConfirmedControl {
+        pane: CLOSE_SECOND_PANE,
+        session: Some([33; 32]),
+        owner: [1; 32],
+        epoch: 1,
+    }];
+    harness.publish(inventory, cx);
+    harness.panes.pane(CLOSE_SECOND_PANE).reconnect();
+    let replacement = harness.panes.pane(remaining_pane);
+    replacement.set(CorePaneStatus::Restored);
     settle_panes(cx);
-    assert_eq!(close_identity(&harness, cx), successor);
-    assert!(
-        close_terminal_is_focused(&harness, cx),
-        "the keyboard returns to the chosen Tab's Pane"
+    focus_active_workspace(&harness.manager, cx);
+    click("tab-close-button-2", cx);
+    assert_eq!(harness.closes().len(), 1);
+
+    // This client's inactive Tab closes and another client removes the Active Tab in the
+    // same publication. The dormant Pane must stay dormant.
+    harness.edits.answer(Outcome::Accepted {
+        target: CLOSE_SECOND_TAB,
+    });
+    harness.publish(
+        close_inventory(3, &[(remaining_tab, &[(remaining_pane, None)])]),
+        cx,
     );
-    let keys = closing_keys(&records);
-    cx.simulate_keystrokes("x");
-    assert_eq!(
-        closing_keys(&records),
-        keys,
-        "the next key never reaches the shell the person asked to close"
-    );
-    assert_eq!(harness.closes().len(), 1, "Cancel closes nothing");
+    assert_eq!(replacement.selections(), 0);
 }
 
 /// The shell the person asked to close exits while the neutral confirmation of a refused own

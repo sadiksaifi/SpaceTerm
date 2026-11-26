@@ -2546,7 +2546,7 @@ mod close {
             .expect("the published Tab can be reviewed");
         assert_eq!(
             tab.message(),
-            "The Tab and its 2 Panes close for every client. This ends 2 Terminal Sessions and stops their running commands."
+            "The Tab and its 2 Panes close for every client. This ends 2 Terminal Sessions."
         );
         assert_eq!(tab.detail(), None, "the Workspace keeps its second Tab");
 
@@ -2573,7 +2573,7 @@ mod close {
             .expect("the published Pane can be reviewed");
         assert_eq!(
             running.message(),
-            "This ends 1 Terminal Session and stops its running commands for every client."
+            "This ends 1 Terminal Session for every client."
         );
 
         let kill = binding

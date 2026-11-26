@@ -642,6 +642,29 @@ pub(super) struct Adapter {
     pub(super) active: ActiveInput,
     unconfirmed: bool,
 }
+
+#[test]
+fn enter_stays_pending_until_the_pane_worker_hands_off_its_keys() {
+    let mut adapter = Adapter::new();
+    adapter.handle.key(KeyInput::text_input("\r"));
+    let line = adapter
+        .handle
+        .state
+        .submitting_line()
+        .expect("queued Enter");
+    let mut handed_off = false;
+    adapter
+        .drain_rounds(1, |request| {
+            if matches!(request, Request::Keys { .. }) {
+                assert!(!line.is_closed(), "the batch is still being handed off");
+                handed_off = true;
+            }
+            Ok(Reply::Unchanged)
+        })
+        .unwrap();
+    assert!(handed_off, "the worker sent the queued Enter");
+    assert!(line.is_closed());
+}
 impl Adapter {
     pub(super) fn new() -> Self {
         Self::with_epoch(|state| Ok(state.invalidate())).unwrap()

@@ -2820,6 +2820,12 @@ pub(crate) fn take_window_modal_focus_restoration(
     modal_owner_for_render(window, cx)?.update(cx, |owner, _| owner.take_focus_restoration())
 }
 
+pub(super) fn restore_window_modal_focus(window: &mut Window, cx: &mut App) {
+    if let Some(owner) = modal_owner_for_render(window, cx) {
+        owner.update(cx, |owner, cx| owner.restore_focus_if_ready(window, cx));
+    }
+}
+
 pub(crate) fn modal_parent_for_focus(
     focus: &FocusHandle,
     window: &Window,

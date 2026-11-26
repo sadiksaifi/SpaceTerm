@@ -337,10 +337,12 @@ fn a_queued_direct_close_keeps_its_original_control_fence_and_requires_review_af
             2,
             "the close waits behind the rename"
         );
+        model.poll();
         assert_eq!(
-            model.poll().inventory.unwrap().workspaces[0].tabs.len(),
-            1,
-            "the queued close already has an optimistic frame"
+            source.presentation_inventory().unwrap().workspaces[0]
+                .tabs
+                .len(),
+            2
         );
         {
             // A server publication reports Take Over without changing the Terminal Session.
@@ -363,7 +365,8 @@ fn a_queued_direct_close_keeps_its_original_control_fence_and_requires_review_af
             if confirmation.own_controls.as_deref() == Some(&[control][..]))
         );
         assert_eq!(core.finish(true, true).outcome, Outcome::StaleConfirmation);
-        let restored = model.poll().inventory.unwrap();
+        model.poll();
+        let restored = source.presentation_inventory().unwrap();
         assert_eq!(restored.workspaces[0].tabs.len(), 2);
         assert_eq!(restored.close.unwrap().sessions[0].session, Some([30; 32]));
         assert_eq!(model.take_stale_close(), Some((target, Some(local))));

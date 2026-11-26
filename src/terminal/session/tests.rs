@@ -5494,6 +5494,23 @@ fn reads(worker: &mut TerminalWorker, output: &[u8]) {
     worker.events.note_output();
 }
 
+#[test]
+fn the_owning_shells_command_marker_fences_a_close_without_a_tracked_enter() {
+    let mut worker = idle_worker(SHELL_FOREGROUND, Some(false));
+    reads(&mut worker, OWNED_PROMPT);
+    reads(&mut worker, b"\x1b]133;C;spaceterm=0f1e\x07");
+    assert!(
+        worker.events.running_work(),
+        "the shell runs a command in its own foreground"
+    );
+    reads(&mut worker, b"\x1b]133;D;0;spaceterm=0f1e\x07");
+    assert!(
+        !worker.events.running_work(),
+        "the shell has reported completion"
+    );
+    worker.finish();
+}
+
 /// Enter is accepted while the worker still processes output from before it: an earlier prompt,
 /// the shell's own echo of the line, and the shell ending the line all leave the input fenced.
 /// Only a fresh prompt drawn after the worker wrote the line answers it. A program that took the

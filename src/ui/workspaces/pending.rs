@@ -1,12 +1,13 @@
 //! The client's bounded connected intent, separate from the transport's durable Original Operation.
 use super::core_workspaces::{
-    CloseKeyboard, WorkspaceAcceptance, WorkspaceCloseIntent, WorkspaceRefusalReason,
+    CloseKeyboard, SubmittedClose, WorkspaceAcceptance, WorkspaceCloseIntent,
+    WorkspaceRefusalReason,
 };
 use crate::terminal::core_session::restart::RECONNECT_LIMIT;
 use crate::terminal::workspace_client::WorkspaceSnapshot;
 use spaceterm_core::hierarchy::{
-    CloseTarget, Id, Inventory, Mutation, Outcome, Pane, PaneDestination, RetainedOutcome, Side,
-    Tab, Workspace,
+    CloseConfirmation, CloseTarget, Id, Inventory, Mutation, Outcome, Pane, PaneDestination,
+    RetainedOutcome, Side, Tab, Workspace,
 };
 use spaceterm_core::worktree::Operation;
 use std::collections::{BTreeMap, VecDeque};
@@ -19,6 +20,7 @@ type Owner = std::rc::Weak<std::cell::Cell<Option<u64>>>;
 
 struct Edit {
     mutation: Mutation,
+    close: Option<SubmittedClose>,
     creation: Option<Creation>,
     /// Whether the interaction that submitted this edit presented its result at once, so its
     /// answer opens nothing again.
@@ -53,6 +55,7 @@ pub(super) struct Completion {
     pub outcome: RetainedOutcome,
     pub inventory: Option<Inventory>,
     pub optimistic: bool,
+    pub close: Option<SubmittedClose>,
 }
 
 #[derive(Default)]
@@ -118,6 +121,7 @@ impl PendingEdits {
         mut mutation: Mutation,
         reply: Option<Reply>,
         owner: Option<Owner>,
+        close: Option<SubmittedClose>,
     ) -> Result<(), WorkspaceRefusalReason> {
         if self.full() {
             return Err(WorkspaceRefusalReason::Pending);
@@ -171,6 +175,7 @@ impl PendingEdits {
             );
         self.edits.push_back(Edit {
             mutation,
+            close,
             creation,
             presented,
             dispatched: false,
@@ -204,6 +209,11 @@ impl PendingEdits {
         &mut self,
         intent: WorkspaceCloseIntent,
     ) -> Result<bool, WorkspaceRefusalReason> {
+        if self.edits.iter().any(|edit| {
+            matches!(&edit.mutation, Mutation::Close { target, .. } if *target == intent.core)
+        }) {
+            return Ok(true);
+        }
         if !self.waiting_for_restart
             && !close_references(intent.core)
                 .iter()
@@ -212,6 +222,29 @@ impl PendingEdits {
             return Ok(false);
         }
         self.queue_close(intent)?;
+        Ok(true)
+    }
+
+    /// Keeps a shortcut behind the direct close whose target still holds the view.
+    pub fn repeat_close(&mut self, target: CloseTarget) -> Result<bool, WorkspaceRefusalReason> {
+        let Some(close) = self.edits.iter_mut().find_map(|edit| {
+            let Mutation::Close {
+                target: pending, ..
+            } = &edit.mutation
+            else {
+                return None;
+            };
+            if *pending != target || optimistic_close(&edit.mutation).is_some() {
+                return None;
+            }
+            edit.close.as_mut()
+        }) else {
+            return Ok(false);
+        };
+        if close.repeats == CAPACITY {
+            return Err(WorkspaceRefusalReason::Pending);
+        }
+        close.repeats += 1;
         Ok(true)
     }
 
@@ -310,11 +343,21 @@ impl PendingEdits {
     }
 
     pub fn closing(&self, pane: Id) -> bool {
-        self.edits.iter().any(|edit| matches!(&edit.mutation, Mutation::Close { confirmation, .. } if confirmation.panes.iter().any(|p| p.id == pane)))
+        self.edits
+            .iter()
+            .filter_map(|edit| optimistic_close(&edit.mutation))
+            .any(|confirmation| confirmation.panes.iter().any(|p| p.id == pane))
     }
 
     pub fn next_dispatch(&self) -> Option<Mutation> {
         let edit = self.edits.front().filter(|edit| !edit.dispatched)?;
+        if edit
+            .close
+            .as_ref()
+            .is_some_and(|close| close.submitting_lines.iter().any(|line| !line.is_closed()))
+        {
+            return None;
+        }
         // A provisional dependency never crosses the transport boundary.
         let mut mutation = edit.mutation.clone();
         remap(&mut mutation, |id| self.canonical(id));
@@ -373,6 +416,7 @@ impl PendingEdits {
                         outcome: outcome.clone(),
                         inventory: snapshot.inventory.clone(),
                         optimistic: edit.presented,
+                        close: edit.close,
                     });
                 }
             }
@@ -790,7 +834,7 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
         }
         return;
     }
-    if let Mutation::Close { confirmation, .. } = mutation {
+    if let Some(confirmation) = optimistic_close(mutation) {
         // Hide only the exact approved Panes. A later publication never broadens consent.
         for workspace in &mut inventory.workspaces {
             for tab in &mut workspace.tabs {
@@ -934,6 +978,15 @@ fn project(inventory: &mut Inventory, mutation: &Mutation, creation: Option<Crea
         }
         _ => {}
     }
+}
+
+/// A direct close that could end a Terminal Session stays visible until Core checks its work.
+fn optimistic_close(mutation: &Mutation) -> Option<&CloseConfirmation> {
+    let Mutation::Close { confirmation, .. } = mutation else {
+        return None;
+    };
+    (confirmation.own_controls.is_none() || confirmation.panes.iter().all(|p| p.session.is_none()))
+        .then_some(confirmation)
 }
 
 pub(super) fn closes_workspace(mutation: &Mutation, workspace: Id) -> bool {

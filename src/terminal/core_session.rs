@@ -135,6 +135,8 @@ pub(crate) struct CorePaneState {
     connected_epoch: AtomicU64,
     paste_unconfirmed: AtomicBool,
     interaction: Mutex<Interaction>,
+    /// The last line queued for the Pane worker, which sends keys in order.
+    submitting_line: Mutex<Option<async_channel::Receiver<()>>>,
     effect_authority: Arc<ClipboardAuthority>,
     hidden_input: AtomicBool,
     /// The Line Mode SpaceTerm Core last pushed, with the connection epoch it arrived on. It
@@ -185,6 +187,7 @@ impl CorePaneState {
             connected_epoch: AtomicU64::new(0),
             paste_unconfirmed: AtomicBool::new(false),
             interaction: Mutex::new(Interaction::default()),
+            submitting_line: Mutex::default(),
             hidden_input: AtomicBool::new(false),
             line: Mutex::default(),
             sending_hidden: Arc::default(),
@@ -202,6 +205,16 @@ impl CorePaneState {
 
     pub(crate) fn status(&self) -> CorePaneStatus {
         *self.status.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The receiver closes once the last queued Enter reaches the shared link or is discarded.
+    pub(crate) fn submitting_line(&self) -> Option<async_channel::Receiver<()>> {
+        self.submitting_line
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .filter(|line| !line.is_closed())
+            .cloned()
     }
     /// Leaves this client's view of the Pane, its Scrollback position and Selection, for the
     /// next window that presents it. This presentation keeps an empty view.
@@ -1190,6 +1203,7 @@ struct SubmittedInput {
     command: Input,
     /// The program was reading hidden input, such as a password, when the person typed this.
     hidden: bool,
+    line: Option<async_channel::Sender<()>>,
 }
 #[derive(Clone, Copy)]
 struct PendingPaste {

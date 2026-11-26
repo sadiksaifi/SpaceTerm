@@ -82,6 +82,22 @@ fn enter_command(session: &TerminalRuntime, command: &str) {
     });
 }
 
+fn run_to_prompt(session: &TerminalRuntime, command: &str) {
+    let before = session.metadata_snapshot().unwrap().finished_commands;
+    enter_command(session, command);
+    let deadline = Instant::now() + REAL_SHELL_DEADLINE;
+    while !session.metadata_snapshot().is_some_and(|metadata| {
+        metadata.finished_commands > before
+            && metadata.prompt_zone == crate::terminal::metadata::PromptZone::CommandInput
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "the command must return to the owned prompt"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn real_shell_output_round_trips_through_the_pty_and_emulator() {
     let _isolation = crate::platform::unix_pty::lock_real_pty_test();
@@ -338,6 +354,171 @@ impl Drop for ShellStartupDirectory {
 }
 
 #[test]
+fn direct_close_protects_zsh_background_and_disowned_work() {
+    const NAME: &str = "terminal::session::unix_adapter_tests::direct_close_protects_zsh_background_and_disowned_work";
+    if crate::platform::unix_pty::isolate_real_pty_test(NAME) {
+        return;
+    }
+    let _isolation = crate::platform::unix_pty::lock_real_pty_test();
+    let startup = ShellStartupDirectory::new();
+    let (session, events, _) = TerminalRuntime::start(
+        native_pty_adapter_factory(),
+        test_launch_planner(startup.path()),
+        test_geometry(),
+        &std::env::current_dir().unwrap(),
+        Some("fixture.test"),
+        LocalFilesystemAuthority::testing(),
+        Arc::default(),
+    )
+    .unwrap();
+    let session = JoinedRealPtySession(session);
+    wait_for_shell_prompt(&session, &events);
+    assert!(
+        !session.running_work(),
+        "a bare shell at its first prompt closes directly"
+    );
+
+    for (command, working) in [
+        (":", false),
+        ("sleep 60 &", true),
+        ("kill -STOP $!", true),
+        ("kill -KILL $!; wait $!", false),
+        ("sleep 60 &!", true),
+    ] {
+        run_to_prompt(&session, command);
+        assert_eq!(
+            session.running_work(),
+            working,
+            "close admission after {command}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "launched by the real zsh prompt-helper test"]
+fn zsh_prompt_helper_process() {
+    let Some(ready) = std::env::var_os("SPACETERM_TEST_HELPER_READY") else {
+        return;
+    };
+    std::fs::write(ready, b"ready").unwrap();
+    thread::sleep(Duration::from_secs(60));
+}
+
+#[test]
+fn direct_close_distinguishes_zsh_prompt_helpers_from_disowned_work() {
+    const NAME: &str = "terminal::session::unix_adapter_tests::direct_close_distinguishes_zsh_prompt_helpers_from_disowned_work";
+    if crate::platform::unix_pty::isolate_real_pty_test(NAME) {
+        return;
+    }
+    let _isolation = crate::platform::unix_pty::lock_real_pty_test();
+    let startup = ShellStartupDirectory::new();
+    // macOS may omit the environment of system executables. Use an ordinary same-user
+    // program to exercise how the adapter identifies application helpers on both hosts.
+    std::os::unix::fs::symlink(
+        std::env::current_exe().unwrap(),
+        startup.path().join("prompt-helper"),
+    )
+    .unwrap();
+    std::fs::write(
+        startup.path().join(".zshrc"),
+        r#"
+start_fixture() {
+    SPACETERM_TEST_HELPER_READY="$ZDOTDIR/$1" "$ZDOTDIR/prompt-helper" \
+        --exact terminal::session::unix_adapter_tests::zsh_prompt_helper_process \
+        --ignored >/dev/null 2>&1 &!
+}
+precmd() {
+    if [[ -z $prompt_helper ]]; then
+        start_fixture helper-ready
+        prompt_helper=$!
+    fi
+}
+theme_precmd() {
+    if [[ -n $1 ]]; then
+        if (( $# > 1 )); then
+            start_fixture shared-ready
+        else
+            start_fixture manual-ready
+        fi
+        manual_job=$!
+    elif [[ -z $theme_helper ]]; then
+        start_fixture theme-ready
+        theme_helper=$!
+    fi
+}
+add-zsh-hook precmd theme_precmd
+"#,
+    )
+    .unwrap();
+    let (session, events, _) = TerminalRuntime::start(
+        native_pty_adapter_factory(),
+        test_launch_planner(startup.path()),
+        test_geometry(),
+        &std::env::current_dir().unwrap(),
+        Some("fixture.test"),
+        LocalFilesystemAuthority::testing(),
+        Arc::default(),
+    )
+    .unwrap();
+    let session = JoinedRealPtySession(session);
+    wait_for_shell_prompt(&session, &events);
+    let wait_for_process = |name: &str| {
+        let ready = startup.path().join(name);
+        let deadline = Instant::now() + REAL_SHELL_DEADLINE;
+        while !ready.is_file() {
+            assert!(
+                Instant::now() < deadline,
+                "the process did not start: {name}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    };
+    wait_for_process("helper-ready");
+    wait_for_process("theme-ready");
+    assert!(
+        !session.running_work(),
+        "the helper alone does not require review"
+    );
+
+    assert_eq!(
+        session
+            .request_paste("draft".to_owned().into())
+            .recv_blocking()
+            .unwrap(),
+        Ok(PasteRequestOutcome::Written)
+    );
+    assert!(
+        !session.running_work(),
+        "editing the prompt does not make a helper work"
+    );
+    run_to_prompt(&session, "=''"); // Complete the draft as an empty shell assignment.
+
+    for (command, ready, working) in [
+        (":", None, false),
+        ("theme_precmd manual", Some("manual-ready"), true),
+        ("kill -KILL $manual_job", None, false),
+        ("add-zsh-hook preexec theme_precmd", None, false),
+        (
+            "add-zsh-hook -d preexec theme_precmd",
+            Some("shared-ready"),
+            true,
+        ),
+        ("kill -KILL $manual_job", None, false),
+        ("(/bin/sleep 60 &)", None, true),
+    ] {
+        run_to_prompt(&session, command);
+        if let Some(ready) = ready {
+            wait_for_process(ready);
+        }
+        assert_eq!(
+            session.running_work(),
+            working,
+            "close admission after {command}"
+        );
+    }
+}
+
+#[test]
 fn a_real_integrated_shell_needs_a_quiet_hour_and_receives_input_after_a_lease() {
     const NAME: &str = "terminal::session::unix_adapter_tests::a_real_integrated_shell_needs_a_quiet_hour_and_receives_input_after_a_lease";
     let _isolation = crate::platform::unix_pty::lock_real_pty_test();
@@ -419,9 +600,11 @@ fn a_real_integrated_shell_computing_in_a_builtin_trap_is_refused_and_finishes_a
     .unwrap();
     let session = JoinedRealPtySession(session);
     wait_for_shell_prompt(&session, &events);
-    session
-        .event_publisher
-        .note_activity(Instant::now() - Duration::from_secs(7200), true, 0);
+    session.event_publisher.note_activity(
+        Instant::now() - Duration::from_secs(7200),
+        true,
+        Default::default(),
+    );
     let observed = session.idle_session().unwrap();
     let scan = || {
         let deadline = Instant::now() + REAL_SHELL_DEADLINE;
@@ -430,7 +613,7 @@ fn a_real_integrated_shell_computing_in_a_builtin_trap_is_refused_and_finishes_a
             session.event_publisher.note_activity(
                 Instant::now() - Duration::from_secs(7200),
                 true,
-                0,
+                Default::default(),
             );
             if let Some(lease) = spaceterm_core::idle_restart::Lease::scan(
                 std::slice::from_ref(&observed),

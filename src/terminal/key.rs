@@ -82,6 +82,17 @@ impl KeyInput {
             && self.text.is_some()
     }
 
+    pub(crate) fn submits_line(&self) -> bool {
+        self.action != KeyAction::Release
+            && (matches!(
+                self.physical_key,
+                PhysicalKey::Enter | PhysicalKey::NumpadEnter
+            ) || self
+                .text
+                .as_deref()
+                .is_some_and(|text| text.contains(['\r', '\n'])))
+    }
+
     pub fn is_modifier_key(&self) -> bool {
         matches!(
             self.physical_key,

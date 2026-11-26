@@ -516,23 +516,29 @@ impl WorkspaceManager {
             &manager,
             window,
             move |workspace_manager, _, event: &TabManagerEvent, window, cx| match event {
-                TabManagerEvent::ClosePaneRequested { tab_id, pane_id } => {
-                    workspace_manager.request_close(
+                TabManagerEvent::ClosePaneRequested {
+                    tab_id,
+                    pane_id,
+                    shortcut,
+                } => {
+                    workspace_manager.request_close_action(
                         CloseTarget::Pane {
                             workspace_id,
                             tab_id: *tab_id,
                             pane_id: *pane_id,
                         },
+                        *shortcut,
                         window,
                         cx,
                     );
                 }
-                TabManagerEvent::CloseTabRequested { tab_id } => {
-                    workspace_manager.request_close(
+                TabManagerEvent::CloseTabRequested { tab_id, shortcut } => {
+                    workspace_manager.request_close_action(
                         CloseTarget::Tab {
                             workspace_id,
                             tab_id: *tab_id,
                         },
+                        *shortcut,
                         window,
                         cx,
                     );
@@ -1746,6 +1752,30 @@ impl WorkspaceManager {
         self.request_core_close(target, window, cx);
     }
 
+    fn request_close_action(
+        &mut self,
+        target: CloseTarget,
+        shortcut: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if shortcut
+            && !spaceterm_ui::window_modal_is_open(window, cx)
+            && let Some(core) = self.close_target(target, cx)
+            && let Some(binding) = self.binding.owning(close_target_workspace(target))
+        {
+            match binding.repeat_close(core) {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(reason) => {
+                    Self::show_refusal(Self::close_operation(target), reason, window, cx);
+                    return;
+                }
+            }
+        }
+        self.request_close(target, window, cx);
+    }
+
     pub(crate) fn request_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.should_close_window(window, cx) {
             window.remove_window();
@@ -2922,17 +2952,20 @@ impl WorkspaceManager {
         else {
             return;
         };
+        let close_repeats = poll.close_repeats.filter(|(target, _)| {
+            self.close_target_is_active(*target, cx) && self.content_holds_keyboard(window, cx)
+        });
         self.reconcile_parked_workspaces(key, window, cx);
-        // Approved closes already moved presentation. Published membership never replaces newer focus.
-        let removal = if poll.accepted.as_ref().is_some_and(|accepted| {
-            matches!(
-                accepted.mutation,
-                spaceterm_core::hierarchy::Mutation::Close { .. }
-            )
-        }) {
-            super::workspaces::WorkspaceRemoval::OwnClose
-        } else {
-            super::workspaces::WorkspaceRemoval::Published
+        // An accepted close can arrive alongside unrelated membership changes.
+        let removal = match poll.accepted.as_ref().map(|accepted| &accepted.mutation) {
+            Some(spaceterm_core::hierarchy::Mutation::Close {
+                target,
+                confirmation,
+            }) => super::workspaces::WorkspaceRemoval::OwnClose {
+                target: *target,
+                confirmation,
+            },
+            _ => super::workspaces::WorkspaceRemoval::Published,
         };
         let inventory_applied = poll.inventory.is_some();
         if let Some(inventory) = poll.inventory {
@@ -3116,6 +3149,46 @@ impl WorkspaceManager {
             return;
         }
         self.reread_after_modal(window, cx);
+        if let Some((closed, repeats)) = close_repeats
+            && !self.close_target_is_active(closed, cx)
+        {
+            self.follow_close_shortcuts(closed, repeats, window, cx);
+        }
+    }
+
+    /// Each waiting shortcut takes the same path as a new press after the accepted close.
+    fn follow_close_shortcuts(
+        &mut self,
+        closed: CloseTarget,
+        repeats: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace_id = close_target_workspace(closed);
+        for _ in 0..repeats {
+            if self.workspaces.active_workspace_id() != Some(workspace_id)
+                || spaceterm_ui::window_modal_is_open(window, cx)
+            {
+                break;
+            }
+            let Some(manager) = self.active_tab_manager() else {
+                break;
+            };
+            let (tab_id, pane_id) = manager.read(cx).active_terminal_identity(cx);
+            let target = match closed {
+                CloseTarget::Pane { .. } => CloseTarget::Pane {
+                    workspace_id,
+                    tab_id,
+                    pane_id,
+                },
+                CloseTarget::Tab { .. } => CloseTarget::Tab {
+                    workspace_id,
+                    tab_id,
+                },
+                _ => break,
+            };
+            self.request_close_action(target, true, window, cx);
+        }
     }
 
     /// Presents the Terminal Metadata `inventory` publishes for every Pane of its server's
@@ -3235,7 +3308,7 @@ impl WorkspaceManager {
         &mut self,
         key: MachineKey,
         inventory: &spaceterm_core::hierarchy::Inventory,
-        removal: super::workspaces::WorkspaceRemoval,
+        removal: super::workspaces::WorkspaceRemoval<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3782,23 +3855,51 @@ impl WorkspaceManager {
         if let Some(approval) = direct {
             use super::workspaces::WorkspaceSubmission;
 
+            let submitting_lines: Vec<_> = self
+                .workspaces
+                .workspace(workspace_id)
+                .map(|entry| {
+                    let tabs = entry.payload().read(cx);
+                    approval
+                        .live_panes()
+                        .filter_map(|pane| tabs.submitting_line(pane, cx))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let has_live_panes = approval.live_panes().next().is_some();
             let key = self.binding.owner(workspace_id);
-            let submission = self
-                .binding
-                .owning_mut(workspace_id)
-                .map(|binding| binding.close(approval, target, CloseConsent::Direct));
+            let submission = self.binding.owning_mut(workspace_id).map(|binding| {
+                binding.close_after_input(
+                    approval,
+                    target,
+                    CloseConsent::Direct,
+                    submitting_lines.clone(),
+                )
+            });
             if let Some(WorkspaceSubmission::Refused(reason)) = submission {
                 Self::show_refusal(Self::close_operation(target), reason, window, cx);
             }
-            if submission == Some(WorkspaceSubmission::Submitted) {
+            let submitted = submission == Some(WorkspaceSubmission::Submitted);
+            if submitted && !has_live_panes {
                 self.prepare_close_keyboard(target, held_keyboard, cx);
             }
             if let Some(key) = key {
+                if submitted && !submitting_lines.is_empty() {
+                    cx.spawn_in(window, async move |manager, cx| {
+                        for line in submitting_lines {
+                            let _ = line.recv().await;
+                        }
+                        let _ = manager.update_in(cx, |manager, window, cx| {
+                            manager.sync_workspaces(key, window, cx);
+                        });
+                    })
+                    .detach();
+                }
                 self.sync_workspaces(key, window, cx);
             }
             // A reviewed close that needs no confirmation now still moves the keyboard the
             // person's first request held.
-            if held_keyboard && submission == Some(WorkspaceSubmission::Submitted) {
+            if held_keyboard && submitted && !has_live_panes {
                 self.focus(window, cx);
             }
             return true;
@@ -4290,6 +4391,7 @@ impl WorkspaceManager {
         {
             return false;
         }
+        spaceterm_ui::restore_window_modal_focus(window, cx);
         // A modal that held the keyboard as the refusal returned its Tab or Pane still owes the
         // keyboard to that Tab or Pane.
         let returned = local.is_some_and(|local| {
@@ -4752,7 +4854,7 @@ impl WorkspaceManager {
     fn remove_workspace(
         &mut self,
         workspace_id: WorkspaceId,
-        removal: super::workspaces::WorkspaceRemoval,
+        removal: super::workspaces::WorkspaceRemoval<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -4795,16 +4897,16 @@ impl WorkspaceManager {
             cx.notify();
             return;
         }
-        let confirmed = self
+        let facts = self
             .binding
             .owning(workspace_id)
-            .and_then(|binding| binding.facts(workspace_id))
-            .is_some_and(|facts| facts.confirmed);
+            .and_then(|binding| binding.facts(workspace_id));
+        let confirmed = facts.is_some_and(|facts| facts.confirmed);
+        let own = facts.is_some_and(|facts| removal.closes_workspace(facts.core));
         if let Some(binding) = self.binding.owning_mut(workspace_id) {
             binding.forget(workspace_id);
         }
         self.pending_final_tab_closes.remove(&workspace_id);
-        let own = removal == super::workspaces::WorkspaceRemoval::OwnClose;
         let held_keyboard = self
             .workspaces
             .workspace(workspace_id)
