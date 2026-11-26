@@ -2717,6 +2717,7 @@ mod startup_tests {
     #[test]
     fn owned_development_eof_finishes_panes_and_preserves_retained_identity_on_relaunch() {
         let fixture = Fixture::new();
+        crate::migration::core_data::prepare(&fixture.paths).unwrap();
         let identity = fs::read(fixture.paths.data.join("identity.json")).unwrap();
         for _ in 0..2 {
             let mut child = owned_child(&fixture, false);

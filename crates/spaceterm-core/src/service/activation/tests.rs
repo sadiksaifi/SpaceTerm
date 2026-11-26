@@ -1160,6 +1160,7 @@ fn update_facts(service: &Service) -> crate::update::facts::UpdateFacts {
 #[test]
 fn a_candidate_that_never_becomes_ready_returns_with_the_retained_state_it_changed_restored() {
     with_service(|service, previous, candidate, supervisor| {
+        crate::migration::core_data::prepare(&service.paths).unwrap();
         let identity = std::fs::read(service.paths.data.join("identity.json")).unwrap();
         supervisor
             .hangs
@@ -1599,8 +1600,9 @@ fn readable_by_0_11_2(service: &Service) {
 
 #[test]
 fn a_return_restores_the_data_generation_a_candidate_migrated_from() {
-    use crate::migration::{Area, Store};
+    use crate::migration::{Area, Store, core_data, generations::CORE_DATA};
     with_service(|service, previous, candidate, supervisor| {
+        core_data::prepare(&service.paths).unwrap();
         supervisor
             .hangs
             .lock()
@@ -1608,18 +1610,21 @@ fn a_return_restores_the_data_generation_a_candidate_migrated_from() {
             .push(candidate.directory.clone());
         let root = service.paths.data.clone();
         let identity = std::fs::read(root.join("identity.json")).unwrap();
+        let current = std::fs::read(root.join("generation.json")).unwrap();
         // The candidate migrates the data to a newer generation, as its runner does, then hangs.
         *supervisor.meddles.lock().unwrap() = Some(Box::new(move |_: &Directory| {
-            let store = crate::migration::core_data::store(&root);
+            let store = core_data::store(&root);
+            let newer = serde_json::to_vec(&serde_json::json!({
+                "generation": CORE_DATA.current + 1
+            }))
+            .unwrap();
             store
                 .write(Area::Backup, "identity.json", &identity)
                 .unwrap();
             store
-                .write(Area::Backup, "generation.json", br#"{"generation":1}"#)
+                .write(Area::Backup, "generation.json", &current)
                 .unwrap();
-            store
-                .write(Area::Root, "generation.json", br#"{"generation":2}"#)
-                .unwrap();
+            store.write(Area::Root, "generation.json", &newer).unwrap();
         }));
         let status = update_running(&service, &previous, &candidate, &supervisor).unwrap();
         assert!(matches!(status.phase, ActivationPhase::Returned { .. }));
@@ -1627,8 +1632,11 @@ fn a_return_restores_the_data_generation_a_candidate_migrated_from() {
             &std::fs::read(service.paths.data.join("generation.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(marker, serde_json::json!({ "generation": 1 }));
-        assert!(crate::migration::core_data::prepare(&service.paths).is_ok());
+        assert_eq!(
+            marker,
+            serde_json::json!({ "generation": CORE_DATA.current })
+        );
+        assert!(core_data::prepare(&service.paths).is_ok());
         // The CLI of the version it returned to may restore its own state the same way.
         assert!(
             service

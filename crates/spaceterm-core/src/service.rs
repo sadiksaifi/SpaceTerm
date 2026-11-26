@@ -2954,6 +2954,7 @@ mod tests {
             supervisor.authorized.store(false, Ordering::Relaxed);
             let service = supervisor.service();
             let startup = LocalStartup::with_service(service.clone()).unwrap();
+            crate::migration::core_data::prepare(&fixture.paths).unwrap();
             let seed = std::fs::read(fixture.paths.data.join("identity.json")).unwrap();
             runtime::test_support::with_artifact(
                 &fixture.root.join("artifact"),
