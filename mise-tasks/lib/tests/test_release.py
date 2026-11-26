@@ -41,10 +41,12 @@ class ReleaseNotesTests(unittest.TestCase):
         self.git("init", "-q")
         self.git("commit", "-qm", "Initial", "--allow-empty")
 
-    def git(self, *args):
+    def git(self, *args, date=None):
+        env = {**os.environ, "GIT_COMMITTER_DATE": date} if date else None
         subprocess.run(
             ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", *args],
             cwd=self.root,
+            env=env,
             check=True,
             capture_output=True,
         )
@@ -120,6 +122,23 @@ class ReleaseNotesTests(unittest.TestCase):
         text = notes(self.root)
         self.assert_embedded_notes(text, "### Features")
         self.assert_release_body(text, "v0.11.2")
+
+    def test_notes_use_desktop_release_history_with_library_tags_at_head_and_between_releases(self):
+        self.git("tag", "-am", "Previous desktop release", "v0.12.2")
+        self.git("commit", "-qm", "feat: add terminal panes", "--allow-empty")
+        self.git("tag", "-am", "Previous library release", "libspaceterm@v0.1.2")
+        self.git("commit", "-qm", "fix(updates): preserve active sessions", "--allow-empty")
+        self.git("tag", "-am", "Desktop release", "v0.12.3", date="2026-11-26T19:00:00Z")
+        expected = notes(self.root)
+        self.git(
+            "tag", "-am", "Library release", "libspaceterm@v0.1.3", date="2026-11-26T20:00:00Z"
+        )
+
+        text = notes(self.root)
+        self.assertEqual(text, expected)
+        self.assertIn("Add terminal panes", text)
+        self.assertIn("**updates:** Preserve active sessions", text)
+        self.assertNotIn("Initial", text)
 
     def test_notes_require_a_stable_release_tag_at_head(self):
         self.git("tag", "-a", "v1.0.0", "-m", "Release")

@@ -79,8 +79,10 @@ def notes(root=ROOT):
     ).stdout.split()
     if not any(release_tag.match(tag) for tag in tags):
         raise TaskError("release notes require a stable release tag from 0.10.0 at HEAD")
+    # With use_branch_tags enabled, --latest selects from the stable tags reachable from HEAD.
+    # --current uses an unfiltered tag lookup, which can select libspaceterm on the same commit.
     result = subprocess.run(
-        ["git-cliff", "--config", "cliff.toml", "--current", "--offline", "--strip", "all"],
+        ["git-cliff", "--config", "cliff.toml", "--latest", "--offline", "--strip", "all"],
         cwd=root,
         capture_output=True,
         text=True,
