@@ -185,7 +185,11 @@ impl ShellLaunchPlanner {
                 // A Prompt Owner inherited from another session would let that session's shell
                 // speak for this one; the session sets its own. The same holds for the Session
                 // a CLI inside it targets.
-                .chain(["TERMINFO", "SPACETERM_PROMPT_OWNER"])
+                .chain([
+                    "TERMINFO",
+                    "SPACETERM_PROMPT_OWNER",
+                    "SPACETERM_PROMPT_HELPER",
+                ])
                 .chain(SESSION_ENVIRONMENT)
                 .map(OsString::from)
                 .collect(),

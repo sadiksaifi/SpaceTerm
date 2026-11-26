@@ -15,7 +15,7 @@ pub(super) struct ActivityState {
     last: Option<Instant>,
     /// The owning shell waited at its own empty prompt after `last`.
     empty_prompt: bool,
-    command_running: bool,
+    prompt: PromptProgress,
     probe: Option<Arc<dyn SessionProbe>>,
     /// Lines submitted, such as by Enter, counted where input is accepted and before the worker
     /// writes them, so a close the host admits after that input sees it.
@@ -195,7 +195,7 @@ impl Default for ActivityState {
             receipt: spaceterm_core::idle_restart::Activity::new(Instant::now()),
             last: None,
             empty_prompt: false,
-            command_running: false,
+            prompt: PromptProgress::default(),
             probe: None,
             submitted: Submissions::default(),
         }
@@ -212,7 +212,7 @@ impl ActivityState {
     pub(super) fn note(&mut self, now: Instant, empty_prompt: bool, progress: PromptProgress) {
         self.last = Some(now);
         self.empty_prompt = empty_prompt;
-        self.command_running = progress.command_running;
+        self.prompt = progress;
         self.submitted.prompted(progress.fresh);
     }
 }
@@ -390,22 +390,28 @@ impl TerminalEventPublisher {
     /// Rechecks foreground work, unanswered input, and live session processes before a close.
     /// Disowned processes can still belong to the terminal session and end with it.
     pub(super) fn running_work(&self) -> bool {
-        let (probe, working, stopped) = {
+        let (probe, prompt, submitted, stopped) = {
             let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
             (
                 state.activity.probe.clone(),
-                state.activity.command_running || state.activity.submitted.pending(),
+                state.activity.prompt,
+                state.activity.submitted.pending(),
                 state.stopped,
             )
         };
         if stopped {
             return false;
         }
-        if working {
+        if prompt.command_running || submitted {
             return true;
         }
-        Self::program_holds(probe.as_deref())
-            || probe.is_some_and(|probe| matches!(probe.others(), Ok(true)))
+        probe.is_some_and(|probe| match probe.shell_foreground() {
+            Ok(false) => true,
+            Ok(true) if prompt.zone == ShellZone::AtPrompt => {
+                matches!(probe.close_work(), Ok(true))
+            }
+            _ => matches!(probe.others(), Ok(true)),
+        })
     }
 }
 

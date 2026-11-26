@@ -63,3 +63,19 @@ _spaceterm_before_command() {
 add-zsh-hook chpwd _spaceterm_report_directory
 add-zsh-hook precmd _spaceterm_before_prompt
 add-zsh-hook preexec _spaceterm_before_command
+
+# Zsh calls its special precmd function before the registered prompt hooks, including on
+# the first prompt. A list trap runs in that function's scope. The export disappears on
+# return. Startup files and submitted commands have their own evaluation contexts.
+# ZLE widgets and functions also registered for a different shell hook are ambiguous.
+# Leave an existing DEBUG handler in charge. A handler installed later can replace this one.
+if [[ -n $_spaceterm_owner && $(builtin trap) != *DEBUG* ]]; then
+    builtin trap '
+        if [[ $ZSH_EVAL_CONTEXT == shfunc:trap && ${funcstack[1]-} == precmd &&
+              ${SPACETERM_PROMPT_HELPER-} != "$SPACETERM_PROMPT_OWNER:$$" &&
+              " ${chpwd_functions[*]-} ${preexec_functions[*]-} ${periodic_functions[*]-} ${zshaddhistory_functions[*]-} ${zshexit_functions[*]-} " != *" precmd "* ]] &&
+           ! builtin zle; then
+            builtin local -x SPACETERM_PROMPT_HELPER="$SPACETERM_PROMPT_OWNER:$$"
+        fi
+    ' DEBUG
+fi

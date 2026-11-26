@@ -9,6 +9,30 @@ use crate::platform::unix_pty::{
 pub(super) struct MacosPtyHost;
 
 impl UnixPtyHost for MacosPtyHost {
+    fn prompt_helper(&self, process: i32, marker: &[u8]) -> bool {
+        // SAFETY: sysconf reads the maximum size of a process's argument and environment block.
+        let Ok(mut size) = usize::try_from(unsafe { libc::sysconf(libc::_SC_ARG_MAX) }) else {
+            return false;
+        };
+        let mut arguments = vec![0_u8; size];
+        let mut query = [libc::CTL_KERN, libc::KERN_PROCARGS2, process];
+        // SAFETY: the MIB is valid and arguments is writable storage for size bytes.
+        let result = unsafe {
+            libc::sysctl(
+                query.as_mut_ptr(),
+                query.len() as u32,
+                arguments.as_mut_ptr().cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        result == 0
+            && arguments
+                .get(..size)
+                .is_some_and(|arguments| process_environment_has(arguments, marker))
+    }
+
     fn process_image(&self, identity: ProcessIdentity) -> io::Result<std::path::PathBuf> {
         use std::os::unix::ffi::OsStrExt;
         if self.observe_exactly(identity.process)?.map(|p| p.identity) != Some(identity) {
@@ -219,6 +243,26 @@ impl UnixPtyHost for MacosPtyHost {
     fn master_read_error(&self, _error: &io::Error) -> MasterReadError {
         MasterReadError::Failure
     }
+}
+
+fn process_environment_has(arguments: &[u8], marker: &[u8]) -> bool {
+    let Some((argc, bytes)) = arguments.split_at_checked(std::mem::size_of::<i32>()) else {
+        return false;
+    };
+    let argc = i32::from_ne_bytes(argc.try_into().expect("argc size checked"));
+    let Some(path_end) = bytes.iter().position(|byte| *byte == 0) else {
+        return false;
+    };
+    let after_path = &bytes[path_end + 1..];
+    let Some(argv) = after_path.iter().position(|byte| *byte != 0) else {
+        return false;
+    };
+    argc > 0
+        && after_path[argv..]
+            .split(|byte| *byte == 0)
+            .skip(argc as usize)
+            .take_while(|entry| !entry.is_empty())
+            .any(|entry| entry == marker)
 }
 
 // Kernel-validated audit tokens bind signals to the PID version, not a reusable PID.

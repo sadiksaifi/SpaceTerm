@@ -10,6 +10,14 @@ use crate::platform::unix_pty::{
 pub(super) struct LinuxPtyHost;
 
 impl UnixPtyHost for LinuxPtyHost {
+    fn prompt_helper(&self, process: i32, marker: &[u8]) -> bool {
+        std::fs::read(format!("/proc/{process}/environ")).is_ok_and(|environment| {
+            environment
+                .split(|byte| *byte == 0)
+                .any(|entry| entry == marker)
+        })
+    }
+
     fn process_image(&self, identity: ProcessIdentity) -> io::Result<std::path::PathBuf> {
         if self.observe_exactly(identity.process)?.map(|p| p.identity) != Some(identity) {
             return Err(io::Error::other("process identity changed"));
