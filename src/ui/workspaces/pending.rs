@@ -225,6 +225,29 @@ impl PendingEdits {
         Ok(true)
     }
 
+    /// Keeps a shortcut behind the direct close whose target still holds the view.
+    pub fn repeat_close(&mut self, target: CloseTarget) -> Result<bool, WorkspaceRefusalReason> {
+        let Some(close) = self.edits.iter_mut().find_map(|edit| {
+            let Mutation::Close {
+                target: pending, ..
+            } = &edit.mutation
+            else {
+                return None;
+            };
+            if *pending != target || optimistic_close(&edit.mutation).is_some() {
+                return None;
+            }
+            edit.close.as_mut()
+        }) else {
+            return Ok(false);
+        };
+        if close.repeats == CAPACITY {
+            return Err(WorkspaceRefusalReason::Pending);
+        }
+        close.repeats += 1;
+        Ok(true)
+    }
+
     /// Retains a close that must capture fresh confirmation after reconnecting.
     pub fn queue_close(
         &mut self,

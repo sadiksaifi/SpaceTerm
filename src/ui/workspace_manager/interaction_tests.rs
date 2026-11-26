@@ -1278,6 +1278,59 @@ fn cmd_w_keeps_the_tab_selected_until_core_admits_the_close(cx: &mut TestAppCont
     assert_eq!(confirmation.panes[0].session, Some([31; 32]));
 }
 
+#[gpui::test]
+fn rapid_cmd_w_closes_each_idle_tab_in_order(cx: &mut TestAppContext) {
+    use spaceterm_core::hierarchy::{ConfirmedControl, Mutation, Outcome};
+    let (harness, cx) = close_harness(cx);
+    let third_tab = [44; 32];
+    let third_pane = [45; 32];
+    let last_tab = [46; 32];
+    let last_pane = [47; 32];
+    let tabs: &[([u8; 32], &[WorkspaceClosePane])] = &[
+        (CLOSE_ROOT_TAB, &[(CLOSE_ROOT_PANE, Some([31; 32]))]),
+        (CLOSE_SECOND_TAB, &[(CLOSE_SECOND_PANE, Some([33; 32]))]),
+        (third_tab, &[(third_pane, Some([35; 32]))]),
+        (last_tab, &[(last_pane, None)]),
+    ];
+    let inventory = |start| {
+        let mut inventory = close_inventory(2 + start as u64, &tabs[start..]);
+        inventory.close.as_mut().unwrap().controls = tabs[start..]
+            .iter()
+            .map(|(_, panes)| ConfirmedControl {
+                pane: panes[0].0,
+                session: panes[0].1,
+                owner: [1; 32],
+                epoch: 1,
+            })
+            .collect();
+        inventory
+    };
+    harness.publish(inventory(0), cx);
+    for pane in [CLOSE_SECOND_PANE, third_pane] {
+        harness.panes.pane(pane).reconnect();
+    }
+    settle_panes(cx);
+    focus_active_workspace(&harness.manager, cx);
+    let original = close_identity(&harness, cx);
+    cx.simulate_keystrokes("cmd-w cmd-w cmd-w");
+    redraw(cx);
+    assert_eq!(close_identity(&harness, cx), original);
+
+    for (index, (tab, panes)) in tabs[..3].iter().enumerate() {
+        let closes = harness.closes();
+        assert_eq!(closes.len(), index + 1);
+        assert!(
+            matches!(closes.last(), Some(Mutation::Close { target: spaceterm_core::hierarchy::CloseTarget::Pane { tab: closed, .. }, .. }) if closed == tab)
+        );
+        harness
+            .edits
+            .answer(Outcome::Accepted { target: panes[0].0 });
+        harness.publish(inventory(index + 1), cx);
+    }
+    assert_eq!(harness.closes().len(), 3);
+    assert!(cx.debug_bounds("modal-action-close-confirm").is_none());
+}
+
 /// Cancel restores keyboard focus to the Pane under confirmation.
 #[gpui::test]
 fn cancel_after_a_refused_own_pane_close_preserves_that_pane(cx: &mut TestAppContext) {

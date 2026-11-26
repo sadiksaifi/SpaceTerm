@@ -2618,6 +2618,13 @@ mod core_workspaces {
             self.edits.pending.borrow_mut().take_close_intent()
         }
 
+        pub(crate) fn repeat_close(
+            &self,
+            target: MachineCloseTarget,
+        ) -> Result<bool, WorkspaceRefusalReason> {
+            self.edits.pending.borrow_mut().repeat_close(target)
+        }
+
         /// Takes the queued close of exactly `core` and `local` once it may resume, as
         /// [`Self::take_close_intent`] would hand it over, so a repeat request resumes it.
         pub(crate) fn take_close_intent_for(
@@ -2764,6 +2771,7 @@ mod core_workspaces {
                     local,
                     consent,
                     submitting_lines,
+                    repeats: 0,
                 }),
             );
             match result {
@@ -3239,6 +3247,9 @@ mod core_workspaces {
                 // server's own identities rather than a reply this client could have lost. The
                 // client that asked for a creation also opens it, once.
                 Outcome::Accepted { target } => {
+                    if let Some(close) = close.filter(|close| close.repeats > 0) {
+                        poll.close_repeats = Some((close.local, close.repeats));
+                    }
                     if own {
                         poll.accepted = Some(WorkspaceAcceptance {
                             mutation: outcome.mutation.clone(),
@@ -3841,6 +3852,7 @@ mod core_workspaces {
         local: CloseTarget,
         consent: CloseConsent,
         pub(super) submitting_lines: Vec<async_channel::Receiver<()>>,
+        pub(super) repeats: usize,
     }
 
     struct StaleClose {
@@ -3928,6 +3940,7 @@ mod core_workspaces {
         /// The initiating interaction presents a provisional creation, or a nonoptimistic edit
         /// completed. An older creation's acknowledgement never opens its target again.
         pub(crate) accepted: Option<WorkspaceAcceptance>,
+        pub(crate) close_repeats: Option<(CloseTarget, usize)>,
         /// The Workspace this client chose as its first-ever view just now. Opening it is the
         /// person's first use, so the window opens its Active Tab for them.
         pub(crate) initial: Option<Id>,

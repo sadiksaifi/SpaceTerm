@@ -426,6 +426,7 @@ pub(crate) enum TabViewEvent {
     UserClosePaneRequested {
         tab_id: TabId,
         pane_id: PaneId,
+        shortcut: bool,
     },
     CloseTabRequested {
         tab_id: TabId,
@@ -1749,7 +1750,7 @@ impl TabView {
             .find(|(_, bounds)| bounds.contains(&pointer))
     }
 
-    fn request_close_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
+    fn request_close_pane(&mut self, pane_id: PaneId, shortcut: bool, cx: &mut Context<Self>) {
         // A Pane's close goes up to the Workspace Window, which asks the server after Close
         // Confirmation. Nothing here closes it locally.
         if self.close_tab_requested || self.tab.pane(pane_id).is_none() {
@@ -1758,6 +1759,7 @@ impl TabView {
         cx.emit(TabViewEvent::UserClosePaneRequested {
             tab_id: self.tab.id(),
             pane_id,
+            shortcut,
         });
     }
 
@@ -2120,7 +2122,7 @@ impl TabView {
                 if self.active && self.focus_branch_blocker.is_none() {
                     self.focus(window, cx);
                 }
-                self.request_close_pane(pane_id, cx);
+                self.request_close_pane(pane_id, false, cx);
                 return;
             }
         }
@@ -2197,7 +2199,7 @@ impl TabView {
     }
 
     fn on_close_pane(&mut self, _: &ClosePane, _: &mut Window, cx: &mut Context<Self>) {
-        self.request_close_pane(self.tab.focused_pane_id(), cx);
+        self.request_close_pane(self.tab.focused_pane_id(), true, cx);
     }
 
     fn render_tree(
@@ -3731,7 +3733,7 @@ impl TabView {
                     .debug_selector(selector("close-pane"))
                     .on_activate(move |_, _, cx| {
                         let _ = close_owner.update(cx, |view, cx| {
-                            view.request_close_pane(pane_id, cx);
+                            view.request_close_pane(pane_id, false, cx);
                         });
                     });
                 // What the person typed as a restart ended the Session goes only to the

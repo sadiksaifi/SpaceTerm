@@ -320,9 +320,11 @@ pub(crate) enum TabManagerEvent {
     ClosePaneRequested {
         tab_id: TabId,
         pane_id: PaneId,
+        shortcut: bool,
     },
     CloseTabRequested {
         tab_id: TabId,
+        shortcut: bool,
     },
     FinalTabCloseRequested {
         final_tab_id: TabId,
@@ -607,10 +609,15 @@ impl TabManager {
             &view,
             window,
             |manager, _, event: &TabViewEvent, window, cx| match event {
-                TabViewEvent::UserClosePaneRequested { tab_id, pane_id } => {
+                TabViewEvent::UserClosePaneRequested {
+                    tab_id,
+                    pane_id,
+                    shortcut,
+                } => {
                     cx.emit(TabManagerEvent::ClosePaneRequested {
                         tab_id: *tab_id,
                         pane_id: *pane_id,
+                        shortcut: *shortcut,
                     });
                 }
                 TabViewEvent::CloseTabRequested { tab_id } => {
@@ -1729,13 +1736,13 @@ impl TabManager {
         }
     }
 
-    fn request_close_tab(&mut self, tab_id: TabId, cx: &mut Context<Self>) {
+    fn request_close_tab(&mut self, tab_id: TabId, shortcut: bool, cx: &mut Context<Self>) {
         // A Tab's close goes up to the Workspace Window, which asks the server after Close
         // Confirmation. Nothing here closes it locally.
         if self.close_workspace_requested || self.tabs.tab(tab_id).is_none() {
             return;
         }
-        cx.emit(TabManagerEvent::CloseTabRequested { tab_id });
+        cx.emit(TabManagerEvent::CloseTabRequested { tab_id, shortcut });
     }
 
     /// Admits a context menu for a Tab without activating it. A Tab mid-drag or a Workspace
@@ -1779,7 +1786,7 @@ impl TabManager {
             TabMenuCommand::SplitDown => self.split_tab(tab_id, SplitAxis::Vertical, window, cx),
             TabMenuCommand::MoveLeft => self.step_tab(tab_id, TabStep::Previous, cx),
             TabMenuCommand::MoveRight => self.step_tab(tab_id, TabStep::Next, cx),
-            TabMenuCommand::Close => self.request_close_tab(tab_id, cx),
+            TabMenuCommand::Close => self.request_close_tab(tab_id, false, cx),
         }
     }
 
@@ -1800,7 +1807,7 @@ impl TabManager {
     }
 
     fn on_close_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
-        self.request_close_tab(self.tabs.active_tab_id(), cx);
+        self.request_close_tab(self.tabs.active_tab_id(), true, cx);
     }
 
     fn on_new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -2131,7 +2138,7 @@ impl TabManager {
                     return;
                 }
                 let _ = close_manager.update(cx, |manager, cx| {
-                    manager.request_close_tab(tab_id, cx);
+                    manager.request_close_tab(tab_id, false, cx);
                 });
             })
             .into_any_element()
