@@ -1331,6 +1331,58 @@ fn rapid_cmd_w_closes_each_idle_tab_in_order(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("modal-action-close-confirm").is_none());
 }
 
+#[gpui::test]
+fn selecting_another_tab_discards_buffered_close_shortcuts(cx: &mut TestAppContext) {
+    use spaceterm_core::hierarchy::{ConfirmedControl, Outcome};
+
+    let (harness, cx) = close_harness(cx);
+    let tabs: &[([u8; 32], &[WorkspaceClosePane])] = &[
+        (CLOSE_ROOT_TAB, &[(CLOSE_ROOT_PANE, Some([31; 32]))]),
+        (CLOSE_SECOND_TAB, &[(CLOSE_SECOND_PANE, Some([33; 32]))]),
+        ([44; 32], &[([45; 32], None)]),
+    ];
+    let root_control = ConfirmedControl {
+        pane: CLOSE_ROOT_PANE,
+        session: Some([31; 32]),
+        owner: [1; 32],
+        epoch: 1,
+    };
+    let second_control = ConfirmedControl {
+        pane: CLOSE_SECOND_PANE,
+        session: Some([33; 32]),
+        ..root_control.clone()
+    };
+    let mut before = close_inventory(2, tabs);
+    before.close.as_mut().unwrap().controls = vec![root_control, second_control.clone()];
+    harness.publish(before, cx);
+    harness.panes.pane(CLOSE_SECOND_PANE).reconnect();
+    settle_panes(cx);
+    focus_active_workspace(&harness.manager, cx);
+    let original = close_identity(&harness, cx);
+
+    cx.simulate_keystrokes("cmd-w cmd-w");
+    redraw(cx);
+    assert_eq!(harness.closes().len(), 1);
+    click("tab-item-2-inactive", cx);
+    settle_panes(cx);
+    let selected = close_identity(&harness, cx);
+    assert_ne!(selected.0, original.0);
+
+    harness.edits.answer(Outcome::Accepted {
+        target: CLOSE_ROOT_PANE,
+    });
+    let mut after = close_inventory(3, &tabs[1..]);
+    after.close.as_mut().unwrap().controls = vec![second_control];
+    harness.publish(after, cx);
+    assert_eq!(close_identity(&harness, cx), selected);
+    assert_eq!(
+        harness.closes().len(),
+        1,
+        "the buffered press cannot close the selected Tab"
+    );
+    assert!(cx.debug_bounds("modal-action-close-confirm").is_none());
+}
+
 /// Cancel restores keyboard focus to the Pane under confirmation.
 #[gpui::test]
 fn cancel_after_a_refused_own_pane_close_preserves_that_pane(cx: &mut TestAppContext) {
