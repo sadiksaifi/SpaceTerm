@@ -346,6 +346,29 @@ fn newer(
     Some((count, revision))
 }
 
+/// Synchronizes the shared link's inventory before using its cached sequence. A Core that
+/// refuses Workspace requests can still supply inventory for viewing.
+fn reconcile_retired(link: &CoreLink, last: Option<&RetainedOutcome>) -> Result<bool, CoreError> {
+    let Some(last) = last else {
+        return Ok(true);
+    };
+    match link
+        .request(Operation::Resolve {
+            sequence: last.sequence,
+        })?
+        .wait()
+    {
+        Ok(ReplyBody::Outcome(_)) | Err(RequestError::Refused(Refusal::Missing)) => {
+            let (_, inventory) = link.next_inventory(0)?;
+            acknowledge_prior_outcome(link, Some(last), None, inventory.next_sequence)?;
+            Ok(true)
+        }
+        Err(RequestError::Refused(_)) => Ok(false),
+        Ok(_) => Err(CoreError::Protocol),
+        Err(error) => Err(error.into()),
+    }
+}
+
 struct FinishedOperation {
     outcome: Option<RetainedOutcome>,
     reconciled: Option<(u64, Arc<InventoryRevision>)>,
@@ -428,22 +451,14 @@ fn run(
             // edit. A shared link may have been admitted while the last edit was settling on
             // another connection. Core queues the inventory we need before it answers Resolve.
             // A pending original's mutation reply provides the same ordering on this link.
-            if let Some(last) = journal.last().filter(|_| journal.pending().is_none()) {
-                match link
-                    .request(Operation::Resolve {
-                        sequence: last.sequence,
-                    })?
-                    .wait()
-                {
-                    Ok(ReplyBody::Outcome(_)) | Err(RequestError::Refused(Refusal::Missing)) => {}
-                    Ok(_) => return Err(CoreError::Protocol),
-                    Err(error) => return Err(error.into()),
-                }
-            }
+            let pending = journal.pending();
+            let mut reconciled = pending.is_some() || reconcile_retired(&link, journal.last())?;
             let (mut seen, initial) = link.next_inventory(0)?;
             controls.retain(&initial.inventory);
             let mut sequence = initial.next_sequence;
-            acknowledge_prior_outcome(&link, journal.last(), journal.pending(), sequence)?;
+            if pending.is_some() {
+                acknowledge_prior_outcome(&link, journal.last(), pending, sequence)?;
+            }
             // Presentations reported while no journal was open are recorded before readers see
             // the journal's unseen outcomes.
             let presenting = state
@@ -497,6 +512,27 @@ fn run(
             loop {
                 match events.recv() {
                     Ok(Event::Edit(mutation)) => {
+                        if !reconciled {
+                            match reconcile_retired(&link, journal.last()) {
+                                Ok(true) => {
+                                    reconciled = true;
+                                    if let Some((count, revision)) = newer(&link, seen, &controls) {
+                                        seen = count;
+                                        sequence = revision.next_sequence;
+                                        state.publish(|s| {
+                                            s.inventory = Some(revision.inventory.clone())
+                                        });
+                                    }
+                                }
+                                result => {
+                                    // The original never reached the journal. Let the person
+                                    // retry it while the shared link keeps showing Workspaces.
+                                    reject(&state, mutation);
+                                    result?;
+                                    continue;
+                                }
+                            }
+                        }
                         active = Some((sequence, mutation.clone()));
                         journal.submit(sequence, mutation)?;
                         let finished = finish(&link, &mut journal, &controls, &state, seen)?;
@@ -1108,7 +1144,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reconnected_desktop_uses_the_inventory_that_precedes_the_outcome_reply() {
+    fn a_reconnected_desktop_shows_inventory_while_core_refuses_reconciliation() {
         use spaceterm_core::protocol::{ClientMessage, CoreMessage, RawFrame, Reply, frame};
         use std::time::Instant;
 
@@ -1162,15 +1198,48 @@ mod tests {
             reconcile.operation,
             Operation::Resolve { sequence: 1 }
         ));
+        receive(CoreMessage::Reply(Box::new(Reply {
+            id: reconcile.id,
+            result: Err(Refusal::StorageUnavailable),
+        })));
+        eventually(
+            "a Core refusal leaves the Workspace Inventory visible",
+            || {
+                let snapshot = edits.snapshot();
+                snapshot.connected && snapshot.inventory.is_some()
+            },
+        );
+        assert_eq!(edits.snapshot().failed_attempts, 0);
+        assert!(link.next_frame().is_none());
+
+        let blocked = creation("Blocked");
+        assert!(edits.submit(blocked.clone()));
+        let reconcile = next_request();
+        assert!(matches!(
+            reconcile.operation,
+            Operation::Resolve { sequence: 1 }
+        ));
+        receive(CoreMessage::Reply(Box::new(Reply {
+            id: reconcile.id,
+            result: Err(Refusal::StorageUnavailable),
+        })));
+        eventually("the edit is refused without losing the connection", || {
+            let snapshot = edits.snapshot();
+            snapshot.connected && snapshot.rejected.as_ref() == Some(&blocked)
+        });
+        assert!(core.journal.lock().unwrap().pending.is_none());
+
+        assert!(edits.submit(creation("Next")));
+        let reconcile = next_request();
+        assert!(matches!(
+            reconcile.operation,
+            Operation::Resolve { sequence: 1 }
+        ));
         offer(2);
         receive(CoreMessage::Reply(Box::new(Reply {
             id: reconcile.id,
             result: Ok(ReplyBody::Outcome(retired)),
         })));
-        eventually("the desktop admits edits after reconciliation", || {
-            edits.snapshot().connected
-        });
-        assert!(edits.submit(creation("Next")));
         let next = next_request();
         assert!(matches!(
             next.operation,
