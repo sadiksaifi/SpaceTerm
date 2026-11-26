@@ -2671,6 +2671,7 @@ fn paired_workspace_machine(
 fn paired_workspace_retry_keeps_the_original_after_a_lost_reply_and_reconnect() {
     use crate::hierarchy::{CreateControl, Mutation, Outcome, State, journal_writer};
     use crate::protocol::{Fatal, InventoryRevision};
+    use spaceterm_client::connection::link::CoreLink;
     use spaceterm_client::workspace::EditError;
 
     struct Runtime {
@@ -2690,6 +2691,17 @@ fn paired_workspace_retry_keeps_the_original_after_a_lost_reply_and_reconnect() 
             self.outbox = Some(outbox);
         }
         fn request(&mut self, peer: &Peer, _: RequestId, operation: Operation) -> Dispatch {
+            if let Operation::Resolve { sequence } = operation {
+                return Dispatch::reply(
+                    self.state
+                        .lock()
+                        .unwrap()
+                        .outcome(peer.client, sequence)
+                        .cloned()
+                        .map(ReplyBody::Outcome)
+                        .ok_or(crate::protocol::Refusal::Missing),
+                );
+            }
             let Operation::Mutate { sequence, mutation } = operation else {
                 panic!("expected the original Workspace mutation");
             };
@@ -2773,7 +2785,7 @@ fn paired_workspace_retry_keeps_the_original_after_a_lost_reply_and_reconnect() 
     machine.disconnect();
     first.join().unwrap().unwrap();
 
-    let second = fixture.serve_next_with(runtime);
+    let second = fixture.serve_next_with(Arc::clone(&runtime));
     let mut editor = open();
     let receipt = editor.retry(until()).unwrap().unwrap();
     assert_eq!(receipt, original_receipt);
@@ -2782,6 +2794,46 @@ fn paired_workspace_retry_keeps_the_original_after_a_lost_reply_and_reconnect() 
     assert_eq!(editor.journal().last().unwrap(), &receipt);
     machine.disconnect();
     second.join().unwrap().unwrap();
+
+    // This link received a global floor offer before the delayed Original Operation settled.
+    // Its offer differs from the retired sequence and is still stale.
+    let cached = CoreLink::new(Arc::new(|_| {}), Arc::new(|| {}), Instant::now());
+    let offer = crate::protocol::CoreMessage::Inventory(Box::new(InventoryRevision {
+        inventory: authority.lock().unwrap().inventory.clone(),
+        next_sequence: 7,
+    }));
+    for bytes in crate::protocol::frame::encode_core(&offer).unwrap().frames {
+        cached
+            .receive(
+                crate::protocol::RawFrame::parse(&bytes).unwrap(),
+                Instant::now(),
+            )
+            .unwrap();
+    }
+    machine.work().adopt(cached.clone());
+    let third = fixture.serve_next_with(runtime);
+    let replacement = editor
+        .submit(
+            Mutation::CreateWorkspace {
+                name: "Replacement".into(),
+                directory: None,
+                control: CreateControl::Creator,
+            },
+            until(),
+        )
+        .unwrap();
+    assert_eq!(replacement.sequence, 2);
+    assert!(matches!(replacement.outcome, Outcome::Accepted { .. }));
+    assert!(cached.next_frame().is_none());
+    third.join().unwrap().unwrap();
+    assert!(
+        authority
+            .lock()
+            .unwrap()
+            .outcome(machine.paired().client, 2)
+            .is_none()
+    );
+    machine.disconnect();
 
     drop(editor);
     drop(machine);

@@ -1,16 +1,18 @@
 //! One authenticated inventory subscription and durable edit journal per desktop client.
 //!
-//! The server pushes each Workspace Inventory revision on the shared link. An edit takes one
-//! request: its reply carries the validated outcome after the revision that holds it, and the
-//! acknowledgement that retires the outcome needs no reply. Nothing here polls.
+//! The server pushes each Workspace Inventory revision on the shared link. An edit's reply
+//! carries the validated outcome after the revision that holds it. On reconnect an outcome
+//! query makes sure the shared link has caught up before its next sequence can be used.
 use crate::machine_connection::{CoreError, MachineConnection};
 use crate::terminal::core_session::PaneControls;
-use spaceterm_client::workspace::{EditError, EditJournal, EditProgress, dispatch_original};
+use spaceterm_client::workspace::{
+    EditError, EditJournal, EditProgress, acknowledge_prior_outcome, dispatch_original,
+};
 use spaceterm_core::{
     attachments::Attachments,
-    connection::link::{CoreLink, Health, LinkEvent, LinkSink},
+    connection::link::{CoreLink, Health, LinkEvent, LinkSink, RequestError},
     hierarchy::{ClientJournal, Inventory, Mutation, RetainedOutcome},
-    protocol::InventoryRevision,
+    protocol::{InventoryRevision, Operation, Refusal, ReplyBody},
 };
 use std::sync::{
     Arc, Mutex, Weak,
@@ -423,15 +425,25 @@ fn run(
             }
             let mut journal = core.journal()?;
             // Authoritative reconciliation always precedes a retry of a previously submitted
-            // edit. The server pushes the inventory when it admits the link.
+            // edit. A shared link may have been admitted while the last edit was settling on
+            // another connection. Core queues the inventory we need before it answers Resolve.
+            // A pending original's mutation reply provides the same ordering on this link.
+            if let Some(last) = journal.last().filter(|_| journal.pending().is_none()) {
+                match link
+                    .request(Operation::Resolve {
+                        sequence: last.sequence,
+                    })?
+                    .wait()
+                {
+                    Ok(ReplyBody::Outcome(_)) | Err(RequestError::Refused(Refusal::Missing)) => {}
+                    Ok(_) => return Err(CoreError::Protocol),
+                    Err(error) => return Err(error.into()),
+                }
+            }
             let (mut seen, initial) = link.next_inventory(0)?;
             controls.retain(&initial.inventory);
             let mut sequence = initial.next_sequence;
-            // The server forgets an outcome only once acknowledged, and nothing confirms that
-            // the last acknowledgement arrived. Repeating it is harmless.
-            if let Some(last) = journal.last() {
-                link.acknowledge(last.sequence)?;
-            }
+            acknowledge_prior_outcome(&link, journal.last(), journal.pending(), sequence)?;
             // Presentations reported while no journal was open are recorded before readers see
             // the journal's unseen outcomes.
             let presenting = state
@@ -578,7 +590,6 @@ fn reject(state: &PublishedSnapshot, mutation: Mutation) {
 mod tests {
     use super::*;
     use spaceterm_client::workspace::ClientOperation;
-    use spaceterm_core::protocol::{Operation, ReplyBody};
 
     #[test]
     fn a_paired_inventory_follower_leaves_reachability_probes_to_its_route_owner() {
@@ -826,6 +837,10 @@ mod tests {
                     subscribers: Arc::clone(&self.subscribers),
                     journal: Arc::clone(&self.journal),
                 }
+            }
+
+            pub fn adopt(&self, link: CoreLink) {
+                *self.binding.lock().unwrap() = Some((link, (Arc::default(), Arc::new(|| {}))));
             }
 
             /// A new admitted connection for `client`.
@@ -1090,5 +1105,87 @@ mod tests {
             "another client's edit reaches the reconnected client",
             || workspaces(&edits) == 2,
         );
+    }
+
+    #[test]
+    fn a_reconnected_desktop_uses_the_inventory_that_precedes_the_outcome_reply() {
+        use spaceterm_core::protocol::{ClientMessage, CoreMessage, RawFrame, Reply, frame};
+        use std::time::Instant;
+
+        let core = served::Core::new([7; 32]);
+        let creation = |name: &str| Mutation::CreateWorkspace {
+            name: name.into(),
+            directory: None,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
+        };
+        let retired = RetainedOutcome {
+            sequence: 1,
+            mutation: creation("Retired"),
+            outcome: spaceterm_core::hierarchy::Outcome::Accepted { target: [7; 32] },
+        };
+        core.journal.lock().unwrap().last = Some(retired.clone());
+        let link = CoreLink::new(Arc::new(|_| {}), Arc::new(|| {}), Instant::now());
+        core.adopt(link.clone());
+        let receive = |message| {
+            for bytes in frame::encode_core(&message).unwrap().frames {
+                link.receive(RawFrame::parse(&bytes).unwrap(), Instant::now())
+                    .unwrap();
+            }
+        };
+        let offer = |next_sequence| {
+            receive(CoreMessage::Inventory(Box::new(InventoryRevision {
+                inventory: spaceterm_core::hierarchy::State::empty().inventory,
+                next_sequence,
+            })))
+        };
+        let mut assembler = frame::Assembler::default();
+        let mut next_request = || {
+            let mut request = None;
+            eventually("the desktop sends a request", || {
+                while let Some((bytes, _)) = link.next_frame() {
+                    if let Some(ClientMessage::Request(value)) =
+                        assembler.client(RawFrame::parse(&bytes).unwrap()).unwrap()
+                    {
+                        request = Some(value);
+                        return true;
+                    }
+                }
+                false
+            });
+            request.unwrap()
+        };
+
+        offer(7);
+        let edits = WorkspaceClient::start(core.handle(), Arc::default());
+        let reconcile = next_request();
+        assert!(matches!(
+            reconcile.operation,
+            Operation::Resolve { sequence: 1 }
+        ));
+        offer(2);
+        receive(CoreMessage::Reply(Box::new(Reply {
+            id: reconcile.id,
+            result: Ok(ReplyBody::Outcome(retired)),
+        })));
+        eventually("the desktop admits edits after reconciliation", || {
+            edits.snapshot().connected
+        });
+        assert!(edits.submit(creation("Next")));
+        let next = next_request();
+        assert!(matches!(
+            next.operation,
+            Operation::Mutate { sequence: 2, .. }
+        ));
+        assert_eq!(
+            core.journal
+                .lock()
+                .unwrap()
+                .pending
+                .as_ref()
+                .unwrap()
+                .sequence,
+            2
+        );
+        link.close();
     }
 }
