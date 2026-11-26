@@ -1527,6 +1527,22 @@ impl<H: HostCommands> Served<H> {
                     Some(mutation),
                 );
             }
+            Operation::CloseIfIdle {
+                sequence,
+                target,
+                confirmation,
+            } => {
+                return self.host.mutate(
+                    peer.client,
+                    peer.connection,
+                    id,
+                    sequence,
+                    Some(spaceterm_core::hierarchy::Mutation::Close {
+                        target,
+                        confirmation,
+                    }),
+                );
+            }
             Operation::Resolve { sequence } => {
                 return self
                     .host

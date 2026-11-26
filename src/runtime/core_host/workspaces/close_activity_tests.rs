@@ -1,7 +1,7 @@
 //! A close that asks nobody first rechecks the exact Terminal Session's activity when SpaceTerm
 //! Core admits it, after every input it accepted before.
 use super::*;
-use crate::runtime::core_host::tests::{command, host, size, workspace_inventory};
+use crate::runtime::core_host::tests::{await_text, command, host, size, workspace_inventory};
 use spaceterm_core::hierarchy::{CloseTarget, Mutation, Outcome};
 
 /// A started own Root Pane beside a second Tab, and the direct close of that Pane.
@@ -101,5 +101,113 @@ fn a_direct_close_right_after_enter_asks_for_review_and_ends_nothing() {
         2,
         "the Pane and its command stay"
     );
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn an_idle_close_of_an_unclaimed_pane_checks_for_work_before_ending_the_session() {
+    let mut host = WorkspaceHost::new(host());
+    let (first_lease, target) = own_pane(&mut host);
+    let CloseTarget::Pane { pane, .. } = target else {
+        unreachable!()
+    };
+    host.request([1; 32], [1; 32], Request::Release { lease: first_lease });
+    let reviewed = workspace_inventory(&mut host);
+    let confirmation = reviewed.close_confirmation(target).unwrap();
+    assert!(
+        !reviewed
+            .close
+            .unwrap()
+            .controls
+            .iter()
+            .any(|control| control.pane == pane)
+    );
+
+    let Reply::Attached { lease } = host.request(
+        [1; 32],
+        [2; 32],
+        Request::SelectPane {
+            pane,
+            explicit: true,
+            size: size(),
+            style: None,
+        },
+    ) else {
+        panic!("the other client takes control")
+    };
+    assert!(matches!(
+        command(
+            &mut host,
+            2,
+            lease,
+            "printf '%s%s\\n' TASK- RUNNING; sleep 30"
+        ),
+        Reply::Unchanged
+    ));
+    await_text(&mut host, lease, "TASK-RUNNING");
+    host.request([1; 32], [2; 32], Request::Release { lease });
+    let current = workspace_inventory(&mut host);
+    assert_eq!(
+        current.close_confirmation(target),
+        Some(confirmation.clone())
+    );
+    assert!(
+        !current
+            .close
+            .unwrap()
+            .controls
+            .iter()
+            .any(|control| control.pane == pane)
+    );
+
+    let request_close = |host: &mut WorkspaceHost, sequence, mutation| {
+        let Reply::Outcome(result) =
+            host.request([3; 32], [3; 32], Request::Mutate { sequence, mutation })
+        else {
+            panic!("the close was answered")
+        };
+        result.outcome
+    };
+    let idle = Mutation::close_if_idle(target, confirmation.clone());
+    assert_eq!(
+        request_close(&mut host, 1, idle),
+        Outcome::StaleConfirmation
+    );
+    assert_eq!(
+        request_close(
+            &mut host,
+            2,
+            Mutation::Close {
+                target,
+                confirmation
+            }
+        ),
+        Outcome::Accepted { target: pane }
+    );
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn an_unclaimed_idle_pane_closes_without_a_control_grant() {
+    let mut host = WorkspaceHost::new(host());
+    let (lease, target) = own_pane(&mut host);
+    let CloseTarget::Pane { pane, .. } = target else {
+        unreachable!()
+    };
+    host.request([1; 32], [1; 32], Request::Release { lease });
+    let confirmation = workspace_inventory(&mut host)
+        .close_confirmation(target)
+        .unwrap();
+    let Reply::Outcome(result) = host.request(
+        [2; 32],
+        [2; 32],
+        Request::Mutate {
+            sequence: 1,
+            mutation: Mutation::close_if_idle(target, confirmation),
+        },
+    ) else {
+        panic!("the close was answered")
+    };
+    assert_eq!(result.outcome, Outcome::Accepted { target: pane });
     host.shutdown().unwrap();
 }

@@ -425,6 +425,16 @@ impl State {
                     return Ok(Outcome::StaleConfirmation);
                 }
                 if let Some(reviewed) = &confirmation.own_controls {
+                    // The independent idle close cannot remove a Workspace or close a Worktree.
+                    if reviewed.is_empty()
+                        && (confirmation.removes_workspace
+                            || !matches!(
+                                target,
+                                CloseTarget::Pane { .. } | CloseTarget::Tab { .. }
+                            ))
+                    {
+                        return Ok(Outcome::StaleConfirmation);
+                    }
                     // A close that asks nobody first never ends work the host verified running
                     // in an exact Session it names, such as a command started by input this
                     // close follows. The person reviews it afresh.
@@ -435,19 +445,21 @@ impl State {
                         return Ok(Outcome::StaleConfirmation);
                     }
                     let current = self.inventory.close.as_ref().map(|live| &live.controls);
-                    if reviewed.len() != confirmation.panes.len()
-                        || confirmation.panes.iter().any(|pane| {
-                            reviewed
-                                .iter()
-                                .filter(|control| {
-                                    control.pane == pane.id
-                                        && control.session == pane.session
-                                        && control.owner == device
-                                        && current.is_some_and(|current| current.contains(control))
-                                })
-                                .count()
-                                != 1
-                        })
+                    if !reviewed.is_empty()
+                        && (reviewed.len() != confirmation.panes.len()
+                            || confirmation.panes.iter().any(|pane| {
+                                reviewed
+                                    .iter()
+                                    .filter(|control| {
+                                        control.pane == pane.id
+                                            && control.session == pane.session
+                                            && control.owner == device
+                                            && current
+                                                .is_some_and(|current| current.contains(control))
+                                    })
+                                    .count()
+                                    != 1
+                            }))
                     {
                         return Ok(Outcome::StaleConfirmation);
                     }

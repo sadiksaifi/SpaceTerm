@@ -69,11 +69,17 @@ pub struct CloseConfirmation {
     pub panes: Vec<ConfirmedPane>,
     pub removes_tab: bool,
     pub removes_workspace: bool,
-    /// Only a confirmation-free own close binds control in addition to exact membership.
+    /// `None` carries explicit consent. A nonempty list fences an idle close to these control
+    /// grants. An empty list marks an idle close independent of control, which uses the
+    /// `CloseIfIdle` work request.
     pub own_controls: Option<Vec<ConfirmedControl>>,
 }
 
 impl CloseConfirmation {
+    pub fn is_close_if_idle(&self) -> bool {
+        self.own_controls.as_ref().is_some_and(Vec::is_empty)
+    }
+
     /// Whether both name the same boot, Panes, Terminal Sessions and removals.
     pub fn same_targets(&self, other: &Self) -> bool {
         self.boot == other.boot
@@ -558,6 +564,20 @@ pub enum Mutation {
     },
 }
 impl Mutation {
+    /// Requests a Pane or Tab close without confirmation, regardless of control ownership.
+    /// Core rechecks running work in the exact reviewed Sessions. Requires work 1.5.
+    pub fn close_if_idle(target: CloseTarget, mut confirmation: CloseConfirmation) -> Self {
+        confirmation.own_controls = Some(Vec::new());
+        Self::Close {
+            target,
+            confirmation,
+        }
+    }
+
+    pub fn is_close_if_idle(&self) -> bool {
+        matches!(self, Self::Close { confirmation, .. } if confirmation.is_close_if_idle())
+    }
+
     /// Who controls what this mutation creates, for those that create work.
     pub fn create_control(&self) -> Option<CreateControl> {
         match self {
