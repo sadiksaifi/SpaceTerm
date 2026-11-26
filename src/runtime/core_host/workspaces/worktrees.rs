@@ -18,6 +18,8 @@ use std::{
 mod preparing;
 mod reads;
 
+const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// The old local factory's scoped launch rule, validated on the owning server.
 pub(super) fn starting_directory(
     workspace: &spaceterm_core::hierarchy::Workspace,
@@ -61,7 +63,10 @@ enum JobResult {
     Finished(Result<Option<PathBuf>, Error>),
 }
 
-struct WriteRunner(Option<std::fs::File>);
+struct WriteRunner {
+    lock: Option<std::fs::File>,
+    write_timeout: Duration,
+}
 impl RepositoryProgramRunner for WriteRunner {
     fn run(
         &self,
@@ -75,14 +80,14 @@ impl RepositoryProgramRunner for WriteRunner {
             .windows(2)
             .any(|args| args[0] == "worktree" && (args[1] == "add" || args[1] == "remove"));
         if write {
-            request.deadline = None;
+            request.deadline = Some(Instant::now() + self.write_timeout);
             // Drain all output without allowing a noisy filter to cancel a started write.
             request.stdout_limit = None;
             crate::platform::unix_repository_program::UnixRepositoryProgramRunner::new().run_locked(
                 &request,
                 &mut |_| {},
                 &CancellationToken::default(),
-                self.0.as_ref(),
+                self.lock.as_ref(),
             )
         } else {
             request.deadline = Some(Instant::now() + Duration::from_secs(5));
@@ -90,7 +95,7 @@ impl RepositoryProgramRunner for WriteRunner {
                 &request,
                 stdout,
                 token,
-                self.0.as_ref(),
+                self.lock.as_ref(),
             )
         }
     }
@@ -98,6 +103,7 @@ impl RepositoryProgramRunner for WriteRunner {
 fn git(
     lock: Option<std::fs::File>,
     token: &CancellationToken,
+    write_timeout: Duration,
 ) -> Result<(LocalWorktreeGit, PathBuf), Error> {
     #[cfg(target_os = "macos")]
     let discovery = crate::platform::macos_repository_tools::MacosRepositoryToolDiscovery::new();
@@ -111,7 +117,10 @@ fn git(
         .map(PathBuf::from)
         .ok_or(Error::Unavailable)?;
     let home = std::fs::canonicalize(home).map_err(|_| Error::Unavailable)?;
-    let runner: Arc<dyn RepositoryProgramRunner> = Arc::new(WriteRunner(lock));
+    let runner: Arc<dyn RepositoryProgramRunner> = Arc::new(WriteRunner {
+        lock,
+        write_timeout,
+    });
     let status = crate::repository_status::tool_check::check_git(
         runner.as_ref(),
         tools.git.as_deref(),
@@ -141,6 +150,7 @@ pub(super) struct Writes {
     reads: reads::Reads,
     worker: Option<std::thread::JoinHandle<JobResult>>,
     operation: Option<(Id, u64)>,
+    timeout: Duration,
 }
 impl Writes {
     pub(super) fn new() -> Self {
@@ -149,6 +159,7 @@ impl Writes {
             reads: reads::Reads::default(),
             worker: None,
             operation: None,
+            timeout: WRITE_TIMEOUT,
         }
     }
     /// Whether a Worktree write is being prepared or run.
@@ -350,6 +361,7 @@ impl WorkspaceHost {
         inventory.repositories = None;
         self.commit_retained(next)?;
         self.writes.operation = Some((device, sequence));
+        let write_timeout = self.writes.timeout;
         self.writes.worker = Some(
             std::thread::Builder::new()
                 .name("spaceterm-worktree-preflight".into())
@@ -357,7 +369,13 @@ impl WorkspaceHost {
                     // From here Git children inherit the lock, so it fences recovery until they exit.
                     let lock =
                         lock.map(spaceterm_core::organization::WorktreeLock::into_inheritable);
-                    JobResult::Prepared(preparing::prepare(operation, approval, inventory, lock))
+                    JobResult::Prepared(preparing::prepare(
+                        operation,
+                        approval,
+                        inventory,
+                        lock,
+                        write_timeout,
+                    ))
                 })
                 .map_err(|_| Refusal::Capacity)?,
         );
@@ -989,6 +1007,117 @@ mod tests {
             let _ = std::fs::write(self.0.join("release"), "");
         }
     }
+
+    #[test]
+    fn a_hung_worktree_checkout_settles_before_queued_workspace_edits_run() {
+        use spaceterm_core::{
+            connection::service::Dispatch, hierarchy::CloseTarget, protocol::RequestId,
+        };
+
+        let git = GitFixture::new();
+        let mut prototype = host();
+        prototype.directory = git.0.clone();
+        let mut host = WorkspaceHost::new(prototype);
+        host.writes.timeout = Duration::from_secs(2);
+        let workspace = create_workspace(&mut host, 1);
+        let other = create_workspace(&mut host, 2);
+        let inventory = workspace_inventory(&mut host);
+        let rename = Mutation::RenameWorkspace {
+            workspace,
+            version: inventory
+                .workspaces
+                .iter()
+                .find(|item| item.id == workspace)
+                .unwrap()
+                .name_version,
+            name: "Renamed".into(),
+        };
+        let target = CloseTarget::KillWorkspace { workspace: other };
+        let kill = Mutation::Close {
+            target,
+            confirmation: inventory.close_confirmation(target).unwrap(),
+        };
+
+        std::fs::write(git.0.join("payload"), "original\n").unwrap();
+        std::fs::write(git.0.join(".gitattributes"), "payload filter=stuck\n").unwrap();
+        git.git(&["add", "payload", ".gitattributes"]);
+        git.git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-m",
+            "payload",
+        ]);
+        let gate = FilterGate(git.0.join("filter-gate"));
+        std::fs::create_dir(&gate.0).unwrap();
+        std::fs::write(gate.0.join("smudge.sh"), "#!/bin/sh\n: > \"$1/started\"\nwhile [ ! -e \"$1/release\" ]; do sleep 0.02; done\ncat\n").unwrap();
+        let quote = |p: &Path| format!("'{}'", p.display().to_string().replace('\'', "'\\''"));
+        git.git(&[
+            "config",
+            "filter.stuck.smudge",
+            &format!("sh {} {}", quote(&gate.0.join("smudge.sh")), quote(&gate.0)),
+        ]);
+        let path = git.0.join("partial");
+        let create = Mutation::Worktree(Operation::Create {
+            workspace,
+            root: git.0.clone(),
+            path: path.clone(),
+            branch: Branch::New {
+                name: "partial".into(),
+                base: BranchName::Local("main".into()),
+            },
+            control: CreateControl::Creator,
+        });
+        assert!(matches!(
+            host.edit([1; 32], [1; 32], RequestId(3), 3, Some(create)),
+            Dispatch::Deferred
+        ));
+        let until = Instant::now() + Duration::from_secs(8);
+        while !gate.0.join("started").exists() {
+            host.tick_until(Instant::now());
+            assert!(Instant::now() < until, "Git did not enter the filter");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        for (peer, mutation) in [([2; 32], rename), ([3; 32], kill)] {
+            assert!(matches!(
+                host.edit(peer, peer, RequestId(1), 1, Some(mutation)),
+                Dispatch::Deferred
+            ));
+        }
+        while host.state.outcome([3; 32], 1).is_none() {
+            host.tick_until(Instant::now());
+            assert!(
+                Instant::now() < until,
+                "Git held the edits past its write deadline"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            host.state.outcome([1; 32], 3).unwrap().outcome,
+            Outcome::WorktreeFailed(Error::Interrupted)
+        );
+        assert!(matches!(
+            host.state.outcome([2; 32], 1).unwrap().outcome,
+            Outcome::Accepted { .. }
+        ));
+        assert!(matches!(
+            host.state.outcome([3; 32], 1).unwrap().outcome,
+            Outcome::Accepted { .. }
+        ));
+        assert!(path.join(".git").is_file());
+        let inventory = workspace_inventory(&mut host);
+        assert_eq!(inventory.workspaces.len(), 1);
+        assert_eq!(inventory.workspaces[0].name, "Renamed");
+        assert!(
+            inventory.workspaces[0]
+                .tabs
+                .iter()
+                .all(|tab| tab.worktree.as_deref() != Some(path.as_path()))
+        );
+    }
+
     fn blocked_removal_fixture() -> (GitFixture, PathBuf, FilterGate) {
         let git = GitFixture::new();
         std::fs::write(git.0.join("payload"), "original\n").unwrap();

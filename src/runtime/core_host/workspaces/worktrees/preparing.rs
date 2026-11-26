@@ -101,9 +101,10 @@ pub(super) fn prepare(
     approval: Option<Approval>,
     inventory: Inventory,
     lock: Option<std::fs::File>,
+    write_timeout: Duration,
 ) -> Result<Prepared, Error> {
     let token = CancellationToken::default();
-    let (git, _) = git(lock, &token)?;
+    let (git, _) = git(lock, &token, write_timeout)?;
     match operation {
         Operation::OpenTab {
             workspace,
@@ -154,9 +155,17 @@ pub(super) fn prepare(
                 removal: None,
                 run: Box::new(move |git| {
                     let token = CancellationToken::default();
-                    git.create(&root, &path, &branch, &token)
-                        .map_err(creation_error)?;
+                    let interrupted = match git
+                        .create(&root, &path, &branch, &token)
+                        .map_err(creation_error)
+                    {
+                        Ok(()) => false,
+                        Err(Error::Interrupted) => true,
+                        Err(error) => return Err(error),
+                    };
                     let snapshot = list(&git, &root, &token).map_err(|_| Error::Interrupted)?;
+                    // Git locks an incomplete checkout while it initializes. Leave a partial
+                    // Worktree and its branch on disk, without opening a Tab there.
                     let physical = local_filesystem()
                         .validate_directory(&path)
                         .ok()
@@ -165,13 +174,18 @@ pub(super) fn prepare(
                             snapshot.worktrees.iter().any(|r| {
                                 r.root == *path
                                     && !r.missing
+                                    && (!interrupted || !r.locked)
                                     && r.head
                                         == crate::worktrees::listing::WorktreeHead::Branch(
                                             branch.name().into(),
                                         )
                             })
                         })
-                        .ok_or(Error::Changed)?;
+                        .ok_or(if interrupted {
+                            Error::Interrupted
+                        } else {
+                            Error::Changed
+                        })?;
                     Ok(Some(physical))
                 }),
             })))
@@ -214,11 +228,11 @@ pub(super) fn prepare(
             {
                 return Err(Error::Changed);
             }
-            let list = list(&git, &root, &token)?;
+            let snapshot = list(&git, &root, &token)?;
             if path == root {
                 return Err(Error::Main);
             }
-            if !list.worktrees.iter().any(|r| r == &approval.record) {
+            if !snapshot.worktrees.iter().any(|r| r == &approval.record) {
                 return Err(Error::Changed);
             }
             if pinned_in_worktree(
@@ -232,7 +246,7 @@ pub(super) fn prepare(
             }
             git.confirm_location(&path, &approval.expected, &token)
                 .map_err(removal_error)?;
-            let fallback = list
+            let fallback = snapshot
                 .worktrees
                 .iter()
                 .find(|r| {
@@ -258,18 +272,30 @@ pub(super) fn prepare(
                 git,
                 removal: Some(removal),
                 run: Box::new(move |git| {
-                    git.remove(
-                        &root,
-                        &path,
-                        force,
-                        &expected,
-                        &CancellationToken::default(),
-                    )
-                    .map_err(|error| match removal_error(error) {
-                        Error::Changed if closes_tabs => Error::ChangedAfterClosing,
-                        error => error,
-                    })?;
-                    Ok(None)
+                    let token = CancellationToken::default();
+                    match git.remove(&root, &path, force, &expected, &token) {
+                        Ok(()) => Ok(None),
+                        Err(WorktreeRemoveError::Interrupted) => {
+                            let snapshot =
+                                list(&git, &root, &token).map_err(|_| Error::Interrupted)?;
+                            let filesystem = local_filesystem();
+                            if snapshot.worktrees.iter().all(|record| record.root != path)
+                                && !filesystem.has_entry(&path)
+                                && matches!(
+                                    filesystem.validate_directory(&path),
+                                    Err(LocalFilesystemError::Missing)
+                                )
+                            {
+                                Ok(None)
+                            } else {
+                                Err(Error::Interrupted)
+                            }
+                        }
+                        Err(error) => Err(match removal_error(error) {
+                            Error::Changed if closes_tabs => Error::ChangedAfterClosing,
+                            error => error,
+                        }),
+                    }
                 }),
             })))
         }
@@ -285,8 +311,7 @@ fn creation_error(error: crate::worktrees::git::WorktreeCreateError) -> Error {
         WorktreeCreateError::BranchExists => Error::BranchExists,
         WorktreeCreateError::BranchCheckedOut => Error::BranchCheckedOut,
         WorktreeCreateError::BranchMissing => Error::BranchMissing,
-        WorktreeCreateError::NotSubmitted(_)
-        | WorktreeCreateError::Core(_)
-        | WorktreeCreateError::Failed => Error::Branch,
+        WorktreeCreateError::Core(error) => error,
+        WorktreeCreateError::NotSubmitted(_) | WorktreeCreateError::Failed => Error::Branch,
     }
 }

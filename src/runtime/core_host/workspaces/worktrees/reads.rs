@@ -172,7 +172,7 @@ fn read_git(
             approval: None,
         });
     }
-    let (git, home) = git(None, token)?;
+    let (git, home) = git(None, token, WRITE_TIMEOUT)?;
     let mut approval = None;
     let reply = match read {
         Read::Context { root } => {
