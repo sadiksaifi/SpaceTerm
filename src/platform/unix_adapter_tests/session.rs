@@ -419,7 +419,6 @@ fn direct_close_distinguishes_zsh_prompt_helpers_from_disowned_work() {
         startup.path().join("prompt-helper"),
     )
     .unwrap();
-    let ready = startup.path().join("helper-ready");
     std::fs::write(
         startup.path().join(".zshrc"),
         r#"
@@ -429,14 +428,25 @@ start_fixture() {
         --ignored >/dev/null 2>&1 &!
 }
 precmd() {
-    if [[ -n $1 ]]; then
-        start_fixture manual-ready
-        manual_job=$!
-    elif [[ -z $prompt_helper ]]; then
+    if [[ -z $prompt_helper ]]; then
         start_fixture helper-ready
         prompt_helper=$!
     fi
 }
+theme_precmd() {
+    if [[ -n $1 ]]; then
+        if (( $# > 1 )); then
+            start_fixture shared-ready
+        else
+            start_fixture manual-ready
+        fi
+        manual_job=$!
+    elif [[ -z $theme_helper ]]; then
+        start_fixture theme-ready
+        theme_helper=$!
+    fi
+}
+add-zsh-hook precmd theme_precmd
 "#,
     )
     .unwrap();
@@ -452,11 +462,19 @@ precmd() {
     .unwrap();
     let session = JoinedRealPtySession(session);
     wait_for_shell_prompt(&session, &events);
-    let deadline = Instant::now() + REAL_SHELL_DEADLINE;
-    while !ready.is_file() {
-        assert!(Instant::now() < deadline, "the prompt helper did not start");
-        thread::sleep(Duration::from_millis(10));
-    }
+    let wait_for_process = |name: &str| {
+        let ready = startup.path().join(name);
+        let deadline = Instant::now() + REAL_SHELL_DEADLINE;
+        while !ready.is_file() {
+            assert!(
+                Instant::now() < deadline,
+                "the process did not start: {name}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    };
+    wait_for_process("helper-ready");
+    wait_for_process("theme-ready");
     assert!(
         !session.running_work(),
         "the helper alone does not require review"
@@ -475,19 +493,22 @@ precmd() {
     );
     run_to_prompt(&session, "=''"); // Complete the draft as an empty shell assignment.
 
-    for (command, working) in [
-        (":", false),
-        ("precmd manual", true),
-        ("kill -KILL $manual_job", false),
-        ("(/bin/sleep 60 &)", true),
+    for (command, ready, working) in [
+        (":", None, false),
+        ("theme_precmd manual", Some("manual-ready"), true),
+        ("kill -KILL $manual_job", None, false),
+        ("add-zsh-hook preexec theme_precmd", None, false),
+        (
+            "add-zsh-hook -d preexec theme_precmd",
+            Some("shared-ready"),
+            true,
+        ),
+        ("kill -KILL $manual_job", None, false),
+        ("(/bin/sleep 60 &)", None, true),
     ] {
         run_to_prompt(&session, command);
-        if command == "precmd manual" {
-            let deadline = Instant::now() + REAL_SHELL_DEADLINE;
-            while !startup.path().join("manual-ready").is_file() {
-                assert!(Instant::now() < deadline, "the manual job did not start");
-                thread::sleep(Duration::from_millis(10));
-            }
+        if let Some(ready) = ready {
+            wait_for_process(ready);
         }
         assert_eq!(
             session.running_work(),

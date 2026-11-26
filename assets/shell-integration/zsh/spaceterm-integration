@@ -64,17 +64,32 @@ add-zsh-hook chpwd _spaceterm_report_directory
 add-zsh-hook precmd _spaceterm_before_prompt
 add-zsh-hook preexec _spaceterm_before_command
 
-# Zsh calls its special precmd function before the registered prompt hooks, including on
-# the first prompt. A list trap runs in that function's scope. The export disappears on
-# return. Startup files and submitted commands have their own evaluation contexts.
-# ZLE widgets and functions also registered for a different shell hook are ambiguous.
+# An automatic call can look like a prompt callback from inside another shell hook or a
+# ZLE widget. Only mark functions assigned exclusively to precmd.
+_spaceterm_is_prompt_hook() {
+    builtin local hook=$1
+    case $hook in
+        _spaceterm_*|TRAP*|chpwd|periodic|preexec|zshaddhistory|zshexit|zsh_directory_name|command_not_found_handler)
+            return 1 ;;
+    esac
+    [[ $hook == precmd || ${precmd_functions[(Ie)$hook]-0} != 0 ]] &&
+        (( ${chpwd_functions[(Ie)$hook]-0} == 0 &&
+           ${periodic_functions[(Ie)$hook]-0} == 0 &&
+           ${preexec_functions[(Ie)$hook]-0} == 0 &&
+           ${zshaddhistory_functions[(Ie)$hook]-0} == 0 &&
+           ${zshexit_functions[(Ie)$hook]-0} == 0 &&
+           ${zsh_directory_name_functions[(Ie)$hook]-0} == 0 )) &&
+        ! builtin zle
+}
+
+# A list trap runs in the prompt hook's scope, so the export disappears when the hook returns.
+# Calls from startup files and submitted commands have different evaluation contexts.
 # Leave an existing DEBUG handler in charge. A handler installed later can replace this one.
 if [[ -n $_spaceterm_owner && $(builtin trap) != *DEBUG* ]]; then
     builtin trap '
-        if [[ $ZSH_EVAL_CONTEXT == shfunc:trap && ${funcstack[1]-} == precmd &&
-              ${SPACETERM_PROMPT_HELPER-} != "$SPACETERM_PROMPT_OWNER:$$" &&
-              " ${chpwd_functions[*]-} ${preexec_functions[*]-} ${periodic_functions[*]-} ${zshaddhistory_functions[*]-} ${zshexit_functions[*]-} " != *" precmd "* ]] &&
-           ! builtin zle; then
+        if [[ $ZSH_EVAL_CONTEXT == shfunc:trap && $# == 0 && -n ${funcstack[1]-} &&
+              ${SPACETERM_PROMPT_HELPER-} != "$SPACETERM_PROMPT_OWNER:$$" ]] &&
+           _spaceterm_is_prompt_hook "${funcstack[1]}"; then
             builtin local -x SPACETERM_PROMPT_HELPER="$SPACETERM_PROMPT_OWNER:$$"
         fi
     ' DEBUG
