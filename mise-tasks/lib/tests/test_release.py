@@ -169,6 +169,16 @@ class ReleaseNotesTests(unittest.TestCase):
         with self.assertRaises(TaskError):
             notes(self.root)
 
+    def test_a_second_release_at_the_same_commit_has_no_new_changes(self):
+        self.git("tag", "-am", "Earlier desktop release", "v0.12.1")
+        self.git("commit", "-qm", "feat: already published", "--allow-empty")
+        self.git("tag", "-am", "Previous desktop release", "v0.12.2")
+        self.git("tag", "-am", "Desktop rebuild", "v0.12.3")
+
+        self.assertEqual(notes(self.root), "No changes since v0.12.2.\n")
+        self.assertEqual(notes(self.root, tag="v0.12.3"), "No changes since v0.12.2.\n")
+        self.assertIn("Already published", notes(self.root, tag="v0.12.2"))
+
     def test_notes_require_a_release_of_the_new_application_at_head(self):
         self.git("tag", "-a", "v0.6.8", "-m", "Release")
         self.git("commit", "-qm", "feat: unreleased", "--allow-empty")

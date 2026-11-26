@@ -91,6 +91,7 @@ def notes(root=ROOT, *, tag=None):
     tag = tag or max(at_head, key=version, default="")
     if tag not in at_head:
         raise TaskError("release notes require a stable release tag from 0.10.0 at HEAD")
+    current_version = version(tag)
     ancestors = checked(
         ["git", "tag", "--merged", "HEAD"],
         "Git could not read earlier release tags",
@@ -101,11 +102,13 @@ def notes(root=ROOT, *, tag=None):
         (
             name
             for name in ancestors
-            if name not in at_head and release_tag.fullmatch(name) and version(name) < version(tag)
+            if release_tag.fullmatch(name) and version(name) < current_version
         ),
         key=version,
         default=None,
     )
+    if previous in at_head:
+        return f"No changes since {previous}.\n"
     # Limit git-cliff to the release's commit range and the tag the template needs to name
     # its previous release. The first release instead renders its own tag and first-release text.
     args = ["--tag-pattern", f"^{re.escape(previous or tag)}$"]
