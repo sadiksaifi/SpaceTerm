@@ -22,8 +22,7 @@ impl FileViewer for FileManagerViewer {
     /// Settles with the file manager's reply. A missing file manager, a refusal, and no reply
     /// within the bus's method timeout are all unavailable.
     fn reveal(&self, path: &Path) -> Reveal {
-        let unavailable =
-            || -> Reveal { Box::pin(std::future::ready(Err(RevealUnavailable))) };
+        let unavailable = || -> Reveal { Box::pin(std::future::ready(Err(RevealUnavailable))) };
         let Some(bus) = &self.bus else {
             return unavailable();
         };
@@ -46,12 +45,7 @@ impl FileViewer for FileManagerViewer {
         if dispatched.is_err() {
             return unavailable();
         }
-        Box::pin(async move {
-            settled
-                .recv()
-                .await
-                .unwrap_or(Err(RevealUnavailable))
-        })
+        Box::pin(async move { settled.recv().await.unwrap_or(Err(RevealUnavailable)) })
     }
 }
 

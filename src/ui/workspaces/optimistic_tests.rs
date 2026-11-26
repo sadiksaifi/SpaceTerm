@@ -573,6 +573,327 @@ fn optimistic_split_preserves_published_repository_and_close_control_facts() {
     }
 }
 
+/// A pending Split and a pending Tab present the Starting Directory SpaceTerm Core then chooses:
+/// the Pinned Directory, otherwise the source Pane's confirmed directory, wherever the source
+/// Pane's shell says it went.
+#[test]
+fn optimistic_creations_start_where_core_starts_them() {
+    let pinned = std::path::PathBuf::from("/fixture/pinned");
+    for (pin, split) in [(true, true), (true, false), (false, true), (false, false)] {
+        let core = DelayedCore::new();
+        let workspace = core.inventory().workspaces[0].id;
+        let tab = core.inventory().workspaces[0].tabs[0].clone();
+        {
+            let mut delivery = core.0.borrow_mut();
+            if pin {
+                delivery.core.inventory.workspaces[0].pinned_directory = Some(pinned.clone());
+            }
+            delivery
+                .core
+                .present_directory(tab.root_pane, "/fixture/elsewhere".into());
+            delivery.snapshot.inventory = Some(live_inventory(&delivery.core));
+        }
+        let (source, mut model) = model(&core);
+        let control = spaceterm_core::hierarchy::CreateControl::Creator;
+        let mutation = if split {
+            Mutation::SplitPane {
+                workspace,
+                tab: tab.id,
+                source: tab.root_pane,
+                axis: Axis::Right,
+                control,
+            }
+        } else {
+            Mutation::CreateTab {
+                workspace,
+                source: Some(tab.root_pane),
+                control,
+            }
+        };
+        assert_eq!(source.submit(mutation), WorkspaceSubmission::Submitted);
+        let created = |inventory: &Inventory| {
+            inventory.workspaces[0]
+                .tabs
+                .iter()
+                .flat_map(|tab| &tab.panes)
+                .find(|pane| pane.id != tab.root_pane)
+                .expect("the created Pane")
+                .starting_directory
+                .clone()
+        };
+
+        let projected = created(&source.presentation_inventory().unwrap());
+        core.finish(true, true);
+        let confirmed = created(&model.poll().inventory.unwrap());
+
+        assert_eq!(
+            projected, confirmed,
+            "the pending Pane starts where Core starts it (pinned: {pin}, split: {split})"
+        );
+        if pin {
+            assert_eq!(confirmed, pinned);
+        }
+    }
+}
+
+/// A Machine's account is learned from every Pane its inventory lists, also a Pane of a Workspace
+/// this client does not present, so a Pane started next is named from it.
+#[test]
+fn a_machines_account_is_learned_from_a_workspace_nobody_presents() {
+    use spaceterm_core::pane::metadata;
+    let core = DelayedCore::new();
+    let (_source, mut model) = model(&core);
+    assert!(model.sessions().account().shell.is_none());
+    {
+        let mut delivery = core.0.borrow_mut();
+        // Another client creates a Workspace, which this client never attaches.
+        delivery
+            .core
+            .apply(
+                OTHER_DEVICE,
+                1,
+                Mutation::CreateWorkspace {
+                    name: "Elsewhere".into(),
+                    directory: None,
+                    control: spaceterm_core::hierarchy::CreateControl::Creator,
+                },
+                std::path::Path::new("/fixture/home"),
+                |_| true,
+            )
+            .unwrap();
+        let pane = delivery.core.inventory.workspaces[1].tabs[0].root_pane;
+        delivery.core.present_presentation(
+            pane,
+            Some(Box::new(metadata::Snapshot {
+                revision: 1,
+                shell_name: "fish".into(),
+                title: "fish".into(),
+                title_provenance: metadata::TitleProvenance::Fallback,
+                directory: "/fixture/home".into(),
+                directory_provenance: metadata::DirectoryProvenance::Initial,
+                user: Some("alex".into()),
+                host: Some("studio".into()),
+                home: Some("/fixture/home".into()),
+                freshness: metadata::Freshness::Live,
+                finished_commands: 0,
+                prompt_zone: metadata::PromptZone::Unknown,
+                command: None,
+                title_activity: false,
+                title_glyph: metadata::TitleGlyph::Reported,
+                progress: metadata::Progress::None,
+            })),
+        );
+        delivery.snapshot.inventory = Some(live_inventory(&delivery.core));
+    }
+
+    model.poll();
+
+    let account = model.sessions().account();
+    assert_eq!(
+        (
+            account.user.as_deref(),
+            account.host.as_deref(),
+            account.home.as_deref(),
+            account.shell.as_deref(),
+        ),
+        (
+            Some("alex"),
+            Some("studio"),
+            Some("/fixture/home"),
+            Some("fish")
+        )
+    );
+}
+
+/// A pending unpinned Workspace starts its first Pane in the Machine's home, which SpaceTerm Core
+/// then chooses and which the Machine's published Terminal Metadata names.
+#[test]
+fn an_optimistic_unpinned_workspace_starts_where_core_starts_it() {
+    use spaceterm_core::pane::metadata;
+    let core = DelayedCore::new();
+    let root_pane = core.inventory().workspaces[0].tabs[0].root_pane;
+    {
+        let mut delivery = core.0.borrow_mut();
+        delivery.core.present_presentation(
+            root_pane,
+            Some(Box::new(metadata::Snapshot {
+                revision: 1,
+                shell_name: "zsh".into(),
+                title: "zsh".into(),
+                title_provenance: metadata::TitleProvenance::Fallback,
+                directory: "/fixture/home".into(),
+                directory_provenance: metadata::DirectoryProvenance::Initial,
+                user: None,
+                host: None,
+                home: Some("/fixture/home".into()),
+                freshness: metadata::Freshness::Live,
+                finished_commands: 0,
+                prompt_zone: metadata::PromptZone::Unknown,
+                command: None,
+                title_activity: false,
+                title_glyph: metadata::TitleGlyph::Reported,
+                progress: metadata::Progress::None,
+            })),
+        );
+        delivery.snapshot.inventory = Some(live_inventory(&delivery.core));
+    }
+    let (source, mut model) = model(&core);
+    assert_eq!(
+        source.submit(Mutation::CreateWorkspace {
+            name: "Second".into(),
+            directory: None,
+            control: spaceterm_core::hierarchy::CreateControl::Creator,
+        }),
+        WorkspaceSubmission::Submitted
+    );
+    let created = |inventory: &Inventory| {
+        let workspace = inventory.workspaces.last().expect("the created Workspace");
+        (
+            workspace.pinned_directory.clone(),
+            workspace.tabs[0].panes[0].starting_directory.clone(),
+        )
+    };
+
+    let projected = created(&source.presentation_inventory().unwrap());
+    core.finish(true, true);
+    let confirmed = created(&model.poll().inventory.unwrap());
+
+    assert_eq!(
+        confirmed,
+        (None, std::path::PathBuf::from("/fixture/home")),
+        "Core starts an unpinned Workspace in its home"
+    );
+    assert_eq!(projected, confirmed);
+}
+
+/// A pending Split in a Worktree Tab starts inside that Worktree, as SpaceTerm Core's scoped
+/// launch rule does: the Pinned Directory when it is inside, otherwise the source Pane's
+/// directory when that is inside, otherwise the Worktree's own directory.
+#[test]
+fn an_optimistic_split_in_a_worktree_tab_starts_inside_the_worktree() {
+    let worktree = std::path::PathBuf::from("/repo/feature");
+    for (pin, confirmed, expected) in [
+        (
+            Some("/repo/feature/crates"),
+            Some("/repo/feature/src"),
+            "/repo/feature/crates",
+        ),
+        (
+            Some("/repo"),
+            Some("/repo/feature/src"),
+            "/repo/feature/src",
+        ),
+        (Some("/repo"), None, "/repo/feature"),
+        (None, None, "/repo/feature"),
+    ] {
+        let core = DelayedCore::new();
+        let workspace = core.inventory().workspaces[0].id;
+        let tab = core.inventory().workspaces[0].tabs[0].clone();
+        {
+            let mut delivery = core.0.borrow_mut();
+            let published = &mut delivery.core.inventory.workspaces[0];
+            published.pinned_directory = pin.map(Into::into);
+            published.tabs[0].worktree = Some(worktree.clone());
+            published.tabs[0].worktree_repository = Some("/repo".into());
+            if let Some(confirmed) = confirmed {
+                delivery
+                    .core
+                    .confirm_directory(tab.root_pane, confirmed.into());
+            }
+            delivery.snapshot.inventory = Some(live_inventory(&delivery.core));
+        }
+        let (source, _model) = model(&core);
+        assert_eq!(
+            source.submit(Mutation::SplitPane {
+                workspace,
+                tab: tab.id,
+                source: tab.root_pane,
+                axis: Axis::Right,
+                control: spaceterm_core::hierarchy::CreateControl::Creator,
+            }),
+            WorkspaceSubmission::Submitted
+        );
+
+        let projected = source.presentation_inventory().unwrap();
+        let created = projected.workspaces[0].tabs[0]
+            .panes
+            .iter()
+            .find(|pane| pane.id != tab.root_pane)
+            .expect("the created Pane");
+        assert_eq!(
+            created.starting_directory,
+            std::path::Path::new(expected),
+            "pinned at {pin:?}, source confirmed at {confirmed:?}"
+        );
+    }
+}
+
+/// A Tab opening in a Worktree is in that Worktree before SpaceTerm Core answers, so a Split
+/// submitted meanwhile starts there and not in a Pinned Directory of another Worktree.
+#[test]
+fn an_optimistic_split_of_a_pending_worktree_tab_starts_in_its_worktree() {
+    let core = DelayedCore::new();
+    let workspace = core.inventory().workspaces[0].id;
+    {
+        let mut delivery = core.0.borrow_mut();
+        delivery.core.inventory.workspaces[0].pinned_directory = Some("/repo".into());
+        delivery.snapshot.inventory = Some(live_inventory(&delivery.core));
+    }
+    let (source, _model) = model(&core);
+    let control = spaceterm_core::hierarchy::CreateControl::Creator;
+    assert_eq!(
+        source.submit(Mutation::Worktree(
+            spaceterm_core::worktree::Operation::OpenTab {
+                workspace,
+                source: None,
+                root: "/repo".into(),
+                path: "/repo-feature".into(),
+                control,
+            }
+        )),
+        WorkspaceSubmission::Submitted
+    );
+    let projected = source.presentation_inventory().unwrap();
+    let pending = projected.workspaces[0].tabs.last().unwrap().clone();
+    assert_eq!(
+        (
+            pending.worktree.as_deref(),
+            pending.worktree_repository.as_deref()
+        ),
+        (
+            Some(std::path::Path::new("/repo-feature")),
+            Some(std::path::Path::new("/repo"))
+        )
+    );
+    assert_eq!(
+        source.submit(Mutation::SplitPane {
+            workspace,
+            tab: pending.id,
+            source: pending.root_pane,
+            axis: Axis::Right,
+            control,
+        }),
+        WorkspaceSubmission::Submitted
+    );
+
+    let projected = source.presentation_inventory().unwrap();
+    let directories: Vec<_> = projected.workspaces[0]
+        .tabs
+        .last()
+        .unwrap()
+        .panes
+        .iter()
+        .map(|pane| pane.starting_directory.clone())
+        .collect();
+    assert_eq!(
+        directories,
+        [
+            std::path::PathBuf::from("/repo-feature"),
+            std::path::PathBuf::from("/repo-feature")
+        ]
+    );
+}
+
 #[test]
 fn optimistic_split_of_a_pending_tab_dispatches_only_after_its_real_parent_exists() {
     let core = DelayedCore::new();

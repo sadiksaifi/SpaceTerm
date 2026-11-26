@@ -2032,14 +2032,54 @@ impl TabManager {
             }
         });
         // A Tab growing in lays its parts out at its whole width and shows each once its slot
-        // holds all of it, so its slot never cuts through a glyph, a word or a control.
-        let reveal = TabReveal::new(motion, close_button_size, close_clearance, appearance);
-        // A Tab that arrived says nothing until its Terminal Session names it, however fast it
-        // grows in, so its first words are its real name. One that never gets a name says
-        // Terminal once its wait ends. While its Focused Pane's shell starts, any name it has is
-        // provisional, such as the shell's executable, so the Tab still says nothing.
+        // holds all of it, so its slot never cuts through a glyph, a word or a control. Its
+        // words count as held once the slot holds the title they say, so a short title shows
+        // with the glyph instead of waiting for the slot to reach the close control.
+        let title_width = {
+            let measure = |text: &gpui::SharedString| {
+                appearance
+                    .typography
+                    .measure(TextRole::Navigation, text, window)
+                    .ceil()
+            };
+            let place = if identity.place.is_empty() {
+                px(0.0)
+            } else {
+                measure(&identity.place)
+            };
+            if identity.says_place_alone() {
+                place
+            } else {
+                let activity = if identity.activity.is_empty() {
+                    measure(&"Terminal".into())
+                } else {
+                    measure(&identity.activity)
+                };
+                if identity.place.is_empty() {
+                    activity
+                } else {
+                    activity
+                        + appearance.spacing(TAB_TRAILING_GAP) * 2.0
+                        + measure(&"·".into())
+                        + place
+                }
+            }
+        };
+        let reveal = TabReveal::new(
+            motion,
+            close_button_size,
+            close_clearance,
+            Some(title_width),
+            appearance,
+        );
+        // A Tab that arrived says nothing of what it is doing until its Terminal Session names
+        // it, however fast it grows in, so the first activity it says is its real name. One that
+        // never gets a name says Terminal once its wait ends. While its Focused Pane's shell
+        // starts, any name it has is provisional, such as the shell's executable, so the Tab says
+        // only where the shell starts, or nothing when nothing says where that is.
         let named =
             !identity.pending && (identity.is_named() || !self.unnamed_since.contains_key(&tab_id));
+        let worded = named || identity.says_place_alone() || identity.predicts_activity();
         // A Tab growing in offers its close control once the control shows whole, so no part of
         // it cut off by the Tab's slot takes a press or reaches assistive technology.
         let close_control = if role != TabItemRole::InBar || reveal.close <= 0.0 {
@@ -2111,8 +2151,8 @@ impl TabManager {
                 close_clearance,
                 TabIdentityReveal {
                     glyph: reveal.glyph,
-                    words: if named { reveal.words } else { 0.0 },
-                    naming: !named,
+                    words: if worded { reveal.words } else { 0.0 },
+                    naming: !worded,
                 },
                 appearance,
             ))
@@ -3341,10 +3381,12 @@ struct TabReveal {
 }
 
 impl TabReveal {
+    /// `title` is how wide the words the Tab says are. Words of unknown width fill their room.
     fn new(
         motion: ItemMotion,
         close_button: Pixels,
         close_clearance: Pixels,
+        title: Option<Pixels>,
         appearance: &super::appearance::ChromeAppearance,
     ) -> Self {
         let leading = appearance.spacing(TAB_ITEM_LEFT_PADDING);
@@ -3357,27 +3399,43 @@ impl TabReveal {
             appearance.spacing(TAB_ITEM_MINIMUM_WIDTH),
             appearance.spacing(TAB_ITEM_WIDTH),
         ];
-        let whole_at = |part: &dyn Fn(Pixels) -> (Pixels, Pixels)| {
+        // A part that ends at a fixed distance from either end of the Tab needs the largest
+        // share of it at one of those two widths. One that ends where its own content does
+        // needs the most at `also`, the width at which that content first fits.
+        let whole_at = |part: &dyn Fn(Pixels) -> (Pixels, Pixels), also: Option<Pixels>| {
             widths
-                .iter()
+                .into_iter()
+                .chain(also.map(|width| width.clamp(widths[0], widths[1])))
                 .map(|width| {
-                    let (start, end) = part(*width);
+                    let (start, end) = part(width);
                     if motion.grows_from_end {
-                        1.0 - start / *width
+                        1.0 - start / width
                     } else {
-                        end / *width
+                        end / width
                     }
                 })
                 .fold(0.0, f32::max)
         };
+        let glyph = motion.reveal(whole_at(&|_| (leading, leading + glyph), None));
+        let words = motion.reveal(whole_at(
+            &|width| {
+                let room = width - trailing - close_clearance;
+                (words, title.map_or(room, |title| (words + title).min(room)))
+            },
+            title.map(|title| words + title + trailing + close_clearance),
+        ));
+        let close = motion.reveal(whole_at(
+            &|width| (width - trailing - close_button, width - trailing),
+            None,
+        ));
+        // A Tab says what it is before it shows anything else: neither its glyph nor its close
+        // control shows before its words. A Tab growing from its start uncovers the glyph
+        // first, which then waits for the words. One growing from its end uncovers the close
+        // control first, which waits likewise, and its glyph follows the words.
         Self {
-            glyph: motion.reveal(whole_at(&|_| (leading, leading + glyph))),
-            words: motion.reveal(whole_at(&|width| {
-                (words, width - trailing - close_clearance)
-            })),
-            close: motion.reveal(whole_at(&|width| {
-                (width - trailing - close_button, width - trailing)
-            })),
+            glyph: glyph.min(words),
+            words,
+            close: close.min(words),
         }
     }
 }
@@ -3415,30 +3473,50 @@ fn render_tab_identity(
         .opacity(reveal.words)
         .when(reveal.naming, |words| {
             words.child(div().debug_selector(move || format!("tab-name-pending-{}", tab_id.get())))
+        });
+    // A starting shell has not said what it is doing. Its Tab says the shell predicted for it
+    // quietly, or only where it starts when nothing predicts one.
+    let place_alone = identity.says_place_alone();
+    let predicted = identity.predicts_activity();
+    let quiet = move |part: gpui::Div| {
+        part.when(predicted, |part| {
+            part.opacity(super::tab_view::PREDICTED_OPACITY)
         })
-        .child(
-            div()
-                .debug_selector(move || format!("tab-activity-{}", tab_id.get()))
-                .flex_shrink_0()
-                .min_w_0()
-                .when(has_place, |activity| {
-                    activity.max_w(relative(TAB_ACTIVITY_MAXIMUM_SHARE))
-                })
-                .truncate()
-                .child(if identity.activity.is_empty() {
-                    gpui::SharedString::from("Terminal")
-                } else {
-                    identity.activity.clone()
-                }),
-        );
+    };
+    if !place_alone {
+        words = words
+            .child(quiet(
+                div()
+                    .debug_selector(move || format!("tab-activity-{}", tab_id.get()))
+                    .flex_shrink_0()
+                    .min_w_0()
+                    .when(has_place, |activity| {
+                        activity.max_w(relative(TAB_ACTIVITY_MAXIMUM_SHARE))
+                    })
+                    .truncate()
+                    .child(if identity.activity.is_empty() {
+                        gpui::SharedString::from("Terminal")
+                    } else {
+                        identity.activity.clone()
+                    }),
+            ))
+            .when(predicted, |words| {
+                words.child(
+                    div()
+                        .debug_selector(move || format!("tab-activity-predicted-{}", tab_id.get())),
+                )
+            });
+    }
     if has_place {
         words = words
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .mx(appearance.spacing(TAB_TRAILING_GAP))
-                    .child("·"),
-            )
+            .when(!place_alone, |words| {
+                words.child(quiet(
+                    div()
+                        .flex_shrink_0()
+                        .mx(appearance.spacing(TAB_TRAILING_GAP))
+                        .child("·"),
+                ))
+            })
             .child(
                 div()
                     .debug_selector(move || format!("tab-place-{}", tab_id.get()))
@@ -9375,10 +9453,11 @@ mod tests {
     }
 
     /// A new Tab whose shell is starting has a provisional name, the shell's executable and the
-    /// directory it reported before its first prompt. The Tab says nothing, and its accessible
-    /// name says the shell is starting, until the Session's startup ends, and then says the name.
+    /// directory it reported before its first prompt. The Tab says only that directory, and its
+    /// accessible name says the shell is starting, until the Session's startup ends, and then
+    /// says the name.
     #[gpui::test]
-    fn a_starting_shells_provisional_name_stays_off_its_tab_until_startup_ends(
+    fn a_starting_shells_provisional_activity_stays_off_its_tab_until_startup_ends(
         cx: &mut TestAppContext,
     ) {
         use crate::terminal::metadata::TitleProvenance;
@@ -9404,17 +9483,17 @@ mod tests {
             cx.executor().advance_clock(TAB_NAME_WAIT * 2);
             cx.run_until_parked();
             assert!(
-                cx.debug_bounds("tab-name-pending-2").is_some(),
-                "a provisional name stays off the Tab while the shell starts"
+                cx.debug_bounds("tab-activity-2").is_none()
+                    && cx.debug_bounds("tab-place-2").is_some(),
+                "a provisional activity stays off the Tab while the shell starts"
             );
             let identity = manager.read_with(cx, |manager, cx| {
                 manager.tabs.active_tab().read(cx).tab_identity()
             });
-            assert!(identity.pending, "the Tab's identity waits for the shell");
-            assert!(
-                identity.is_named(),
-                "the Tab holds a provisional name: {:?}",
-                identity.one_line()
+            assert_eq!(
+                (identity.pending, identity.one_line().to_string()),
+                (true, "app".to_owned()),
+                "the Tab waits for the shell and says the directory it reported"
             );
             spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Starting shell");
         }
@@ -9422,7 +9501,7 @@ mod tests {
         pane.end_startup();
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds("tab-name-pending-2").is_none(),
+            cx.debug_bounds("tab-activity-2").is_some(),
             "the Tab says its name once the shell's startup ends"
         );
         let identity = manager.read_with(cx, |manager, cx| {
@@ -9432,6 +9511,332 @@ mod tests {
             (identity.pending, identity.one_line().to_string()),
             (false, "Terminal \u{b7} app".to_owned())
         );
+    }
+
+    /// A Split's new Pane takes the focus, and its Tab names it on the keypress: the shell its
+    /// Machine starts, and where the Pane starts. The shell name stays quiet until the shell
+    /// reports, and only then counts as the Pane's own.
+    #[gpui::test]
+    fn a_split_should_name_its_tab_for_the_new_pane_at_once(cx: &mut TestAppContext) {
+        use crate::terminal::metadata::TitleProvenance;
+        let (manager, _records, cx) = tab_manager(cx);
+        let identity = |cx: &mut VisualTestContext| {
+            manager.read_with(cx, |manager, cx| {
+                let identity = manager.tabs.active_tab().read(cx).tab_identity();
+                (identity.pending, identity.one_line().to_string())
+            })
+        };
+        report_metadata(cx, 1, 1, |metadata| {
+            metadata.shell_name = Arc::from("zsh");
+            metadata.directory.path = Arc::from("/srv/app");
+            metadata.title.value = Arc::from("sleep 7");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+        });
+        cx.run_until_parked();
+        assert_eq!(identity(cx), (false, "sleep 7 \u{b7} app".to_owned()));
+        let core = cx.update(|_, cx| {
+            cx.global::<crate::ui::workspace_manager::tests::LocalCore>()
+                .clone()
+        });
+        // A Pane a person creates starts its shell as it opens.
+        core.panes.start_opened_panes_quietly();
+
+        cx.dispatch_action(SplitRight);
+        cx.run_until_parked();
+
+        let second = core.panes.opened_at(1);
+        let place = core
+            .edits
+            .applied_inventory()
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| &tab.panes)
+            .find(|pane| pane.id == second)
+            .and_then(|pane| pane.starting_directory.file_name())
+            .expect("the second Pane starts in a named folder")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            identity(cx),
+            (true, format!("zsh \u{b7} {place}")),
+            "the Tab names the new Pane before its shell reports anything"
+        );
+        assert!(
+            cx.debug_bounds("tab-activity-predicted-1").is_some(),
+            "the predicted shell name is drawn quietly"
+        );
+
+        report_metadata(cx, 2, 1, |metadata| {
+            metadata.shell_name = Arc::from("zsh");
+            metadata.directory.path = Arc::from("/srv/api");
+            metadata.title.value = Arc::from("zsh");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+        });
+        core.panes.pane(second).end_startup();
+        cx.run_until_parked();
+        assert_eq!(identity(cx), (false, "zsh \u{b7} api".to_owned()));
+        assert!(cx.debug_bounds("tab-activity-predicted-1").is_none());
+    }
+
+    /// A Pane growing in lays its caption out for the width it reaches, so its name never loses
+    /// room to controls that join part of the way, and only its far end is still out of view.
+    #[gpui::test]
+    fn a_growing_panes_caption_name_should_never_shrink(cx: &mut TestAppContext) {
+        use crate::terminal::metadata::TitleProvenance;
+        cx.update(|cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+        let (manager, _records, cx) = tab_manager(cx);
+        report_metadata(cx, 1, 1, |metadata| {
+            metadata.shell_name = Arc::from("zsh");
+            metadata.directory.path = Arc::from("/srv/app");
+            metadata.title.value = Arc::from("zsh");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+        });
+        cx.run_until_parked();
+        finish_slides(cx);
+        let core = cx.update(|_, cx| {
+            cx.global::<crate::ui::workspace_manager::tests::LocalCore>()
+                .clone()
+        });
+        core.panes.start_opened_panes_quietly();
+
+        cx.dispatch_action(SplitRight);
+        cx.run_until_parked();
+        let pane = manager.read_with(cx, |manager, cx| {
+            manager.tabs.active_tab().read(cx).focused_pane_id().get()
+        });
+        let name: &'static str = format!("pane-caption-name-{pane}").leak();
+        let mut drawn = Vec::new();
+        // Short steps, so some frames fall where the Split controls join a Pane this narrow.
+        for _ in 0..90 {
+            if let Some(bounds) = cx.debug_bounds(name) {
+                drawn.push((bounds.origin.x, bounds.size.width));
+            }
+            next_frame_after(3, cx);
+        }
+
+        assert!(
+            drawn.first().map(|(x, _)| *x) != drawn.last().map(|(x, _)| *x),
+            "the new Pane must move as it grows in, got {drawn:?}"
+        );
+        assert!(
+            drawn
+                .windows(2)
+                .all(|pair| pair[1].1 >= pair[0].1 - px(0.5)),
+            "the name must never get narrower while its Pane grows, got {drawn:?}"
+        );
+    }
+
+    /// A Pane growing in shows a part of its caption only once the Pane as drawn holds all of
+    /// it, so its edge never cuts through a word, a separator or a control.
+    #[gpui::test]
+    fn a_growing_panes_caption_should_show_each_part_whole(cx: &mut TestAppContext) {
+        use crate::terminal::metadata::TitleProvenance;
+        cx.update(|cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+        let (manager, _records, cx) = tab_manager(cx);
+        report_metadata(cx, 1, 1, |metadata| {
+            metadata.shell_name = Arc::from("zsh");
+            metadata.directory.path = Arc::from("/srv/app");
+            metadata.title.value = Arc::from("zsh");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+        });
+        cx.run_until_parked();
+        finish_slides(cx);
+        let core = cx.update(|_, cx| {
+            cx.global::<crate::ui::workspace_manager::tests::LocalCore>()
+                .clone()
+        });
+        core.panes.start_opened_panes_quietly();
+
+        cx.dispatch_action(SplitRight);
+        cx.run_until_parked();
+        let pane = manager.read_with(cx, |manager, cx| {
+            manager.tabs.active_tab().read(cx).focused_pane_id().get()
+        });
+        let parts: Vec<&'static str> = [
+            "pane-caption-name",
+            "pane-caption-status-separator",
+            "pane-caption-status",
+            "pane-controls-clip",
+        ]
+        .into_iter()
+        .map(|part| &*format!("{part}-{pane}").leak())
+        .collect();
+        let mut drawn = Vec::new();
+        for _ in 0..90 {
+            for part in &parts {
+                if let Some(bounds) = cx.debug_bounds(part) {
+                    drawn.push((*part, bounds.right()));
+                }
+            }
+            next_frame_after(3, cx);
+        }
+        finish_slides(cx);
+        for part in &parts {
+            if let Some(bounds) = cx.debug_bounds(part) {
+                drawn.push((*part, bounds.right()));
+            }
+        }
+        // The new Pane grows from its far edge, which is where its caption ends at rest.
+        let edge = cx
+            .debug_bounds(parts[3])
+            .expect("the settled Pane shows its controls")
+            .right();
+
+        assert!(
+            parts
+                .iter()
+                .all(|part| drawn.iter().any(|(shown, _)| shown == part)),
+            "every part must show by the time the Pane rests, got {drawn:?}"
+        );
+        let past: Vec<_> = drawn
+            .iter()
+            .filter(|(_, right)| *right > edge + px(0.5))
+            .collect();
+        assert!(
+            past.is_empty(),
+            "no part may reach past the Pane's edge at {edge:?}, got {past:?}"
+        );
+    }
+
+    /// A Pane growing in from below shows no part of its caption until the Pane as drawn is
+    /// tall enough to hold it, so its edge never cuts through the caption.
+    #[gpui::test]
+    fn a_pane_growing_downward_should_show_its_caption_only_once_it_holds_it(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::terminal::metadata::TitleProvenance;
+        cx.update(|cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+        let (manager, _records, cx) = tab_manager(cx);
+        report_metadata(cx, 1, 1, |metadata| {
+            metadata.shell_name = Arc::from("zsh");
+            metadata.directory.path = Arc::from("/srv/app");
+            metadata.title.value = Arc::from("zsh");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+        });
+        cx.run_until_parked();
+        finish_slides(cx);
+        let core = cx.update(|_, cx| {
+            cx.global::<crate::ui::workspace_manager::tests::LocalCore>()
+                .clone()
+        });
+        core.panes.start_opened_panes_quietly();
+
+        cx.dispatch_action(SplitDown);
+        cx.run_until_parked();
+        let pane = manager.read_with(cx, |manager, cx| {
+            manager.tabs.active_tab().read(cx).focused_pane_id().get()
+        });
+        let surface: &'static str = format!("pane-surface-{pane}").leak();
+        let parts: Vec<&'static str> = [
+            "pane-caption-name",
+            "pane-caption-status",
+            "pane-controls-clip",
+        ]
+        .into_iter()
+        .map(|part| &*format!("{part}-{pane}").leak())
+        .collect();
+        let mut heights = Vec::new();
+        let mut past = Vec::new();
+        for _ in 0..90 {
+            if let Some(surface) = cx.debug_bounds(surface) {
+                heights.push(surface.size.height);
+                for part in &parts {
+                    if let Some(bounds) = cx.debug_bounds(part)
+                        && bounds.bottom() > surface.bottom() + px(0.5)
+                    {
+                        past.push((*part, bounds.bottom(), surface.bottom()));
+                    }
+                }
+            }
+            next_frame_after(3, cx);
+        }
+        finish_slides(cx);
+
+        assert!(
+            heights.first() < heights.last(),
+            "the new Pane must grow taller, got {heights:?}"
+        );
+        assert!(
+            past.is_empty(),
+            "no caption part may reach below the Pane as drawn, got {past:?}"
+        );
+        assert!(
+            parts.iter().all(|part| cx.debug_bounds(part).is_some()),
+            "the settled Pane shows its caption"
+        );
+    }
+
+    /// A Focused Pane that says only Terminal, then starts a shell, never borrows the name of a
+    /// Pane the Tab was not showing. The Tab says where the new shell starts.
+    #[gpui::test]
+    fn a_starting_pane_should_not_put_a_name_its_tab_was_not_showing_on_the_tab(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::terminal::metadata::TitleProvenance;
+        let (manager, _records, cx) = tab_manager(cx);
+        let title = |cx: &mut VisualTestContext| {
+            manager.read_with(cx, |manager, cx| {
+                manager.tabs.active_tab().read(cx).tab_title().to_string()
+            })
+        };
+        report_metadata(cx, 1, 1, |metadata| {
+            metadata.directory.path = Arc::from("/srv/app");
+            metadata.title.value = Arc::from("vim");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+        });
+        cx.run_until_parked();
+        assert_eq!(title(cx), "vim \u{b7} app");
+        cx.dispatch_action(SplitRight);
+        cx.run_until_parked();
+        // The second Pane never names itself, so its wait ends and the Tab says Terminal.
+        cx.executor()
+            .advance_clock(crate::ui::tab_view::NAME_WAIT * 2);
+        cx.run_until_parked();
+        assert_eq!(title(cx), "Terminal");
+        let core = cx.update(|_, cx| {
+            cx.global::<crate::ui::workspace_manager::tests::LocalCore>()
+                .clone()
+        });
+        let second = core.panes.opened_at(1);
+        let place = core
+            .edits
+            .applied_inventory()
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| &tab.panes)
+            .find(|pane| pane.id == second)
+            .and_then(|pane| pane.starting_directory.file_name())
+            .expect("the second Pane starts in a named folder")
+            .to_string_lossy()
+            .into_owned();
+
+        core.panes.pane(second).attach_quietly();
+        cx.run_until_parked();
+
+        assert_eq!(title(cx), place);
+    }
+
+    /// A directory the shell reports that is too long to present whole still names its own
+    /// folder in the Tab.
+    #[gpui::test]
+    fn a_long_reported_directory_should_keep_its_folder_name_in_the_tab(cx: &mut TestAppContext) {
+        use crate::terminal::metadata::TitleProvenance;
+        let (manager, _records, cx) = tab_manager(cx);
+        // Thirty ten-character folders put the last folder past the 256 characters a Tab shows.
+        let directory = format!("{}/last-folder", "/abcdefghij".repeat(30));
+        report_metadata(cx, 1, 1, |metadata| {
+            metadata.directory.path = Arc::from(directory.as_str());
+            metadata.title.value = Arc::from("vim");
+            metadata.title.provenance = TitleProvenance::TerminalControl;
+        });
+        cx.run_until_parked();
+
+        let title = manager.read_with(cx, |manager, cx| {
+            manager.tabs.active_tab().read(cx).tab_title().to_string()
+        });
+        assert_eq!(title, "vim \u{b7} last-folder");
     }
 
     /// How opaque the window painted a chip whose bounds are `chip`, if it painted one there.
@@ -9666,7 +10071,18 @@ mod tests {
         let leading = appearance.spacing(TAB_ITEM_LEFT_PADDING);
         let trailing = appearance.spacing(TAB_ITEM_RIGHT_PADDING);
         let glyph = appearance.icons.metrics(IconRole::Status).glyph_size;
-        for grows_from_end in [false, true] {
+        // Titles that fit the narrowest Tab, that fit only a wider one, and that fit none.
+        let titles = [
+            None,
+            Some(px(32.0)),
+            Some(px(81.0)),
+            Some(px(99.0)),
+            Some(px(400.0)),
+        ];
+        let cases = titles
+            .into_iter()
+            .flat_map(|title| [(false, title), (true, title)]);
+        for (grows_from_end, title) in cases {
             for step in 0..=100 {
                 let presence = step as f32 / 100.0;
                 let motion = ItemMotion {
@@ -9674,11 +10090,14 @@ mod tests {
                     grows_from_end,
                     ..ItemMotion::default()
                 };
-                let reveal = TabReveal::new(motion, close_button, close_clearance, &appearance);
-                for width in [
-                    appearance.spacing(TAB_ITEM_MINIMUM_WIDTH),
-                    appearance.spacing(TAB_ITEM_WIDTH),
-                ] {
+                let reveal =
+                    TabReveal::new(motion, close_button, close_clearance, title, &appearance);
+                // Every width a Tab grows toward, from its readable minimum to its roomy width.
+                let narrowest = f32::from(appearance.spacing(TAB_ITEM_MINIMUM_WIDTH));
+                let roomy = f32::from(appearance.spacing(TAB_ITEM_WIDTH));
+                let widths =
+                    (0..=66).map(|step| px(narrowest + (roomy - narrowest) * step as f32 / 66.0));
+                for width in widths {
                     // The part of a Tab `width` wide that its slot shows.
                     let shown = width * presence;
                     let (visible_start, visible_end) = if grows_from_end {
@@ -9686,12 +10105,14 @@ mod tests {
                     } else {
                         (px(0.0), shown)
                     };
+                    let words_start = leading + glyph + appearance.spacing(TAB_ORIGIN_GAP);
+                    let words_room = width - trailing - close_clearance;
                     for (opacity, start, end) in [
                         (reveal.glyph, leading, leading + glyph),
                         (
                             reveal.words,
-                            leading + glyph + appearance.spacing(TAB_ORIGIN_GAP),
-                            width - trailing - close_clearance,
+                            words_start,
+                            title.map_or(words_room, |title| (words_start + title).min(words_room)),
                         ),
                         (
                             reveal.close,
@@ -9713,10 +10134,124 @@ mod tests {
                 ItemMotion::default(),
                 close_button,
                 close_clearance,
+                title,
                 &appearance,
             );
             assert_eq!((rest.glyph, rest.words, rest.close), (1.0, 1.0, 1.0));
         }
+    }
+
+    /// A growing Tab says what it is before it shows anything else: neither its glyph nor its
+    /// close control shows before its words, whichever end the Tab grows from, and the words
+    /// show as soon as its slot holds them.
+    #[test]
+    fn a_growing_tab_should_show_nothing_before_its_words() {
+        let appearance = crate::ui::appearance::ChromeAppearance::prepare(
+            &crate::appearance::ThemeCatalog::default()
+                .resolve(
+                    crate::appearance::AppearanceGeneration::INITIAL,
+                    &crate::appearance::AppearancePreferences::default(),
+                    crate::appearance::SystemAppearance::unavailable(),
+                    &crate::appearance::AvailableFonts::default(),
+                )
+                .expect("the built-in appearance resolves")
+                .chrome,
+        );
+        let close_button = px(20.0);
+        let close_clearance = close_button + appearance.spacing(TAB_TRAILING_GAP);
+        for grows_from_end in [false, true] {
+            for title in [None, Some(px(32.0)), Some(px(99.0))] {
+                for step in 0..=100 {
+                    let motion = ItemMotion {
+                        entering: Some(step as f32 / 100.0),
+                        grows_from_end,
+                        ..ItemMotion::default()
+                    };
+                    let reveal =
+                        TabReveal::new(motion, close_button, close_clearance, title, &appearance);
+                    assert!(
+                        reveal.glyph <= reveal.words && reveal.close <= reveal.words,
+                        "nothing shows before the words at {step}%, from the end: \
+                         {grows_from_end}, title {title:?}, got {reveal:?}"
+                    );
+                    if !grows_from_end {
+                        assert_eq!(
+                            reveal.glyph, reveal.words,
+                            "a Tab growing from its start shows its glyph with its words at \
+                             {step}%, title {title:?}"
+                        );
+                    }
+                }
+            }
+        }
+        // A Tab growing from its end uncovers its words before its glyph, and they do not wait.
+        let from_end = TabReveal::new(
+            ItemMotion {
+                entering: Some(0.9),
+                grows_from_end: true,
+                ..ItemMotion::default()
+            },
+            close_button,
+            close_clearance,
+            Some(px(32.0)),
+            &appearance,
+        );
+        assert!(
+            from_end.words > 0.0 && from_end.glyph == 0.0 && from_end.close == from_end.words,
+            "the words and the close control show while the glyph is still out of view, got \
+             {from_end:?}"
+        );
+    }
+
+    /// A Tab growing in shows its words once its slot holds the words it says, not only once it
+    /// holds all the room words may take. A short title shows soon after the glyph.
+    #[test]
+    fn a_growing_tab_shows_a_short_title_before_its_slot_reaches_the_close_control() {
+        let appearance = crate::ui::appearance::ChromeAppearance::prepare(
+            &crate::appearance::ThemeCatalog::default()
+                .resolve(
+                    crate::appearance::AppearanceGeneration::INITIAL,
+                    &crate::appearance::AppearancePreferences::default(),
+                    crate::appearance::SystemAppearance::unavailable(),
+                    &crate::appearance::AvailableFonts::default(),
+                )
+                .expect("the built-in appearance resolves")
+                .chrome,
+        );
+        let close_button = px(20.0);
+        let close_clearance = close_button + appearance.spacing(TAB_TRAILING_GAP);
+        let width = appearance.spacing(TAB_ITEM_WIDTH);
+        let narrowest = appearance.spacing(TAB_ITEM_MINIMUM_WIDTH);
+        let words_start = appearance.spacing(TAB_ITEM_LEFT_PADDING)
+            + appearance.icons.metrics(IconRole::Status).glyph_size
+            + appearance.spacing(TAB_ORIGIN_GAP);
+        let title = px(32.0);
+        // A Tab grows toward any width down to its narrowest. This much of it holds the title
+        // at every such width, with room to fade in, and is short of the close control.
+        let presence = (words_start + title) / narrowest + 0.1;
+        assert!(
+            presence
+                < (width - appearance.spacing(TAB_ITEM_RIGHT_PADDING) - close_clearance) / width
+        );
+        let motion = ItemMotion {
+            entering: Some(presence),
+            ..ItemMotion::default()
+        };
+
+        let whole_room = TabReveal::new(motion, close_button, close_clearance, None, &appearance);
+        let titled = TabReveal::new(
+            motion,
+            close_button,
+            close_clearance,
+            Some(title),
+            &appearance,
+        );
+
+        assert_eq!(
+            whole_room.words, 0.0,
+            "words of unknown width wait for all their room"
+        );
+        assert_eq!(titled.words, 1.0, "a title the slot holds whole shows");
     }
 
     #[gpui::test]

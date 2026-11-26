@@ -757,6 +757,15 @@ pub(crate) struct TabView {
     /// starts; once it started, when it did. Their Tab and Pane Caption wait for the first
     /// real name together, at most [`NAME_WAIT`] after the start.
     title_waits: BTreeMap<PaneId, Option<std::time::Instant>>,
+    /// Where SpaceTerm Core starts each Pane's shell: the directory it confirmed for the Pane,
+    /// otherwise the Pane's Starting Directory. A Pane that waits for its name says it in its
+    /// Tab and Pane Caption until the shell reports its own.
+    pane_places: BTreeMap<PaneId, std::path::PathBuf>,
+    /// The Panes that joined the layout and are still growing into their place.
+    entering: BTreeSet<PaneId>,
+    /// The revision of the Machine's account this Tab last drew, which a starting Pane's
+    /// caption reads.
+    account_revision: u64,
     /// Ends the earliest title wait.
     _title_wait: Option<gpui::Task<()>>,
     /// A Pane of this Tab waited for or used a background start turn at the last reading, so the
@@ -872,6 +881,9 @@ impl TabView {
             losses: BTreeMap::new(),
             _classify: None,
             title_waits: BTreeMap::new(),
+            pane_places: BTreeMap::new(),
+            entering: BTreeSet::new(),
+            account_revision: 0,
             _title_wait: None,
             _workspace_status: cx.spawn_in(window, async move |view, cx| {
                 while changes.recv().await.is_ok() {
@@ -1057,6 +1069,9 @@ impl TabView {
 
     /// What this Tab presents about the Terminal Session its Focused Pane runs, read from that
     /// Pane's caption facts.
+    ///
+    /// The Tab follows its Focused Pane at once. A Pane whose shell is starting has a predicted
+    /// name, so a Split or a restored Pane taking the focus changes the Tab on that action.
     pub(crate) fn tab_identity(&self) -> TabIdentity {
         let focused = self.tab.focused_pane_id();
         TabIdentity::resolve(
@@ -1075,14 +1090,49 @@ impl TabView {
     }
 
     /// What Pane `pane_id`'s caption says, and whether it still waits for its shell's first
-    /// name. A starting shell's caption and Tab wait for that name together rather than saying
-    /// Terminal, so their first words are its real name.
+    /// name. A starting shell's caption and Tab never say Terminal first. Meanwhile they say
+    /// where the shell starts and predict what it is: the shell it reported, otherwise the
+    /// shell its Machine's other Panes run. That prediction is drawn quietly until the shell
+    /// names itself, and with nothing to predict from they say only where the shell starts.
     fn caption_text(&self, pane_id: PaneId) -> PaneCaptionText {
         let mut text = self.named_caption(pane_id);
         // While its shell starts, a name the Pane has is only provisional, such as the shell's
         // executable before the shell names itself.
         text.pending = self.title_waits.get(&pane_id) == Some(&None)
             || (self.title_waits.contains_key(&pane_id) && !self.pane_named(pane_id));
+        if text.pending {
+            // A Pane with no Terminal Metadata yet takes its Machine's account from the Panes
+            // that have, so its caption neither gains its Machine nor abbreviates its home a
+            // moment later.
+            let sessions = self.binding.sessions();
+            let account = sessions.account();
+            if text.origin.user.is_empty() && text.origin.host.is_empty() {
+                text.origin = PaneOrigin::of_machine(
+                    account.user.as_deref(),
+                    account.host.as_deref(),
+                    sessions.remote_name().as_deref(),
+                );
+            }
+            if !text.has_directory
+                && let Some(place) = self.pane_places.get(&pane_id)
+            {
+                text.place_in(&super::terminal_pane::presented_directory(
+                    &place.to_string_lossy(),
+                    account.home.as_deref(),
+                ));
+            }
+            if text.has_directory {
+                // A command a startup file runs is no name, so only the shell is predicted.
+                text.label = if text.shell.is_empty() {
+                    crate::terminal::metadata::sanitize_title(
+                        account.shell.as_deref().unwrap_or_default(),
+                    )
+                    .into()
+                } else {
+                    text.shell.clone()
+                };
+            }
+        }
         text
     }
 
@@ -2256,6 +2306,18 @@ impl TabView {
                     has_multiple_panes,
                     observed_by: self.pane_observers.get(&pane_id).cloned(),
                     binding: self.caption_controls(pane_id),
+                    growing: if self.entering.contains(&pane_id) {
+                        let inset = self.pane_frames.inset(pane_id);
+                        (inset.left + inset.right).max(px(0.0))
+                    } else {
+                        px(0.0)
+                    },
+                    edge: None,
+                    covered: self.entering.contains(&pane_id)
+                        && self
+                            .pane_frames
+                            .drawn_height(pane_id)
+                            .is_some_and(|height| height < appearance.caption_height()),
                 },
                 controls_reveal: hovers
                     .get(&pane_id)
@@ -2864,6 +2926,45 @@ impl TabView {
             changed = true;
             cx.notify();
         }
+        // A starting Pane's caption reads its Machine's account, which another Pane may have
+        // just published.
+        let account_revision = self.binding.sessions().account().revision;
+        if self.account_revision != account_revision {
+            self.account_revision = account_revision;
+            if !self.title_waits.is_empty() {
+                cx.emit(TabViewEvent::PresentationChanged {
+                    tab_id: self.tab.id(),
+                });
+                cx.notify();
+            }
+        }
+        let places: BTreeMap<PaneId, std::path::PathBuf> = core_tab
+            .panes
+            .iter()
+            .filter_map(|pane| {
+                let pane_id = self.binding.local_pane(pane.id)?;
+                // A directory the shell of an earlier Session reported starts nothing.
+                let directory = pane
+                    .confirmed_directory
+                    .as_ref()
+                    .unwrap_or(&pane.starting_directory);
+                (!directory.as_os_str().is_empty()).then(|| (pane_id, directory.clone()))
+            })
+            .collect();
+        if self.pane_places != places {
+            // Only a Pane that waits for its name says its place from here.
+            let shown = self
+                .title_waits
+                .keys()
+                .any(|pane_id| self.pane_places.get(pane_id) != places.get(pane_id));
+            self.pane_places = places;
+            if shown {
+                cx.emit(TabViewEvent::PresentationChanged {
+                    tab_id: self.tab.id(),
+                });
+                cx.notify();
+            }
+        }
         changed |= self.remove_absent_panes(core_tab, window, cx);
         let retired = self
             .parked_panes
@@ -3206,6 +3307,7 @@ impl TabView {
         self.advance_native_service_hierarchy_generation(cx);
         self.pane_layout_revision += 1;
         self.pane_motion.expect_change();
+        self.entering.insert(pane_id);
         if let Some(terminal) = self.tab.pane(pane_id) {
             self.pane_titles.insert(pane_id, terminal.read(cx).title());
             self.pane_captions
@@ -4071,7 +4173,6 @@ impl Render for TabView {
             },
         };
         let hovers = self.pane_hovers(appearance.active, window, cx);
-        self.sync_pane_caption_views(&hovers, &appearance, cx);
         let places = self
             .pane_layout_size
             .map(|layout_size| {
@@ -4092,7 +4193,12 @@ impl Render for TabView {
         self.pane_frames = self.pane_motion.present(&places, window.scale_factor(), cx);
         if self.pane_frames.moving {
             window.request_animation_frame();
+        } else {
+            self.entering.clear();
         }
+        // The captions read this frame's Pane motion, so a growing Pane's caption knows the
+        // width it reaches.
+        self.sync_pane_caption_views(&hovers, &appearance, cx);
         // A Split's spacer leaves its gap unpainted while Panes move across it. When only the stage
         // stretches the Panes, each spacer paints its gap where the stretch draws it instead.
         self.stretched_split_gaps.clear();
@@ -4253,6 +4359,10 @@ pub(crate) const NAME_WAIT: std::time::Duration = std::time::Duration::from_mill
 /// What assistive technology hears for a Pane or Tab whose shell is still starting.
 pub(crate) const STARTING_NAME: &str = "Starting shell";
 
+/// How opaque a starting shell's predicted name is, in its Tab and Pane Caption, until the shell
+/// names itself.
+pub(crate) const PREDICTED_OPACITY: f32 = 0.55;
+
 /// What one Tab presents about the Terminal Session its Focused Pane runs. A Tab never composes a
 /// path or interprets a title, and leaves a segment empty rather than inventing one.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -4269,8 +4379,8 @@ pub(crate) struct TabIdentity {
     pub(crate) glyph: Option<gpui::SharedString>,
     /// Whether any Pane in the Tab is asking for attention.
     pub(crate) attention: bool,
-    /// The Focused Pane's shell is starting and has not named itself yet, so the Tab waits for
-    /// its first name the same way the Pane Caption does.
+    /// The Focused Pane's shell is starting and has not named itself yet, so the activity is a
+    /// prediction, or empty when nothing predicts it.
     pub(crate) pending: bool,
 }
 
@@ -4281,22 +4391,50 @@ impl TabIdentity {
         !self.place.is_empty() || !(self.activity.is_empty() || self.activity == "Terminal")
     }
 
+    /// Whether the Tab says only where its Terminal Session starts, because the Focused Pane's
+    /// shell is starting and nothing predicts what it is.
+    pub(crate) fn says_place_alone(&self) -> bool {
+        self.pending && self.activity.is_empty() && !self.place.is_empty()
+    }
+
+    /// Whether the Tab's activity is a prediction, drawn quietly until the shell names itself.
+    pub(crate) fn predicts_activity(&self) -> bool {
+        self.pending && !self.activity.is_empty()
+    }
+
     fn resolve(caption: PaneCaptionText, title: gpui::SharedString, attention: bool) -> Self {
-        let (activity, directory) = if caption.label.is_empty() {
-            (caption.name.as_ref(), "")
+        // A starting shell says where it starts and the shell predicted for it, and never a
+        // name it has not earned, such as Terminal. With no place it says nothing.
+        let (activity, place): (gpui::SharedString, gpui::SharedString) = if caption.pending {
+            match (caption.has_directory, caption.label.is_empty()) {
+                (false, _) => Default::default(),
+                (true, true) => (Default::default(), caption.name.clone()),
+                (true, false) => {
+                    let label =
+                        spaceterm_core::labels::Label::from_parts(&caption.label, &caption.name);
+                    (
+                        label.activity.clone().into(),
+                        label.place().to_owned().into(),
+                    )
+                }
+            }
         } else {
-            (caption.label.as_ref(), caption.name.as_ref())
-        };
-        let label = spaceterm_core::labels::Label::from_parts(
-            if activity.is_empty() {
-                title.as_ref()
+            let (activity, directory) = if caption.label.is_empty() {
+                (caption.name.as_ref(), "")
             } else {
-                activity
-            },
-            directory,
-        );
-        let place = label.place().to_owned().into();
-        let activity = label.activity.into();
+                (caption.label.as_ref(), caption.name.as_ref())
+            };
+            let label = spaceterm_core::labels::Label::from_parts(
+                if activity.is_empty() {
+                    title.as_ref()
+                } else {
+                    activity
+                },
+                directory,
+            );
+            let place = label.place().to_owned().into();
+            (label.activity.into(), place)
+        };
         Self {
             remote: caption.origin.remote,
             progress: caption.progress,
@@ -4319,6 +4457,10 @@ impl TabIdentity {
             line.push_str(&format!("[{percent}%] "));
         } else if self.progress != TerminalProgress::None {
             line.push_str(&format!("[{:?}] ", self.progress));
+        }
+        if self.says_place_alone() {
+            line.push_str(&self.place);
+            return line.into();
         }
         line.push_str(if self.activity.is_empty() {
             "Terminal"
@@ -4345,14 +4487,24 @@ struct PaneCaptionText {
     running: bool,
     progress: TerminalProgress,
     repository: Option<RepositoryCaption>,
-    /// The Pane's shell is starting and has not named itself yet. The caption and its Tab show
-    /// one waiting presentation until its first confirmed name, which then shows whole.
+    /// The Pane's shell is starting and has not named itself yet. The caption and its Tab say
+    /// where the shell starts and a predicted shell until its first confirmed name.
     pending: bool,
+    /// The shell the Terminal Session said it runs, or empty until it says.
+    shell: gpui::SharedString,
 }
 
 impl PaneCaptionText {
     fn from_terminal(terminal: &TerminalPane) -> Self {
         Self::from_facts(terminal.caption())
+    }
+
+    /// Places a caption that reported no directory in `directory`, keeping its name as its label.
+    fn place_in(&mut self, directory: &str) {
+        let (leading, leaf) = split_directory_leaf(directory);
+        self.label = std::mem::replace(&mut self.name, leaf);
+        self.directory = leading;
+        self.has_directory = true;
     }
 
     fn from_facts(facts: super::terminal_pane::PaneCaptionFacts) -> Self {
@@ -4368,6 +4520,7 @@ impl PaneCaptionText {
                 progress: facts.progress,
                 repository: facts.repository,
                 pending: false,
+                shell: facts.shell,
             };
         }
         let (leading, name) = split_directory_leaf(&facts.directory);
@@ -4382,6 +4535,7 @@ impl PaneCaptionText {
             progress: facts.progress,
             repository: facts.repository,
             pending: false,
+            shell: facts.shell,
         }
     }
 }
@@ -4415,6 +4569,16 @@ struct PaneCaption {
     observed_by: Option<gpui::SharedString>,
     /// Present when a SpaceTerm Server owns the Pane, which changes what its controls offer.
     binding: Option<WorkspaceCaptionControls>,
+    /// How much wider the Pane gets before it rests, while it grows into the layout. Its
+    /// caption is laid out that much wider than it is drawn, from its leading edge, so its
+    /// name keeps the room it has at rest and only its far end is still out of view.
+    growing: Pixels,
+    /// Where the Pane as drawn ends while it grows, which its caption learns as it is laid
+    /// out. A caption part shows only once it lies wholly before this edge.
+    edge: Option<Pixels>,
+    /// The Pane as drawn is still shorter than its caption, as when it grows in from below, so
+    /// no caption part shows yet.
+    covered: bool,
 }
 
 /// A Pane's caption. It reads no Pane state of its own, so the frames a Pane draws for its
@@ -4511,13 +4675,16 @@ fn render_pane_caption(
                     control.background,
                 );
             }
-            let layout = CaptionLayout::resolve(
-                &caption,
-                bounds.size.width,
-                controls_reveal,
-                window,
-                &appearance,
-            );
+            // A Pane growing in lays its caption out at the width it reaches.
+            let room = gpui::size(bounds.size.width + caption.growing, bounds.size.height);
+            let layout =
+                CaptionLayout::resolve(&caption, room.width, controls_reveal, window, &appearance);
+            // A growing Pane shows a caption part only once it holds all of it.
+            caption.edge = if caption.covered {
+                Some(bounds.left())
+            } else {
+                (caption.growing > px(0.0)).then(|| bounds.right())
+            };
             let content = render_pane_caption_content(
                 caption,
                 controls_reveal,
@@ -4547,11 +4714,18 @@ fn render_pane_caption(
                 .rounded_tr(pane_radius)
                 .child(content)
                 .into_any_element();
-            content.layout_as_root(bounds.size.map(gpui::AvailableSpace::Definite), window, cx);
-            content.prepaint_at(bounds.origin, window, cx);
+            content.layout_as_root(room.map(gpui::AvailableSpace::Definite), window, cx);
+            // What reaches past the Pane as drawn neither shows nor takes the pointer.
+            window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+                content.prepaint_at(bounds.origin, window, cx);
+            });
             content
         },
-        |_, mut content, window, cx| content.paint(window, cx),
+        |bounds, mut content, window, cx| {
+            window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+                content.paint(window, cx);
+            });
+        },
     )
     .w_full()
     .h(caption_height)
@@ -4586,6 +4760,9 @@ fn render_pane_caption_content(
         has_multiple_panes,
         binding,
         observed_by,
+        growing: _,
+        edge,
+        covered: _,
     } = caption;
     let color = paint.foreground;
     let button_paint = |value: crate::appearance::SemanticPaint| {
@@ -4783,15 +4960,15 @@ fn render_pane_caption_content(
         };
     }
     // While the shell starts, assistive technology hears that rather than a name the caption
-    // does not show yet.
-    let caption_name = if text.pending {
+    // does not show yet. A caption that shows where the shell starts is named for that place.
+    let caption_name = if text.pending && !text.has_directory {
         format!("Pane Caption, {STARTING_NAME}")
     } else {
         format!("Pane Caption, {}", text.name)
     };
     let repository = text.repository.clone();
     let caption_content =
-        render_caption_identity(pane_id, text, attention, layout, appearance, &paint);
+        render_caption_identity(pane_id, text, attention, layout, edge, appearance, &paint);
     let focus_pane = move |window: &mut Window, cx: &mut App| {
         let _ = focus_view.update(cx, |view, cx| {
             view.focus_pane(pane_id, cx);
@@ -4839,18 +5016,22 @@ fn render_pane_caption_content(
         .when_some(
             repository.filter(|_| layout.repository.show),
             |row, repository| {
-                row.child(render_repository_segment(
-                    pane_id,
-                    &repository,
-                    (terminal.downgrade(), view.clone()),
-                    layout.repository,
-                    appearance,
-                    &paint,
+                row.child(whole(
+                    edge,
+                    render_repository_segment(
+                        pane_id,
+                        &repository,
+                        (terminal.downgrade(), view.clone()),
+                        layout.repository,
+                        appearance,
+                        &paint,
+                    ),
                 ))
             },
         )
         .when_some(observed_by, |row, label| {
-            row.child(
+            row.child(whole(
+                edge,
                 div()
                     .id(("pane-observers", pane_id.get()))
                     .debug_selector(move || format!("pane-caption-observers-{}", pane_id.get()))
@@ -4863,10 +5044,87 @@ fn render_pane_caption_content(
                     .truncate()
                     .text_color(gpui_color(paint.secondary))
                     .child(label),
-            )
+            ))
         })
-        .child(controls_slot.child(controls_clip.child(controls)))
+        .child(whole(
+            edge,
+            controls_slot.child(controls_clip.child(controls)),
+        ))
         .into_any_element()
+}
+
+/// A part of the caption of a Pane growing into the layout. It shows only once the Pane as
+/// drawn, which ends at `edge`, holds all of it, so the Pane's edge never cuts through a word,
+/// a separator or a control. A part of a Pane at rest has no `edge` and always shows.
+struct WholePart {
+    part: AnyElement,
+    edge: Option<Pixels>,
+}
+
+fn whole(edge: Option<Pixels>, part: impl gpui::IntoElement) -> WholePart {
+    WholePart {
+        part: part.into_any_element(),
+        edge,
+    }
+}
+
+impl gpui::IntoElement for WholePart {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl gpui::Element for WholePart {
+    type RequestLayoutState = ();
+    /// Whether the part shows.
+    type PrepaintState = bool;
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+    fn request_layout(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (gpui::LayoutId, ()) {
+        (self.part.request_layout(window, cx), ())
+    }
+    fn prepaint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        let shows = self
+            .edge
+            .is_none_or(|edge| bounds.right() <= edge + px(0.5));
+        if shows {
+            self.part.prepaint(window, cx);
+        }
+        shows
+    }
+    fn paint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        shows: &mut bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if *shows {
+            self.part.paint(window, cx);
+        }
+    }
 }
 
 /// The mark before a branch name or detached commit id, in the inherited text color.
@@ -5004,50 +5262,73 @@ fn render_caption_identity(
     text: PaneCaptionText,
     attention: bool,
     layout: CaptionLayout,
+    edge: Option<Pixels>,
     appearance: &super::appearance::ChromeAppearance,
     paint: &crate::appearance::CaptionPaint,
 ) -> gpui::Div {
     let color = paint.foreground;
+    // A shell that is starting says nothing of what it is doing until its first confirmed name,
+    // as its Tab does, so neither says Terminal first and then something else. It says where it
+    // starts meanwhile, and shows no words when nothing says where that is.
+    let pending = text.pending;
+    let unplaced = pending && !text.has_directory;
+    // The Machine is separated from the words after it, so with no words it stands alone.
+    let worded = !unplaced && (text.has_directory || !text.name.is_empty());
     let mut caption_content = div()
         .flex_1()
         .min_w_0()
         .flex()
         .items_center()
         .overflow_hidden()
-        .child(render_pane_origin(
-            pane_id,
-            &text.origin,
-            layout,
-            color,
-            appearance,
+        .child(whole(
+            edge,
+            render_pane_origin(pane_id, &text.origin, worded, layout, color, appearance),
         ));
-    // A shell that is starting shows no words until its first confirmed name, as its Tab does,
-    // so neither says Terminal first and then something else.
-    let pending = text.pending;
-    let waiting = move |segment: gpui::Div| segment.when(pending, |segment| segment.opacity(0.0));
-    caption_content = caption_content.when(pending, |row| {
+    // The separator after the Machine shows with what it separates the Machine from, so a
+    // growing Pane never shows one with nothing after it.
+    let origin_separator =
+        (worded && layout.show_host && !text.origin.host.is_empty()).then(|| {
+            div()
+                .debug_selector(move || format!("pane-caption-origin-separator-{}", pane_id.get()))
+                .flex_shrink_0()
+                .mx(appearance.spacing(5.0))
+                .text_color(gpui_color(color))
+                .child("›")
+        });
+    let waiting = move |segment: gpui::Div| segment.when(unplaced, |segment| segment.opacity(0.0));
+    caption_content = caption_content.when(unplaced, |row| {
         row.child(
             div().debug_selector(move || format!("pane-caption-name-pending-{}", pane_id.get())),
         )
     });
     if text.has_directory {
-        caption_content = caption_content
+        // The place: the separator from the Machine, the directory and its folder.
+        let place = div()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .children(origin_separator)
             .when(layout.show_directory && !text.directory.is_empty(), |row| {
-                row.child(waiting(
+                row.child(
                     div()
                         .debug_selector(move || format!("pane-caption-directory-{}", pane_id.get()))
                         .flex_shrink_0()
                         .text_color(gpui_color(color))
                         .child(text.directory),
-                ))
+                )
             })
-            .child(waiting(
+            .child(
                 div()
                     .debug_selector(move || format!("pane-caption-name-{}", pane_id.get()))
                     .min_w_0()
                     .truncate()
                     .child(text.name),
-            ))
+            );
+        // The status, with the separator before it.
+        let status = div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
             .when(layout.show_status_separator, |row| {
                 row.child(
                     div()
@@ -5071,31 +5352,53 @@ fn render_caption_identity(
                         paint,
                         appearance,
                     )),
-            )
+            );
+        caption_content = caption_content
+            .child(whole(edge, place))
+            .child(whole(edge, status))
             .when(layout.show_label && !text.label.is_empty(), |row| {
-                row.child(waiting(
+                row.child(whole(
+                    edge,
                     div()
                         .debug_selector(move || format!("pane-caption-label-{}", pane_id.get()))
                         .min_w_0()
                         .truncate()
                         .text_color(gpui_color(color))
+                        // A starting shell's label is a prediction, drawn quietly.
+                        .when(pending, |label| label.opacity(PREDICTED_OPACITY))
                         .child(text.label),
                 ))
+                .when(pending, |row| {
+                    row.child(div().debug_selector(move || {
+                        format!("pane-caption-label-predicted-{}", pane_id.get())
+                    }))
+                })
             });
     } else {
         caption_content = caption_content
-            .child(render_pane_status(
-                pane_id,
-                (text.progress, text.glyph, attention),
-                paint,
-                appearance,
-            ))
-            .child(waiting(
+            .child(whole(
+                edge,
                 div()
-                    .debug_selector(move || format!("pane-caption-name-{}", pane_id.get()))
-                    .min_w_0()
-                    .truncate()
-                    .child(text.name),
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .children(origin_separator)
+                    .child(render_pane_status(
+                        pane_id,
+                        (text.progress, text.glyph, attention),
+                        paint,
+                        appearance,
+                    )),
+            ))
+            .child(whole(
+                edge,
+                waiting(
+                    div()
+                        .debug_selector(move || format!("pane-caption-name-{}", pane_id.get()))
+                        .min_w_0()
+                        .truncate()
+                        .child(text.name),
+                ),
             ));
     }
     caption_content
@@ -5123,10 +5426,13 @@ fn caption_row(
         .text_color(gpui_color(color))
 }
 
-/// Renders the account and machine a Pane runs on, ahead of the directory it sits in.
+/// Renders the account and machine a Pane runs on, ahead of the directory it sits in. The
+/// separator after them belongs to what follows, and the Machine keeps its gap when nothing
+/// `separates` it from words.
 fn render_pane_origin(
     pane_id: PaneId,
     origin: &PaneOrigin,
+    separates: bool,
     layout: CaptionLayout,
     color: crate::appearance::Color,
     appearance: &super::appearance::ChromeAppearance,
@@ -5150,14 +5456,9 @@ fn render_pane_origin(
                 div()
                     .debug_selector(move || format!("pane-caption-host-{}", pane_id.get()))
                     .text_color(gpui_color(color))
+                    // Without its separator the Machine keeps the gap to the status after it.
+                    .when(!separates, |host| host.mr(appearance.spacing(5.0)))
                     .child(origin.host.clone()),
-            )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .mx(appearance.spacing(5.0))
-                    .text_color(gpui_color(color))
-                    .child("›"),
             )
         })
         .into_any_element()
@@ -7048,6 +7349,7 @@ mod tests {
             origin,
             directory: directory.to_owned().into(),
             label: label.to_owned().into(),
+            shell: Default::default(),
             glyph: None,
             running: false,
             progress: TerminalProgress::None,
@@ -7808,6 +8110,54 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A Pane Caption separates its Machine from what follows it only when words follow. A
+    /// shell that starts where nothing says where shows its Machine and no separator.
+    #[gpui::test]
+    fn caption_should_show_no_separator_after_its_machine_while_it_has_no_words(
+        cx: &mut TestAppContext,
+    ) {
+        let (_, view, records, cx) = caption_view(cx);
+        let mut screen =
+            ScreenSnapshot::from_test_parts_at(Arc::from([]), Default::default(), "zsh", 1);
+        let metadata = Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata);
+        metadata.context = crate::terminal::metadata::TerminalMetadataContext::local(
+            crate::local_path::LocalPathSemantics::Posix,
+            "/Users/tester",
+            crate::terminal::metadata::LocalMachine::new(
+                Some("tester"),
+                Some("workstation"),
+                Some("/Users/tester"),
+            ),
+        );
+        publish_screen(&view, &records, 1, screen, cx);
+        cx.run_until_parked();
+        let shows = |cx: &mut VisualTestContext, part: &str| {
+            cx.debug_bounds(format!("pane-caption-{part}-1").leak())
+                .is_some()
+        };
+        assert!(
+            shows(cx, "host") && shows(cx, "origin-separator") && !shows(cx, "name-pending"),
+            "a caption with a name separates its Machine from it"
+        );
+
+        // The Pane's shell starts, and nothing says where.
+        view.update(cx, |view, cx| {
+            view.title_waits.insert(PaneId::new(1), None);
+            view.pane_places.clear();
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            shows(cx, "name-pending"),
+            "the caption has no words to show"
+        );
+        assert!(
+            shows(cx, "host") && !shows(cx, "origin-separator"),
+            "the caption names its Machine with no separator after it"
+        );
     }
 
     #[gpui::test]

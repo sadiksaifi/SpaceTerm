@@ -68,6 +68,7 @@ pub(crate) fn caption_fixture(cx: &App) -> Option<PaneCaptionFacts> {
             },
             directory: "workbench-fixture".into(),
             label: "Workbench fixture".into(),
+            shell: Default::default(),
             glyph: None,
             running: false,
             progress: Default::default(),

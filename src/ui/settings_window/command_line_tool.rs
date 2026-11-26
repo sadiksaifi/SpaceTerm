@@ -369,10 +369,9 @@ impl SettingsWindow {
                 .enumerate()
                 .flat_map(|(index, &(action, label))| {
                     // Uninstall sits apart from the step that keeps the command.
-                    let separator = (index > 0 && action == ToolAction::Uninstall)
-                        .then(MenuEntry::separator);
-                    let entry =
-                        MenuEntry::action(label, action).disabled(presentation.working);
+                    let separator =
+                        (index > 0 && action == ToolAction::Uninstall).then(MenuEntry::separator);
+                    let entry = MenuEntry::action(label, action).disabled(presentation.working);
                     separator.into_iter().chain([entry])
                 })
                 .collect();
@@ -444,7 +443,11 @@ mod tests {
         let missing = checked(Launcher::Missing);
         assert_eq!(
             (missing.state, missing.action, missing.menu),
-            ("Not installed", Some((ToolAction::Install, "Install")), vec![])
+            (
+                "Not installed",
+                Some((ToolAction::Install, "Install")),
+                vec![]
+            )
         );
         let stale = checked(Launcher::Stale);
         assert_eq!(

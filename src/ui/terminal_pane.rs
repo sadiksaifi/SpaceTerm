@@ -1505,12 +1505,15 @@ impl TerminalPane {
         use crate::terminal::metadata::{CommandState, TitleProvenance, sanitize_title};
 
         let metadata = self.metadata();
+        let home = metadata.context.home();
         let directory = match self.current_directory() {
             Some(crate::domain::CurrentDirectory::Local(path)) => {
-                sanitize_title(&path.to_string_lossy())
+                presented_directory(&path.to_string_lossy(), home)
             }
-            Some(crate::domain::CurrentDirectory::Remote(path)) => sanitize_title(path.as_str()),
-            None => sanitize_title(&metadata.directory.path),
+            Some(crate::domain::CurrentDirectory::Remote(path)) => {
+                presented_directory(path.as_str(), home)
+            }
+            None => presented_directory(&metadata.directory.path, home),
         };
         let running = metadata
             .command
@@ -1537,8 +1540,9 @@ impl TerminalPane {
         };
         PaneCaptionFacts {
             origin: PaneOrigin::from_context(&metadata.context),
-            directory: compact_home_directory(&directory, metadata.context.home()).into(),
+            directory: directory.into(),
             label: label.into(),
+            shell: sanitize_title(&metadata.shell_name).into(),
             glyph,
             running: running.is_some(),
             progress: super::terminal_status::TerminalProgress::from_metadata(
@@ -5930,6 +5934,8 @@ pub(crate) struct PaneCaptionFacts {
     pub(crate) origin: PaneOrigin,
     pub(crate) directory: SharedString,
     pub(crate) label: SharedString,
+    /// The shell the Terminal Session runs, or empty until it says.
+    pub(crate) shell: SharedString,
     /// The glyph the program reported for itself, replacing the Terminal Session's own.
     pub(crate) glyph: Option<SharedString>,
     pub(crate) running: bool,
@@ -5948,6 +5954,19 @@ pub(crate) struct PaneOrigin {
 }
 
 impl PaneOrigin {
+    /// The origin of a Pane that has published nothing yet, from the account its Machine's
+    /// other Panes published. `remote` is another computer's Machine as its desktop names it,
+    /// which names the host only when the Machine published none, as it does for a Pane's own
+    /// Terminal Metadata.
+    pub(crate) fn of_machine(user: Option<&str>, host: Option<&str>, remote: Option<&str>) -> Self {
+        use crate::terminal::metadata::sanitize_title;
+        Self {
+            user: sanitize_title(user.unwrap_or_default()).into(),
+            host: sanitize_title(short_hostname(host.or(remote).unwrap_or_default())).into(),
+            remote: remote.is_some(),
+        }
+    }
+
     fn from_context(context: &crate::terminal::metadata::TerminalMetadataContext) -> Self {
         use crate::terminal::metadata::{TerminalOrigin, sanitize_title};
 
@@ -5974,6 +5993,38 @@ fn short_hostname(host: &str) -> &str {
 }
 
 use spaceterm_core::labels::compact_home_directory;
+
+/// How a caption writes directory `path` of a Machine whose home is `home`: without the control
+/// and invisible characters Terminal Metadata never carries, with the home abbreviated, and with
+/// its own folder's name whole. A parent path too long to present keeps its leading folders and
+/// marks where the rest was left out, so a long path never shows another folder's name as its
+/// own. The text is for presentation only.
+pub(crate) fn presented_directory(path: &str, home: Option<&str>) -> String {
+    use spaceterm_core::pane::metadata::{MAX_DIRECTORY_CHARS, MAX_TITLE_CHARS, sanitize};
+    let presentable = sanitize(path, MAX_DIRECTORY_CHARS);
+    let directory = compact_home_directory(presentable.trim(), home);
+    let trimmed = directory.trim_end_matches('/');
+    let Some(separator) = trimmed.rfind('/') else {
+        return directory.chars().take(MAX_TITLE_CHARS).collect();
+    };
+    let (parent, folder) = trimmed.split_at(separator + 1);
+    let folder: String = folder.chars().take(MAX_TITLE_CHARS).collect();
+    if parent.chars().count() <= MAX_TITLE_CHARS {
+        return format!("{parent}{folder}");
+    }
+    let mut leading = String::new();
+    let mut length = 0;
+    for part in parent.split_inclusive('/') {
+        let part_length = part.chars().count();
+        // The mark and its separator take two characters.
+        if length + part_length + 2 > MAX_TITLE_CHARS {
+            break;
+        }
+        leading.push_str(part);
+        length += part_length;
+    }
+    format!("{leading}\u{2026}/{folder}")
+}
 
 fn normalized_pane_title(reported_title: &str, fallback_title: &str) -> String {
     let reported = reported_title

@@ -1194,6 +1194,22 @@ mod core_workspaces {
         /// Whether a Pane these sessions present was explicitly selected, by the person or by
         /// the landing of their own launch. Until then the window presents a view nobody chose.
         selected: Rc<std::cell::Cell<bool>>,
+        /// The Machine's account as its Panes' Terminal Metadata last named it, for presenting
+        /// a Pane that has published nothing itself. It grants no file authority.
+        account: Rc<std::cell::RefCell<MachineAccount>>,
+    }
+
+    /// The account a Machine's Panes run under, as their Terminal Metadata names it. These are
+    /// presentation strings and grant no authority.
+    #[derive(Clone, Default)]
+    pub(crate) struct MachineAccount {
+        pub(crate) user: Option<Arc<str>>,
+        pub(crate) host: Option<Arc<str>>,
+        pub(crate) home: Option<Arc<str>>,
+        /// The shell the Machine's Panes run, which a Pane it starts next most likely runs too.
+        pub(crate) shell: Option<Arc<str>>,
+        /// How many times any of these changed, for a view to know when to draw again.
+        pub(crate) revision: u64,
     }
 
     impl WorkspacePaneSessions {
@@ -1246,6 +1262,31 @@ mod core_workspaces {
                 restart_causes: Arc::default(),
                 this_computer: SharedString::default(),
                 selected: Rc::default(),
+                account: Rc::default(),
+            }
+        }
+
+        /// The Machine's account, as far as any of its Panes published Terminal Metadata.
+        pub(crate) fn account(&self) -> MachineAccount {
+            self.account.borrow().clone()
+        }
+
+        /// Records the account a Pane of this Machine published.
+        pub(crate) fn learn_account(&self, published: &spaceterm_core::pane::metadata::Snapshot) {
+            let mut account = self.account.borrow_mut();
+            let account = &mut *account;
+            for (known, published) in [
+                (&mut account.user, published.user.as_deref()),
+                (&mut account.host, published.host.as_deref()),
+                (&mut account.home, published.home.as_deref()),
+                (&mut account.shell, Some(published.shell_name.as_str())),
+            ] {
+                if let Some(published) = published.filter(|value| !value.is_empty())
+                    && known.as_deref() != Some(published)
+                {
+                    *known = Some(published.into());
+                    account.revision += 1;
+                }
             }
         }
 
@@ -2943,6 +2984,18 @@ mod core_workspaces {
                 *self.edits.machine.borrow_mut() = Some(core);
             }
             let (snapshot, standing_in) = self.edits.read();
+            // Every Pane the Machine lists names its account, whichever Workspaces this client
+            // presents, so a Pane started next is named from it at once.
+            for published in snapshot
+                .inventory
+                .iter()
+                .flat_map(|inventory| &inventory.workspaces)
+                .flat_map(|workspace| &workspace.tabs)
+                .flat_map(|tab| &tab.panes)
+                .filter_map(|pane| pane.presentation.as_deref())
+            {
+                self.sessions.learn_account(published);
+            }
             if snapshot.connected
                 && !standing_in
                 && let Some(inventory) = &snapshot.inventory
@@ -3920,6 +3973,9 @@ mod core_workspaces {
             changes: crate::terminal::changes::Changes,
             /// Whether the connection reaches its Terminal Session once its Pane observes it.
             connect_when_observed: std::sync::atomic::AtomicBool,
+            /// Whether that connection attaches a shell this client started, quiet until its
+            /// first prompt.
+            quiet_when_observed: std::sync::atomic::AtomicBool,
             running_version: Mutex<Option<spaceterm_core::update::facts::Version>>,
             unsent: Mutex<Option<crate::terminal::core_session::unsent::UnsentInput>>,
         }
@@ -3945,6 +4001,7 @@ mod core_workspaces {
                     retries: std::sync::atomic::AtomicUsize::new(0),
                     changes: crate::terminal::changes::Changes::default(),
                     connect_when_observed: std::sync::atomic::AtomicBool::new(false),
+                    quiet_when_observed: std::sync::atomic::AtomicBool::new(false),
                     running_version: Mutex::default(),
                     unsent: Mutex::default(),
                 })
@@ -4180,7 +4237,14 @@ mod core_workspaces {
                     .connect_when_observed
                     .swap(false, std::sync::atomic::Ordering::SeqCst)
                 {
-                    self.reconnect();
+                    if self
+                        .quiet_when_observed
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        self.attach_quietly();
+                    } else {
+                        self.reconnect();
+                    }
                 }
             }
 
@@ -4229,6 +4293,9 @@ mod core_workspaces {
             /// Panes no subscription opens for yet, as the account-local opener refuses a Pane
             /// its attachment catalog does not list yet.
             refused: Mutex<std::collections::BTreeSet<super::Id>>,
+            /// Whether each Pane opened from now on starts a shell this client created, quiet
+            /// until its first prompt, as a Pane a person just created does.
+            quiet_starts: std::sync::atomic::AtomicBool,
         }
 
         impl ScriptedPanes {
@@ -4265,6 +4332,7 @@ mod core_workspaces {
                     refused: Mutex::default(),
                     connected: false,
                     order: Mutex::default(),
+                    quiet_starts: Default::default(),
                 })
             }
 
@@ -4280,7 +4348,15 @@ mod core_workspaces {
                     refused: Mutex::default(),
                     connected: true,
                     order: Mutex::default(),
+                    quiet_starts: Default::default(),
                 })
+            }
+
+            /// Every Pane opened from now on starts its shell quietly, until
+            /// [`ScriptedPane::end_startup`].
+            pub(crate) fn start_opened_panes_quietly(&self) {
+                self.quiet_starts
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
             }
 
             /// The scripted connections behind every server Pane opened so far.
@@ -4339,6 +4415,10 @@ mod core_workspaces {
                 connection
                     .connect_when_observed
                     .store(self.connected, std::sync::atomic::Ordering::SeqCst);
+                connection.quiet_when_observed.store(
+                    self.quiet_starts.load(std::sync::atomic::Ordering::SeqCst),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
                 self.order.lock().expect("order").push(pane);
                 self.panes
                     .lock()
