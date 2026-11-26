@@ -5497,13 +5497,14 @@ fn reads(worker: &mut TerminalWorker, output: &[u8]) {
 #[test]
 fn an_idle_shell_with_a_prompt_helper_closes_directly() {
     let mut worker = idle_worker(SHELL_FOREGROUND, Some(true));
-    reads(&mut worker, OWNED_PROMPT);
+    let no_jobs = b"\x1b]7;file://mac.local/initial\x07\x1b]133;A;spaceterm=0f1e;jobs=0\x07% ";
+    reads(&mut worker, no_jobs);
     assert!(!worker.events.running_work(), "the first prompt is idle");
 
     worker.events.note_submitted();
     assert!(worker.process_command(Command::Key(enter_key())));
     assert!(worker.events.running_work(), "the line is unanswered");
-    reads(&mut worker, FRESH_PROMPT);
+    reads(&mut worker, no_jobs);
     assert!(!worker.events.running_work(), "the command has finished");
     worker.finish();
 }

@@ -338,6 +338,63 @@ impl Drop for ShellStartupDirectory {
 }
 
 #[test]
+fn direct_close_distinguishes_zsh_prompt_helpers_from_tracked_jobs() {
+    const NAME: &str = "terminal::session::unix_adapter_tests::direct_close_distinguishes_zsh_prompt_helpers_from_tracked_jobs";
+    if crate::platform::unix_pty::isolate_real_pty_test(NAME) {
+        return;
+    }
+    let _isolation = crate::platform::unix_pty::lock_real_pty_test();
+    let startup = ShellStartupDirectory::new();
+    std::fs::write(
+        startup.path().join(".zshrc"),
+        "precmd() { if [[ -z $helper ]]; then sleep 60 &! helper=$!; fi }\n",
+    )
+    .unwrap();
+    let (session, events, _) = TerminalRuntime::start(
+        native_pty_adapter_factory(),
+        test_launch_planner(startup.path()),
+        test_geometry(),
+        &std::env::current_dir().unwrap(),
+        Some("fixture.test"),
+        LocalFilesystemAuthority::testing(),
+        Arc::default(),
+    )
+    .unwrap();
+    let session = JoinedRealPtySession(session);
+    wait_for_shell_prompt(&session, &events);
+    assert!(
+        !session.running_work(),
+        "a disowned prompt helper leaves the first prompt idle"
+    );
+
+    for (command, working) in [
+        (":", false),
+        ("sleep 60 &", true),
+        ("kill -STOP $!", true),
+        ("kill -KILL $!; wait $!", false),
+    ] {
+        let before = session.metadata_snapshot().unwrap().finished_commands;
+        enter_command(&session, command);
+        let deadline = Instant::now() + REAL_SHELL_DEADLINE;
+        while !session.metadata_snapshot().is_some_and(|metadata| {
+            metadata.finished_commands > before
+                && metadata.prompt_zone == crate::terminal::metadata::PromptZone::CommandInput
+        }) {
+            assert!(
+                Instant::now() < deadline,
+                "the command must return to the owned prompt"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            session.running_work(),
+            working,
+            "close admission after {command}"
+        );
+    }
+}
+
+#[test]
 fn a_real_integrated_shell_needs_a_quiet_hour_and_receives_input_after_a_lease() {
     const NAME: &str = "terminal::session::unix_adapter_tests::a_real_integrated_shell_needs_a_quiet_hour_and_receives_input_after_a_lease";
     let _isolation = crate::platform::unix_pty::lock_real_pty_test();
