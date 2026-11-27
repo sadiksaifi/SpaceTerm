@@ -47,6 +47,7 @@ impl Batch {
 
 pub(super) fn read<'a>(
     panes: Vec<Id>,
+    preserve_palette: bool,
     source: impl Fn(Id) -> Source<'a>,
     request: RequestId,
     outbox: &Outbox,
@@ -85,7 +86,7 @@ pub(super) fn read<'a>(
             let result = live.runtime.read_preview({
                 let batch = Arc::clone(&batch);
                 move |capture| {
-                    batch.record(index, Ok(captured(session, capture)));
+                    batch.record(index, Ok(captured(session, capture, preserve_palette)));
                     if let Some(batch) = Arc::into_inner(batch) {
                         batch.send();
                     }
@@ -117,11 +118,11 @@ pub(super) fn read<'a>(
     Dispatch::Deferred
 }
 
-fn captured(session: Id, capture: PreviewCapture) -> State {
+fn captured(session: Id, capture: PreviewCapture, preserve_palette: bool) -> State {
     match capture {
         PreviewCapture::Live(grid) => State::Live {
             session,
-            screen: grid.as_deref().map(current),
+            screen: grid.as_deref().map(|grid| current(grid, preserve_palette)),
         },
         PreviewCapture::Ended => State::Ended {
             session: Some(session),
@@ -130,7 +131,7 @@ fn captured(session: Id, capture: PreviewCapture) -> State {
     }
 }
 
-fn current(grid: &PreviewGrid) -> Screen {
+fn current(grid: &PreviewGrid, preserve_palette: bool) -> Screen {
     Screen {
         columns: grid.columns,
         row_count: grid.rows.len() as u16,
@@ -143,7 +144,7 @@ fn current(grid: &PreviewGrid) -> Screen {
                 .iter()
                 .map(|(row, wrapped)| (row.as_ref(), *wrapped)),
             grid.columns,
-            &grid.palette,
+            (!preserve_palette).then_some(&grid.palette),
         ),
     }
 }

@@ -861,11 +861,11 @@ fn rgb(color: crate::appearance::Color) -> [u8; 3] {
     [color.r, color.g, color.b]
 }
 
-/// Encodes visible preview rows without a channel, style table, links, or selection.
+/// Encodes visible preview rows with inline styles. A supplied palette resolves indexed colors.
 pub(super) fn preview_rows<'a>(
     rows: impl Iterator<Item = (&'a [CellSnapshot], bool)>,
     columns: u16,
-    palette: &[crate::appearance::Color; 256],
+    palette: Option<&[crate::appearance::Color; 256]>,
 ) -> Vec<wire::Row> {
     fn resolve(color: pane::Color, palette: &[crate::appearance::Color; 256]) -> pane::Color {
         match color {
@@ -880,9 +880,11 @@ pub(super) fn preview_rows<'a>(
             for cell in row.iter().take(usize::from(columns)) {
                 let mut style = StyleFields::of(cell).style();
                 style.flags &= !flags::SELECTED;
-                style.foreground = resolve(style.foreground, palette);
-                style.background = resolve(style.background, palette);
-                style.underline_color = resolve(style.underline_color, palette);
+                if let Some(palette) = palette {
+                    style.foreground = resolve(style.foreground, palette);
+                    style.background = resolve(style.background, palette);
+                    style.underline_color = resolve(style.underline_color, palette);
+                }
                 let style = if style == Style::DEFAULT {
                     StyleRef::Default
                 } else {

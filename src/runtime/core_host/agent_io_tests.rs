@@ -655,7 +655,16 @@ struct Client {
 
 impl Client {
     fn admit(served: &mut Served<WorkspaceHost>, peer: Peer, name: &str) -> Self {
-        let outbox = Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK);
+        Self::admit_at_work(served, peer, name, protocol::version::WORK)
+    }
+
+    fn admit_at_work(
+        served: &mut Served<WorkspaceHost>,
+        peer: Peer,
+        name: &str,
+        work: protocol::version::ProtocolVersion,
+    ) -> Self {
+        let outbox = Outbox::new(Arc::new(|| {}), work);
         served.admitted(&peer, name.into(), outbox.clone());
         Self {
             peer,
@@ -776,6 +785,8 @@ fn pane_previews_read_hidden_output_and_discard_it_when_the_shell_fails() {
     use spaceterm_core::connection::link::{CoreLink, LinkError, PendingReply};
     use spaceterm_core::protocol::preview::{PanePreview, State};
     use spaceterm_core::protocol::screen::StyleRef;
+    const LEGACY_WORK: protocol::version::ProtocolVersion =
+        protocol::version::ProtocolVersion { major: 1, minor: 6 };
 
     fn request(
         served: &mut Served<WorkspaceHost>,
@@ -783,7 +794,7 @@ fn pane_previews_read_hidden_output_and_discard_it_when_the_shell_fails() {
         link: &CoreLink,
         panes: Vec<[u8; 32]>,
     ) -> PendingReply {
-        let pending = link.read_pane_previews(panes).unwrap();
+        let pending = link.read_pane_previews_with_palette(panes).unwrap();
         let (frame, _) = link.next_frame().unwrap();
         let decoded = Assembler::default()
             .client(protocol::RawFrame::parse(&frame).unwrap())
@@ -791,8 +802,15 @@ fn pane_previews_read_hidden_output_and_discard_it_when_the_shell_fails() {
         let Some(protocol::ClientMessage::Request(request)) = decoded else {
             panic!("the link sends one read request");
         };
+        assert_eq!(
+            matches!(
+                &request.operation,
+                Operation::PanePreviewsWithPalette { .. }
+            ),
+            agent.outbox.work() > LEGACY_WORK,
+        );
         agent.outbox.begin(request.id).unwrap();
-        match served.request(&OBSERVER, request.id, request.operation) {
+        match served.request(&agent.peer, request.id, request.operation) {
             Dispatch::After(work) => agent.outbox.reply_or_refuse(request.id, work()).unwrap(),
             Dispatch::Deferred => {}
             Dispatch::Reply(_) => panic!("the preview encodes outside the service lock"),
@@ -859,15 +877,15 @@ fn pane_previews_read_hidden_output_and_discard_it_when_the_shell_fails() {
     let mut served = Served::new(binding);
     served.ticker(Arc::new(|| {}));
     let person = Client::admit(&mut served, CONTROLLER, "Person");
-    let agent = Client::admit(&mut served, OBSERVER, "Agent");
+    let agent = Client::admit_at_work(&mut served, OBSERVER, "Agent", LEGACY_WORK);
     let link = CoreLink::new(Arc::new(|_| {}), Arc::new(|| {}), Instant::now());
     link.select_work(protocol::version::ProtocolVersion { major: 1, minor: 5 });
     assert!(matches!(
-        link.read_pane_previews(vec![pane]),
+        link.read_pane_previews_with_palette(vec![pane]),
         Err(LinkError::Unsupported)
     ));
     assert!(link.next_frame().is_none());
-    link.select_work(protocol::version::WORK);
+    link.select_work(LEGACY_WORK);
 
     let started = person.reply(
         &mut served,
@@ -906,15 +924,28 @@ fn pane_previews_read_hidden_output_and_discard_it_when_the_shell_fails() {
     write(
         &mut served,
         2,
-        vec![text("printf '\\033[31mPREVIEW-%s\\033[0m\\n' hidden\r")],
+        vec![text(concat!(
+            "printf '\\033]4;1;#123456\\007\\033[31;41;4;58;5;1mPREVIEW-%s\\033[0m\\n",
+            "\\033[38;2;18;52;86mPREVIEW-%s\\033[0m\\n' hidden rgb\r",
+        ))],
     );
 
-    let has_output = |screen: &protocol::preview::Screen, marker: &str| {
-        screen.rows.iter().flat_map(|row| &row.runs).any(|run| {
-            run.text.contains(marker)
-                && matches!(run.style, StyleRef::Inline(style) if matches!(style.foreground, pane::Color::Rgb(_)))
-        })
+    let style_for = |screen: &protocol::preview::Screen, marker: &str| {
+        screen
+            .rows
+            .iter()
+            .flat_map(|row| &row.runs)
+            .find_map(|run| {
+                if run.text.contains(marker)
+                    && let StyleRef::Inline(style) = run.style
+                {
+                    Some(style)
+                } else {
+                    None
+                }
+            })
     };
+    let rgb = pane::Color::Rgb([18, 52, 86]);
     let until = Instant::now() + DEADLINE;
     loop {
         let previews = read(&mut served, &agent, &link, vec![cold, pane, missing]);
@@ -927,8 +958,25 @@ fn pane_previews_read_hidden_output_and_discard_it_when_the_shell_fails() {
         );
         assert_eq!(previews[0].state, State::NotStarted);
         assert_eq!(previews[2].state, State::Missing);
-        if matches!(&previews[1].state, State::Live {session, screen: Some(screen)} if *session == lease.session && has_output(screen, "PREVIEW-hidden"))
+        if let State::Live {
+            session,
+            screen: Some(screen),
+        } = &previews[1].state
+            && let (Some(indexed), Some(explicit)) = (
+                style_for(screen, "PREVIEW-hidden"),
+                style_for(screen, "PREVIEW-rgb"),
+            )
         {
+            assert_eq!(*session, lease.session);
+            assert_eq!(
+                [
+                    indexed.foreground,
+                    indexed.background,
+                    indexed.underline_color
+                ],
+                [rgb; 3]
+            );
+            assert_eq!(explicit.foreground, rgb);
             break;
         }
         assert!(Instant::now() < until, "the hidden output is readable");
@@ -937,6 +985,33 @@ fn pane_previews_read_hidden_output_and_discard_it_when_the_shell_fails() {
     assert_eq!(served.host().running_lease(pane), Some(lease));
     assert_eq!(served.host().session_size(pane), Some(size()));
     assert_eq!(served.host().running_lease(cold), None);
+
+    let palette_peer = Peer {
+        client: [5; 32],
+        connection: [5; 32],
+        pairing: None,
+    };
+    let palette_agent = Client::admit(&mut served, palette_peer, "Palette reader");
+    let palette_link = CoreLink::new(Arc::new(|_| {}), Arc::new(|| {}), Instant::now());
+    palette_link.select_work(protocol::version::WORK);
+    let previews = read(&mut served, &palette_agent, &palette_link, vec![pane]);
+    let State::Live {
+        screen: Some(screen),
+        ..
+    } = &previews[0].state
+    else {
+        panic!("the preview has a live screen");
+    };
+    let indexed = style_for(screen, "PREVIEW-hidden").unwrap();
+    assert_eq!(
+        [
+            indexed.foreground,
+            indexed.background,
+            indexed.underline_color
+        ],
+        [pane::Color::Palette(1); 3]
+    );
+    assert_eq!(style_for(screen, "PREVIEW-rgb").unwrap().foreground, rgb);
 
     // The title proves that the worker consumed the synchronized-update start. Keep the update
     // open until the preview request has entered the same worker queue as the shell's input.
@@ -982,7 +1057,7 @@ fn pane_previews_read_hidden_output_and_discard_it_when_the_shell_fails() {
         matches!(
             &previews[0].state,
             State::Live {session, screen: Some(screen)}
-                if *session == lease.session && has_output(screen, "PREVIEW-settled")
+                if *session == lease.session && style_for(screen, "PREVIEW-settled").is_some()
         ),
         "a held read needs the complete synchronized screen: {previews:?}"
     );

@@ -389,6 +389,22 @@ impl CoreLink {
         self.request(Operation::PanePreviews { panes })
     }
 
+    /// Reads [`ReplyBody::PanePreviews`] with palette indexes in run styles. When the connection
+    /// selects Work 1.6, requests the same previews with palette colors resolved to RGB.
+    pub fn read_pane_previews_with_palette(
+        &self,
+        panes: Vec<crate::hierarchy::Id>,
+    ) -> Result<PendingReply, LinkError> {
+        if supports_work(
+            self.work(),
+            crate::protocol::capability::Capability::PanePreviewPalette,
+        ) {
+            self.request(Operation::PanePreviewsWithPalette { panes })
+        } else {
+            self.read_pane_previews(panes)
+        }
+    }
+
     /// Sends a request whose reply `then` receives on the I/O thread. `then` must not block.
     pub fn request_then(
         &self,

@@ -663,7 +663,7 @@ fn end_all_sessions_drops_output_and_fences_old_input_effects_and_snapshots() {
     fn read_preview(host: &WorkspaceHost, outbox: &Outbox, id: RequestId, pane: Id) {
         outbox.begin(id).unwrap();
         assert!(matches!(
-            host.pane_previews(vec![pane], id, outbox),
+            host.pane_previews(vec![pane], true, id, outbox),
             Dispatch::Deferred
         ));
     }
@@ -761,7 +761,7 @@ fn end_all_sessions_drops_output_and_fences_old_input_effects_and_snapshots() {
     // The retained outcome can arrive before the native stops, so the preview fence must
     // already be in place before the synchronization tick runs.
     assert!(
-        matches!(host.pane_previews(vec![pane], RequestId(3), &queued),
+        matches!(host.pane_previews(vec![pane], true, RequestId(3), &queued),
         Dispatch::Reply(reply) if matches!(*reply, Err(Refusal::Stale)))
     );
     assert!(matches!(
