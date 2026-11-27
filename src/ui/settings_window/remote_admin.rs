@@ -639,7 +639,7 @@ impl SettingsWindow {
 
     /// The lane steps for `route`'s current connection, when the desktop reaches paired
     /// servers' lanes and holds a connection to this one.
-    pub(super) fn remote_control(
+    fn remote_control(
         &self,
         route: &DirectRouteId,
         cx: &App,
@@ -657,22 +657,48 @@ impl SettingsWindow {
             && self.remote(route).is_none_or(|admin| admin.work.is_none())
     }
 
-    /// Whether SpaceTerm reaches `route`'s service lane over a connection it holds, whatever
-    /// the card is doing.
-    pub(super) fn remote_reachable(&self, route: &DirectRouteId, cx: &App) -> bool {
+    /// Whether `route` is connected, or refused only for want of a work protocol in common,
+    /// which the service lane still speaks.
+    fn lane_status_answers(&self, route: &DirectRouteId) -> bool {
         let status = self
             .saved_direct_machines()
             .into_iter()
             .find(|(saved, _, _)| saved == route)
             .map(|(_, status, _)| status);
-        let reachable = matches!(
+        matches!(
             status,
             Some(
                 DirectRouteStatus::Connected
                     | DirectRouteStatus::Refused(RefusalReason::Incompatible)
             )
-        );
-        reachable
+        )
+    }
+
+    /// The lane steps for `route` over the handle whose service lane answers, which SpaceTerm
+    /// keeps also while the Core refuses this desktop's work protocol. `None` while the route's
+    /// lane doesn't answer.
+    pub(super) fn remote_lane(
+        &self,
+        route: &DirectRouteId,
+        cx: &App,
+    ) -> Option<(Arc<dyn RemoteMachineControl>, MachineConnection)> {
+        if !self.lane_status_answers(route) {
+            return None;
+        }
+        let source = installed(cx)?;
+        let core = self.direct_routes.as_ref()?.connections.service(route)?;
+        Some((source(core.clone()), core))
+    }
+
+    /// The handle `route`'s service lane answers on now, if SpaceTerm holds one.
+    pub(super) fn remote_lane_handle(&self, route: &DirectRouteId) -> Option<MachineConnection> {
+        self.direct_routes.as_ref()?.connections.service(route)
+    }
+
+    /// Whether SpaceTerm reaches `route`'s service lane over a connection it holds, whatever
+    /// the card is doing.
+    pub(super) fn remote_reachable(&self, route: &DirectRouteId, cx: &App) -> bool {
+        self.lane_status_answers(route)
             && installed(cx).is_some()
             && self
                 .direct_routes

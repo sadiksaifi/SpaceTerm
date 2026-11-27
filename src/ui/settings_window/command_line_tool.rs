@@ -17,6 +17,7 @@ use super::SettingsWindow;
 use super::machine_list::MachineChoice;
 use crate::command_line_tool::{CommandLineTool, Launcher, ToolAction, ToolFailure};
 use crate::core_context::MachineKey;
+use crate::machine_connection::MachineConnection;
 use crate::ui::appearance::ChromeAppearance;
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::sidebar_window::form::{CaptionTone, badge};
@@ -125,6 +126,9 @@ impl CommandLineTools {
     }
 }
 
+/// A paired Machine's connection and its link generation.
+type Link = (MachineConnection, u64);
+
 /// The last status of one Machine's command, and the running step.
 #[derive(Default)]
 pub(super) struct CommandLineToolRow {
@@ -135,6 +139,10 @@ pub(super) struct CommandLineToolRow {
     /// A service operation or update finished while a step ran, so that step's read may predate
     /// it and the command is read again afterwards.
     read_outdated: bool,
+    /// The paired Machine's connection and its link generation when the last step ran. A
+    /// reconnect may reach a Machine whose command changed since, so what the step learned
+    /// belongs to that link.
+    read_over: Option<Link>,
     /// Returns the background result to GPUI. Dropping the window drops it.
     _operation: Option<Task<()>>,
 }
@@ -255,6 +263,17 @@ pub(super) fn present(
             ToolAction::Uninstall => menu.push((offered, "Uninstall")),
         }
     }
+    // A paired Machine's command may change there at any time, and SpaceTerm reads it again
+    // only when asked, so a read one always offers Check Again.
+    if place == ToolPlace::Paired && matches!(check, ToolCheck::Checked(_)) {
+        // It is the button only where the row offers nothing else.
+        let again = (ToolAction::Check, "Check Again");
+        if action.is_none() && menu.is_empty() {
+            action = Some(again);
+        } else {
+            menu.insert(0, again);
+        }
+    }
     // SpaceTerm runs no shell to learn PATH, so the row names the directory PATH must include
     // for a command it would install. An installed command's explanation names its path.
     let ours = matches!(
@@ -338,7 +357,16 @@ impl SettingsWindow {
             MachineChoice::Local => ToolPlace::Local,
             MachineChoice::Direct(_) => ToolPlace::Paired,
         };
-        let row = tools.row(&choice);
+        // What a step learned over an earlier link of a paired Machine no longer holds.
+        let row = tools.row(&choice).filter(|row| match (&choice, &row.read_over) {
+            (MachineChoice::Direct(route), Some((read_over, link))) => {
+                row.working.is_some()
+                    || self.remote_lane_handle(route).is_some_and(|current| {
+                        read_over.same_handle(&current) && *link == current.link_generation()
+                    })
+            }
+            _ => true,
+        });
         Some(present(
             tools.name,
             place,
@@ -368,11 +396,19 @@ impl SettingsWindow {
         }
     }
 
-    /// Runs the selected Machine's action on the background executor.
-    pub(super) fn request_command_line_tool(&mut self, action: ToolAction, cx: &mut Context<Self>) {
-        let Some(choice) = self.selected_machine() else {
+    /// Runs `action` on `choice`'s command on the background executor, while `choice` is still
+    /// the selected Machine. A control rendered for one Machine never acts on another that
+    /// replaced it before the next frame.
+    pub(super) fn request_command_line_tool(
+        &mut self,
+        choice: &MachineChoice,
+        action: ToolAction,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_machine().as_ref() != Some(choice) {
             return;
-        };
+        }
+        let choice = choice.clone();
         let work = match action {
             ToolAction::Check => ToolWork::Check,
             ToolAction::Install => ToolWork::Install,
@@ -382,24 +418,26 @@ impl SettingsWindow {
         self.run_command_line_tool(choice, work, cx);
     }
 
-    /// `choice`'s command: this computer's own, or a paired Machine's over the lane of the
-    /// connection SpaceTerm holds to it. `None` for a paired Machine SpaceTerm doesn't reach now.
+    /// `choice`'s command: this computer's own, or a paired Machine's over the service lane of
+    /// the connection SpaceTerm holds to it, with that connection and its link generation.
+    /// `None` for a paired Machine whose lane SpaceTerm doesn't reach now.
     fn command_line_tool_for(
         &self,
         choice: &MachineChoice,
         cx: &App,
-    ) -> Option<Arc<CommandLineTool>> {
+    ) -> Option<(Arc<CommandLineTool>, Option<Link>)> {
         match choice {
-            MachineChoice::Local => self.command_line_tools.local.clone(),
+            MachineChoice::Local => Some((self.command_line_tools.local.clone()?, None)),
             MachineChoice::Direct(route) => {
-                if !self.remote_reachable(route, cx) {
-                    return None;
-                }
-                let (control, _) = self.remote_control(route, cx)?;
-                Some(Arc::new(CommandLineTool::new(
-                    self.command_line_tools.name,
-                    control.command_line_tool(),
-                )))
+                let (control, core) = self.remote_lane(route, cx)?;
+                let link = core.link_generation();
+                Some((
+                    Arc::new(CommandLineTool::new(
+                        self.command_line_tools.name,
+                        control.command_line_tool(),
+                    )),
+                    Some((core, link)),
+                ))
             }
         }
     }
@@ -417,16 +455,27 @@ impl SettingsWindow {
         if work != ToolWork::Check {
             row.failure = None;
         }
-        let Some(tool) = tool else {
+        let Some((tool, read_over)) = tool else {
             // Nothing reaches a paired Machine SpaceTerm isn't connected to, so the row says so
-            // without trying.
-            match work {
-                ToolWork::Check => row.check = ToolCheck::Failed(ToolFailure::Unreachable),
-                _ => row.failure = Some(ToolFailure::Unreachable),
-            }
+            // without trying, and what it learned over an earlier link no longer holds.
+            row.check = ToolCheck::Failed(ToolFailure::Unreachable);
+            row.failure = None;
+            row.read_over = None;
             cx.notify();
             return;
         };
+        // A step over a new link starts from nothing that an earlier link showed.
+        let same_link = match (&row.read_over, &read_over) {
+            (Some((earlier, earlier_link)), Some((current, link))) => {
+                earlier.same_handle(current) && earlier_link == link
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if !same_link {
+            row.check = ToolCheck::NotChecked;
+        }
+        row.read_over = read_over;
         row.working = Some(work);
         let result = cx.background_spawn(async move {
             match work {
@@ -471,7 +520,12 @@ impl SettingsWindow {
         let Some(presentation) = self.command_line_tool_presentation() else {
             return div().into_any_element();
         };
+        // The row presents a selected Machine, so its controls act only on that Machine.
+        let Some(shown) = self.selected_machine() else {
+            return div().into_any_element();
+        };
         let owner = cx.weak_entity();
+        let target = shown.clone();
         let button = presentation.action.map(|(action, label)| {
             Button::new(ACTION_SELECTOR, label)
                 .variant(ButtonVariant::Outline)
@@ -481,7 +535,7 @@ impl SettingsWindow {
                 .debug_selector(ACTION_SELECTOR)
                 .on_activate(move |_, _: &mut Window, cx| {
                     let _ = owner.update(cx, |settings, cx| {
-                        settings.request_command_line_tool(action, cx);
+                        settings.request_command_line_tool(&target, action, cx);
                     });
                 })
         });
@@ -499,6 +553,7 @@ impl SettingsWindow {
                 })
                 .collect();
             let owner = cx.weak_entity();
+            let target = shown.clone();
             let icon_size = appearance.icons.metrics(IconRole::Control).glyph_size;
             Menu::new(
                 MENU_SELECTOR,
@@ -516,14 +571,12 @@ impl SettingsWindow {
             .on_activate(move |activation, _: &mut Window, cx| {
                 let action = *activation.action();
                 let _ = owner.update(cx, |settings, cx| {
-                    settings.request_command_line_tool(action, cx);
+                    settings.request_command_line_tool(&target, action, cx);
                 });
             })
         });
         let state_selector = presentation.state_selector;
-        let working = self
-            .selected_machine()
-            .and_then(|choice| self.command_line_tools.row(&choice)?.working);
+        let working = self.command_line_tools.row(&shown).and_then(|row| row.working);
         let progress = match working {
             Some(ToolWork::Install) => "Installing the command",
             Some(ToolWork::Repair) => "Repairing the command",

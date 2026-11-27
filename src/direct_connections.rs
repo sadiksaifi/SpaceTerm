@@ -160,6 +160,11 @@ pub mod tests {
         (desktop(routes), ids)
     }
 
+    pub fn work_refused_routes(labels: &[&str]) -> (DirectConnections, Vec<DirectRouteId>) {
+        let (routes, ids) = fixture::work_refused_routes(labels);
+        (desktop(routes), ids)
+    }
+
     pub fn connected_routes_to_one_core(
         labels: &[&str],
         core: [u8; 32],

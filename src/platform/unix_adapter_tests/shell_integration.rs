@@ -557,6 +557,7 @@ fn a_login_shell_whose_profile_replaces_path_still_finds_the_session_cli() {
         pane: [1; 32],
         session: [2; 32],
         cli: cli.clone(),
+        started_elsewhere: false,
     };
     for (shell, integration) in [
         ("/bin/bash", None),
