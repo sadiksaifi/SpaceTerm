@@ -356,6 +356,9 @@ fn failure_text(failure: ToolFailure, name: &str) -> SharedString {
         ToolFailure::Failed => {
             SharedString::new_static("This Machine couldn\u{2019}t finish the change.")
         }
+        ToolFailure::Unread => SharedString::new_static(
+            "The change finished, but SpaceTerm couldn\u{2019}t read the command afterward.",
+        ),
     }
 }
 
@@ -540,6 +543,12 @@ impl SettingsWindow {
                 match (work, result) {
                     (_, Ok(status)) => row.check = ToolCheck::Checked(status),
                     (ToolWork::Check, Err(failure)) => row.check = ToolCheck::Failed(failure),
+                    // The change finished, so nothing failed, but what the path holds now is
+                    // unknown until it is read again.
+                    (_, Err(ToolFailure::Unread)) => {
+                        row.check = ToolCheck::NotChecked;
+                        again = true;
+                    }
                     // A failed change says why and reads the command again: it may have landed
                     // before the failure, or found another program's file meanwhile.
                     (ToolWork::Install | ToolWork::Repair | ToolWork::Uninstall, Err(failure)) => {

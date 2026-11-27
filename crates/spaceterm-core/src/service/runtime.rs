@@ -199,11 +199,9 @@ impl Service {
             LockWait::Locked(lock) => lock,
             LockWait::Held | LockWait::Cancelled => return Err(CoreError::ServiceBusy),
         };
-        launcher::remove(
-            self.cli_home()?,
-            &self.identity,
-            &self.paths.data.join("installations"),
-        )
+        let home = self.cli_home()?;
+        launcher::inspectable(home, &self.identity)?;
+        launcher::remove(home, &self.identity, &self.paths.data.join("installations"))
     }
 
     /// Read what the command-line launcher path holds, without following it or taking a lock.

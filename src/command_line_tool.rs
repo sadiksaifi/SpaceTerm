@@ -82,6 +82,8 @@ pub(crate) enum ToolFailure {
     Unsupported,
     /// The paired Machine refused or answered in a way SpaceTerm doesn't read.
     Failed,
+    /// The change finished, but the read after it didn't, so what the path holds now is unknown.
+    Unread,
 }
 
 /// The outcome of linking the launcher.
@@ -128,8 +130,8 @@ impl CommandLineTool {
 
     /// Links the launcher unless another program's file or link is there, and reports the
     /// launcher afterward. Install and Repair both run this; an installed launcher is linked
-    /// again. A link that succeeded is never reported as failed: when the read after it fails,
-    /// the link itself shows the launcher installed. Blocks.
+    /// again. A link that succeeded whose read after it failed reports [`ToolFailure::Unread`].
+    /// Blocks.
     pub(crate) fn install(&self) -> Result<Launcher, ToolFailure> {
         match self.files.read()? {
             Launcher::OtherLink | Launcher::OtherFile => return Err(ToolFailure::Occupied),
@@ -142,15 +144,22 @@ impl CommandLineTool {
                 }
             }
         }
-        Ok(self.status().unwrap_or(Launcher::Installed))
+        self.status().map_err(|_| ToolFailure::Unread)
     }
 
     /// Removes SpaceTerm's launcher and reports the launcher afterward, which another program's
-    /// entry may still hold. A removal that succeeded is never reported as failed: when the read
-    /// after it fails, SpaceTerm's link is known to be gone. Blocks.
+    /// entry may still hold. It reads first, so another program's entry that took the path since
+    /// the last read is reported and nothing is removed. A removal that succeeded whose read
+    /// after it failed reports [`ToolFailure::Unread`]. Blocks.
     pub(crate) fn uninstall(&self) -> Result<Launcher, ToolFailure> {
+        match self.files.read()? {
+            other @ (Launcher::OtherLink | Launcher::OtherFile | Launcher::Missing) => {
+                return Ok(other);
+            }
+            Launcher::Installed | Launcher::Stale | Launcher::Outdated | Launcher::Blocked => {}
+        }
         self.files.unlink()?;
-        Ok(self.status().unwrap_or(Launcher::Missing))
+        self.status().map_err(|_| ToolFailure::Unread)
     }
 }
 
@@ -172,8 +181,9 @@ pub(crate) mod testing {
         pub(crate) links: AtomicUsize,
         pub(crate) unlinks: AtomicUsize,
         pub(crate) reads: AtomicUsize,
-        /// What a read returns after a successful link or removal, in place of the launcher
-        /// that change leaves, such as a connection lost after the change.
+        /// What a read returns after a link or removal, in place of the launcher that change
+        /// leaves, such as a connection lost after the change or a removal that landed before
+        /// it failed.
         pub(crate) after_change: Mutex<Option<Result<Launcher, ToolFailure>>>,
     }
 
@@ -207,14 +217,12 @@ pub(crate) mod testing {
         fn link(&self) -> Result<LinkOutcome, ToolFailure> {
             self.links.fetch_add(1, Ordering::SeqCst);
             let outcome = *self.link.lock().unwrap();
+            if let Some(after) = *self.after_change.lock().unwrap() {
+                *self.launcher.lock().unwrap() = after;
+                return outcome;
+            }
             match outcome {
-                Ok(LinkOutcome::Linked) => {
-                    *self.launcher.lock().unwrap() = self
-                        .after_change
-                        .lock()
-                        .unwrap()
-                        .unwrap_or(Ok(Launcher::Installed));
-                }
+                Ok(LinkOutcome::Linked) => *self.launcher.lock().unwrap() = Ok(Launcher::Installed),
                 Ok(LinkOutcome::Kept) => *self.launcher.lock().unwrap() = Ok(Launcher::OtherLink),
                 Ok(LinkOutcome::Blocked) => *self.launcher.lock().unwrap() = Ok(Launcher::Blocked),
                 Err(_) => {}
@@ -224,11 +232,11 @@ pub(crate) mod testing {
         fn unlink(&self) -> Result<(), ToolFailure> {
             self.unlinks.fetch_add(1, Ordering::SeqCst);
             let outcome = *self.unlink.lock().unwrap();
-            if outcome.is_ok() {
+            if let Some(after) = *self.after_change.lock().unwrap() {
+                *self.launcher.lock().unwrap() = after;
+            } else if outcome.is_ok() {
                 let mut launcher = self.launcher.lock().unwrap();
-                if let Some(after) = *self.after_change.lock().unwrap() {
-                    *launcher = after;
-                } else if !matches!(*launcher, Ok(Launcher::OtherLink | Launcher::OtherFile)) {
+                if !matches!(*launcher, Ok(Launcher::OtherLink | Launcher::OtherFile)) {
                     *launcher = Ok(Launcher::Missing);
                 }
             }
@@ -320,12 +328,22 @@ mod tests {
     }
 
     #[test]
-    fn a_change_that_succeeded_is_reported_even_when_the_read_after_it_fails() {
+    fn a_change_whose_read_after_it_fails_reports_the_launcher_unknown() {
         let (files, tool) = fixture(Launcher::Missing);
         *files.after_change.lock().unwrap() = Some(Err(ToolFailure::Unreachable));
-        assert_eq!(tool.install(), Ok(Launcher::Installed));
-        assert_eq!(tool.uninstall(), Ok(Launcher::Missing));
+        assert_eq!(tool.install(), Err(ToolFailure::Unread));
+        *files.launcher.lock().unwrap() = Ok(Launcher::Installed);
+        assert_eq!(tool.uninstall(), Err(ToolFailure::Unread));
         assert_eq!((files.links(), files.unlinks()), (1, 1));
+    }
+
+    #[test]
+    fn uninstall_reads_first_and_removes_nothing_another_program_holds() {
+        for launcher in [Launcher::OtherLink, Launcher::OtherFile, Launcher::Missing] {
+            let (files, tool) = fixture(launcher);
+            assert_eq!(tool.uninstall(), Ok(launcher));
+            assert_eq!(files.unlinks(), 0);
+        }
     }
 
     #[test]

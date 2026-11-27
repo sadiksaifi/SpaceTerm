@@ -185,7 +185,7 @@ fn a_change_that_fails_after_it_landed_shows_the_launcher_as_it_is(cx: &mut Test
     click(NAVIGATION_SELECTOR, cx);
     // The link is removed, then saving the directory fails.
     *files.unlink.lock().unwrap() = Err(ToolFailure::StorageUnavailable);
-    *files.launcher.lock().unwrap() = Ok(Launcher::Missing);
+    *files.after_change.lock().unwrap() = Some(Ok(Launcher::Missing));
     choose("Uninstall", cx);
     let removed = presentation(&window, cx);
     assert_eq!(
