@@ -109,8 +109,10 @@ pub enum Operation {
         target: crate::hierarchy::CloseTarget,
         confirmation: crate::hierarchy::CloseConfirmation,
     },
-    /// Reads visible text in request order without opening or acting on a Pane channel.
+    /// Reads visible text in request order without using a Pane channel. Resolves palette colors.
     PanePreviews { panes: Vec<crate::hierarchy::Id> },
+    /// Reads the same visible text, with indexed colors kept as palette entries.
+    PanePreviewsWithPalette { panes: Vec<crate::hierarchy::Id> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -272,6 +274,7 @@ impl Operation {
             Self::CloseIfIdle { .. } => Some(Capability::CloseIfIdle),
             Self::Mutate { mutation, .. } => mutation.required_capability(),
             Self::PanePreviews { .. } => Some(Capability::PanePreview),
+            Self::PanePreviewsWithPalette { .. } => Some(Capability::PanePreviewPalette),
             Self::WorktreeRead(crate::worktree::Read::ContextWithDefault { .. }) => {
                 Some(Capability::WorktreeDefaultBranch)
             }
@@ -287,7 +290,9 @@ impl Operation {
                 command.len() <= MAX_RUN_COMMAND_BYTES && !command.chars().any(|c| c.is_control()),
             ),
             Self::ScrollbackPage { rows, .. } => check((1..=limits::MAX_PAGE_ROWS).contains(rows)),
-            Self::PanePreviews { panes } => super::preview::validate_request(panes),
+            Self::PanePreviews { panes } | Self::PanePreviewsWithPalette { panes } => {
+                super::preview::validate_request(panes)
+            }
             _ => Ok(()),
         }
     }

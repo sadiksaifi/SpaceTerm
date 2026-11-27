@@ -1339,7 +1339,13 @@ impl HostCommands for WorkspaceHost {
         self.directories.cancel((connection, id));
         self.cancel_worktree_read(connection, id);
     }
-    fn pane_previews(&self, panes: Vec<Id>, id: RequestId, outbox: &Outbox) -> Dispatch {
+    fn pane_previews(
+        &self,
+        panes: Vec<Id>,
+        preserve_palette: bool,
+        id: RequestId,
+        outbox: &Outbox,
+    ) -> Dispatch {
         if self.state.session_ends().is_some_and(|ends| {
             self.preview_clear.as_ref() != Some(ends) && ends.boot == self.prototype.boot
         }) {
@@ -1347,6 +1353,7 @@ impl HostCommands for WorkspaceHost {
         }
         super::preview::read(
             panes,
+            preserve_palette,
             |pane| match self.state.pane(pane) {
                 Some(_) => self.panes.get(&pane).map_or(
                     super::preview::Source::NotStarted,

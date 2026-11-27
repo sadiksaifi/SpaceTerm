@@ -32,11 +32,13 @@ pub enum Capability {
     WorktreeDefaultBranch,
     /// Work: move a Tab or place a new Tab from a moved Pane in the Workspace's shared order.
     ReorderTab,
+    /// Work: read Pane previews that preserve palette indexes in style colors.
+    PanePreviewPalette,
 }
 
 impl Capability {
     /// Every capability, in declaration order.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::UpdateFacts,
         Self::Install,
         Self::Restart,
@@ -49,6 +51,7 @@ impl Capability {
         Self::PaneActivity,
         Self::WorktreeDefaultBranch,
         Self::ReorderTab,
+        Self::PanePreviewPalette,
     ];
 
     /// The lane that carries it and the first version that has it.
@@ -64,6 +67,7 @@ impl Capability {
             | Self::PaneActivity
             | Self::WorktreeDefaultBranch
             | Self::ReorderTab => (Lane::Work, ProtocolVersion { major: 1, minor: 6 }),
+            Self::PanePreviewPalette => (Lane::Work, ProtocolVersion { major: 1, minor: 7 }),
         }
     }
 }

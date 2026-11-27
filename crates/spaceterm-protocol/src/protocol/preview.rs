@@ -37,7 +37,8 @@ pub enum State {
 }
 
 /// The visible grid, cropped to the preview's row and column limits. Runs use default or inline
-/// styles and contain no links. Palette entries are resolved to RGB by the Machine.
+/// styles and contain no links. `PanePreviewsWithPalette` preserves palette entries in runs.
+/// `PanePreviews` resolves those entries to the Machine's RGB values.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Screen {
     pub columns: u16,
