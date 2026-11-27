@@ -232,19 +232,35 @@ pub(in crate::service) fn remove(
     installations: &Path,
 ) -> Result<(), CoreError> {
     let parent = home.join(".local/bin");
-    if !parent.exists() {
+    if !parent
+        .try_exists()
+        .map_err(|_| CoreError::StorageUnavailable)?
+    {
         return Ok(());
     }
     let launcher = parent.join(identity);
     let leftover = temporary(&parent, identity);
     let removal = removing(identity);
     let moved = parent.join(&removal);
-    let ours = |path: &Path| {
-        std::fs::read_link(path).is_ok_and(|target| managed(&target, identity, installations))
+    // Only nothing there or an entry that is not a link proves no managed link is there. A path
+    // SpaceTerm can't inspect may still hold one, so the removal fails rather than report it
+    // gone.
+    let inspect = |path: &Path| match std::fs::read_link(path) {
+        Ok(target) => Ok(managed(&target, identity, installations)),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(_) => Err(CoreError::StorageUnavailable),
     };
-    if !ours(&launcher) && !ours(&leftover) && !ours(&moved) {
+    if !inspect(&launcher)? && !inspect(&leftover)? && !inspect(&moved)? {
         return Ok(());
     }
+    let ours = |path: &Path| inspect(path).unwrap_or(false);
     let directory = owned_directory(&parent)?;
     remove_leftover(&leftover, identity, installations)?;
     // An interrupted removal's own link.

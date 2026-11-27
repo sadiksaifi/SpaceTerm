@@ -531,3 +531,24 @@ fn an_unreachable_result_ends_when_the_machine_answers_again(cx: &mut TestAppCon
         "Not checked"
     );
 }
+
+/// A check the person asks for replaces what an earlier refusal said.
+#[gpui::test]
+fn check_again_clears_an_earlier_refusal(cx: &mut TestAppContext) {
+    let remote = crate::ui::settings_window::remote_admin::testing::ScriptedRemote::new();
+    let machines = open_penguin(&remote, cx);
+    click(ACTION_SELECTOR, machines.cx);
+    *remote.launcher.link.lock().unwrap() = Err(ToolFailure::Busy);
+    click(ACTION_SELECTOR, machines.cx);
+    let refused = presentation(&machines.window, machines.cx);
+    assert_eq!(
+        (refused.state, refused.caption.map(|(_, tone)| tone)),
+        ("Not installed", Some(CaptionTone::Error))
+    );
+
+    // The other operation finished and installed the command meanwhile.
+    *remote.launcher.launcher.lock().unwrap() = Ok(Launcher::Installed);
+    choose("Check Again", machines.cx);
+    let installed = presentation(&machines.window, machines.cx);
+    assert_eq!((installed.state, installed.caption), ("Installed", None));
+}

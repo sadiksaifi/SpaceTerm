@@ -648,11 +648,7 @@ impl SettingsWindow {
     /// Whether `route` is connected, or refused only for want of a work protocol in common,
     /// which the service lane still speaks.
     pub(super) fn remote_lane_answers(&self, route: &DirectRouteId) -> bool {
-        let status = self
-            .saved_direct_machines()
-            .into_iter()
-            .find(|(saved, _, _)| saved == route)
-            .map(|(_, status, _)| status);
+        let status = self.remote_route_status(route);
         matches!(
             status,
             Some(
@@ -676,6 +672,14 @@ impl SettingsWindow {
         let source = installed(cx)?;
         let core = self.direct_routes.as_ref()?.connections.service(route)?;
         Some((source(core.clone()), core))
+    }
+
+    /// `route`'s connection status now.
+    pub(super) fn remote_route_status(&self, route: &DirectRouteId) -> Option<DirectRouteStatus> {
+        self.saved_direct_machines()
+            .into_iter()
+            .find(|(saved, _, _)| saved == route)
+            .map(|(_, status, _)| status)
     }
 
     /// The handle `route`'s service lane answers on now, if SpaceTerm holds one.

@@ -126,8 +126,22 @@ impl CommandLineTools {
     }
 }
 
-/// A paired Machine's connection and its link generation.
-type Link = (MachineConnection, u64);
+/// The paired Machine's connection, its link generation, and the route's status, which together
+/// name the link a step used. A Core that restarts into another work major keeps the earlier
+/// handle and generation, so the status tells that link apart.
+pub(super) struct Link {
+    core: MachineConnection,
+    generation: u64,
+    status: Option<crate::direct_connections::DirectRouteStatus>,
+}
+
+impl Link {
+    fn same(&self, other: &Self) -> bool {
+        self.core.same_handle(&other.core)
+            && self.generation == other.generation
+            && self.status == other.status
+    }
+}
 
 /// The last status of one Machine's command, and the running step.
 #[derive(Default)]
@@ -369,11 +383,11 @@ impl SettingsWindow {
             }
             let answers = self.remote_lane_answers(route);
             match &row.read_over {
-                Some((read_over, link)) => {
+                Some(read_over) => {
                     answers
-                        && self.remote_lane_handle(route).is_some_and(|current| {
-                            read_over.same_handle(&current) && *link == current.link_generation()
-                        })
+                        && self
+                            .remote_lane_link(route)
+                            .is_some_and(|current| read_over.same(&current))
                 }
                 None => !answers,
             }
@@ -426,7 +440,24 @@ impl SettingsWindow {
             ToolAction::Repair => ToolWork::Repair,
             ToolAction::Uninstall => ToolWork::Uninstall,
         };
+        // A check the person asks for replaces what an earlier action's refusal said. The read
+        // that follows a refusal keeps it.
+        if let Some(row) = self.command_line_tools.rows.get_mut(&choice.key())
+            && row.working.is_none()
+        {
+            row.failure = None;
+        }
         self.run_command_line_tool(choice, work, cx);
+    }
+
+    /// The link `route`'s service lane answers on now, if SpaceTerm holds one.
+    fn remote_lane_link(&self, route: &crate::direct_connections::DirectRouteId) -> Option<Link> {
+        let core = self.remote_lane_handle(route)?;
+        Some(Link {
+            generation: core.link_generation(),
+            core,
+            status: self.remote_route_status(route),
+        })
     }
 
     /// `choice`'s command: this computer's own, or a paired Machine's over the service lane of
@@ -441,13 +472,17 @@ impl SettingsWindow {
             MachineChoice::Local => Some((self.command_line_tools.local.clone()?, None)),
             MachineChoice::Direct(route) => {
                 let (control, core) = self.remote_lane(route, cx)?;
-                let link = core.link_generation();
+                let link = Link {
+                    generation: core.link_generation(),
+                    core,
+                    status: self.remote_route_status(route),
+                };
                 Some((
                     Arc::new(CommandLineTool::new(
                         self.command_line_tools.name,
                         control.command_line_tool(),
                     )),
-                    Some((core, link)),
+                    Some(link),
                 ))
             }
         }
@@ -477,14 +512,13 @@ impl SettingsWindow {
         };
         // A step over a new link starts from nothing that an earlier link showed.
         let same_link = match (&row.read_over, &read_over) {
-            (Some((earlier, earlier_link)), Some((current, link))) => {
-                earlier.same_handle(current) && earlier_link == link
-            }
+            (Some(earlier), Some(current)) => earlier.same(current),
             (None, None) => true,
             _ => false,
         };
         if !same_link {
             row.check = ToolCheck::NotChecked;
+            row.failure = None;
         }
         row.read_over = read_over;
         row.working = Some(work);
