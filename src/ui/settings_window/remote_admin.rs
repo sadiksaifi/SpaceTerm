@@ -314,11 +314,13 @@ impl LauncherFiles for LaneLauncherFiles {
     }
 
     fn link(&self) -> Result<LinkOutcome, ToolFailure> {
-        Ok(match self.call(admin::install_command_line_tool, change_failure)? {
-            CliLink::Linked => LinkOutcome::Linked,
-            CliLink::Kept => LinkOutcome::Kept,
-            CliLink::Blocked => LinkOutcome::Blocked,
-        })
+        Ok(
+            match self.call(admin::install_command_line_tool, change_failure)? {
+                CliLink::Linked => LinkOutcome::Linked,
+                CliLink::Kept => LinkOutcome::Kept,
+                CliLink::Blocked => LinkOutcome::Blocked,
+            },
+        )
     }
 
     fn unlink(&self) -> Result<(), ToolFailure> {

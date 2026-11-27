@@ -7,7 +7,6 @@ use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 use spaceterm_ui::a11y_testing::{A11yTree, perform};
 
 use super::{ACTION_SELECTOR, MENU_SELECTOR};
-use crate::ui::settings_window::machine_list::MachineChoice;
 use crate::appearance::Appearance;
 use crate::command_line_tool::testing::{ScriptedFiles, tool};
 use crate::command_line_tool::{Launcher, LinkOutcome, ToolAction, ToolFailure};
@@ -18,6 +17,7 @@ use crate::settings::SettingsDocument;
 use crate::settings::storage::testing::MemoryStorage;
 use crate::ui::appearance_runtime;
 use crate::ui::settings_window::SettingsWindow;
+use crate::ui::settings_window::machine_list::MachineChoice;
 use crate::ui::settings_window::machines::testing::ScriptedCore;
 use crate::ui::settings_window::machines::{LocalCoreControl, OfferedMachine};
 use crate::ui::sidebar_window::form::CaptionTone;
@@ -318,7 +318,12 @@ fn a_paired_machines_command_is_read_and_installed_over_its_lane_only_when_asked
 ) {
     let remote = crate::ui::settings_window::remote_admin::testing::ScriptedRemote::new();
     let machines = open_penguin(&remote, cx);
-    let reads = || remote.launcher.reads.load(std::sync::atomic::Ordering::SeqCst);
+    let reads = || {
+        remote
+            .launcher
+            .reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+    };
     // Opening Machines on penguin reaches nothing.
     let unchecked = presentation(&machines.window, machines.cx);
     assert_eq!(
@@ -327,8 +332,11 @@ fn a_paired_machines_command_is_read_and_installed_over_its_lane_only_when_asked
     );
     assert_eq!(reads(), 0);
     assert_eq!(
-        machines.window.read_with(machines.cx, |settings, _| settings
-            .core_group_heading(crate::ui::settings_window::machine_list::COMMAND_LINE_GROUP)),
+        machines
+            .window
+            .read_with(machines.cx, |settings, _| settings.core_group_heading(
+                crate::ui::settings_window::machine_list::COMMAND_LINE_GROUP
+            )),
         "Command Line on penguin"
     );
 
@@ -365,9 +373,16 @@ fn a_paired_machine_spaceterm_does_not_reach_is_never_asked(cx: &mut TestAppCont
         (unreachable.state, unreachable.action),
         ("Unavailable", Some((ToolAction::Check, "Try Again")))
     );
-    assert!(unreachable.explanation.contains("couldn\u{2019}t reach the Machine"));
+    assert!(
+        unreachable
+            .explanation
+            .contains("couldn\u{2019}t reach the Machine")
+    );
     assert_eq!(
-        remote.launcher.reads.load(std::sync::atomic::Ordering::SeqCst),
+        remote
+            .launcher
+            .reads
+            .load(std::sync::atomic::Ordering::SeqCst),
         0
     );
 }
@@ -439,7 +454,10 @@ fn a_control_shown_for_one_machine_never_acts_on_another(cx: &mut TestAppContext
     assert_eq!(
         (
             remote.launcher.unlinks(),
-            remote.launcher.reads.load(std::sync::atomic::Ordering::SeqCst)
+            remote
+                .launcher
+                .reads
+                .load(std::sync::atomic::Ordering::SeqCst)
         ),
         (0, 0)
     );
