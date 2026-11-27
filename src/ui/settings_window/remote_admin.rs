@@ -271,16 +271,15 @@ impl RemoteMachineControl for LaneControl {
     fn command_line_tool(&self) -> Arc<dyn LauncherFiles> {
         Arc::new(LaneLauncherFiles {
             core: self.core.clone(),
-            session: std::sync::Mutex::new(None),
         })
     }
 }
 
-/// A paired Machine's Command Line Tool over its service lane. One lane connection serves the
-/// reads and the change of one row step, and a failed request ends it.
+/// A paired Machine's Command Line Tool over its service lane. Each read and each change opens
+/// its own lane connection, so a change that follows a read dials again and a route the person
+/// disconnected meanwhile sends no change.
 struct LaneLauncherFiles {
     core: MachineConnection,
-    session: std::sync::Mutex<Option<spaceterm_core::service::lane::client::Session>>,
 }
 
 impl LaneLauncherFiles {
@@ -288,25 +287,14 @@ impl LaneLauncherFiles {
         &self,
         step: impl FnOnce(&mut spaceterm_core::service::lane::client::Session) -> Result<T, LaneError>,
     ) -> Result<T, ToolFailure> {
-        let mut held = self.session.lock().unwrap_or_else(|e| e.into_inner());
-        let session = match held.as_mut() {
-            Some(session) => session,
-            None => {
-                let lane = self
-                    .core
-                    .service_lane()
-                    .map_err(|error| tool_failure(LaneError::Core(error)))?;
-                let opened = lane
-                    .session_by(std::time::Instant::now() + admin::REQUEST_LIMIT)
-                    .map_err(tool_failure)?;
-                held.insert(opened)
-            }
-        };
-        let result = step(session);
-        if result.is_err() {
-            *held = None;
-        }
-        result.map_err(tool_failure)
+        let lane = self
+            .core
+            .service_lane()
+            .map_err(|error| tool_failure(LaneError::Core(error)))?;
+        let mut session = lane
+            .session_by(std::time::Instant::now() + admin::REQUEST_LIMIT)
+            .map_err(tool_failure)?;
+        step(&mut session).map_err(tool_failure)
     }
 }
 
@@ -659,7 +647,7 @@ impl SettingsWindow {
 
     /// Whether `route` is connected, or refused only for want of a work protocol in common,
     /// which the service lane still speaks.
-    fn lane_status_answers(&self, route: &DirectRouteId) -> bool {
+    pub(super) fn remote_lane_answers(&self, route: &DirectRouteId) -> bool {
         let status = self
             .saved_direct_machines()
             .into_iter()
@@ -682,7 +670,7 @@ impl SettingsWindow {
         route: &DirectRouteId,
         cx: &App,
     ) -> Option<(Arc<dyn RemoteMachineControl>, MachineConnection)> {
-        if !self.lane_status_answers(route) {
+        if !self.remote_lane_answers(route) {
             return None;
         }
         let source = installed(cx)?;
@@ -698,7 +686,7 @@ impl SettingsWindow {
     /// Whether SpaceTerm reaches `route`'s service lane over a connection it holds, whatever
     /// the card is doing.
     pub(super) fn remote_reachable(&self, route: &DirectRouteId, cx: &App) -> bool {
-        self.lane_status_answers(route)
+        self.remote_lane_answers(route)
             && installed(cx).is_some()
             && self
                 .direct_routes

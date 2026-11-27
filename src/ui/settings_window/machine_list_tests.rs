@@ -98,6 +98,16 @@ pub(in crate::ui::settings_window) fn open_with<'a>(
     paired: Paired,
     cx: &'a mut TestAppContext,
 ) -> Machines<'a> {
+    open_with_tool(local, None, paired, cx)
+}
+
+/// [`open_with`], with `command_line_tool` as this computer's command when `local` is set.
+pub(in crate::ui::settings_window) fn open_with_tool<'a>(
+    local: bool,
+    command_line_tool: Option<Arc<crate::command_line_tool::CommandLineTool>>,
+    paired: Paired,
+    cx: &'a mut TestAppContext,
+) -> Machines<'a> {
     let (direct, routes) = paired;
     let storage = MemoryStorage::with_document(&SettingsDocument::default());
     let settings = crate::settings::Settings::load(storage.clone());
@@ -114,7 +124,7 @@ pub(in crate::ui::settings_window) fn open_with<'a>(
         connection: Ok(ScriptedCore::new(Ok(connected(1))) as Arc<dyn LocalCoreControl>),
         service: None,
         update: None,
-        command_line_tool: None,
+        command_line_tool,
         removal: None,
     });
     let (window, cx) = cx.add_window_view(|window, cx| {

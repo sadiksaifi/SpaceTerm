@@ -469,3 +469,65 @@ fn a_paired_machine_with_another_work_protocol_installs_over_its_service_lane(
         "Installed"
     );
 }
+
+/// A menu opened for a paired Machine closes when This Mac or This Computer replaces it, so a
+/// key press meant for the paired Machine never reaches this computer's command.
+#[gpui::test]
+fn an_open_menu_closes_when_another_machine_replaces_its_own(cx: &mut TestAppContext) {
+    use crate::ui::settings_window::machine_list::tests::{connected_paired, open_with_tool};
+    let remote = crate::ui::settings_window::remote_admin::testing::ScriptedRemote::new();
+    *remote.launcher.launcher.lock().unwrap() = Ok(Launcher::Installed);
+    let local = ScriptedFiles::new(Ok(Launcher::Installed));
+    let paired = connected_paired(&["penguin"], cx);
+    cx.update(|cx| remote.install(cx));
+    let machines = open_with_tool(true, Some(Arc::new(tool(&local))), paired, cx);
+    let route = machines.routes[0];
+    machines.cx.update(|_, cx| {
+        crate::ui::settings_window::machine_selection::select(
+            crate::core_context::MachineKey::Direct(route),
+            cx,
+        );
+    });
+    machines.cx.run_until_parked();
+    click(ACTION_SELECTOR, machines.cx);
+    click(MENU_SELECTOR, machines.cx);
+    assert!(A11yTree::read(machines.cx).find("Repair").is_some());
+
+    machines.cx.update(|_, cx| {
+        crate::ui::settings_window::machine_selection::select(
+            crate::core_context::MachineKey::Local,
+            cx,
+        );
+    });
+    machines.cx.run_until_parked();
+    machines.cx.simulate_keystrokes("enter");
+    machines.cx.run_until_parked();
+    assert_eq!((local.links(), local.unlinks()), (0, 0));
+    assert!(!A11yTree::read(machines.cx).find("Repair").is_some());
+}
+
+/// A Machine found unreachable reads as not checked once SpaceTerm reaches it again.
+#[gpui::test]
+fn an_unreachable_result_ends_when_the_machine_answers_again(cx: &mut TestAppContext) {
+    let remote = crate::ui::settings_window::remote_admin::testing::ScriptedRemote::new();
+    let machines = open_penguin(&remote, cx);
+    let route = machines.routes[0];
+    machines.direct.disconnect(&route);
+    machines.cx.run_until_parked();
+    click(ACTION_SELECTOR, machines.cx);
+    assert_eq!(
+        presentation(&machines.window, machines.cx).state,
+        "Unavailable"
+    );
+    machines.direct.connect(&route);
+    crate::ui::settings_window::machine_list::tests::settle(machines.cx, |cx| {
+        cx.update(|_, cx| {
+            crate::ui::direct_machines::installed(cx)
+                .is_some_and(|direct| direct.service(&route).is_some())
+        })
+    });
+    assert_eq!(
+        presentation(&machines.window, machines.cx).state,
+        "Not checked"
+    );
+}

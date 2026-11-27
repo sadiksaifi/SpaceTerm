@@ -357,15 +357,26 @@ impl SettingsWindow {
             MachineChoice::Local => ToolPlace::Local,
             MachineChoice::Direct(_) => ToolPlace::Paired,
         };
-        // What a step learned over an earlier link of a paired Machine no longer holds.
-        let row = tools.row(&choice).filter(|row| match (&choice, &row.read_over) {
-            (MachineChoice::Direct(route), Some((read_over, link))) => {
-                row.working.is_some()
-                    || self.remote_lane_handle(route).is_some_and(|current| {
-                        read_over.same_handle(&current) && *link == current.link_generation()
-                    })
+        // What a step learned about a paired Machine holds only over the link it used, while
+        // that link's lane still answers. A step that found the Machine unreachable holds only
+        // while it still is.
+        let row = tools.row(&choice).filter(|row| {
+            let MachineChoice::Direct(route) = &choice else {
+                return true;
+            };
+            if row.working.is_some() {
+                return true;
             }
-            _ => true,
+            let answers = self.remote_lane_answers(route);
+            match &row.read_over {
+                Some((read_over, link)) => {
+                    answers
+                        && self.remote_lane_handle(route).is_some_and(|current| {
+                            read_over.same_handle(&current) && *link == current.link_generation()
+                        })
+                }
+                None => !answers,
+            }
         });
         Some(present(
             tools.name,
@@ -555,8 +566,17 @@ impl SettingsWindow {
             let owner = cx.weak_entity();
             let target = shown.clone();
             let icon_size = appearance.icons.metrics(IconRole::Control).glyph_size;
+            // Each Machine's menu keeps its own open state, so a menu opened for one Machine
+            // closes, rather than acting on another, when that one replaces it.
+            let id = match &shown {
+                MachineChoice::Local => SharedString::new_static(MENU_SELECTOR),
+                MachineChoice::Direct(route) => SharedString::from(format!(
+                    "{MENU_SELECTOR}-{}",
+                    route.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+                )),
+            };
             Menu::new(
-                MENU_SELECTOR,
+                id,
                 SharedString::new_static("More for Command Line Tool"),
                 entries,
             )
