@@ -491,7 +491,12 @@ impl SettingsWindow {
         }
     }
 
-    fn run_command_line_tool(&mut self, choice: MachineChoice, work: ToolWork, cx: &mut Context<Self>) {
+    fn run_command_line_tool(
+        &mut self,
+        choice: MachineChoice,
+        work: ToolWork,
+        cx: &mut Context<Self>,
+    ) {
         if !self.command_line_tools.offered(&choice) {
             return;
         }
@@ -615,7 +620,10 @@ impl SettingsWindow {
                 MachineChoice::Local => SharedString::new_static(MENU_SELECTOR),
                 MachineChoice::Direct(route) => SharedString::from(format!(
                     "{MENU_SELECTOR}-{}",
-                    route.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+                    route
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
                 )),
             };
             Menu::new(
@@ -639,7 +647,10 @@ impl SettingsWindow {
             })
         });
         let state_selector = presentation.state_selector;
-        let working = self.command_line_tools.row(&shown).and_then(|row| row.working);
+        let working = self
+            .command_line_tools
+            .row(&shown)
+            .and_then(|row| row.working);
         let progress = match working {
             Some(ToolWork::Install) => "Installing the command",
             Some(ToolWork::Repair) => "Repairing the command",
@@ -677,7 +688,13 @@ mod tests {
     const NAME: &str = "spaceterm-development";
 
     fn checked(launcher: Launcher) -> ToolRowPresentation {
-        present(NAME, ToolPlace::Local, ToolCheck::Checked(launcher), None, None)
+        present(
+            NAME,
+            ToolPlace::Local,
+            ToolCheck::Checked(launcher),
+            None,
+            None,
+        )
     }
 
     #[test]
