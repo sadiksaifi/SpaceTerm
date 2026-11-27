@@ -750,6 +750,27 @@ fn a_paired_device_installs_and_removes_the_machines_command_line_tool() {
     });
 }
 
+/// A read waits for a launcher change another connection is still making, so it never answers
+/// with the launcher from before that change.
+#[test]
+fn a_command_line_tool_read_waits_for_a_change_underway() {
+    with_lane(|lane| {
+        let data = Directory::open(&lane.service.paths.data, true).unwrap();
+        let held = data.lock("service.lock", false).unwrap();
+        assert_eq!(
+            code(lane.lane.answer(LaneRequest::CommandLineTool {}, &ACTOR)),
+            "service_busy"
+        );
+        drop(held);
+        assert_eq!(
+            lane.lane.answer(LaneRequest::CommandLineTool {}, &ACTOR),
+            LaneReply::CommandLineTool {
+                launcher: CliLauncher::Missing
+            }
+        );
+    });
+}
+
 #[test]
 fn command_line_tool_requests_need_service_1_4_and_keep_their_json_shape() {
     let older = crate::protocol::version::ProtocolVersion { major: 1, minor: 3 };

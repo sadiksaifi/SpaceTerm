@@ -467,7 +467,7 @@ impl LaneCore {
             // without an approved runtime refuses the install.
             LaneRequest::CommandLineTool {} => self
                 .service
-                .cli_launcher()
+                .cli_launcher_settled()
                 .map(|launcher| LaneReply::CommandLineTool { launcher }),
             LaneRequest::InstallCommandLineTool {} => self
                 .service

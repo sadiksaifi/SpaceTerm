@@ -204,6 +204,18 @@ impl Service {
         launcher::remove(home, &self.identity, &self.paths.data.join("installations"))
     }
 
+    /// [`Self::cli_launcher`] once no other SpaceTerm writer holds the service lock, so a read
+    /// that follows a change whose reply was lost never answers before that change finishes.
+    /// Another service operation that outlasts the operation grace returns ServiceBusy.
+    pub fn cli_launcher_settled(&self) -> Result<CliLauncher, CoreError> {
+        let data = Directory::open(&self.paths.data, true)?;
+        let _operation = match data.wait_lock("service.lock", OPERATION_GRACE, None)? {
+            LockWait::Locked(lock) => lock,
+            LockWait::Held | LockWait::Cancelled => return Err(CoreError::ServiceBusy),
+        };
+        self.cli_launcher()
+    }
+
     /// Read what the command-line launcher path holds, without following it or taking a lock.
     /// Unreadable service policy makes no launcher Outdated.
     pub fn cli_launcher(&self) -> Result<CliLauncher, CoreError> {
