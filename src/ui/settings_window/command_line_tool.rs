@@ -90,7 +90,7 @@ pub(super) struct CommandLineTools {
     /// The command people type on every Machine. A paired Machine's SpaceTerm Core has this
     /// build's identity, so its command has the same name.
     name: &'static str,
-    /// This computer's command. `None` omits the row while This Mac or This Computer is
+    /// This computer's command. `None` omits the row while this computer is
     /// selected.
     local: Option<Arc<CommandLineTool>>,
     /// Whether this desktop reaches paired Machines' service lanes. Without them, a paired
@@ -181,7 +181,7 @@ pub(super) fn present(
             "settings-command-line-tool-state-not-checked",
             SharedString::new_static(match place {
                 ToolPlace::Local => "SpaceTerm checks the command when you open this section.",
-                ToolPlace::Paired => "Check this Machine to install or update its command.",
+                ToolPlace::Paired => "Check the Machine to install or update its command.",
             }),
             check_action,
         ),
@@ -213,7 +213,7 @@ pub(super) fn present(
                     "settings-command-line-tool-state-outdated",
                     format!(
                         "\u{201C}{name}\u{201D} runs a different SpaceTerm Core build than \
-                         this Machine\u{2019}s SpaceTerm Core."
+                         the Machine\u{2019}s SpaceTerm Core."
                     ),
                 ),
                 Launcher::Blocked => (
@@ -343,18 +343,18 @@ fn failure_text(failure: ToolFailure, name: &str) -> SharedString {
             "Something else is using SpaceTerm\u{2019}s temporary name {DIRECTORY}/.launcher-{name}."
         )),
         ToolFailure::Unreachable => SharedString::new_static(
-            "SpaceTerm couldn\u{2019}t reach this Machine. Check that it\u{2019}s connected, then \
+            "SpaceTerm couldn\u{2019}t reach the Machine. Check that it\u{2019}s connected, then \
              try again.",
         ),
         ToolFailure::Refused => SharedString::new_static(
-            "This Machine didn\u{2019}t accept this device. Reconnect, then try again.",
+            "The Machine didn\u{2019}t accept this device. Reconnect, then try again.",
         ),
         ToolFailure::Unsupported => SharedString::from(format!(
-            "Installing \u{201C}{name}\u{201D} from here needs a newer SpaceTerm Core on this \
+            "Installing \u{201C}{name}\u{201D} from here needs a newer SpaceTerm Core on the \
              Machine. Update it first."
         )),
         ToolFailure::Failed => {
-            SharedString::new_static("This Machine couldn\u{2019}t finish the change.")
+            SharedString::new_static("The Machine couldn\u{2019}t finish the change.")
         }
         ToolFailure::Unread => SharedString::new_static(
             "SpaceTerm couldn\u{2019}t confirm the change or read the command afterward.",

@@ -365,7 +365,7 @@ fn a_paired_machine_spaceterm_does_not_reach_is_never_asked(cx: &mut TestAppCont
         (unreachable.state, unreachable.action),
         ("Unavailable", Some((ToolAction::Check, "Try Again")))
     );
-    assert!(unreachable.explanation.contains("couldn\u{2019}t reach this Machine"));
+    assert!(unreachable.explanation.contains("couldn\u{2019}t reach the Machine"));
     assert_eq!(
         remote.launcher.reads.load(std::sync::atomic::Ordering::SeqCst),
         0
@@ -384,7 +384,7 @@ fn a_paired_machine_with_an_older_core_says_it_needs_an_update(cx: &mut TestAppC
         (
             "Unavailable",
             "Installing \u{201C}spaceterm-development\u{201D} from here needs a newer SpaceTerm \
-             Core on this Machine. Update it first."
+             Core on the Machine. Update it first."
         )
     );
 }
