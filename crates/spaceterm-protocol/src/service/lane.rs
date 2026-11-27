@@ -105,6 +105,17 @@ pub enum LaneRequest {
         boot: String,
         candidate: String,
     },
+    /// Reads what the Machine's Command Line Tool path holds. Answers `CommandLineTool`. Since
+    /// service [`crate::version::MINOR_COMMAND_LINE_TOOL`].
+    CommandLineTool {},
+    /// Links the Command Line Tool to the approved runtime as the installer does, unless
+    /// another program's entry is there. Answers `CommandLineToolLinked`. Since service
+    /// [`crate::version::MINOR_COMMAND_LINE_TOOL`].
+    InstallCommandLineTool {},
+    /// Removes SpaceTerm's own Command Line Tool link, and leaves another program's entry.
+    /// Answers `CommandLineToolRemoved`. Since service
+    /// [`crate::version::MINOR_COMMAND_LINE_TOOL`].
+    UninstallCommandLineTool {},
 }
 
 impl LaneReply {
@@ -156,6 +167,9 @@ impl LaneRequest {
                 crate::update::facts::MINOR_DETAILED_FACTS
             }
             Self::GrantStop { .. } => crate::version::MINOR_IDLE_RESTART,
+            Self::CommandLineTool {}
+            | Self::InstallCommandLineTool {}
+            | Self::UninstallCommandLineTool {} => crate::version::MINOR_COMMAND_LINE_TOOL,
             _ => 0,
         };
         ProtocolVersion { major: 1, minor }
@@ -261,6 +275,50 @@ pub enum LaneReply {
         floor: crate::update::ordering::Floor,
     },
     StopGranted {},
+    /// What the Command Line Tool path holds.
+    CommandLineTool {
+        launcher: CliLauncher,
+    },
+    /// What `InstallCommandLineTool` did.
+    CommandLineToolLinked {
+        link: CliLink,
+    },
+    /// `UninstallCommandLineTool` left no SpaceTerm link at the path.
+    CommandLineToolRemoved {},
+}
+
+/// What the command-line launcher path holds. Only [`CliLauncher::Missing`] and SpaceTerm's
+/// own links are ever replaced.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CliLauncher {
+    Missing,
+    /// A link into this identity's retained installations whose executable exists.
+    Linked,
+    /// A link into this identity's retained installations whose executable is gone.
+    Stale,
+    /// A link into another of this identity's installations than the approved runtime, such as
+    /// one an update couldn't repoint.
+    Outdated,
+    /// A stale or outdated managed link that can't be replaced, because another tool's entry
+    /// holds the temporary name `.launcher-<identity>` beside it.
+    Blocked,
+    /// A link to anything else, such as another tool.
+    Foreign,
+    /// A file, directory or other entry that is not a link.
+    NotLink,
+}
+
+/// The outcome of linking the command-line launcher.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CliLink {
+    /// The launcher names the selected runtime.
+    Linked,
+    /// Another tool's launcher is there and stays.
+    Kept,
+    /// Another tool's entry holds the temporary name a replacement needs, and stays.
+    Blocked,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

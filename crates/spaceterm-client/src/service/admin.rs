@@ -1,7 +1,8 @@
 //! The administration steps every SpaceTerm Client shares over a server's service lane: settle
 //! the operations this identity left pending, read Status and the update facts, install a new
 //! version from the Core's feed or by pushing an archive, preview Stop, Restart or a Network
-//! Access change, and execute a confirmed preview until it settles.
+//! Access change, execute a confirmed preview until it settles, and read, install or remove the
+//! Machine's Command Line Tool.
 //!
 //! The CLI and the desktop present each result their own way. Both take the same steps here, so
 //! a confirmation, a dispatched operation and its settlement mean the same on either.
@@ -15,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use spaceterm_protocol::service::lane::OperationId;
 use spaceterm_protocol::service::lane::network::{LaneNetworkEffects, NetworkAccess};
 use spaceterm_protocol::service::lane::{
-    LaneAction, LaneEffects, LaneOperationState, LaneReceipt, LaneReply, LaneRequest, LaneStatus,
-    MAX_CHUNK,
+    CliLauncher, CliLink, LaneAction, LaneEffects, LaneOperationState, LaneReceipt, LaneReply,
+    LaneRequest, LaneStatus, MAX_CHUNK,
 };
 use std::io::Read;
 use std::time::{Duration, Instant};
@@ -404,6 +405,43 @@ pub fn check(
 pub fn status(session: &mut Session) -> Result<LaneStatus, LaneError> {
     match session.call(&LaneRequest::Status, Instant::now() + REQUEST_LIMIT)? {
         LaneReply::Status(status) => Ok(status),
+        _ => Err(LaneError::Core(CoreError::Protocol)),
+    }
+}
+
+/// What the Machine's Command Line Tool path holds. A Core whose service lane selected a minor
+/// below [`spaceterm_protocol::version::MINOR_COMMAND_LINE_TOOL`] is never asked, and the
+/// session refuses the request as `Unsupported`.
+pub fn command_line_tool(session: &mut Session) -> Result<CliLauncher, LaneError> {
+    match session.call(
+        &LaneRequest::CommandLineTool {},
+        Instant::now() + REQUEST_LIMIT,
+    )? {
+        LaneReply::CommandLineTool { launcher } => Ok(launcher),
+        _ => Err(LaneError::Core(CoreError::Protocol)),
+    }
+}
+
+/// Links the Machine's Command Line Tool unless another program's entry is there, as
+/// [`command_line_tool`] requires.
+pub fn install_command_line_tool(session: &mut Session) -> Result<CliLink, LaneError> {
+    match session.call(
+        &LaneRequest::InstallCommandLineTool {},
+        Instant::now() + REQUEST_LIMIT,
+    )? {
+        LaneReply::CommandLineToolLinked { link } => Ok(link),
+        _ => Err(LaneError::Core(CoreError::Protocol)),
+    }
+}
+
+/// Removes SpaceTerm's own Command Line Tool link on the Machine, as [`command_line_tool`]
+/// requires.
+pub fn uninstall_command_line_tool(session: &mut Session) -> Result<(), LaneError> {
+    match session.call(
+        &LaneRequest::UninstallCommandLineTool {},
+        Instant::now() + REQUEST_LIMIT,
+    )? {
+        LaneReply::CommandLineToolRemoved {} => Ok(()),
         _ => Err(LaneError::Core(CoreError::Protocol)),
     }
 }

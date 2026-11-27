@@ -128,37 +128,7 @@ impl CandidateFiles {
     }
 }
 
-/// What the command-line launcher path holds. Only [`CliLauncher::Missing`] and SpaceTerm's
-/// own links are ever replaced.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CliLauncher {
-    Missing,
-    /// A link into this identity's retained installations whose executable exists.
-    Linked,
-    /// A link into this identity's retained installations whose executable is gone.
-    Stale,
-    /// A link into another of this identity's installations than the approved runtime, such as
-    /// one an update couldn't repoint.
-    Outdated,
-    /// A stale or outdated managed link that can't be replaced, because another tool's entry
-    /// holds the temporary name at [`Service::cli_temporary_path`].
-    Blocked,
-    /// A link to anything else, such as another tool.
-    Foreign,
-    /// A file, directory or other entry that is not a link.
-    NotLink,
-}
-
-/// The outcome of linking the command-line launcher.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CliLink {
-    /// The launcher names the selected runtime.
-    Linked,
-    /// Another tool's launcher is there and stays.
-    Kept,
-    /// Another tool's entry holds the temporary name a replacement needs, and stays.
-    Blocked,
-}
+pub use spaceterm_protocol::service::lane::{CliLauncher, CliLink};
 
 /// What keeping an existing launcher on the approved runtime did. Never fatal to the service
 /// operation that asked.

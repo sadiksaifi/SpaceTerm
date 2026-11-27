@@ -29,7 +29,8 @@ pub const MAJOR: u16 = WORK.major;
 /// [`crate::update::facts::MINOR_RESTART_FACTS`] and the `clock_behind` code. Service 1.2 adds
 /// the `DetailedFacts` and `WaitDetailedFacts` requests of
 /// [`crate::update::facts::MINOR_DETAILED_FACTS`]. Service 1.3 adds the final Stop grant.
-pub const SERVICE: ProtocolVersion = ProtocolVersion { major: 1, minor: 3 };
+/// Service 1.4 adds the Command Line Tool requests of [`MINOR_COMMAND_LINE_TOOL`].
+pub const SERVICE: ProtocolVersion = ProtocolVersion { major: 1, minor: 4 };
 /// This build's Desktop Channel version.
 pub const DESKTOP_CHANNEL: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };
 
@@ -76,6 +77,10 @@ pub fn negotiate(
 
 /// Work and service minor that add the Stop grant and the retained-input refusal.
 pub const MINOR_IDLE_RESTART: u16 = 3;
+
+/// Service minor that reads, installs and removes the Machine's Command Line Tool, so a paired
+/// client can install the command on that Machine.
+pub const MINOR_COMMAND_LINE_TOOL: u16 = 4;
 
 #[cfg(test)]
 mod tests {

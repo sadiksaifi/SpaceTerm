@@ -17,13 +17,14 @@ use std::sync::Arc;
 use gpui::{AnyWindowHandle, App, AppContext as _, Context, Global, SharedString, Task};
 use spaceterm_core::service::lane::admin::{self, Preview, Verdict};
 use spaceterm_core::service::lane::client::{LaneError, Outcome};
-use spaceterm_core::service::lane::{LaneAction, LaneReceipt, LaneStatus};
+use spaceterm_core::service::lane::{CliLauncher, CliLink, LaneAction, LaneReceipt, LaneStatus};
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionIntent,
     ModalActionRole, ModalId,
 };
 
 use super::SettingsWindow;
+use crate::command_line_tool::{Launcher, LauncherFiles, LinkOutcome, ToolFailure};
 use crate::direct_connections::{DirectRouteId, DirectRouteStatus, RefusalReason};
 use crate::machine_connection::{CoreError, MachineConnection};
 use crate::ui::sidebar_window::form::CaptionTone;
@@ -190,6 +191,8 @@ pub(crate) trait RemoteMachineControl: Send + Sync {
     fn prepare(&self, change: Change) -> Result<Prepared, RemoteFailure>;
     /// Executes a confirmed preview and follows it until it settles or its wait passes.
     fn perform(&self, preview: Preview) -> Result<Performed, RemoteFailure>;
+    /// The Machine's Command Line Tool, which its SpaceTerm Core reads and links over the lane.
+    fn command_line_tool(&self) -> Arc<dyn LauncherFiles>;
 }
 
 /// The steps over a paired server's own lane, with its pending operations kept beside this
@@ -263,6 +266,96 @@ impl RemoteMachineControl for LaneControl {
         )
         .map_err(RemoteFailure::of_lane)?;
         Ok(Performed { outcome, settled })
+    }
+
+    fn command_line_tool(&self) -> Arc<dyn LauncherFiles> {
+        Arc::new(LaneLauncherFiles {
+            core: self.core.clone(),
+            session: std::sync::Mutex::new(None),
+        })
+    }
+}
+
+/// A paired Machine's Command Line Tool over its service lane. One lane connection serves the
+/// reads and the change of one row step, and a failed request ends it.
+struct LaneLauncherFiles {
+    core: MachineConnection,
+    session: std::sync::Mutex<Option<spaceterm_core::service::lane::client::Session>>,
+}
+
+impl LaneLauncherFiles {
+    fn call<T>(
+        &self,
+        step: impl FnOnce(&mut spaceterm_core::service::lane::client::Session) -> Result<T, LaneError>,
+    ) -> Result<T, ToolFailure> {
+        let mut held = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        let session = match held.as_mut() {
+            Some(session) => session,
+            None => {
+                let lane = self
+                    .core
+                    .service_lane()
+                    .map_err(|error| tool_failure(LaneError::Core(error)))?;
+                let opened = lane
+                    .session_by(std::time::Instant::now() + admin::REQUEST_LIMIT)
+                    .map_err(tool_failure)?;
+                held.insert(opened)
+            }
+        };
+        let result = step(session);
+        if result.is_err() {
+            *held = None;
+        }
+        result.map_err(tool_failure)
+    }
+}
+
+impl LauncherFiles for LaneLauncherFiles {
+    fn read(&self) -> Result<Launcher, ToolFailure> {
+        Ok(match self.call(admin::command_line_tool)? {
+            CliLauncher::Missing => Launcher::Missing,
+            CliLauncher::Linked => Launcher::Installed,
+            CliLauncher::Stale => Launcher::Stale,
+            CliLauncher::Outdated => Launcher::Outdated,
+            CliLauncher::Foreign => Launcher::OtherLink,
+            CliLauncher::NotLink => Launcher::OtherFile,
+            CliLauncher::Blocked => Launcher::Blocked,
+        })
+    }
+
+    fn link(&self) -> Result<LinkOutcome, ToolFailure> {
+        Ok(match self.call(admin::install_command_line_tool)? {
+            CliLink::Linked => LinkOutcome::Linked,
+            CliLink::Kept => LinkOutcome::Kept,
+            CliLink::Blocked => LinkOutcome::Blocked,
+        })
+    }
+
+    fn unlink(&self) -> Result<(), ToolFailure> {
+        self.call(admin::uninstall_command_line_tool)
+    }
+}
+
+/// The Command Line Tool's classification of a lane failure.
+fn tool_failure(error: LaneError) -> ToolFailure {
+    if let LaneError::Code(code) = &error {
+        match code.as_str() {
+            "unsafe_storage" => return ToolFailure::UnsafeStorage,
+            "storage_unavailable" => return ToolFailure::StorageUnavailable,
+            _ => {}
+        }
+    }
+    match RemoteFailure::of_lane(error) {
+        RemoteFailure::Unreachable => ToolFailure::Unreachable,
+        RemoteFailure::Refused => ToolFailure::Refused,
+        RemoteFailure::Unsupported => ToolFailure::Unsupported,
+        RemoteFailure::Busy => ToolFailure::Busy,
+        RemoteFailure::Unverified => ToolFailure::Unverified,
+        RemoteFailure::Changed
+        | RemoteFailure::Capacity
+        | RemoteFailure::ActivationUnresolved
+        | RemoteFailure::Protocol
+        | RemoteFailure::Failed => ToolFailure::Failed,
     }
 }
 
@@ -546,7 +639,7 @@ impl SettingsWindow {
 
     /// The lane steps for `route`'s current connection, when the desktop reaches paired
     /// servers' lanes and holds a connection to this one.
-    fn remote_control(
+    pub(super) fn remote_control(
         &self,
         route: &DirectRouteId,
         cx: &App,
@@ -873,6 +966,9 @@ pub(super) mod testing {
         pub(in crate::ui::settings_window) perform: Mutex<Result<Performed, RemoteFailure>>,
         pub(in crate::ui::settings_window) prepared: Mutex<Vec<Change>>,
         pub(in crate::ui::settings_window) performed: Mutex<Vec<Preview>>,
+        /// The Machine's Command Line Tool.
+        pub(in crate::ui::settings_window) launcher:
+            Arc<crate::command_line_tool::testing::ScriptedFiles>,
     }
 
     impl ScriptedRemote {
@@ -883,6 +979,9 @@ pub(super) mod testing {
                 perform: Mutex::new(Err(RemoteFailure::Unreachable)),
                 prepared: Mutex::default(),
                 performed: Mutex::default(),
+                launcher: crate::command_line_tool::testing::ScriptedFiles::new(Ok(
+                    Launcher::Missing,
+                )),
             })
         }
 
@@ -909,6 +1008,10 @@ pub(super) mod testing {
         fn perform(&self, preview: Preview) -> Result<Performed, RemoteFailure> {
             self.performed.lock().unwrap().push(preview);
             self.perform.lock().unwrap().clone()
+        }
+
+        fn command_line_tool(&self) -> Arc<dyn LauncherFiles> {
+            Arc::clone(&self.launcher) as Arc<dyn LauncherFiles>
         }
     }
 }

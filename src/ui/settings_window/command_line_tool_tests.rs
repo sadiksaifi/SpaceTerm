@@ -6,7 +6,8 @@ use gpui::accesskit::Action;
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 use spaceterm_ui::a11y_testing::{A11yTree, perform};
 
-use super::{ACTION_SELECTOR, MENU_SELECTOR, ToolCheck};
+use super::{ACTION_SELECTOR, MENU_SELECTOR};
+use crate::ui::settings_window::machine_list::MachineChoice;
 use crate::appearance::Appearance;
 use crate::command_line_tool::testing::{ScriptedFiles, tool};
 use crate::command_line_tool::{Launcher, LinkOutcome, ToolAction, ToolFailure};
@@ -99,10 +100,10 @@ fn opening_machines_checks_the_command_and_install_then_offers_its_menu(cx: &mut
     let (files, window, cx) = open_settings(Some(Launcher::Missing), cx);
     assert_eq!(
         window.read_with(cx, |settings, _| settings
-            .command_line_tool
-            .as_ref()
+            .command_line_tools
+            .row(&MachineChoice::Local)
             .map(|row| row.check)),
-        Some(ToolCheck::NotChecked)
+        None
     );
     click(NAVIGATION_SELECTOR, cx);
     let missing = presentation(&window, cx);
@@ -296,4 +297,94 @@ fn a_finished_operation_during_a_read_reads_the_command_again(cx: &mut TestAppCo
     cx.run_until_parked();
     assert_eq!(reads(), before + 2);
     assert_eq!(presentation(&window, cx).state, "Installed");
+}
+
+/// Opens Machines on one connected paired Machine named penguin, whose lane steps are `remote`.
+fn open_penguin<'a>(
+    remote: &Arc<crate::ui::settings_window::remote_admin::testing::ScriptedRemote>,
+    cx: &'a mut TestAppContext,
+) -> crate::ui::settings_window::machine_list::tests::Machines<'a> {
+    use crate::ui::settings_window::machine_list::tests::{connected_paired, open_with};
+    let paired = connected_paired(&["penguin"], cx);
+    cx.update(|cx| remote.install(cx));
+    let machines = open_with(false, paired, cx);
+    machines.cx.run_until_parked();
+    machines
+}
+
+#[gpui::test]
+fn a_paired_machines_command_is_read_and_installed_over_its_lane_only_when_asked(
+    cx: &mut TestAppContext,
+) {
+    let remote = crate::ui::settings_window::remote_admin::testing::ScriptedRemote::new();
+    let machines = open_penguin(&remote, cx);
+    let reads = || remote.launcher.reads.load(std::sync::atomic::Ordering::SeqCst);
+    // Opening Machines on penguin reaches nothing.
+    let unchecked = presentation(&machines.window, machines.cx);
+    assert_eq!(
+        (unchecked.state, unchecked.action),
+        ("Not checked", Some((ToolAction::Check, "Check")))
+    );
+    assert_eq!(reads(), 0);
+    assert_eq!(
+        machines.window.read_with(machines.cx, |settings, _| settings
+            .core_group_heading(crate::ui::settings_window::machine_list::COMMAND_LINE_GROUP)),
+        "Command Line on penguin"
+    );
+
+    click(ACTION_SELECTOR, machines.cx);
+    assert_eq!(reads(), 1);
+    let missing = presentation(&machines.window, machines.cx);
+    assert_eq!(
+        (missing.state, missing.action),
+        ("Not installed", Some((ToolAction::Install, "Install")))
+    );
+
+    click(ACTION_SELECTOR, machines.cx);
+    assert_eq!(remote.launcher.links(), 1);
+    let installed = presentation(&machines.window, machines.cx);
+    assert_eq!((installed.state, installed.action), ("Installed", None));
+
+    choose("Uninstall", machines.cx);
+    assert_eq!(remote.launcher.unlinks(), 1);
+    assert_eq!(
+        presentation(&machines.window, machines.cx).state,
+        "Not installed"
+    );
+}
+
+#[gpui::test]
+fn a_paired_machine_spaceterm_does_not_reach_is_never_asked(cx: &mut TestAppContext) {
+    let remote = crate::ui::settings_window::remote_admin::testing::ScriptedRemote::new();
+    let machines = open_penguin(&remote, cx);
+    machines.direct.disconnect(&machines.routes[0]);
+    machines.cx.run_until_parked();
+    click(ACTION_SELECTOR, machines.cx);
+    let unreachable = presentation(&machines.window, machines.cx);
+    assert_eq!(
+        (unreachable.state, unreachable.action),
+        ("Unavailable", Some((ToolAction::Check, "Try Again")))
+    );
+    assert!(unreachable.explanation.contains("couldn\u{2019}t reach this Machine"));
+    assert_eq!(
+        remote.launcher.reads.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+}
+
+#[gpui::test]
+fn a_paired_machine_with_an_older_core_says_it_needs_an_update(cx: &mut TestAppContext) {
+    let remote = crate::ui::settings_window::remote_admin::testing::ScriptedRemote::new();
+    *remote.launcher.launcher.lock().unwrap() = Err(ToolFailure::Unsupported);
+    let machines = open_penguin(&remote, cx);
+    click(ACTION_SELECTOR, machines.cx);
+    let older = presentation(&machines.window, machines.cx);
+    assert_eq!(
+        (older.state, older.explanation.as_ref()),
+        (
+            "Unavailable",
+            "Installing \u{201C}spaceterm-development\u{201D} from here needs a newer SpaceTerm \
+             Core on this Machine. Update it first."
+        )
+    );
 }

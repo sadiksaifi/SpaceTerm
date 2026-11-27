@@ -1,4 +1,5 @@
-//! The Command Line Tool: this build identity's launcher in the account's own `~/.local/bin`.
+//! The Command Line Tool: this build identity's launcher in the account's own `~/.local/bin`,
+//! on this computer or on a paired Machine, whose SpaceTerm Core links it over its service lane.
 //!
 //! Installing creates the link `install.sh` creates, through the same service code, so it needs
 //! no administrator and asks for no password. It never replaces a file or link that another
@@ -43,6 +44,9 @@ impl Launcher {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ToolAction {
+    /// Reads the launcher again. Offered where SpaceTerm reads it only when asked, as on a
+    /// paired Machine.
+    Check,
     Install,
     /// Links SpaceTerm's launcher again, as Install does.
     Repair,
@@ -70,6 +74,14 @@ pub(crate) enum ToolFailure {
     Occupied,
     /// Another program's entry holds the temporary name replacement uses, so nothing changed.
     Blocked,
+    /// SpaceTerm couldn't reach the paired Machine's service lane.
+    Unreachable,
+    /// The paired Machine didn't accept this device.
+    Refused,
+    /// The paired Machine's SpaceTerm Core is too old to link the launcher over its lane.
+    Unsupported,
+    /// The paired Machine refused or answered in a way SpaceTerm doesn't read.
+    Failed,
 }
 
 /// The outcome of linking the launcher.
