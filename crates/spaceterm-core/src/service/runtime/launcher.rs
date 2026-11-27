@@ -218,6 +218,32 @@ fn rename_exclusive(directory: &File, from: &str, to: &str) -> std::io::Result<(
     }
 }
 
+/// Fails unless SpaceTerm can tell whether a link of this identity's is at the launcher path or
+/// its replacement and removal names: nothing there, an entry that is not a link, a link, or a
+/// `bin` that is not a directory all answer. [`remove`] treats a path it can't inspect as
+/// holding no link, so a Core uninstall never stops partway on it, and a removal the person asks
+/// for alone checks this first, so it never reports a link it couldn't see as removed.
+pub(in crate::service) fn inspectable(home: &Path, identity: &str) -> Result<(), CoreError> {
+    let parent = home.join(".local/bin");
+    let answers = |path: &Path| match std::fs::symlink_metadata(path) {
+        Ok(_) => true,
+        Err(error) => matches!(
+            error.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+        ),
+    };
+    let paths = [
+        parent.join(identity),
+        temporary(&parent, identity),
+        parent.join(removing(identity)),
+    ];
+    if paths.iter().all(|path| answers(path)) {
+        Ok(())
+    } else {
+        Err(CoreError::StorageUnavailable)
+    }
+}
+
 /// Remove only a link into this identity's retained installations, under the service lock.
 ///
 /// The service lock orders only SpaceTerm's own writers, so the launcher first moves to

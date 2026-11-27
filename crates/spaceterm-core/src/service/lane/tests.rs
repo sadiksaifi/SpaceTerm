@@ -691,6 +691,118 @@ fn permission_messages_keep_their_json_shape() {
 }
 
 #[test]
+fn a_paired_device_installs_and_removes_the_machines_command_line_tool() {
+    with_lane(|lane| {
+        let answer = |request| lane.lane.answer(request, &ACTOR);
+        let read = || answer(LaneRequest::CommandLineTool {});
+        assert_eq!(
+            read(),
+            LaneReply::CommandLineTool {
+                launcher: CliLauncher::Missing
+            }
+        );
+        assert_eq!(
+            answer(LaneRequest::InstallCommandLineTool {}),
+            LaneReply::CommandLineToolLinked {
+                link: CliLink::Linked
+            }
+        );
+        // The launcher runs the approved runtime's own CLI.
+        let launcher = lane.service.cli_launcher_path().unwrap();
+        let target = std::fs::read_link(&launcher).unwrap();
+        assert!(target.starts_with(lane.service.installations_directory()));
+        assert_eq!(
+            read(),
+            LaneReply::CommandLineTool {
+                launcher: CliLauncher::Linked
+            }
+        );
+        assert_eq!(
+            answer(LaneRequest::UninstallCommandLineTool {}),
+            LaneReply::CommandLineToolRemoved {}
+        );
+        assert_eq!(
+            read(),
+            LaneReply::CommandLineTool {
+                launcher: CliLauncher::Missing
+            }
+        );
+
+        // Another program's file at the path stays through an install and an uninstall.
+        std::fs::write(&launcher, b"another tool").unwrap();
+        assert_eq!(
+            answer(LaneRequest::InstallCommandLineTool {}),
+            LaneReply::CommandLineToolLinked {
+                link: CliLink::Kept
+            }
+        );
+        assert_eq!(
+            answer(LaneRequest::UninstallCommandLineTool {}),
+            LaneReply::CommandLineToolRemoved {}
+        );
+        assert_eq!(std::fs::read(&launcher).unwrap(), b"another tool");
+        assert_eq!(
+            read(),
+            LaneReply::CommandLineTool {
+                launcher: CliLauncher::NotLink
+            }
+        );
+    });
+}
+
+/// A read waits for a launcher change another connection is still making, so it never answers
+/// with the launcher from before that change.
+#[test]
+fn a_command_line_tool_read_waits_for_a_change_underway() {
+    with_lane(|lane| {
+        let data = Directory::open(&lane.service.paths.data, true).unwrap();
+        let held = data.lock("service.lock", false).unwrap();
+        assert_eq!(
+            code(lane.lane.answer(LaneRequest::CommandLineTool {}, &ACTOR)),
+            "service_busy"
+        );
+        drop(held);
+        assert_eq!(
+            lane.lane.answer(LaneRequest::CommandLineTool {}, &ACTOR),
+            LaneReply::CommandLineTool {
+                launcher: CliLauncher::Missing
+            }
+        );
+    });
+}
+
+#[test]
+fn command_line_tool_requests_need_service_1_4_and_keep_their_json_shape() {
+    let older = crate::protocol::version::ProtocolVersion { major: 1, minor: 3 };
+    for request in [
+        LaneRequest::CommandLineTool {},
+        LaneRequest::InstallCommandLineTool {},
+        LaneRequest::UninstallCommandLineTool {},
+    ] {
+        assert!(!request.supported_at(older));
+        assert!(request.supported_at(crate::protocol::version::SERVICE));
+    }
+    assert_eq!(
+        serde_json::to_value(LaneRequest::InstallCommandLineTool {}).unwrap(),
+        serde_json::json!({ "request": "install_command_line_tool" })
+    );
+    assert_eq!(
+        serde_json::to_value(LaneReply::CommandLineTool {
+            launcher: CliLauncher::NotLink
+        })
+        .unwrap(),
+        serde_json::json!({ "reply": "command_line_tool", "launcher": "not_link" })
+    );
+    assert_eq!(
+        serde_json::to_value(LaneReply::CommandLineToolLinked {
+            link: CliLink::Kept
+        })
+        .unwrap(),
+        serde_json::json!({ "reply": "command_line_tool_linked", "link": "kept" })
+    );
+}
+
+#[test]
 fn status_reports_the_approved_runtime_and_live_sessions() {
     with_lane(|lane| {
         lane.host.sessions.lock().unwrap().push([3; 32]);

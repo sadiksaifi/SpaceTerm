@@ -42,7 +42,7 @@ pub(super) const CORE_GROUP: &str = "";
 pub(super) const NETWORK_GROUP: &str = "Network Access";
 /// The card listing every server.
 pub(super) const ALL_MACHINES_GROUP: &str = "All Machines";
-/// The card of this computer's command, which ignores the picker.
+/// The card of the selected Machine's command.
 pub(super) const COMMAND_LINE_GROUP: &str = "Command Line";
 /// The card of the selected server's Git and its Server Settings on the Git page.
 pub(super) const GIT_CORE_GROUP: &str = "Git on machine";
@@ -325,6 +325,9 @@ impl SettingsWindow {
             | SettingsRowId::MachineWorktreeLocation => selected.is_some(),
             // Devices appear once other devices may connect.
             SettingsRowId::PairedDevices => row_presents(row, selected) && self.network_access_on(),
+            SettingsRowId::CommandLineTool => {
+                selected.is_some_and(|choice| self.command_line_tools.offered(choice))
+            }
             row => row_presents(row, selected),
         }
     }
@@ -418,6 +421,9 @@ impl SettingsWindow {
         match group {
             GIT_CORE_GROUP => {
                 SharedString::from(format!("Git on {}", self.selected_machine_name()))
+            }
+            COMMAND_LINE_GROUP => {
+                SharedString::from(format!("Command Line on {}", self.selected_machine_name()))
             }
             other => SharedString::new_static(other),
         }

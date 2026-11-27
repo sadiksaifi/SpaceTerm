@@ -41,9 +41,9 @@ use network::{
 };
 use serde::Deserialize;
 pub use spaceterm_protocol::service::lane::{
-    Actor, CLOCK_BEHIND, LOCAL_ONLY, LaneAction, LaneActivation, LaneDevice, LaneEffects,
-    LaneNetwork, LaneOperationState, LaneReceipt, LaneReply, LaneRequest, LaneStatus, LaneVersion,
-    MAX_CHUNK, MAX_FRAME, OperationId, WAIT_FACTS_LIMIT,
+    Actor, CLOCK_BEHIND, CliLauncher, CliLink, LOCAL_ONLY, LaneAction, LaneActivation, LaneDevice,
+    LaneEffects, LaneNetwork, LaneOperationState, LaneReceipt, LaneReply, LaneRequest, LaneStatus,
+    LaneVersion, MAX_CHUNK, MAX_FRAME, OperationId, WAIT_FACTS_LIMIT,
 };
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -462,6 +462,21 @@ impl LaneCore {
             | LaneRequest::ResetPermission { .. } => {
                 return (self.permission(request, actor), None);
             }
+            // The Command Line Tool is this account's own link, so a paired caller installs it
+            // as the desktop on the Machine does. The lane retains no package first, so a Core
+            // without an approved runtime refuses the install.
+            LaneRequest::CommandLineTool {} => self
+                .service
+                .cli_launcher_settled()
+                .map(|launcher| LaneReply::CommandLineTool { launcher }),
+            LaneRequest::InstallCommandLineTool {} => self
+                .service
+                .link_cli(|| Err(CoreError::CandidateMissing))
+                .map(|link| LaneReply::CommandLineToolLinked { link }),
+            LaneRequest::UninstallCommandLineTool {} => self
+                .service
+                .unlink_cli()
+                .map(|()| LaneReply::CommandLineToolRemoved {}),
         };
         (result.unwrap_or_else(|failure| error(&failure)), None)
     }

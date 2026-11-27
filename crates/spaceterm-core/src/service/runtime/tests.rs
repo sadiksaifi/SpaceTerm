@@ -726,6 +726,43 @@ fn a_client_links_and_removes_the_launcher_the_installer_selects_and_keeps_other
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// A removal that can't read the launcher path reports a storage failure instead of reporting
+/// a link that may still be there as removed.
+#[test]
+fn a_removal_that_cannot_inspect_the_launcher_fails_and_keeps_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = temporary();
+    let service = Service::for_paths(crate::host::Paths {
+        identity: "spaceterm-development".into(),
+        data: home.join(".local/share/spaceterm-development/core"),
+        runtime: home.join("runtime"),
+    })
+    .unwrap();
+    with_artifact(
+        &home.join("source"),
+        "spaceterm-development",
+        |archive, signature| {
+            assert_eq!(
+                service.link_cli(|| Ok(service
+                    .provision(archive, signature, target(), COMMIT, VERSION)?
+                    .directory)),
+                Ok(CliLink::Linked)
+            );
+            let bin = home.join(".local/bin");
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(service.unlink_cli(), Err(CoreError::StorageUnavailable));
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(service.cli_launcher(), Ok(CliLauncher::Linked));
+
+            // A file where `~/.local/bin` belongs holds no launcher, so removal finishes.
+            std::fs::remove_dir_all(&bin).unwrap();
+            std::fs::write(&bin, b"not a directory").unwrap();
+            assert_eq!(service.unlink_cli(), Ok(()));
+        },
+    );
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 fn temporary() -> PathBuf {
     let mut random = [0; 16];
     ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut random).unwrap();

@@ -386,7 +386,13 @@ pub fn offline_with_lock(label: &str) -> (DirectConnections, DirectRouteId, Cred
 /// scripted writers answer protocol operations and the handles cannot reach a native server.
 /// Registry mutations still use DirectConnections.
 pub fn connected_routes(labels: &[&str]) -> (DirectConnections, Vec<DirectRouteId>) {
-    connected_fixture(labels, None)
+    connected_fixture(labels, None, false)
+}
+
+/// Saved routes whose Core refuses this desktop's work protocol, so each keeps only the handle
+/// whose service lane still answers.
+pub fn work_refused_routes(labels: &[&str]) -> (DirectConnections, Vec<DirectRouteId>) {
+    connected_fixture(labels, None, true)
 }
 
 /// Connected saved routes that all reach the server `server`, as an earlier pairing and a newer
@@ -395,12 +401,13 @@ pub fn connected_routes_to_one_core(
     labels: &[&str],
     core: [u8; 32],
 ) -> (DirectConnections, Vec<DirectRouteId>) {
-    connected_fixture(labels, Some(core))
+    connected_fixture(labels, Some(core), false)
 }
 
 fn connected_fixture(
     labels: &[&str],
     core: Option<[u8; 32]>,
+    work_refused: bool,
 ) -> (DirectConnections, Vec<DirectRouteId>) {
     struct ConnectedNetwork;
     impl DirectNetwork for ConnectedNetwork {
@@ -478,9 +485,13 @@ fn connected_fixture(
         state.routes.insert(
             saved.route.id,
             RouteState {
-                status: DirectRouteStatus::Connected,
-                core: Some(core),
-                service: None,
+                status: if work_refused {
+                    DirectRouteStatus::Refused(crate::RefusalReason::Incompatible)
+                } else {
+                    DirectRouteStatus::Connected
+                },
+                core: (!work_refused).then(|| core.clone()),
+                service: work_refused.then_some(core),
                 gate,
                 retry: Retry::new(Interaction::Quiet),
                 health: None,

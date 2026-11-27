@@ -6,7 +6,8 @@ use gpui::accesskit::Action;
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 use spaceterm_ui::a11y_testing::{A11yTree, perform};
 
-use super::{ACTION_SELECTOR, MENU_SELECTOR, ToolCheck};
+use super::{ACTION_SELECTOR, MENU_SELECTOR};
+use crate::ui::settings_window::machine_list::MachineChoice;
 use crate::appearance::Appearance;
 use crate::command_line_tool::testing::{ScriptedFiles, tool};
 use crate::command_line_tool::{Launcher, LinkOutcome, ToolAction, ToolFailure};
@@ -99,10 +100,10 @@ fn opening_machines_checks_the_command_and_install_then_offers_its_menu(cx: &mut
     let (files, window, cx) = open_settings(Some(Launcher::Missing), cx);
     assert_eq!(
         window.read_with(cx, |settings, _| settings
-            .command_line_tool
-            .as_ref()
+            .command_line_tools
+            .row(&MachineChoice::Local)
             .map(|row| row.check)),
-        Some(ToolCheck::NotChecked)
+        None
     );
     click(NAVIGATION_SELECTOR, cx);
     let missing = presentation(&window, cx);
@@ -184,7 +185,7 @@ fn a_change_that_fails_after_it_landed_shows_the_launcher_as_it_is(cx: &mut Test
     click(NAVIGATION_SELECTOR, cx);
     // The link is removed, then saving the directory fails.
     *files.unlink.lock().unwrap() = Err(ToolFailure::StorageUnavailable);
-    *files.launcher.lock().unwrap() = Ok(Launcher::Missing);
+    *files.after_change.lock().unwrap() = Some(Ok(Launcher::Missing));
     choose("Uninstall", cx);
     let removed = presentation(&window, cx);
     assert_eq!(
@@ -296,4 +297,258 @@ fn a_finished_operation_during_a_read_reads_the_command_again(cx: &mut TestAppCo
     cx.run_until_parked();
     assert_eq!(reads(), before + 2);
     assert_eq!(presentation(&window, cx).state, "Installed");
+}
+
+/// Opens Machines on one connected paired Machine named penguin, whose lane steps are `remote`.
+fn open_penguin<'a>(
+    remote: &Arc<crate::ui::settings_window::remote_admin::testing::ScriptedRemote>,
+    cx: &'a mut TestAppContext,
+) -> crate::ui::settings_window::machine_list::tests::Machines<'a> {
+    use crate::ui::settings_window::machine_list::tests::{connected_paired, open_with};
+    let paired = connected_paired(&["penguin"], cx);
+    cx.update(|cx| remote.install(cx));
+    let machines = open_with(false, paired, cx);
+    machines.cx.run_until_parked();
+    machines
+}
+
+#[gpui::test]
+fn a_paired_machines_command_is_read_and_installed_over_its_lane_only_when_asked(
+    cx: &mut TestAppContext,
+) {
+    let remote = crate::ui::settings_window::remote_admin::testing::ScriptedRemote::new();
+    let machines = open_penguin(&remote, cx);
+    let reads = || remote.launcher.reads.load(std::sync::atomic::Ordering::SeqCst);
+    // Opening Machines on penguin reaches nothing.
+    let unchecked = presentation(&machines.window, machines.cx);
+    assert_eq!(
+        (unchecked.state, unchecked.action),
+        ("Not checked", Some((ToolAction::Check, "Check")))
+    );
+    assert_eq!(reads(), 0);
+    assert_eq!(
+        machines.window.read_with(machines.cx, |settings, _| settings
+            .core_group_heading(crate::ui::settings_window::machine_list::COMMAND_LINE_GROUP)),
+        "Command Line on penguin"
+    );
+
+    click(ACTION_SELECTOR, machines.cx);
+    assert_eq!(reads(), 1);
+    let missing = presentation(&machines.window, machines.cx);
+    assert_eq!(
+        (missing.state, missing.action),
+        ("Not installed", Some((ToolAction::Install, "Install")))
+    );
+
+    click(ACTION_SELECTOR, machines.cx);
+    assert_eq!(remote.launcher.links(), 1);
+    let installed = presentation(&machines.window, machines.cx);
+    assert_eq!((installed.state, installed.action), ("Installed", None));
+
+    choose("Uninstall", machines.cx);
+    assert_eq!(remote.launcher.unlinks(), 1);
+    assert_eq!(
+        presentation(&machines.window, machines.cx).state,
+        "Not installed"
+    );
+}
+
+#[gpui::test]
+fn a_paired_machine_spaceterm_does_not_reach_is_never_asked(cx: &mut TestAppContext) {
+    let remote = crate::ui::settings_window::remote_admin::testing::ScriptedRemote::new();
+    let machines = open_penguin(&remote, cx);
+    machines.direct.disconnect(&machines.routes[0]);
+    machines.cx.run_until_parked();
+    click(ACTION_SELECTOR, machines.cx);
+    let unreachable = presentation(&machines.window, machines.cx);
+    assert_eq!(
+        (unreachable.state, unreachable.action),
+        ("Unavailable", Some((ToolAction::Check, "Try Again")))
+    );
+    assert!(unreachable.explanation.contains("couldn\u{2019}t reach the Machine"));
+    assert_eq!(
+        remote.launcher.reads.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+}
+
+#[gpui::test]
+fn a_paired_machine_with_an_older_core_says_it_needs_an_update(cx: &mut TestAppContext) {
+    let remote = crate::ui::settings_window::remote_admin::testing::ScriptedRemote::new();
+    *remote.launcher.launcher.lock().unwrap() = Err(ToolFailure::Unsupported);
+    let machines = open_penguin(&remote, cx);
+    click(ACTION_SELECTOR, machines.cx);
+    let older = presentation(&machines.window, machines.cx);
+    assert_eq!(
+        (older.state, older.explanation.as_ref()),
+        (
+            "Unavailable",
+            "Installing \u{201C}spaceterm-development\u{201D} from here needs a newer SpaceTerm \
+             Core on the Machine. Update it first."
+        )
+    );
+}
+
+#[gpui::test]
+fn a_read_paired_command_offers_check_again_and_forgets_it_once_disconnected(
+    cx: &mut TestAppContext,
+) {
+    let remote = crate::ui::settings_window::remote_admin::testing::ScriptedRemote::new();
+    *remote.launcher.launcher.lock().unwrap() = Ok(Launcher::OtherFile);
+    let machines = open_penguin(&remote, cx);
+    click(ACTION_SELECTOR, machines.cx);
+    let other = presentation(&machines.window, machines.cx);
+    assert_eq!(
+        (other.state, other.action),
+        ("Other file", Some((ToolAction::Check, "Check Again")))
+    );
+
+    // The person moves the file on penguin and asks again.
+    *remote.launcher.launcher.lock().unwrap() = Ok(Launcher::Missing);
+    click(ACTION_SELECTOR, machines.cx);
+    let missing = presentation(&machines.window, machines.cx);
+    assert_eq!(
+        (missing.state, missing.action, missing.menu),
+        (
+            "Not installed",
+            Some((ToolAction::Install, "Install")),
+            vec![(ToolAction::Check, "Check Again")]
+        )
+    );
+
+    // What SpaceTerm read belongs to the link it read over.
+    machines.direct.disconnect(&machines.routes[0]);
+    machines.cx.run_until_parked();
+    assert_eq!(
+        presentation(&machines.window, machines.cx).state,
+        "Not checked"
+    );
+}
+
+#[gpui::test]
+fn a_control_shown_for_one_machine_never_acts_on_another(cx: &mut TestAppContext) {
+    let remote = crate::ui::settings_window::remote_admin::testing::ScriptedRemote::new();
+    *remote.launcher.launcher.lock().unwrap() = Ok(Launcher::Installed);
+    let machines = open_penguin(&remote, cx);
+    // A Machine the row no longer shows, such as one a removal took away before the next frame.
+    let other = MachineChoice::Direct([0xee; 32]);
+    machines.window.update(machines.cx, |settings, cx| {
+        settings.request_command_line_tool(&other, ToolAction::Uninstall, cx);
+    });
+    machines.cx.run_until_parked();
+    assert_eq!(
+        (
+            remote.launcher.unlinks(),
+            remote.launcher.reads.load(std::sync::atomic::Ordering::SeqCst)
+        ),
+        (0, 0)
+    );
+}
+
+/// A Core that refuses this desktop's work protocol still answers its service lane, so its
+/// command is read and installed there.
+#[gpui::test]
+fn a_paired_machine_with_another_work_protocol_installs_over_its_service_lane(
+    cx: &mut TestAppContext,
+) {
+    use crate::ui::settings_window::machine_list::tests::open_with;
+    let remote = crate::ui::settings_window::remote_admin::testing::ScriptedRemote::new();
+    let paired = crate::direct_connections::tests::work_refused_routes(&["penguin"]);
+    cx.update(|cx| remote.install(cx));
+    let machines = open_with(false, paired, cx);
+    machines.cx.run_until_parked();
+    click(ACTION_SELECTOR, machines.cx);
+    assert_eq!(
+        presentation(&machines.window, machines.cx).state,
+        "Not installed"
+    );
+    click(ACTION_SELECTOR, machines.cx);
+    assert_eq!(remote.launcher.links(), 1);
+    assert_eq!(
+        presentation(&machines.window, machines.cx).state,
+        "Installed"
+    );
+}
+
+/// A menu opened for a paired Machine closes when This Mac or This Computer replaces it, so a
+/// key press meant for the paired Machine never reaches this computer's command.
+#[gpui::test]
+fn an_open_menu_closes_when_another_machine_replaces_its_own(cx: &mut TestAppContext) {
+    use crate::ui::settings_window::machine_list::tests::{connected_paired, open_with_tool};
+    let remote = crate::ui::settings_window::remote_admin::testing::ScriptedRemote::new();
+    *remote.launcher.launcher.lock().unwrap() = Ok(Launcher::Installed);
+    let local = ScriptedFiles::new(Ok(Launcher::Installed));
+    let paired = connected_paired(&["penguin"], cx);
+    cx.update(|cx| remote.install(cx));
+    let machines = open_with_tool(true, Some(Arc::new(tool(&local))), paired, cx);
+    let route = machines.routes[0];
+    machines.cx.update(|_, cx| {
+        crate::ui::settings_window::machine_selection::select(
+            crate::core_context::MachineKey::Direct(route),
+            cx,
+        );
+    });
+    machines.cx.run_until_parked();
+    click(ACTION_SELECTOR, machines.cx);
+    click(MENU_SELECTOR, machines.cx);
+    assert!(A11yTree::read(machines.cx).find("Repair").is_some());
+
+    machines.cx.update(|_, cx| {
+        crate::ui::settings_window::machine_selection::select(
+            crate::core_context::MachineKey::Local,
+            cx,
+        );
+    });
+    machines.cx.run_until_parked();
+    machines.cx.simulate_keystrokes("enter");
+    machines.cx.run_until_parked();
+    assert_eq!((local.links(), local.unlinks()), (0, 0));
+    assert!(!A11yTree::read(machines.cx).find("Repair").is_some());
+}
+
+/// A Machine found unreachable reads as not checked once SpaceTerm reaches it again.
+#[gpui::test]
+fn an_unreachable_result_ends_when_the_machine_answers_again(cx: &mut TestAppContext) {
+    let remote = crate::ui::settings_window::remote_admin::testing::ScriptedRemote::new();
+    let machines = open_penguin(&remote, cx);
+    let route = machines.routes[0];
+    machines.direct.disconnect(&route);
+    machines.cx.run_until_parked();
+    click(ACTION_SELECTOR, machines.cx);
+    assert_eq!(
+        presentation(&machines.window, machines.cx).state,
+        "Unavailable"
+    );
+    machines.direct.connect(&route);
+    crate::ui::settings_window::machine_list::tests::settle(machines.cx, |cx| {
+        cx.update(|_, cx| {
+            crate::ui::direct_machines::installed(cx)
+                .is_some_and(|direct| direct.service(&route).is_some())
+        })
+    });
+    assert_eq!(
+        presentation(&machines.window, machines.cx).state,
+        "Not checked"
+    );
+}
+
+/// A check the person asks for replaces what an earlier refusal said.
+#[gpui::test]
+fn check_again_clears_an_earlier_refusal(cx: &mut TestAppContext) {
+    let remote = crate::ui::settings_window::remote_admin::testing::ScriptedRemote::new();
+    let machines = open_penguin(&remote, cx);
+    click(ACTION_SELECTOR, machines.cx);
+    *remote.launcher.link.lock().unwrap() = Err(ToolFailure::Busy);
+    click(ACTION_SELECTOR, machines.cx);
+    let refused = presentation(&machines.window, machines.cx);
+    assert_eq!(
+        (refused.state, refused.caption.map(|(_, tone)| tone)),
+        ("Not installed", Some(CaptionTone::Error))
+    );
+
+    // The other operation finished and installed the command meanwhile.
+    *remote.launcher.launcher.lock().unwrap() = Ok(Launcher::Installed);
+    choose("Check Again", machines.cx);
+    let installed = presentation(&machines.window, machines.cx);
+    assert_eq!((installed.state, installed.caption), ("Installed", None));
 }

@@ -1,6 +1,9 @@
-//! The Command Line Tool row: whether this build's command is in `~/.local/bin`, with Install,
-//! or Repair and Uninstall in its menu. The row belongs to this computer, so it ignores the
-//! server picker. [`crate::command_line_tool`] owns the launcher policy.
+//! The Command Line Tool row: whether this build's command is in `~/.local/bin` on the selected
+//! Machine, with Install, or Repair and Uninstall in its menu. This computer's command is read
+//! whenever Machines comes into view. A paired Machine's command is read and changed over its
+//! service lane, and only when the person asks, because opening or selecting in Settings
+//! connects to nothing. [`crate::command_line_tool`] owns the launcher policy.
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use gpui::prelude::*;
@@ -11,7 +14,10 @@ use spaceterm_ui::{
 };
 
 use super::SettingsWindow;
+use super::machine_list::MachineChoice;
 use crate::command_line_tool::{CommandLineTool, Launcher, ToolAction, ToolFailure};
+use crate::core_context::MachineKey;
+use crate::machine_connection::MachineConnection;
 use crate::ui::appearance::ChromeAppearance;
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::sidebar_window::form::{CaptionTone, badge};
@@ -38,8 +44,9 @@ pub(super) fn offered(cx: &App) -> Option<Arc<CommandLineTool>> {
 }
 
 /// What SpaceTerm last learned about the command.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) enum ToolCheck {
+    #[default]
     NotChecked,
     Checked(Launcher),
     Failed(ToolFailure),
@@ -69,9 +76,76 @@ pub(super) struct ToolRowPresentation {
     pub(super) working: bool,
 }
 
-/// Owns the tool, the last status, and the running step.
+/// Where the row's command lives, which decides when SpaceTerm reads it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ToolPlace {
+    /// This computer: read whenever Machines comes into view.
+    Local,
+    /// A paired Machine: read only when the person asks.
+    Paired,
+}
+
+/// Each Machine's command and what SpaceTerm learned about it in this window.
+pub(super) struct CommandLineTools {
+    /// The command people type on every Machine. A paired Machine's SpaceTerm Core has this
+    /// build's identity, so its command has the same name.
+    name: &'static str,
+    /// This computer's command. `None` omits the row while this computer is
+    /// selected.
+    local: Option<Arc<CommandLineTool>>,
+    /// Whether this desktop reaches paired Machines' service lanes. Without them, a paired
+    /// Machine offers no row.
+    paired: bool,
+    rows: BTreeMap<MachineKey, CommandLineToolRow>,
+}
+
+impl CommandLineTools {
+    pub(super) fn new(local: Option<Arc<CommandLineTool>>, paired: bool) -> Self {
+        Self {
+            name: local.as_ref().map_or_else(
+                || crate::application_identity::ApplicationIdentity::current().directory_name(),
+                |tool| tool.name(),
+            ),
+            local,
+            paired,
+            rows: BTreeMap::new(),
+        }
+    }
+
+    /// Whether `choice` offers the row.
+    pub(super) fn offered(&self, choice: &MachineChoice) -> bool {
+        match choice {
+            MachineChoice::Local => self.local.is_some(),
+            MachineChoice::Direct(_) => self.paired,
+        }
+    }
+
+    /// What SpaceTerm last learned about `choice`'s command, if it read or changed it.
+    pub(super) fn row(&self, choice: &MachineChoice) -> Option<&CommandLineToolRow> {
+        self.rows.get(&choice.key())
+    }
+}
+
+/// The paired Machine's connection, its link generation, and the route's status, which together
+/// name the link a step used. A Core that restarts into another work major keeps the earlier
+/// handle and generation, so the status tells that link apart.
+pub(super) struct Link {
+    core: MachineConnection,
+    generation: u64,
+    status: Option<crate::direct_connections::DirectRouteStatus>,
+}
+
+impl Link {
+    fn same(&self, other: &Self) -> bool {
+        self.core.same_handle(&other.core)
+            && self.generation == other.generation
+            && self.status == other.status
+    }
+}
+
+/// The last status of one Machine's command, and the running step.
+#[derive(Default)]
 pub(super) struct CommandLineToolRow {
-    tool: Arc<CommandLineTool>,
     pub(super) check: ToolCheck,
     pub(super) working: Option<ToolWork>,
     /// Why the last Install, Repair or Uninstall didn't complete. The next action clears it.
@@ -79,46 +153,43 @@ pub(super) struct CommandLineToolRow {
     /// A service operation or update finished while a step ran, so that step's read may predate
     /// it and the command is read again afterwards.
     read_outdated: bool,
+    /// The paired Machine's connection and its link generation when the last step ran. A
+    /// reconnect may reach a Machine whose command changed since, so what the step learned
+    /// belongs to that link.
+    read_over: Option<Link>,
     /// Returns the background result to GPUI. Dropping the window drops it.
     _operation: Option<Task<()>>,
-}
-
-impl CommandLineToolRow {
-    pub(super) fn new(tool: Arc<CommandLineTool>) -> Self {
-        Self {
-            tool,
-            check: ToolCheck::NotChecked,
-            working: None,
-            failure: None,
-            read_outdated: false,
-            _operation: None,
-        }
-    }
-
-    pub(super) fn presentation(&self) -> ToolRowPresentation {
-        present(self.tool.name(), self.check, self.working, self.failure)
-    }
 }
 
 /// The presentation of one state.
 pub(super) fn present(
     name: &str,
+    place: ToolPlace,
     check: ToolCheck,
     working: Option<ToolWork>,
     failure: Option<ToolFailure>,
 ) -> ToolRowPresentation {
+    // A paired Machine's command is read only when the person asks, first and after a failed
+    // read.
+    let check_action: &[ToolAction] = match place {
+        ToolPlace::Local => &[],
+        ToolPlace::Paired => &[ToolAction::Check],
+    };
     let (state, state_selector, explanation, actions) = match check {
         ToolCheck::NotChecked => (
             "Not checked",
             "settings-command-line-tool-state-not-checked",
-            SharedString::new_static("SpaceTerm checks the command when you open this section."),
-            &[][..],
+            SharedString::new_static(match place {
+                ToolPlace::Local => "SpaceTerm checks the command when you open this section.",
+                ToolPlace::Paired => "Check the Machine to install or update its command.",
+            }),
+            check_action,
         ),
         ToolCheck::Failed(failure) => (
             "Unavailable",
             "settings-command-line-tool-state-unavailable",
             failure_text(failure, name),
-            &[][..],
+            check_action,
         ),
         ToolCheck::Checked(launcher) => {
             let (state, selector, explanation) = match launcher {
@@ -142,7 +213,7 @@ pub(super) fn present(
                     "settings-command-line-tool-state-outdated",
                     format!(
                         "\u{201C}{name}\u{201D} runs a different SpaceTerm Core build than \
-                         this computer\u{2019}s SpaceTerm Core."
+                         the Machine\u{2019}s SpaceTerm Core."
                     ),
                 ),
                 Launcher::Blocked => (
@@ -188,6 +259,13 @@ pub(super) fn present(
     let mut menu = Vec::new();
     for &offered in actions {
         match offered {
+            ToolAction::Check => {
+                let label = match check {
+                    ToolCheck::Failed(_) => "Try Again",
+                    _ => "Check",
+                };
+                action = Some((offered, label));
+            }
             ToolAction::Install => {
                 let label = match check {
                     ToolCheck::Checked(Launcher::Stale | Launcher::Outdated) => "Reinstall",
@@ -197,6 +275,17 @@ pub(super) fn present(
             }
             ToolAction::Repair => menu.push((offered, "Repair")),
             ToolAction::Uninstall => menu.push((offered, "Uninstall")),
+        }
+    }
+    // A paired Machine's command may change there at any time, and SpaceTerm reads it again
+    // only when asked, so a read one always offers Check Again.
+    if place == ToolPlace::Paired && matches!(check, ToolCheck::Checked(_)) {
+        // It is the button only where the row offers nothing else.
+        let again = (ToolAction::Check, "Check Again");
+        if action.is_none() && menu.is_empty() {
+            action = Some(again);
+        } else {
+            menu.insert(0, again);
         }
     }
     // SpaceTerm runs no shell to learn PATH, so the row names the directory PATH must include
@@ -253,27 +342,79 @@ fn failure_text(failure: ToolFailure, name: &str) -> SharedString {
         ToolFailure::Blocked => SharedString::from(format!(
             "Something else is using SpaceTerm\u{2019}s temporary name {DIRECTORY}/.launcher-{name}."
         )),
+        ToolFailure::Unreachable => SharedString::new_static(
+            "SpaceTerm couldn\u{2019}t reach the Machine. Check that it\u{2019}s connected, then \
+             try again.",
+        ),
+        ToolFailure::Refused => SharedString::new_static(
+            "The Machine didn\u{2019}t accept this device. Reconnect, then try again.",
+        ),
+        ToolFailure::Unsupported => SharedString::from(format!(
+            "Installing \u{201C}{name}\u{201D} from here needs a newer SpaceTerm Core on the \
+             Machine. Update it first."
+        )),
+        ToolFailure::Failed => {
+            SharedString::new_static("The Machine couldn\u{2019}t finish the change.")
+        }
+        ToolFailure::Unread => SharedString::new_static(
+            "SpaceTerm couldn\u{2019}t confirm the change or read the command afterward.",
+        ),
     }
 }
 
 impl SettingsWindow {
+    /// The selected Machine's row, or `None` when that Machine offers none.
     pub(super) fn command_line_tool_presentation(&self) -> Option<ToolRowPresentation> {
-        self.command_line_tool
-            .as_ref()
-            .map(CommandLineToolRow::presentation)
+        let choice = self.selected_machine()?;
+        let tools = &self.command_line_tools;
+        if !tools.offered(&choice) {
+            return None;
+        }
+        let place = match choice {
+            MachineChoice::Local => ToolPlace::Local,
+            MachineChoice::Direct(_) => ToolPlace::Paired,
+        };
+        // What a step learned about a paired Machine holds only over the link it used, while
+        // that link's lane still answers. A step that found the Machine unreachable holds only
+        // while it still is.
+        let row = tools.row(&choice).filter(|row| {
+            let MachineChoice::Direct(route) = &choice else {
+                return true;
+            };
+            if row.working.is_some() {
+                return true;
+            }
+            let answers = self.remote_lane_answers(route);
+            match &row.read_over {
+                Some(read_over) => {
+                    answers
+                        && self
+                            .remote_lane_link(route)
+                            .is_some_and(|current| read_over.same(&current))
+                }
+                None => !answers,
+            }
+        });
+        Some(present(
+            tools.name,
+            place,
+            row.map_or(ToolCheck::NotChecked, |row| row.check),
+            row.and_then(|row| row.working),
+            row.and_then(|row| row.failure),
+        ))
     }
 
-    /// Reads the command on the background executor as Servers comes into view. A running step
-    /// keeps its place.
+    /// Reads this computer's command on the background executor as Machines comes into view. A
+    /// running step keeps its place.
     pub(super) fn check_command_line_tool(&mut self, cx: &mut Context<Self>) {
-        self.run_command_line_tool(ToolWork::Check, cx);
+        self.run_command_line_tool(MachineChoice::Local, ToolWork::Check, cx);
     }
 
-    /// Reads the command again after a service operation or update finished. Repointing the
-    /// launcher never blocks those, so one that couldn't follow the new server build shows only
-    /// here. A row not yet read waits for Servers to come into view.
+    /// Reads this computer's command again after a service operation or update finished.
+    /// Repointing the launcher never blocks those, so one that couldn't follow the new server
+    /// build shows only here. A row not yet read waits for Machines to come into view.
     pub(super) fn reread_command_line_tool(&mut self, cx: &mut Context<Self>) {
-        let Some(row) = self.command_line_tool.as_mut() else {
+        let Some(row) = self.command_line_tools.rows.get_mut(&MachineKey::Local) else {
             return;
         };
         if row.working.is_some() {
@@ -283,28 +424,107 @@ impl SettingsWindow {
         }
     }
 
-    /// Runs the row's action on the background executor.
-    pub(super) fn request_command_line_tool(&mut self, action: ToolAction, cx: &mut Context<Self>) {
+    /// Runs `action` on `choice`'s command on the background executor, while `choice` is still
+    /// the selected Machine. A control rendered for one Machine never acts on another that
+    /// replaced it before the next frame.
+    pub(super) fn request_command_line_tool(
+        &mut self,
+        choice: &MachineChoice,
+        action: ToolAction,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_machine().as_ref() != Some(choice) {
+            return;
+        }
+        let choice = choice.clone();
         let work = match action {
+            ToolAction::Check => ToolWork::Check,
             ToolAction::Install => ToolWork::Install,
             ToolAction::Repair => ToolWork::Repair,
             ToolAction::Uninstall => ToolWork::Uninstall,
         };
-        self.run_command_line_tool(work, cx);
+        // A check the person asks for replaces what an earlier action's refusal said. The read
+        // that follows a refusal keeps it.
+        if let Some(row) = self.command_line_tools.rows.get_mut(&choice.key())
+            && row.working.is_none()
+        {
+            row.failure = None;
+        }
+        self.run_command_line_tool(choice, work, cx);
     }
 
-    fn run_command_line_tool(&mut self, work: ToolWork, cx: &mut Context<Self>) {
-        let Some(row) = self.command_line_tool.as_mut() else {
+    /// The link `route`'s service lane answers on now, if SpaceTerm holds one.
+    fn remote_lane_link(&self, route: &crate::direct_connections::DirectRouteId) -> Option<Link> {
+        let core = self.remote_lane_handle(route)?;
+        Some(Link {
+            generation: core.link_generation(),
+            core,
+            status: self.remote_route_status(route),
+        })
+    }
+
+    /// `choice`'s command: this computer's own, or a paired Machine's over the service lane of
+    /// the connection SpaceTerm holds to it, with that connection and its link generation.
+    /// `None` for a paired Machine whose lane SpaceTerm doesn't reach now.
+    fn command_line_tool_for(
+        &self,
+        choice: &MachineChoice,
+        cx: &App,
+    ) -> Option<(Arc<CommandLineTool>, Option<Link>)> {
+        match choice {
+            MachineChoice::Local => Some((self.command_line_tools.local.clone()?, None)),
+            MachineChoice::Direct(route) => {
+                let (control, core) = self.remote_lane(route, cx)?;
+                let link = Link {
+                    generation: core.link_generation(),
+                    core,
+                    status: self.remote_route_status(route),
+                };
+                Some((
+                    Arc::new(CommandLineTool::new(
+                        self.command_line_tools.name,
+                        control.command_line_tool(),
+                    )),
+                    Some(link),
+                ))
+            }
+        }
+    }
+
+    fn run_command_line_tool(&mut self, choice: MachineChoice, work: ToolWork, cx: &mut Context<Self>) {
+        if !self.command_line_tools.offered(&choice) {
             return;
-        };
+        }
+        let tool = self.command_line_tool_for(&choice, cx);
+        let key = choice.key();
+        let row = self.command_line_tools.rows.entry(key.clone()).or_default();
         if row.working.is_some() {
             return;
         }
-        row.working = Some(work);
         if work != ToolWork::Check {
             row.failure = None;
         }
-        let tool = Arc::clone(&row.tool);
+        let Some((tool, read_over)) = tool else {
+            // Nothing reaches a paired Machine SpaceTerm isn't connected to, so the row says so
+            // without trying, and what it learned over an earlier link no longer holds.
+            row.check = ToolCheck::Failed(ToolFailure::Unreachable);
+            row.failure = None;
+            row.read_over = None;
+            cx.notify();
+            return;
+        };
+        // A step over a new link starts from nothing that an earlier link showed.
+        let same_link = match (&row.read_over, &read_over) {
+            (Some(earlier), Some(current)) => earlier.same(current),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same_link {
+            row.check = ToolCheck::NotChecked;
+            row.failure = None;
+        }
+        row.read_over = read_over;
+        row.working = Some(work);
         let result = cx.background_spawn(async move {
             match work {
                 ToolWork::Check => tool.status(),
@@ -315,7 +535,7 @@ impl SettingsWindow {
         row._operation = Some(cx.spawn(async move |settings, cx| {
             let result = result.await;
             let _ = settings.update(cx, |settings, cx| {
-                let Some(row) = settings.command_line_tool.as_mut() else {
+                let Some(row) = settings.command_line_tools.rows.get_mut(&key) else {
                     return;
                 };
                 row.working = None;
@@ -323,6 +543,12 @@ impl SettingsWindow {
                 match (work, result) {
                     (_, Ok(status)) => row.check = ToolCheck::Checked(status),
                     (ToolWork::Check, Err(failure)) => row.check = ToolCheck::Failed(failure),
+                    // The change may have happened, so nothing is known to have failed, but what
+                    // the path holds now is unknown until it is read again.
+                    (_, Err(ToolFailure::Unread)) => {
+                        row.check = ToolCheck::NotChecked;
+                        again = true;
+                    }
                     // A failed change says why and reads the command again: it may have landed
                     // before the failure, or found another program's file meanwhile.
                     (ToolWork::Install | ToolWork::Repair | ToolWork::Uninstall, Err(failure)) => {
@@ -331,7 +557,7 @@ impl SettingsWindow {
                     }
                 }
                 if again {
-                    settings.check_command_line_tool(cx);
+                    settings.run_command_line_tool(choice, ToolWork::Check, cx);
                 }
                 cx.notify();
             });
@@ -348,7 +574,12 @@ impl SettingsWindow {
         let Some(presentation) = self.command_line_tool_presentation() else {
             return div().into_any_element();
         };
+        // The row presents a selected Machine, so its controls act only on that Machine.
+        let Some(shown) = self.selected_machine() else {
+            return div().into_any_element();
+        };
         let owner = cx.weak_entity();
+        let target = shown.clone();
         let button = presentation.action.map(|(action, label)| {
             Button::new(ACTION_SELECTOR, label)
                 .variant(ButtonVariant::Outline)
@@ -358,7 +589,7 @@ impl SettingsWindow {
                 .debug_selector(ACTION_SELECTOR)
                 .on_activate(move |_, _: &mut Window, cx| {
                     let _ = owner.update(cx, |settings, cx| {
-                        settings.request_command_line_tool(action, cx);
+                        settings.request_command_line_tool(&target, action, cx);
                     });
                 })
         });
@@ -376,9 +607,19 @@ impl SettingsWindow {
                 })
                 .collect();
             let owner = cx.weak_entity();
+            let target = shown.clone();
             let icon_size = appearance.icons.metrics(IconRole::Control).glyph_size;
+            // Each Machine's menu keeps its own open state, so a menu opened for one Machine
+            // closes, rather than acting on another, when that one replaces it.
+            let id = match &shown {
+                MachineChoice::Local => SharedString::new_static(MENU_SELECTOR),
+                MachineChoice::Direct(route) => SharedString::from(format!(
+                    "{MENU_SELECTOR}-{}",
+                    route.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+                )),
+            };
             Menu::new(
-                MENU_SELECTOR,
+                id,
                 SharedString::new_static("More for Command Line Tool"),
                 entries,
             )
@@ -393,12 +634,13 @@ impl SettingsWindow {
             .on_activate(move |activation, _: &mut Window, cx| {
                 let action = *activation.action();
                 let _ = owner.update(cx, |settings, cx| {
-                    settings.request_command_line_tool(action, cx);
+                    settings.request_command_line_tool(&target, action, cx);
                 });
             })
         });
         let state_selector = presentation.state_selector;
-        let progress = match self.command_line_tool.as_ref().and_then(|row| row.working) {
+        let working = self.command_line_tools.row(&shown).and_then(|row| row.working);
+        let progress = match working {
             Some(ToolWork::Install) => "Installing the command",
             Some(ToolWork::Repair) => "Repairing the command",
             Some(ToolWork::Uninstall) => "Uninstalling the command",
@@ -435,7 +677,7 @@ mod tests {
     const NAME: &str = "spaceterm-development";
 
     fn checked(launcher: Launcher) -> ToolRowPresentation {
-        present(NAME, ToolCheck::Checked(launcher), None, None)
+        present(NAME, ToolPlace::Local, ToolCheck::Checked(launcher), None, None)
     }
 
     #[test]
@@ -530,6 +772,7 @@ mod tests {
     fn a_failed_action_replaces_the_path_note_and_a_failed_read_offers_nothing() {
         let refused = present(
             NAME,
+            ToolPlace::Local,
             ToolCheck::Checked(Launcher::Missing),
             None,
             Some(ToolFailure::NoCorePackage),
@@ -545,6 +788,7 @@ mod tests {
         );
         let unreadable = present(
             NAME,
+            ToolPlace::Local,
             ToolCheck::Failed(ToolFailure::UnsafeStorage),
             None,
             None,
@@ -553,7 +797,13 @@ mod tests {
             (unreadable.state, unreadable.action, unreadable.menu),
             ("Unavailable", None, vec![])
         );
-        let checking = present(NAME, ToolCheck::NotChecked, Some(ToolWork::Check), None);
+        let checking = present(
+            NAME,
+            ToolPlace::Local,
+            ToolCheck::NotChecked,
+            Some(ToolWork::Check),
+            None,
+        );
         assert_eq!((checking.state, checking.working), ("Not checked", true));
     }
 }

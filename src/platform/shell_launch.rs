@@ -42,6 +42,13 @@ const FOREIGN_RUNTIME_ENVIRONMENT: &[&str] = &[
     "ZELLIJ_SESSION_NAME",
 ];
 
+/// Programs that copy their own selection write the clipboard of the computer they run on. A
+/// SpaceTerm Core's Terminal Session may be presented on another computer, and its presenting
+/// client can change while the program runs, so pi's own opt-in asks it to also send each copy as
+/// OSC 52, which reaches the presenting client's clipboard under Clipboard Authority. pi copies
+/// plain text, so the second write loses nothing.
+const SELECTION_COPY_ENVIRONMENT: (&str, &str) = ("PI_CLIPBOARD_OSC52", "1");
+
 /// The variables that tell `spaceterm` inside a server's Terminal Session which server, Pane and
 /// Session it runs in, and which executable is that server's own CLI. An inherited value is
 /// always removed, so a shell started outside such a Session never names one.
@@ -170,6 +177,8 @@ impl ShellLaunchPlanner {
             ),
             ("SPACETERM".into(), "1".into()),
         ]);
+        let (name, value) = SELECTION_COPY_ENVIRONMENT;
+        environment.push((name.into(), value.into()));
         if let Some(terminfo) = &terminal_identity.terminfo {
             environment.push(("TERMINFO".into(), terminfo.as_os_str().to_owned()));
         }
@@ -485,6 +494,12 @@ mod tests {
                 Some(OsStr::new(identity::PROGRAM_VERSION))
             );
             assert_eq!(env_value(&launch, "SPACETERM"), Some(OsStr::new("1")));
+            // pi also sends each copy to the presenting client, whose clipboard may be on another
+            // computer.
+            assert_eq!(
+                env_value(&launch, "PI_CLIPBOARD_OSC52"),
+                Some(OsStr::new("1"))
+            );
             assert!(FOREIGN_RUNTIME_ENVIRONMENT.iter().all(|name| {
                 launch
                     .environment_removals()

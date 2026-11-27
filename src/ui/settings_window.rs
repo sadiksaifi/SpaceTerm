@@ -463,7 +463,7 @@ pub(crate) struct SettingsWindow {
     core_update: Option<core_update::MachineUpdateRow>,
     update_window: AnyWindowHandle,
     /// This computer's command for the local server's identity. `None` omits its row.
-    command_line_tool: Option<command_line_tool::CommandLineToolRow>,
+    command_line_tools: command_line_tool::CommandLineTools,
     /// The desktop's direct network connections. `None` omits their rows.
     direct_routes: Option<direct_routes::DirectRouteRows>,
     /// Uninstall SpaceTerm. `None` omits its row.
@@ -814,10 +814,6 @@ impl SettingsWindow {
                         && local_core
                             .as_ref()
                             .is_none_or(|offered| offered.service.is_none()))
-                    || (*row == SettingsRowId::CommandLineTool
-                        && local_core
-                            .as_ref()
-                            .is_none_or(|offered| offered.command_line_tool.is_none()))
                     // Only an installed app can remove itself.
                     || (*row == SettingsRowId::UninstallSpaceTerm
                         && local_core
@@ -893,10 +889,12 @@ impl SettingsWindow {
                 .as_ref()
                 .and_then(|offered| offered.update.clone())
                 .map(core_update::MachineUpdateRow::new),
-            command_line_tool: local_core
-                .as_ref()
-                .and_then(|offered| offered.command_line_tool.clone())
-                .map(command_line_tool::CommandLineToolRow::new),
+            command_line_tools: command_line_tool::CommandLineTools::new(
+                local_core
+                    .as_ref()
+                    .and_then(|offered| offered.command_line_tool.clone()),
+                remote_admin::installed(cx).is_some(),
+            ),
             uninstall: local_core
                 .as_ref()
                 .and_then(|offered| offered.removal.clone())

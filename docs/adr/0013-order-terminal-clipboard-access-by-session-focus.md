@@ -1,3 +1,5 @@
 # Order terminal clipboard access by Terminal Session focus
 
 Clipboard Authority belongs to the originating Pane's Terminal Input Focus, and reads need explicit permission, because terminal output can come from local or remote programs. Clipboard requests use a bounded asynchronous channel because blocking the worker on a UI reply would deadlock a synchronous Selection query.
+
+A program that copies its own selection writes the clipboard of the computer it runs on, which is not the presenting client's when SpaceTerm Core is on another Machine. Such a program reaches the presenting client only when it also sends the copy as OSC 52 under this authority. [The shell launch policy](../../src/platform/shell_launch.rs) sets pi's opt-in `PI_CLIPBOARD_OSC52=1` in every Terminal Session. SpaceTerm sets no other program's or product's marker, such as Herdr's `HERDR_ENV`, because each also changes how that program behaves. Codex, for example, offers no program-neutral opt-in, so it reaches the presenting client only where its native clipboard write fails, as on a Machine with no display.

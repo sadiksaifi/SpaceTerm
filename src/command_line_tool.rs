@@ -1,4 +1,5 @@
-//! The Command Line Tool: this build identity's launcher in the account's own `~/.local/bin`.
+//! The Command Line Tool: this build identity's launcher in the account's own `~/.local/bin`,
+//! on this computer or on a paired Machine, whose SpaceTerm Core links it over its service lane.
 //!
 //! Installing creates the link `install.sh` creates, through the same service code, so it needs
 //! no administrator and asks for no password. It never replaces a file or link that another
@@ -43,6 +44,9 @@ impl Launcher {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ToolAction {
+    /// Reads the launcher again. Offered where SpaceTerm reads it only when asked, as on a
+    /// paired Machine.
+    Check,
     Install,
     /// Links SpaceTerm's launcher again, as Install does.
     Repair,
@@ -70,6 +74,17 @@ pub(crate) enum ToolFailure {
     Occupied,
     /// Another program's entry holds the temporary name replacement uses, so nothing changed.
     Blocked,
+    /// SpaceTerm couldn't reach the paired Machine's service lane.
+    Unreachable,
+    /// The paired Machine didn't accept this device.
+    Refused,
+    /// The paired Machine's SpaceTerm Core is too old to link the launcher over its lane.
+    Unsupported,
+    /// The paired Machine refused or answered in a way SpaceTerm doesn't read.
+    Failed,
+    /// The change may have happened, but SpaceTerm couldn't confirm it or read the path after
+    /// it, so what the path holds now is unknown.
+    Unread,
 }
 
 /// The outcome of linking the launcher.
@@ -116,7 +131,8 @@ impl CommandLineTool {
 
     /// Links the launcher unless another program's file or link is there, and reports the
     /// launcher afterward. Install and Repair both run this; an installed launcher is linked
-    /// again. Blocks.
+    /// again. A link that succeeded whose read after it failed reports [`ToolFailure::Unread`].
+    /// Blocks.
     pub(crate) fn install(&self) -> Result<Launcher, ToolFailure> {
         match self.files.read()? {
             Launcher::OtherLink | Launcher::OtherFile => return Err(ToolFailure::Occupied),
@@ -129,14 +145,22 @@ impl CommandLineTool {
                 }
             }
         }
-        self.status()
+        self.status().map_err(|_| ToolFailure::Unread)
     }
 
     /// Removes SpaceTerm's launcher and reports the launcher afterward, which another program's
-    /// entry may still hold. Blocks.
+    /// entry may still hold. It reads first, so another program's entry that took the path since
+    /// the last read is reported and nothing is removed. A removal that succeeded whose read
+    /// after it failed reports [`ToolFailure::Unread`]. Blocks.
     pub(crate) fn uninstall(&self) -> Result<Launcher, ToolFailure> {
+        match self.files.read()? {
+            other @ (Launcher::OtherLink | Launcher::OtherFile | Launcher::Missing) => {
+                return Ok(other);
+            }
+            Launcher::Installed | Launcher::Stale | Launcher::Outdated | Launcher::Blocked => {}
+        }
         self.files.unlink()?;
-        self.status()
+        self.status().map_err(|_| ToolFailure::Unread)
     }
 }
 
@@ -158,6 +182,10 @@ pub(crate) mod testing {
         pub(crate) links: AtomicUsize,
         pub(crate) unlinks: AtomicUsize,
         pub(crate) reads: AtomicUsize,
+        /// What a read returns after a link or removal, in place of the launcher that change
+        /// leaves, such as a connection lost after the change or a removal that landed before
+        /// it failed.
+        pub(crate) after_change: Mutex<Option<Result<Launcher, ToolFailure>>>,
     }
 
     impl ScriptedFiles {
@@ -169,6 +197,7 @@ pub(crate) mod testing {
                 links: AtomicUsize::new(0),
                 unlinks: AtomicUsize::new(0),
                 reads: AtomicUsize::new(0),
+                after_change: Mutex::new(None),
             })
         }
 
@@ -189,6 +218,10 @@ pub(crate) mod testing {
         fn link(&self) -> Result<LinkOutcome, ToolFailure> {
             self.links.fetch_add(1, Ordering::SeqCst);
             let outcome = *self.link.lock().unwrap();
+            if let Some(after) = *self.after_change.lock().unwrap() {
+                *self.launcher.lock().unwrap() = after;
+                return outcome;
+            }
             match outcome {
                 Ok(LinkOutcome::Linked) => *self.launcher.lock().unwrap() = Ok(Launcher::Installed),
                 Ok(LinkOutcome::Kept) => *self.launcher.lock().unwrap() = Ok(Launcher::OtherLink),
@@ -200,7 +233,9 @@ pub(crate) mod testing {
         fn unlink(&self) -> Result<(), ToolFailure> {
             self.unlinks.fetch_add(1, Ordering::SeqCst);
             let outcome = *self.unlink.lock().unwrap();
-            if outcome.is_ok() {
+            if let Some(after) = *self.after_change.lock().unwrap() {
+                *self.launcher.lock().unwrap() = after;
+            } else if outcome.is_ok() {
                 let mut launcher = self.launcher.lock().unwrap();
                 if !matches!(*launcher, Ok(Launcher::OtherLink | Launcher::OtherFile)) {
                     *launcher = Ok(Launcher::Missing);
@@ -291,6 +326,25 @@ mod tests {
         *files.unlink.lock().unwrap() = Err(ToolFailure::Busy);
         assert_eq!(tool.uninstall(), Err(ToolFailure::Busy));
         assert_eq!(tool.status(), Ok(Launcher::Installed));
+    }
+
+    #[test]
+    fn a_change_whose_read_after_it_fails_reports_the_launcher_unknown() {
+        let (files, tool) = fixture(Launcher::Missing);
+        *files.after_change.lock().unwrap() = Some(Err(ToolFailure::Unreachable));
+        assert_eq!(tool.install(), Err(ToolFailure::Unread));
+        *files.launcher.lock().unwrap() = Ok(Launcher::Installed);
+        assert_eq!(tool.uninstall(), Err(ToolFailure::Unread));
+        assert_eq!((files.links(), files.unlinks()), (1, 1));
+    }
+
+    #[test]
+    fn uninstall_reads_first_and_removes_nothing_another_program_holds() {
+        for launcher in [Launcher::OtherLink, Launcher::OtherFile, Launcher::Missing] {
+            let (files, tool) = fixture(launcher);
+            assert_eq!(tool.uninstall(), Ok(launcher));
+            assert_eq!(files.unlinks(), 0);
+        }
     }
 
     #[test]
