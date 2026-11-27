@@ -82,7 +82,8 @@ pub(crate) enum ToolFailure {
     Unsupported,
     /// The paired Machine refused or answered in a way SpaceTerm doesn't read.
     Failed,
-    /// The change finished, but the read after it didn't, so what the path holds now is unknown.
+    /// The change may have happened, but SpaceTerm couldn't confirm it or read the path after
+    /// it, so what the path holds now is unknown.
     Unread,
 }
 

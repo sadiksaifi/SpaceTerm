@@ -578,3 +578,29 @@ fn a_paired_card_updates_through_the_shared_store_and_shows_its_progress(cx: &mu
             .is_none()
     );
 }
+
+/// Only the Core's own refusal, or a request the connection's version lacks, proves a launcher
+/// change didn't happen. A reply lost after the request left reads as unconfirmed.
+#[test]
+fn a_launcher_change_whose_reply_was_lost_reads_as_unconfirmed() {
+    use crate::command_line_tool::ToolFailure;
+    assert_eq!(
+        change_failure(LaneError::Code("service_busy".into())),
+        ToolFailure::Busy
+    );
+    assert_eq!(
+        change_failure(LaneError::Code("unsafe_storage".into())),
+        ToolFailure::UnsafeStorage
+    );
+    assert_eq!(
+        change_failure(LaneError::Core(CoreError::Unsupported)),
+        ToolFailure::Unsupported
+    );
+    for lost in [
+        LaneError::Core(CoreError::Protocol),
+        LaneError::Core(CoreError::NotRunning),
+        LaneError::Deadline,
+    ] {
+        assert_eq!(change_failure(lost), ToolFailure::Unread);
+    }
+}

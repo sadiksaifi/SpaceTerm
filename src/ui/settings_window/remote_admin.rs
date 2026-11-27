@@ -283,9 +283,11 @@ struct LaneLauncherFiles {
 }
 
 impl LaneLauncherFiles {
+    /// Runs `step` over a new lane connection, classifying its failure with `classify`.
     fn call<T>(
         &self,
         step: impl FnOnce(&mut spaceterm_core::service::lane::client::Session) -> Result<T, LaneError>,
+        classify: fn(LaneError) -> ToolFailure,
     ) -> Result<T, ToolFailure> {
         let lane = self
             .core
@@ -294,13 +296,13 @@ impl LaneLauncherFiles {
         let mut session = lane
             .session_by(std::time::Instant::now() + admin::REQUEST_LIMIT)
             .map_err(tool_failure)?;
-        step(&mut session).map_err(tool_failure)
+        step(&mut session).map_err(classify)
     }
 }
 
 impl LauncherFiles for LaneLauncherFiles {
     fn read(&self) -> Result<Launcher, ToolFailure> {
-        Ok(match self.call(admin::command_line_tool)? {
+        Ok(match self.call(admin::command_line_tool, tool_failure)? {
             CliLauncher::Missing => Launcher::Missing,
             CliLauncher::Linked => Launcher::Installed,
             CliLauncher::Stale => Launcher::Stale,
@@ -312,7 +314,7 @@ impl LauncherFiles for LaneLauncherFiles {
     }
 
     fn link(&self) -> Result<LinkOutcome, ToolFailure> {
-        Ok(match self.call(admin::install_command_line_tool)? {
+        Ok(match self.call(admin::install_command_line_tool, change_failure)? {
             CliLink::Linked => LinkOutcome::Linked,
             CliLink::Kept => LinkOutcome::Kept,
             CliLink::Blocked => LinkOutcome::Blocked,
@@ -320,7 +322,20 @@ impl LauncherFiles for LaneLauncherFiles {
     }
 
     fn unlink(&self) -> Result<(), ToolFailure> {
-        self.call(admin::uninstall_command_line_tool)
+        self.call(admin::uninstall_command_line_tool, change_failure)
+    }
+}
+
+/// The classification of a launcher change that failed after its connection opened. The Core
+/// changes the launcher before it replies, so only its own refusal, or a request this
+/// connection's version lacks, proves nothing changed. A lost reply leaves the change
+/// unconfirmed.
+fn change_failure(error: LaneError) -> ToolFailure {
+    match error {
+        LaneError::Code(_) | LaneError::BelowFloor(_) | LaneError::Core(CoreError::Unsupported) => {
+            tool_failure(error)
+        }
+        LaneError::Core(_) | LaneError::Interrupted | LaneError::Deadline => ToolFailure::Unread,
     }
 }
 
