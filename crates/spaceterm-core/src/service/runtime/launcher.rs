@@ -242,15 +242,17 @@ pub(in crate::service) fn remove(
     let leftover = temporary(&parent, identity);
     let removal = removing(identity);
     let moved = parent.join(&removal);
-    // Only nothing there or an entry that is not a link proves no managed link is there. A path
-    // SpaceTerm can't inspect may still hold one, so the removal fails rather than report it
-    // gone.
+    // Only nothing there, an entry that is not a link, or a `bin` that is not a directory proves
+    // no managed link is there. A path SpaceTerm can't inspect may still hold one, so the
+    // removal fails rather than report it gone.
     let inspect = |path: &Path| match std::fs::read_link(path) {
         Ok(target) => Ok(managed(&target, identity, installations)),
         Err(error)
             if matches!(
                 error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+                std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::InvalidInput
+                    | std::io::ErrorKind::NotADirectory
             ) =>
         {
             Ok(false)

@@ -753,6 +753,11 @@ fn a_removal_that_cannot_inspect_the_launcher_fails_and_keeps_it() {
             assert_eq!(service.unlink_cli(), Err(CoreError::StorageUnavailable));
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
             assert_eq!(service.cli_launcher(), Ok(CliLauncher::Linked));
+
+            // A file where `~/.local/bin` belongs holds no launcher, so removal finishes.
+            std::fs::remove_dir_all(&bin).unwrap();
+            std::fs::write(&bin, b"not a directory").unwrap();
+            assert_eq!(service.unlink_cli(), Ok(()));
         },
     );
     std::fs::remove_dir_all(home).unwrap();
