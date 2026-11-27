@@ -299,15 +299,7 @@ pub trait HostCommands: Send {
     fn admitted(&mut self, _client: [u8; 32], _name: control::ClientName) {}
     /// A connection was admitted. A host that pushes Workspace Inventory keeps `outbox` until
     /// [`Self::disconnected`].
-    /// `paired` is set for a paired device on another computer.
-    fn connected(
-        &mut self,
-        _client: [u8; 32],
-        _connection: [u8; 32],
-        _paired: bool,
-        _outbox: &Outbox,
-    ) {
-    }
+    fn connected(&mut self, _client: [u8; 32], _connection: [u8; 32], _outbox: &Outbox) {}
     /// A Workspace edit, or with `None` the resolution of a recorded one, replied to after
     /// the inventory revision that holds its outcome.
     fn mutate(
@@ -1320,12 +1312,7 @@ impl<H: HostCommands> ConnectionService for Served<H> {
     }
     fn admitted(&mut self, peer: &Peer, name: control::ClientName, outbox: Outbox) {
         self.host.admitted(peer.client, name);
-        self.host.connected(
-            peer.client,
-            peer.connection,
-            peer.pairing.is_some(),
-            &outbox,
-        );
+        self.host.connected(peer.client, peer.connection, &outbox);
         self.connections.insert(
             peer.connection,
             Connection {

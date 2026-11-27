@@ -132,11 +132,6 @@ impl CorePaneHost {
                 pane: identity.pane,
                 session: lease.session,
                 cli: context.cli.clone(),
-                started_elsewhere: self
-                    .paired_connections
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .contains(&connection),
             });
         }
         let runtime = self

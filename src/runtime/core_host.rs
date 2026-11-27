@@ -335,9 +335,6 @@ pub struct CorePaneHost {
     close_activity_demand: bool,
     /// What each started Terminal Session tells the CLI inside it about this server.
     session_context: Option<Arc<CoreSessionContext>>,
-    /// The connections a paired device on another computer holds, shared by every Pane of one
-    /// server. A Session one of them starts is presented on that computer first.
-    paired_connections: Arc<std::sync::Mutex<std::collections::HashSet<[u8; 32]>>>,
 }
 
 /// What every Terminal Session of one server tells `spaceterm` inside it: the server's build
@@ -493,7 +490,6 @@ impl CorePaneHost {
             notifier: None,
             close_activity_demand: false,
             session_context: None,
-            paired_connections: Arc::default(),
         })
     }
     /// Native composition for the explicitly launched local server, recording into `counters`.
@@ -533,7 +529,6 @@ impl CorePaneHost {
             notifier: None,
             close_activity_demand: false,
             session_context: None,
-            paired_connections: Arc::default(),
         })
     }
 }

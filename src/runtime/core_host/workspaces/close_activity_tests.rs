@@ -136,7 +136,7 @@ fn check_foreground_without_shell_integration(line: &str, expected: Foreground) 
     let (lease, target) = own_pane(&mut host);
     let observer = [2; 32];
     let outbox = Outbox::new(Arc::new(|| {}), WORK);
-    HostCommands::connected(&mut host, observer, observer, false, &outbox);
+    HostCommands::connected(&mut host, observer, observer, &outbox);
     let mut assembler = Assembler::default();
     let mut wait = |host: &mut WorkspaceHost, foreground, needs_review| {
         let deadline = Instant::now() + Duration::from_secs(5);

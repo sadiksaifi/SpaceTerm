@@ -697,8 +697,8 @@ fn end_all_sessions_drops_output_and_fences_old_input_effects_and_snapshots() {
     await_text(&mut host, old, "OLD-SESSION-OUTPUT");
     let queued = Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK);
     let probe = Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK);
-    host.connected([3; 32], [3; 32], false, &queued);
-    host.connected([4; 32], [4; 32], false, &probe);
+    host.connected([3; 32], [3; 32], &queued);
+    host.connected([4; 32], [4; 32], &probe);
     read_preview(&host, &queued, RequestId(1), pane);
     // The terminal worker runs both reads in order. When it answers the probe, the first reply
     // is already in this other connection's outbox, which has not sent any preview bytes.

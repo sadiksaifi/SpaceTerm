@@ -16,7 +16,6 @@ const FOREIGN_RUNTIME_ENVIRONMENT: &[&str] = &[
     "GHOSTTY_BIN_DIR",
     "GHOSTTY_RESOURCES_DIR",
     "GHOSTTY_SHELL_FEATURES",
-    "HERDR_ENV",
     "ITERM_SESSION_ID",
     "KITTY_LISTEN_ON",
     "KITTY_PID",
@@ -43,18 +42,12 @@ const FOREIGN_RUNTIME_ENVIRONMENT: &[&str] = &[
     "ZELLIJ_SESSION_NAME",
 ];
 
-/// Programs that copy their own selection, such as Codex and pi, write the clipboard of the
-/// computer they run on. A SpaceTerm Core's Terminal Session may be presented on another
-/// computer, and its presenting client can change while the program runs, so pi's own opt-in
-/// asks it to also send each copy as OSC 52, which reaches the presenting client's clipboard
-/// under Clipboard Authority. pi copies plain text, so the second write loses nothing.
+/// Programs that copy their own selection write the clipboard of the computer they run on. A
+/// SpaceTerm Core's Terminal Session may be presented on another computer, and its presenting
+/// client can change while the program runs, so pi's own opt-in asks it to also send each copy as
+/// OSC 52, which reaches the presenting client's clipboard under Clipboard Authority. pi copies
+/// plain text, so the second write loses nothing.
 const SELECTION_COPY_ENVIRONMENT: (&str, &str) = ("PI_CLIPBOARD_OSC52", "1");
-
-/// Codex has no program-neutral opt-in. It also sends a copy as OSC 52 inside Herdr, another
-/// persistent multiplexer, so a Session that a paired device on another computer starts carries
-/// Herdr's marker. Codex keeps writing HTML to the native clipboard, which an OSC 52 write of
-/// plain text would replace on the computer that runs it, so a Session started there carries none.
-const STARTED_ELSEWHERE_ENVIRONMENT: (&str, &str) = ("HERDR_ENV", "1");
 
 /// The variables that tell `spaceterm` inside a server's Terminal Session which server, Pane and
 /// Session it runs in, and which executable is that server's own CLI. An inherited value is
@@ -79,8 +72,6 @@ pub struct SessionEnvironment {
     /// The server's own `spaceterm` executable. Its directory starts the Session's `PATH`, and
     /// shell integration puts it first again after the startup files run.
     pub cli: PathBuf,
-    /// A paired device on another computer started this Session, so it is presented there.
-    pub started_elsewhere: bool,
 }
 
 impl fmt::Debug for SessionEnvironment {
@@ -186,10 +177,8 @@ impl ShellLaunchPlanner {
             ),
             ("SPACETERM".into(), "1".into()),
         ]);
-        environment.push((
-            SELECTION_COPY_ENVIRONMENT.0.into(),
-            SELECTION_COPY_ENVIRONMENT.1.into(),
-        ));
+        let (name, value) = SELECTION_COPY_ENVIRONMENT;
+        environment.push((name.into(), value.into()));
         if let Some(terminfo) = &terminal_identity.terminfo {
             environment.push(("TERMINFO".into(), terminfo.as_os_str().to_owned()));
         }
@@ -257,10 +246,6 @@ impl PreparedShellLaunch {
             .push((cli.into(), session.cli.as_os_str().to_owned()));
         if let Some(path) = launch.session_path(&session.cli) {
             launch.environment.push(("PATH".into(), path));
-        }
-        if session.started_elsewhere {
-            let (name, value) = STARTED_ELSEWHERE_ENVIRONMENT;
-            launch = launch.with_environment_value(name, value);
         }
         launch
     }
@@ -509,18 +494,11 @@ mod tests {
                 Some(OsStr::new(identity::PROGRAM_VERSION))
             );
             assert_eq!(env_value(&launch, "SPACETERM"), Some(OsStr::new("1")));
-            // A program that copies its own selection also sends it to the presenting client,
-            // whose clipboard may be on another computer.
+            // pi also sends each copy to the presenting client, whose clipboard may be on another
+            // computer.
             assert_eq!(
                 env_value(&launch, "PI_CLIPBOARD_OSC52"),
                 Some(OsStr::new("1"))
-            );
-            // Only a Session a paired device starts carries Herdr's marker.
-            assert_eq!(env_value(&launch, "HERDR_ENV"), None);
-            assert!(
-                launch
-                    .environment_removals()
-                    .contains(&OsString::from("HERDR_ENV"))
             );
             assert!(FOREIGN_RUNTIME_ENVIRONMENT.iter().all(|name| {
                 launch
@@ -610,7 +588,6 @@ mod tests {
             pane: [1; 32],
             session: [2; 32],
             cli: "/opt/space term/bin/spaceterm".into(),
-            started_elsewhere: false,
         };
         for mode in [
             ShellIntegrationMode::Automatic,
@@ -669,7 +646,6 @@ mod tests {
             pane: [1; 32],
             session: [2; 32],
             cli: "/opt/space term/bin/spaceterm".into(),
-            started_elsewhere: false,
         };
         assert_eq!(format!("{session:?}"), "SessionEnvironment { .. }");
         let launch = planner
@@ -694,36 +670,5 @@ mod tests {
                 OsString::from("/opt/space term/bin/spaceterm"),
             ]
         );
-        assert_eq!(env_value(&launch, "HERDR_ENV"), None);
-    }
-
-    /// Codex also sends a copy as OSC 52 only for a Session presented on another computer.
-    #[test]
-    fn only_a_session_a_paired_device_starts_asks_codex_for_osc_52() {
-        let resources = crate::terminal::testing::ShellResourcesFixture::new();
-        let planner =
-            ShellLaunchPlanner::for_test("/bin/zsh".into(), resources.path().to_path_buf());
-        for started_elsewhere in [false, true] {
-            let session = SessionEnvironment {
-                identity: "spaceterm".into(),
-                core: [0; 32],
-                pane: [1; 32],
-                session: [2; 32],
-                cli: "/opt/spaceterm/bin/spaceterm".into(),
-                started_elsewhere,
-            };
-            let launch = planner
-                .local(&std::env::temp_dir())
-                .unwrap()
-                .with_session_environment(&session);
-            assert_eq!(
-                env_value(&launch, "HERDR_ENV"),
-                started_elsewhere.then_some(OsStr::new("1"))
-            );
-            assert_eq!(
-                env_value(&launch, "PI_CLIPBOARD_OSC52"),
-                Some(OsStr::new("1"))
-            );
-        }
     }
 }

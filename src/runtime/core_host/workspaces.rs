@@ -521,7 +521,6 @@ impl WorkspaceHost {
                 notifier: self.prototype.notifier.clone(),
                 close_activity_demand: self.prototype.close_activity_demand,
                 session_context: self.prototype.session_context.clone(),
-                paired_connections: Arc::clone(&self.prototype.paired_connections),
             };
             self.panes.insert(id, host);
         }
@@ -1264,14 +1263,7 @@ impl HostCommands for WorkspaceHost {
     fn admitted(&mut self, client: Id, name: control::ClientName) {
         self.prototype.admitted(client, name);
     }
-    fn connected(&mut self, client: Id, connection: Id, paired: bool, outbox: &Outbox) {
-        if paired {
-            self.prototype
-                .paired_connections
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(connection);
-        }
+    fn connected(&mut self, client: Id, connection: Id, outbox: &Outbox) {
         self.subscribe(client, connection, outbox.clone());
         self.rearm();
     }
@@ -1488,11 +1480,6 @@ impl HostCommands for WorkspaceHost {
         }
     }
     fn disconnected(&mut self, connection: Id) {
-        self.prototype
-            .paired_connections
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&connection);
         self.unsubscribe(connection);
         self.cancel_worktree_reads(connection);
         self.directories.cancel_connection(connection);
@@ -1763,7 +1750,7 @@ mod tests {
             panic!("the Pane must have a live Terminal Session")
         };
         let outbox = Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK);
-        HostCommands::connected(&mut host, observer, observer, false, &outbox);
+        HostCommands::connected(&mut host, observer, observer, &outbox);
         let messages = drain(&outbox);
         let [CoreMessage::Inventory(before)] = messages.as_slice() else {
             panic!("the second client must receive its initial inventory")
@@ -1771,7 +1758,7 @@ mod tests {
         let before = &before.inventory.workspaces[0];
         let tab = before.tabs[1].id;
         let mover = Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK);
-        HostCommands::connected(&mut host, device, device, false, &mover);
+        HostCommands::connected(&mut host, device, device, &mover);
         let _ = drain(&mover);
         let id = RequestId(1);
         mover.begin(id).unwrap();
@@ -1827,7 +1814,7 @@ mod tests {
         let (mut host, memory) = journaled();
         let device = [1; 32];
         let outbox = Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK);
-        HostCommands::connected(&mut host, device, device, false, &outbox);
+        HostCommands::connected(&mut host, device, device, &outbox);
         assert!(matches!(
             drain(&outbox).as_slice(),
             [CoreMessage::Inventory(revision)] if revision.next_sequence == 1
@@ -1963,7 +1950,7 @@ mod tests {
         let (mut host, memory) = journaled();
         let device = [1; 32];
         let outbox = Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK);
-        HostCommands::connected(&mut host, device, device, false, &outbox);
+        HostCommands::connected(&mut host, device, device, &outbox);
         drain(&outbox);
         memory.fail.store(true, Ordering::SeqCst);
         let id = RequestId(1);
@@ -2113,7 +2100,7 @@ mod tests {
         let (mut host, memory) = journaled();
         let outbox = Outbox::new(Arc::new(|| {}), spaceterm_core::protocol::version::WORK);
         // A subscriber's Git facts are due at once.
-        HostCommands::connected(&mut host, [1; 32], [1; 32], false, &outbox);
+        HostCommands::connected(&mut host, [1; 32], [1; 32], &outbox);
         memory.fail.store(true, Ordering::SeqCst);
         let mutation = rename(&host, "Uncertain");
         assert!(matches!(
