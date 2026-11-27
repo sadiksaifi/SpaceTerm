@@ -42,6 +42,16 @@ const FOREIGN_RUNTIME_ENVIRONMENT: &[&str] = &[
     "ZELLIJ_SESSION_NAME",
 ];
 
+/// Programs that copy their own selection, such as Codex and pi, write the clipboard of the
+/// computer they run on. A SpaceTerm Core's Terminal Session may be presented on another
+/// computer, and its presenting client can change while the program runs, so these variables ask
+/// each program to also send the copy as OSC 52, which reaches the presenting client's clipboard
+/// under Clipboard Authority. `PI_CLIPBOARD_OSC52` is pi's own opt-in. Codex has no
+/// program-neutral opt-in, so SpaceTerm sets the marker of Herdr, another persistent multiplexer,
+/// for which Codex sends both.
+const SELECTION_COPY_ENVIRONMENT: [(&str, &str); 2] =
+    [("PI_CLIPBOARD_OSC52", "1"), ("HERDR_ENV", "1")];
+
 /// The variables that tell `spaceterm` inside a server's Terminal Session which server, Pane and
 /// Session it runs in, and which executable is that server's own CLI. An inherited value is
 /// always removed, so a shell started outside such a Session never names one.
@@ -170,6 +180,11 @@ impl ShellLaunchPlanner {
             ),
             ("SPACETERM".into(), "1".into()),
         ]);
+        environment.extend(
+            SELECTION_COPY_ENVIRONMENT
+                .iter()
+                .map(|(name, value)| ((*name).into(), (*value).into())),
+        );
         if let Some(terminfo) = &terminal_identity.terminfo {
             environment.push(("TERMINFO".into(), terminfo.as_os_str().to_owned()));
         }
@@ -485,6 +500,13 @@ mod tests {
                 Some(OsStr::new(identity::PROGRAM_VERSION))
             );
             assert_eq!(env_value(&launch, "SPACETERM"), Some(OsStr::new("1")));
+            // A program that copies its own selection also sends it to the presenting client,
+            // whose clipboard may be on another computer.
+            assert_eq!(
+                env_value(&launch, "PI_CLIPBOARD_OSC52"),
+                Some(OsStr::new("1"))
+            );
+            assert_eq!(env_value(&launch, "HERDR_ENV"), Some(OsStr::new("1")));
             assert!(FOREIGN_RUNTIME_ENVIRONMENT.iter().all(|name| {
                 launch
                     .environment_removals()
