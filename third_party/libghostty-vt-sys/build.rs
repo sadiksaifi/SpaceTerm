@@ -4,39 +4,20 @@ use std::process::Command;
 
 // The workspace gitlink owns the Ghostty revision. Cargo builds a patched copy of that
 // checkout, never fetching a different source revision or modifying the submodule.
-const BUILD_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
+//
+// Checkouts can share one target directory, and Cargo gives this package the same build
+// directory in each. The script therefore compiles no checkout path or file into itself: it reads
+// everything from the checkout it runs in, and reruns when `.cargo/config.toml` names another
+// checkout in `SPACETERM_CHECKOUT`.
 const BUILD_SCRIPT_FILES: &[&str] = &["build.rs"];
 
-struct SpaceTermPatch {
-    relative_path: &'static str,
-    compiled_source: &'static [u8],
-}
-
-const SPACETERM_PATCHES: &[SpaceTermPatch] = &[
-    SpaceTermPatch {
-        relative_path: "patches/spaceterm-kitty-graphics.patch",
-        compiled_source: include_bytes!("patches/spaceterm-kitty-graphics.patch"),
-    },
-    SpaceTermPatch {
-        relative_path: "patches/spaceterm-terminal-effects.patch",
-        compiled_source: include_bytes!("patches/spaceterm-terminal-effects.patch"),
-    },
-    SpaceTermPatch {
-        relative_path: "patches/spaceterm-color-provenance.patch",
-        compiled_source: include_bytes!("patches/spaceterm-color-provenance.patch"),
-    },
-    SpaceTermPatch {
-        relative_path: "patches/spaceterm-accessibility.patch",
-        compiled_source: include_bytes!("patches/spaceterm-accessibility.patch"),
-    },
-    SpaceTermPatch {
-        relative_path: "patches/spaceterm-clear-screen.patch",
-        compiled_source: include_bytes!("patches/spaceterm-clear-screen.patch"),
-    },
-    SpaceTermPatch {
-        relative_path: "patches/spaceterm-prompt-resize.patch",
-        compiled_source: include_bytes!("patches/spaceterm-prompt-resize.patch"),
-    },
+const SPACETERM_PATCHES: &[&str] = &[
+    "patches/spaceterm-kitty-graphics.patch",
+    "patches/spaceterm-terminal-effects.patch",
+    "patches/spaceterm-color-provenance.patch",
+    "patches/spaceterm-accessibility.patch",
+    "patches/spaceterm-clear-screen.patch",
+    "patches/spaceterm-prompt-resize.patch",
 ];
 
 #[derive(Clone, Copy)]
@@ -88,7 +69,7 @@ impl LinkMode {
 
 fn main() {
     println!("cargo:rerun-if-env-changed=DOCS_RS");
-    let manifest_dir = manifest_dir();
+    println!("cargo:rerun-if-env-changed=SPACETERM_CHECKOUT");
 
     // docs.rs has no Zig toolchain. The checked-in bindings in src/bindings.rs
     // are enough for generating documentation, so skip the entire native
@@ -107,48 +88,16 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CARGO_ZIGBUILD_TARGET");
     println!("cargo:rerun-if-env-changed=DEBUG");
     println!("cargo:rerun-if-env-changed=OPT_LEVEL");
-    for build_script in BUILD_SCRIPT_FILES {
-        println!(
-            "cargo:rerun-if-changed={}",
-            manifest_dir.join(build_script).display()
-        );
+    // Relative paths resolve in the checkout Cargo builds.
+    for input in BUILD_SCRIPT_FILES.iter().chain(SPACETERM_PATCHES) {
+        println!("cargo:rerun-if-changed={input}");
     }
-    for patch in SPACETERM_PATCHES {
-        println!(
-            "cargo:rerun-if-changed={}",
-            manifest_dir.join(patch.relative_path).display()
-        );
-    }
-    verify_compiled_patch_inputs(&manifest_dir);
 
     build_vendored(link_mode);
 }
 
 fn manifest_dir() -> PathBuf {
-    let runtime_manifest_dir =
-        PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir must be set"));
-    let compiled_manifest_dir = Path::new(BUILD_MANIFEST_DIR);
-    assert_eq!(
-        runtime_manifest_dir, compiled_manifest_dir,
-        "Cargo reused a libghostty-vt-sys build script compiled for a different worktree; \
-         remove this package's build-script artifacts from the shared target directory"
-    );
-    runtime_manifest_dir
-}
-
-fn verify_compiled_patch_inputs(manifest_dir: &Path) {
-    for patch in SPACETERM_PATCHES {
-        let path = manifest_dir.join(patch.relative_path);
-        let on_disk = std::fs::read(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        assert_eq!(
-            on_disk,
-            patch.compiled_source,
-            "compiled build script contains stale patch data for {}; remove this package's \
-             build-script artifacts from the shared target directory",
-            path.display()
-        );
-    }
+    PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir must be set"))
 }
 
 /// Build libghostty-vt from source via zig. The zig build itself generates
@@ -444,8 +393,12 @@ fn prepare_ghostty(out_dir: &Path) -> PathBuf {
     let stamp = src_dir.join(".spaceterm-source-inputs");
     let mut inputs = commit.as_bytes().to_vec();
     for patch in SPACETERM_PATCHES {
-        inputs.extend_from_slice(patch.relative_path.as_bytes());
-        inputs.extend_from_slice(patch.compiled_source);
+        let path = manifest_dir.join(patch);
+        inputs.extend_from_slice(patch.as_bytes());
+        inputs.extend_from_slice(
+            &std::fs::read(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display())),
+        );
     }
     if std::fs::read(&stamp).is_ok_and(|existing| existing == inputs)
         && cached_clone_is_readable(&src_dir)
@@ -517,7 +470,7 @@ fn git_output(directory: &Path, args: &[&str]) -> String {
 fn apply_spaceterm_patch(src_dir: &Path) {
     let manifest_dir = manifest_dir();
     for patch in SPACETERM_PATCHES {
-        apply_patch(src_dir, &manifest_dir.join(patch.relative_path));
+        apply_patch(src_dir, &manifest_dir.join(patch));
     }
 }
 
