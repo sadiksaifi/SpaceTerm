@@ -660,23 +660,24 @@ fn every_desktop_config_migration_fixture_migrates_and_reads_strictly() {
     );
 }
 
-/// Generation 1 named New Scratch Workspace `new_workspace` and New Workspace
-/// `open_local_directory`. Each saved Shortcut stays on the Command it was assigned to.
-#[test]
-fn generation_two_keeps_workspace_creation_shortcuts_on_their_commands() {
-    let generation_one: serde_json::Value = serde_json::from_slice(include_bytes!(
+/// The generation-1 Settings Document with a Shortcut saved for each Workspace creation Command
+/// that generation 2 renames: `new_workspace` for New Scratch Workspace and
+/// `open_local_directory` for New Workspace.
+fn generation_one_settings_with_creation_shortcuts() -> serde_json::Value {
+    let mut settings: serde_json::Value = serde_json::from_slice(include_bytes!(
         "../../fixtures/migrations/desktop-config/gen-1/settings.json"
     ))
     .unwrap();
-    let mut settings = generation_one;
     settings["keybindings"] = serde_json::json!({
         "new_workspace": "cmd-y",
         "open_local_directory": null,
         "close_tab": "cmd-shift-x",
     });
+    settings
+}
 
-    let migrated = migration::migrate_document(&CONFIG, SETTINGS, settings).unwrap();
-
+/// Each saved Shortcut stays on the Command it was assigned to.
+fn assert_creation_shortcuts_kept(migrated: &serde_json::Value) {
     assert_eq!(migrated["schema_version"], 2);
     assert_eq!(
         migrated["keybindings"],
@@ -686,6 +687,45 @@ fn generation_two_keeps_workspace_creation_shortcuts_on_their_commands() {
             "close_tab": "cmd-shift-x",
         })
     );
+}
+
+#[test]
+fn importing_generation_one_settings_keeps_creation_shortcuts_on_their_commands() {
+    let migrated = migration::migrate_document(
+        &CONFIG,
+        SETTINGS,
+        generation_one_settings_with_creation_shortcuts(),
+    )
+    .unwrap();
+
+    assert_creation_shortcuts_kept(&migrated);
+}
+
+#[test]
+fn launching_on_generation_one_config_keeps_creation_shortcuts_on_their_commands() {
+    use migration::{Area, Store};
+
+    let root = fixtures::scratch("desktop-config-shortcuts");
+    fixtures::copy_private(&fixtures::directory("desktop-config").join("gen-1"), &root);
+    let store = config_store(native(), root.clone());
+    store
+        .write(
+            Area::Root,
+            SETTINGS,
+            &serde_json::to_vec(&generation_one_settings_with_creation_shortcuts()).unwrap(),
+        )
+        .unwrap();
+
+    let outcome = migration::run(&CONFIG, &store, &mut migration::NoCredentials, false);
+
+    assert!(
+        matches!(outcome, Ok(migration::Outcome::Migrated { .. })),
+        "{outcome:?}"
+    );
+    let bytes = store.read(Area::Root, SETTINGS).unwrap().unwrap();
+    assert_creation_shortcuts_kept(&serde_json::from_slice(&bytes).unwrap());
+    assert!(crate::settings::parse_settings(&bytes).is_ok());
+    std::fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]
