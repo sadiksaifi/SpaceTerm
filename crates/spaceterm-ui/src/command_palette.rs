@@ -614,10 +614,11 @@ impl CommandPaletteAction {
 ///
 /// Activating it or one of its menu items emits [`CommandPaletteEvent::HeaderAction`] and leaves
 /// the palette open.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct CommandPalettePrimaryAction {
     id: SharedString,
     label: SharedString,
+    leading_icon: Option<IconBuilder>,
     shortcut: Option<SharedString>,
     disabled: bool,
     menu_items: Vec<(SharedString, SharedString)>,
@@ -631,12 +632,20 @@ impl CommandPalettePrimaryAction {
         Self {
             id: id.into(),
             label: label.into(),
+            leading_icon: None,
             shortcut: None,
             disabled: false,
             menu_items: Vec::new(),
             menu_disabled: false,
             debug_selector: None,
         }
+    }
+
+    /// Renders a symbol before the label with the button's foreground, at the search line's
+    /// icon size.
+    pub fn leading_icon(mut self, build: impl Fn(Rgba, Pixels) -> AnyElement + 'static) -> Self {
+        self.leading_icon = Some(Rc::new(build));
+        self
     }
 
     /// Shows the displayed Shortcut of [`Confirm`], the key that activates the action, after
@@ -3480,6 +3489,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                     action,
                     self.primary_action_focus.clone(),
                     self.empty_explanation(),
+                    theme.metrics.input_icon_size,
                 ))
             })
             .into_any_element()
@@ -3697,6 +3707,7 @@ fn render_primary_action<I: Clone + Eq + 'static>(
     action: &CommandPalettePrimaryAction,
     focus_handle: gpui::FocusHandle,
     explanation: Option<SharedString>,
+    icon_size: Pixels,
 ) -> AnyElement {
     let id = action.id.clone();
     let menu_palette = palette.clone();
@@ -3715,6 +3726,9 @@ fn render_primary_action<I: Clone + Eq + 'static>(
     )
     .variant(ButtonVariant::Primary)
     .size(ButtonSize::Small)
+    .when_some(action.leading_icon.clone(), |button, build| {
+        button.leading(move |foreground| build(foreground, icon_size))
+    })
     .when_some(action.shortcut.clone(), |button, shortcut| {
         button.shortcut(shortcut)
     })
