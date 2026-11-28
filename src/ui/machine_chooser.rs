@@ -212,14 +212,6 @@ impl MachineChooser {
                 }
                 cx.notify();
             }
-            // An edited filter ends the palette's loading state, though the saved Machines are
-            // still being read.
-            CommandPaletteEvent::QueryChanged(_)
-                if self.choices == Some(MachineChoices::Loading) =>
-            {
-                self.palette
-                    .update(cx, |palette, cx| palette.set_loading(true, cx));
-            }
             CommandPaletteEvent::Activated(activation) => {
                 let route = *activation.item_id();
                 if self.ended {

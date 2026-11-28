@@ -1283,6 +1283,66 @@ fn a_button_only_primary_action_should_leave_the_confirm_key_and_return_alone(
 }
 
 #[gpui::test]
+fn a_button_only_primary_action_should_leave_empty_results_announced(cx: &mut TestAppContext) {
+    use crate::a11y_testing::A11yTree;
+
+    let (root, palette, _, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(
+            Some(CommandPalettePrimaryAction::new("add", "Add").button_only()),
+            cx,
+        );
+    });
+    show_empty_state(
+        &root,
+        &palette,
+        CommandPaletteEmpty::no_match("No items match"),
+        cx,
+    );
+    cx.executor().advance_clock(Duration::from_millis(750));
+    cx.run_until_parked();
+
+    assert_eq!(
+        A11yTree::read(cx).with_role("Status")[0]["aria"]["value"],
+        "No items match \u{201C}zzz\u{201D}."
+    );
+}
+
+#[gpui::test]
+fn typing_should_keep_a_palette_that_matches_its_own_items_loading(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    open_palette(&root, &palette, cx);
+    show_loading(&palette, cx);
+    cx.executor().advance_clock(LOADING_MINIMUM_DISPLAY);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("command-palette-loading").is_some());
+
+    cx.simulate_keystrokes("o");
+    cx.run_until_parked();
+
+    assert!(
+        cx.debug_bounds("command-palette-loading").is_some(),
+        "the filter edit ended a load it doesn't answer"
+    );
+}
+
+#[gpui::test]
+fn a_replacement_chain_that_ends_early_should_restore_its_focus_owner(cx: &mut TestAppContext) {
+    let (root, palette, _, _, cx) = palette_window(cx);
+    let prior = open_palette(&root, &palette, cx);
+    let replacement = cx.update(|window, cx| {
+        palette.update(cx, |palette, cx| {
+            palette.dismiss_for_replacement(window, cx)
+        })
+    });
+    assert!(!cx.update(|window, _| prior.is_focused(window)));
+
+    cx.update(|window, cx| replacement.unwrap().restore(window, cx));
+
+    assert!(cx.update(|window, _| prior.is_focused(window)));
+}
+
+#[gpui::test]
 fn a_results_note_should_follow_the_last_result(cx: &mut TestAppContext) {
     let (root, palette, _, _, cx) = palette_window(cx);
     palette.update(cx, |palette, cx| {

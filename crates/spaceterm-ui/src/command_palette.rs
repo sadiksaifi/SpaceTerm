@@ -530,6 +530,16 @@ pub struct CommandPaletteReplacementFocus {
     restore_focus: Option<WeakFocusHandle>,
 }
 
+impl CommandPaletteReplacementFocus {
+    /// Returns focus to the owner the chain began with, for a chain that ends before its next
+    /// palette opens, such as when that palette's operation is refused.
+    pub fn restore(self, window: &mut Window, cx: &mut App) {
+        if let Some(focus) = self.restore_focus.and_then(|focus| focus.upgrade()) {
+            focus.focus(window, cx);
+        }
+    }
+}
+
 struct PendingCommandPaletteOpen {
     replacement: CommandPaletteReplacementFocus,
     transferred_focus: bool,
@@ -2369,7 +2379,11 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         if self.open {
             self.wait_for_empty_status(cx);
         }
-        self.set_loading_state(false, cx);
+        // A caller that matches its own results answers each query anew, while the palette's own
+        // matching filters items the caller is still loading.
+        if self.matching == CommandPaletteMatching::Caller {
+            self.set_loading_state(false, cx);
+        }
         self.recompute_matches();
         self.emit_query(cx);
         cx.notify();
@@ -2394,10 +2408,12 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
     fn empty_explanation(&self) -> Option<SharedString> {
         if self.loading_presentation != LoadingPresentation::Settled
             || !self.matches.is_empty()
+            // Return activates an enabled primary action, so empty results need no explanation,
+            // unless the action is button-only.
             || self
                 .primary_action
                 .as_ref()
-                .is_some_and(|action| !action.disabled)
+                .is_some_and(|action| !action.disabled && !action.button_only)
         {
             return None;
         }
