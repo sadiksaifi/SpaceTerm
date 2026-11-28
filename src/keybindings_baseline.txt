@@ -153,6 +153,7 @@ ctrl-cmd-space	Some(Identifier("SpaceTermTextArea"))	spaceterm_text_input::ShowC
 cmd-shift-k	None	terminal::ChooseWorkspace
 cmd-n	None	terminal::NewScratchWorkspace
 cmd-o	None	terminal::NewWorkspace
+cmd-shift-o	None	terminal::NewRemoteWorkspace
 alt-cmd-]	Some(Identifier("TerminalPane"))	terminal::NextWorktree
 alt-cmd-[	Some(Identifier("TerminalPane"))	terminal::PreviousWorktree
 ctrl-cmd-w	None	terminal::KillWorkspace

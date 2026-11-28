@@ -31,6 +31,7 @@ mod direct_pairing;
 pub(crate) mod directory_picker;
 mod drag_and_drop;
 pub(crate) mod empty_state;
+mod machine_chooser;
 pub(crate) mod pane_lifecycle;
 mod pane_motion;
 mod pane_snapshot;
@@ -152,6 +153,7 @@ actions!(
         ChooseWorkspace,
         NewScratchWorkspace,
         NewWorkspace,
+        NewRemoteWorkspace,
         NewWorktree,
         NextWorktree,
         PreviousWorktree,

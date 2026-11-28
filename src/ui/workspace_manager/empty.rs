@@ -28,7 +28,6 @@ pub(super) const EMPTY_TITLE: &str = "No Workspaces Attached";
 /// The detail while the server is reachable, so its detached Workspaces are in the switcher.
 pub(super) const EMPTY_DETAIL: &str = "Choose a Workspace to attach, or create one.";
 pub(super) const EMPTY_ACTION: &str = "Choose Workspace\u{2026}";
-pub(super) const EMPTY_CREATE: &str = "New Local Workspace";
 /// The title while this computer's server is unreachable, so the switcher lists none of its
 /// Workspaces.
 pub(super) const OFFLINE_TITLE: &str = "Machine Not Connected";
@@ -325,12 +324,12 @@ impl WorkspaceManager {
                         manager.open_workspace_switcher(window, cx);
                     });
                 });
-            let create = Button::new("empty-workspace-create", EMPTY_CREATE)
+            let create = Button::new("empty-workspace-create", WorkspaceCreation::Local.label())
                 .tab_stop(true)
                 .debug_selector("empty-workspace-create")
                 .on_activate(move |_, window, cx| {
                     let _ = manager.update(cx, |manager, cx| {
-                        manager.run_workspace_creation(WorkspaceCreation::Scratch, window, cx);
+                        manager.run_workspace_creation(WorkspaceCreation::Local, window, cx);
                     });
                 });
             crate::ui::empty_state::empty_state(title, cx)

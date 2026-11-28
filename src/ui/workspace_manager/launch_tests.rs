@@ -950,7 +950,10 @@ fn startup_without_usable_core_state_presents_recovery_across_the_window(cx: &mu
         Some("Couldn\u{2019}t Verify SpaceTerm Core")
     );
     assert_eq!(workspace_controls_presented(cx), Vec::<&str>::new());
-    assert!(!creation_available(cx), "New Workspace has nowhere to go");
+    assert!(
+        !creation_available(cx),
+        "New Scratch Workspace has nowhere to go"
+    );
     assert!(cx.debug_bounds(launch::LAUNCH_SETTINGS_SELECTOR).is_some());
     let viewport = cx.update(|window, _| window.viewport_size());
     let launch = cx
@@ -1512,7 +1515,8 @@ fn new_workspace_presents_a_pending_creation_without_core_authority(cx: &mut Tes
     );
 }
 
-/// New Workspace chosen with no Workspace Window opens one that has no attached Workspaces yet.
+/// New Scratch Workspace chosen with no Workspace Window opens one that has no attached Workspaces
+/// yet.
 /// It creates one Workspace once the server presents them, where opening SpaceTerm creates none.
 #[gpui::test]
 fn new_workspace_without_a_window_creates_once_the_core_presents_its_workspaces(
@@ -1552,7 +1556,7 @@ fn new_workspace_without_a_window_creates_once_the_core_presents_its_workspaces(
 }
 
 #[gpui::test]
-fn open_local_directory_creates_a_core_workspace_rooted_there(cx: &mut TestAppContext) {
+fn new_workspace_creates_a_core_workspace_rooted_there(cx: &mut TestAppContext) {
     use spaceterm_core::hierarchy::Mutation;
 
     let chosen = std::env::temp_dir()
@@ -1828,7 +1832,7 @@ fn created_names(harness: &LaunchHarness) -> Vec<String> {
 fn the_switcher_creates_a_local_workspace_with_its_query_as_the_name(cx: &mut TestAppContext) {
     let (harness, cx) = ready_harness(cx);
     open_workspace_switcher_for_creation(cx);
-    click("workspace-switcher-create-local", cx);
+    click("workspace-switcher-new-scratch-workspace", cx);
 
     assert_eq!(created_names(&harness), ["fresh workspace"]);
     assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
@@ -2031,9 +2035,9 @@ fn active_core_workspace(harness: &LaunchHarness, cx: &mut VisualTestContext) ->
 }
 
 #[gpui::test]
-fn the_new_workspace_menu_creates_and_opens_a_machine_workspace(cx: &mut TestAppContext) {
+fn the_create_workspace_menu_creates_and_opens_a_machine_workspace(cx: &mut TestAppContext) {
     let (harness, cx) = ready_harness(cx);
-    click_new_workspace_menu("new-workspace-menu-create-local", cx);
+    click_create_workspace_menu("create-workspace-menu-new-scratch-workspace", cx);
     assert_eq!(created_names(&harness), [""]);
     assert_eq!(
         harness.workspace_count(cx),
@@ -2102,7 +2106,7 @@ fn the_collapsed_workspace_name_creates_a_named_workspace_and_stays_collapsed(
     click("workspace-chip-label", cx);
     cx.simulate_keystrokes("f r e s h space w o r k s p a c e");
     cx.run_until_parked();
-    click("workspace-switcher-create-local", cx);
+    click("workspace-switcher-new-scratch-workspace", cx);
 
     assert_eq!(created_names(&harness), ["fresh workspace"]);
     assert!(
@@ -2114,15 +2118,13 @@ fn the_collapsed_workspace_name_creates_a_named_workspace_and_stays_collapsed(
 }
 
 #[gpui::test]
-fn open_local_directory_from_the_sidebar_names_by_directory_or_creates_nothing(
-    cx: &mut TestAppContext,
-) {
+fn new_workspace_from_the_sidebar_names_by_directory_or_creates_nothing(cx: &mut TestAppContext) {
     use spaceterm_core::hierarchy::Mutation;
 
     let project = temporary_directory("launch-open-local-sidebar");
     std::fs::create_dir_all(&project).unwrap();
     let (harness, cx) = ready_harness(cx);
-    click_new_workspace_menu("new-workspace-menu-open-local-directory", cx);
+    click_create_workspace_menu("create-workspace-menu-new-workspace", cx);
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(harness.edits.submitted().is_empty());
@@ -2132,7 +2134,7 @@ fn open_local_directory_from_the_sidebar_names_by_directory_or_creates_nothing(
             .read_with(cx, |manager, _| manager.pin_picker.is_none())
     );
 
-    click_new_workspace_menu("new-workspace-menu-open-local-directory", cx);
+    click_create_workspace_menu("create-workspace-menu-new-workspace", cx);
     confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
 
     assert_eq!(
@@ -2152,7 +2154,7 @@ fn open_local_directory_from_the_sidebar_names_by_directory_or_creates_nothing(
 }
 
 #[gpui::test]
-fn open_local_directory_takes_the_switcher_query_as_its_name(cx: &mut TestAppContext) {
+fn new_workspace_takes_the_switcher_query_as_its_name(cx: &mut TestAppContext) {
     let project = temporary_directory("launch-open-local-query");
     std::fs::create_dir_all(&project).unwrap();
     let (harness, cx) = ready_harness(cx);

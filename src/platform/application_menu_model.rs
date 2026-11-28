@@ -84,6 +84,7 @@ pub(crate) fn file_menu() -> Menu {
         items: vec![
             MenuItem::action("New Scratch Workspace", NewScratchWorkspace),
             MenuItem::action("New Workspace…", crate::ui::NewWorkspace),
+            MenuItem::action("New Remote Workspace…", crate::ui::NewRemoteWorkspace),
             MenuItem::action("Add Machine…", crate::ui::settings_window::AddMachine),
             MenuItem::action("Choose Workspace…", ChooseWorkspace),
             MenuItem::separator(),

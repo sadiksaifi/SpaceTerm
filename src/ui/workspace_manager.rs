@@ -22,6 +22,7 @@ use super::directory_picker::{
     CoreDirectorySource, DirectoryPicker, DirectoryPickerEvent, DirectorySelection,
     DirectorySource, LocalDirectorySource,
 };
+use super::machine_chooser::{MachineChooser, MachineChooserEvent};
 use super::terminal_focus::{TerminalFocusBlocker, TerminalFocusCoordinator, WorkspaceFocusOwners};
 use super::workspace_creation::WorkspaceCreation;
 use super::workspaces::CloseConsent;
@@ -32,10 +33,11 @@ use super::{
     ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ChooseWorkspace, ClosePane,
     CloseTab, CloseTerminalFind, CopySelection, FindNext, FindPrevious, FocusNextPane,
     FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane, KillWorkspace,
-    MoveTabLeft, MoveTabRight, NewScratchWorkspace, NewTab, NewWorkspace, NewWorktree, NextTab,
-    NextWorktree, OpenTerminalFind, PreviousTab, PreviousWorktree, ScrollPageDown, ScrollPageUp,
-    ScrollToBottom, ScrollToTop, ShowRepositoryStatus, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT,
-    TabManager, TabManagerEvent, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
+    MoveTabLeft, MoveTabRight, NewRemoteWorkspace, NewScratchWorkspace, NewTab, NewWorkspace,
+    NewWorktree, NextTab, NextWorktree, OpenTerminalFind, PreviousTab, PreviousWorktree,
+    ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, ShowRepositoryStatus, SplitDown,
+    SplitRight, TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom, ToggleSidebar,
+    ToggleSidebarFocus,
 };
 use crate::appearance::Color;
 use crate::close_confirmation::{CloseConfirmation, CloseTarget};
@@ -61,10 +63,10 @@ use gpui::{
 };
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, AnchoredAlignment, AnchoredPlacement,
-    AnchoredPlacementConfig, ButtonVariant, ComboBox, ComboBoxAccessory, ComboBoxCommand,
-    ComboBoxCopy, ComboBoxHandle, ComboBoxItem, CustomIconName, Icon, IconButton, IconName,
-    ModalAction, ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ModalLayer,
-    Tooltip, WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse,
+    AnchoredPlacementConfig, ButtonVariant, ComboBox, ComboBoxCommand, ComboBoxCopy,
+    ComboBoxHandle, ComboBoxItem, CommandPaletteReplacementFocus, CustomIconName, Icon, IconButton,
+    IconName, ModalAction, ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId,
+    ModalLayer, Tooltip, WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse,
     WindowDragRegionStatus, window_combo_box_is_open, window_modal_is_open,
 };
 
@@ -146,9 +148,9 @@ enum PinTarget {
     Workspace(WorkspaceId),
     /// A new Local Workspace pinned from its first Terminal Session, named `name` unless blank.
     NewLocalWorkspace { name: String },
-    /// A new Workspace on the paired server at `key`, pinned to a directory there and named
+    /// A new Remote Workspace on the paired Machine at `key`, pinned to a directory there and named
     /// `name` unless blank.
-    NewCoreWorkspace { key: MachineKey, name: String },
+    NewRemoteWorkspace { key: MachineKey, name: String },
 }
 
 /// How applying a chosen directory to a pin target ended.
@@ -264,7 +266,7 @@ pub(crate) struct WorkspaceManager {
     window_traffic_lights: super::appearance_runtime::WindowTrafficLightOwner,
     transient: WorkspaceTransientUi,
     workspace_switcher: ComboBoxHandle<SwitcherChoice, WorkspaceCreation>,
-    /// The Workspace Open Remote Directory is opening, until its server takes it.
+    /// The Remote Workspace New Remote Workspace is opening, until its server takes it.
     pub(super) pending_core_directory: Option<PendingCoreDirectory>,
     /// The owning server's answer to whether a Workspace there already uses the directory the
     /// person chose to open.
@@ -277,6 +279,8 @@ pub(crate) struct WorkspaceManager {
     local_home_directory_path: PathBuf,
     directory_selection: Rc<dyn SystemDirectorySelection>,
     pin_picker: Option<Entity<DirectoryPicker>>,
+    /// The Machine chooser New Remote Workspace opens before the Directory Picker.
+    machine_chooser: Option<Entity<MachineChooser>>,
     pin_operation: u64,
     /// Counts Workspace activations, so a deferred completion can tell that navigation happened
     /// since it began, even navigation that returned to the same Workspace.
@@ -285,7 +289,7 @@ pub(crate) struct WorkspaceManager {
     /// right after that creation's submission runs, because newer navigation superseded the
     /// person's original choice.
     quiet_creation: Option<MachineKey>,
-    /// Follows the keyboard owner a pending Open Remote Directory settled on.
+    /// Follows the keyboard owner a pending New Remote Workspace settled on.
     core_directory_keyboard: Option<gpui::Subscription>,
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     window_drag_status: WindowDragRegionStatus,
@@ -445,6 +449,7 @@ impl WorkspaceManager {
             local_home_directory_path,
             directory_selection,
             pin_picker: None,
+            machine_chooser: None,
             pin_operation: 0,
             activation_epoch: 0,
             quiet_creation: None,
@@ -714,6 +719,10 @@ impl WorkspaceManager {
                 .pin_picker
                 .as_ref()
                 .is_some_and(|picker| picker.read(cx).blocks_terminal_input())
+                || self
+                    .machine_chooser
+                    .as_ref()
+                    .is_some_and(|chooser| chooser.read(cx).blocks_terminal_input())
                 || self.active_directory_recovery(cx).is_some(),
             switcher: window_combo_box_is_open(window, cx),
             window_drag: self.window_drag_status.is_active(),
@@ -781,6 +790,9 @@ impl WorkspaceManager {
         if let Some(picker) = self.pin_picker.take() {
             picker.update(cx, |picker, cx| picker.cancel(window, cx));
             self.transient.end_pin();
+        }
+        if let Some(chooser) = self.machine_chooser.take() {
+            chooser.update(cx, |chooser, cx| chooser.cancel(window, cx));
         }
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.dismiss_editing(window, cx);
@@ -909,7 +921,7 @@ impl WorkspaceManager {
     }
 
     /// Opens a chosen local directory as a Workspace the account server owns.
-    fn open_local_directory_workspace(
+    fn open_pinned_local_workspace(
         &mut self,
         directory: ValidatedLocalDirectory,
         name: String,
@@ -976,10 +988,10 @@ impl WorkspaceManager {
                 self.apply_validated_local_pin(workspace_id, directory, window, cx),
             ),
             PinTarget::NewLocalWorkspace { name } => {
-                self.open_local_directory_workspace(directory, name, window, cx)
+                self.open_pinned_local_workspace(directory, name, window, cx)
             }
             // A paired server's Workspace never takes a directory on this computer.
-            PinTarget::NewCoreWorkspace { .. } => PinApplication::Failed,
+            PinTarget::NewRemoteWorkspace { .. } => PinApplication::Failed,
         }
     }
 
@@ -1031,7 +1043,13 @@ impl WorkspaceManager {
 
     /// Opens the Directory Picker for the target's machine. A local target also offers System
     /// Directory Selection from the picker.
-    fn open_pin_picker(&mut self, target: PinTarget, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_pin_picker(
+        &mut self,
+        target: PinTarget,
+        replacement: Option<CommandPaletteReplacementFocus>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.active_directory_recovery(cx).is_some() {
             return;
         }
@@ -1040,7 +1058,9 @@ impl WorkspaceManager {
             PinTarget::NewLocalWorkspace { .. } => {
                 crate::keybindings::Command::NewWorkspace.label()
             }
-            PinTarget::NewCoreWorkspace { .. } => "Open Remote Directory",
+            PinTarget::NewRemoteWorkspace { .. } => {
+                crate::keybindings::Command::NewRemoteWorkspace.label()
+            }
         };
         // Another computer's server Workspace browses that server's own directories. Nothing on
         // this computer reads or validates them.
@@ -1061,10 +1081,10 @@ impl WorkspaceManager {
                 };
                 Some(source)
             }
-            PinTarget::NewCoreWorkspace { key, .. } => {
+            PinTarget::NewRemoteWorkspace { key, .. } => {
                 let Some(source) = self.core_directory_source(*key, cx) else {
                     Self::show_refusal(
-                        "open a remote directory",
+                        "create a Remote Workspace",
                         super::workspaces::WorkspaceRefusalReason::Offline,
                         window,
                         cx,
@@ -1126,7 +1146,7 @@ impl WorkspaceManager {
                             (
                                 true,
                                 DirectorySelection::Core(directory),
-                                PinTarget::NewCoreWorkspace { key, name },
+                                PinTarget::NewRemoteWorkspace { key, name },
                             ) if remote => {
                                 manager.pin_operation = manager.pin_operation.wrapping_add(1);
                                 manager.transient.end_pin();
@@ -1185,8 +1205,9 @@ impl WorkspaceManager {
         )
         .detach();
         self.pin_picker = Some(picker.clone());
-        picker.update(cx, |picker, cx| {
-            picker.open(window, cx);
+        picker.update(cx, |picker, cx| match replacement {
+            Some(replacement) => picker.open_replacing(replacement, window, cx),
+            None => picker.open(window, cx),
         });
         self.sync_terminal_focus_blocker(window, cx);
         cx.notify();
@@ -1198,29 +1219,109 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.choose_directory(PinTarget::Workspace(workspace_id), window, cx);
+        self.choose_directory(PinTarget::Workspace(workspace_id), None, window, cx);
     }
 
-    /// Opens Open Remote Directory on the saved paired server `route`: the Directory Picker
-    /// browses that server, and the chosen directory opens a Workspace there named `name` unless
-    /// blank.
-    fn open_remote_directory(
+    /// Opens the Machine chooser for New Remote Workspace. A chosen Machine opens the Directory
+    /// Picker on it, which creates a Workspace there named `name` unless blank.
+    fn open_machine_chooser(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        if spaceterm_ui::window_menu_is_open(window, cx) {
+            let manager = cx.entity();
+            window.defer(cx, move |window, cx| {
+                spaceterm_ui::dismiss_active_menu(window, cx);
+                manager.update(cx, |manager, cx| {
+                    manager.open_machine_chooser(name, window, cx)
+                });
+            });
+            return;
+        }
+        if self.transient.local_selection_pending || self.active_directory_recovery(cx).is_some() {
+            return;
+        }
+        if let Some(picker) = self.pin_picker.take() {
+            picker.update(cx, |picker, cx| picker.cancel(window, cx));
+            self.transient.end_pin();
+        }
+        if let Some(chooser) = self.machine_chooser.take() {
+            chooser.update(cx, |chooser, cx| chooser.cancel(window, cx));
+        }
+        let chooser = cx.new(|cx| MachineChooser::new(window, cx));
+        cx.subscribe_in(
+            &chooser,
+            window,
+            move |manager, chooser, event: &MachineChooserEvent, window, cx| {
+                if manager.machine_chooser.as_ref() != Some(chooser) {
+                    return;
+                }
+                manager.machine_chooser = None;
+                match event {
+                    MachineChooserEvent::Chosen(route) => {
+                        let replacement =
+                            chooser.update(cx, |chooser, _| chooser.take_replacement());
+                        manager.choose_remote_workspace_directory(
+                            *route,
+                            name.clone(),
+                            replacement,
+                            window,
+                            cx,
+                        );
+                    }
+                    // Settings owns adding a Machine; the chooser only opens that journey.
+                    MachineChooserEvent::AddMachine => {
+                        window
+                            .dispatch_action(Box::new(crate::ui::settings_window::AddMachine), cx);
+                    }
+                    MachineChooserEvent::Dismissed => {}
+                }
+                manager.sync_terminal_focus_blocker(window, cx);
+                cx.notify();
+            },
+        )
+        .detach();
+        let choices = self.machine_choices(cx);
+        chooser.update(cx, |chooser, cx| {
+            chooser.set_choices(choices, cx);
+            chooser.open(window, cx);
+        });
+        self.machine_chooser = Some(chooser);
+        self.sync_terminal_focus_blocker(window, cx);
+        cx.notify();
+    }
+
+    /// Lists the saved Machines as they stand now in an open Machine chooser.
+    fn refresh_machine_chooser(&self, cx: &mut App) {
+        if let Some(chooser) = &self.machine_chooser {
+            let choices = self.machine_choices(cx);
+            chooser.update(cx, |chooser, cx| chooser.set_choices(choices, cx));
+        }
+    }
+
+    /// Opens the Directory Picker on the Machine `route` reaches for New Remote Workspace, taking
+    /// the Machine chooser's focus owner `replacement`. The chosen directory opens a Workspace
+    /// there named `name` unless blank.
+    fn choose_remote_workspace_directory(
         &mut self,
         route: crate::direct_connections::DirectRouteId,
         name: String,
+        replacement: Option<CommandPaletteReplacementFocus>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(key) = self.machine_key(&super::MachineTarget::Direct(route)) else {
             Self::show_refusal(
-                "open a remote directory",
+                "create a Remote Workspace",
                 super::workspaces::WorkspaceRefusalReason::Offline,
                 window,
                 cx,
             );
             return;
         };
-        self.choose_directory(PinTarget::NewCoreWorkspace { key, name }, window, cx);
+        self.choose_directory(
+            PinTarget::NewRemoteWorkspace { key, name },
+            replacement,
+            window,
+            cx,
+        );
     }
 
     /// Opens a Workspace on the paired server at `key` pinned to `directory` there, named `name`
@@ -1252,7 +1353,7 @@ impl WorkspaceManager {
         self.continue_core_directory(window, cx);
     }
 
-    /// Records what holds the keyboard for the pending Open Remote Directory, and follows the
+    /// Records what holds the keyboard for the pending New Remote Workspace, and follows the
     /// person moving it elsewhere before the server answers.
     fn settle_core_directory_keyboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let keyboard = window.focused(cx);
@@ -1273,7 +1374,7 @@ impl WorkspaceManager {
         });
     }
 
-    /// Whether the pending Open Remote Directory still reflects the person's latest intent: no
+    /// Whether the pending New Remote Workspace still reflects the person's latest intent: no
     /// newer navigation, and the keyboard where it settled, never moved since.
     fn core_directory_intent_kept(&self, window: &Window, cx: &App) -> bool {
         let Some(pending) = &self.pending_core_directory else {
@@ -1305,7 +1406,7 @@ impl WorkspaceManager {
             // The server stopped being presented, so nothing reaches it.
             self.finish_core_directory();
             Self::show_refusal(
-                "open a remote directory",
+                "create a Remote Workspace",
                 WorkspaceRefusalReason::Offline,
                 window,
                 cx,
@@ -1480,17 +1581,24 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.choose_directory(PinTarget::NewLocalWorkspace { name }, window, cx);
+        self.choose_directory(PinTarget::NewLocalWorkspace { name }, None, window, cx);
     }
 
-    /// Chooses the directory `target` pins through the Directory Picker.
-    fn choose_directory(&mut self, target: PinTarget, window: &mut Window, cx: &mut Context<Self>) {
+    /// Chooses the directory `target` pins through the Directory Picker, which restores
+    /// `replacement` when it closes, the focus owner a chooser before it handed over.
+    fn choose_directory(
+        &mut self,
+        target: PinTarget,
+        replacement: Option<CommandPaletteReplacementFocus>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if spaceterm_ui::window_menu_is_open(window, cx) {
             let manager = cx.entity();
             window.defer(cx, move |window, cx| {
                 spaceterm_ui::dismiss_active_menu(window, cx);
                 manager.update(cx, |manager, cx| {
-                    manager.choose_directory(target, window, cx)
+                    manager.choose_directory(target, replacement, window, cx)
                 });
             });
             return;
@@ -1503,11 +1611,11 @@ impl WorkspaceManager {
             PinTarget::Workspace(workspace_id) => self
                 .workspace_pin_version(*workspace_id)
                 .map(|version| (*workspace_id, version)),
-            PinTarget::NewLocalWorkspace { .. } | PinTarget::NewCoreWorkspace { .. } => None,
+            PinTarget::NewLocalWorkspace { .. } | PinTarget::NewRemoteWorkspace { .. } => None,
         };
         self.transient.begin_pin(target.clone(), version);
         self.pin_operation = self.pin_operation.wrapping_add(1);
-        self.open_pin_picker(target, window, cx);
+        self.open_pin_picker(target, replacement, window, cx);
     }
 
     /// Selects a local directory for `target` through System Directory Selection.
@@ -1947,7 +2055,7 @@ impl WorkspaceManager {
                 self.record_display_order();
             }
             SidebarEvent::Create(creation) => {
-                // The creation menu returns focus to its trigger on close, so return it to
+                // The Create Workspace menu returns focus to its trigger on close, so return it to
                 // the terminal before a chooser captures its cancel-restore target.
                 self.focus(window, cx);
                 self.start_workspace_creation(creation, String::new(), window, cx)
@@ -2113,6 +2221,15 @@ impl WorkspaceManager {
         self.run_workspace_creation(WorkspaceCreation::Local, window, cx);
     }
 
+    fn on_new_remote_workspace(
+        &mut self,
+        _: &NewRemoteWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_workspace_creation(WorkspaceCreation::Remote, window, cx);
+    }
+
     /// Runs a creation Command. An open Workspace Switcher runs it with its query as the name.
     fn run_workspace_creation(
         &mut self,
@@ -2148,12 +2265,7 @@ impl WorkspaceManager {
                 self.create_workspace(name, None, window, cx);
             }
             WorkspaceCreation::Local => self.choose_local_workspace_directory(name, window, cx),
-            WorkspaceCreation::Remote(route) => {
-                self.create_workspace_on(&super::MachineTarget::Direct(route), name, window, cx)
-            }
-            WorkspaceCreation::OpenRemoteDirectory(route) => {
-                self.open_remote_directory(route, name, window, cx)
-            }
+            WorkspaceCreation::Remote => self.open_machine_chooser(name, window, cx),
         }
     }
 
@@ -2414,8 +2526,10 @@ impl WorkspaceManager {
         let accept_manager = manager.clone();
         let combo_lifecycle_window = window.window_handle();
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
-        let creation_rows =
-            switcher_creation_rows(&self.remote_creation_machines(cx), presentation);
+        let creation_rows: Vec<_> = WorkspaceCreation::ALL
+            .into_iter()
+            .map(|creation| (creation, creation.shortcut(presentation)))
+            .collect();
         let collapsed_identity = (presence > 0.0)
             .then(|| self.workspace_chrome_identity(cx))
             .flatten()
@@ -2451,26 +2565,17 @@ impl WorkspaceManager {
             move |_| {
                 creation_rows
                     .iter()
-                    .map(|row| {
-                        let creation = row.creation;
-                        let mut command = ComboBoxCommand::new(creation, row.label.clone())
+                    .map(|(creation, shortcut)| {
+                        let creation = *creation;
+                        let command = ComboBoxCommand::new(creation, creation.label())
                             .leading_icon(move |foreground, size| {
                                 Icon::custom(creation.icon(), size, foreground).into_any_element()
                             })
-                            .debug_selector(format!("workspace-switcher-{}", row.selector));
-                        if row.starts_group {
-                            command = command.starts_group();
+                            .debug_selector(format!("workspace-switcher-{}", creation.selector()));
+                        match shortcut.clone() {
+                            Some(shortcut) => command.shortcut(shortcut),
+                            None => command,
                         }
-                        if let Some(shortcut) = row.shortcut.clone() {
-                            command = command.shortcut(shortcut);
-                        }
-                        if !row.available {
-                            command = command
-                                .disabled(true)
-                                .description(super::workspace_creation::REMOTE_UNAVAILABLE)
-                                .trailing(ComboBoxAccessory::Status("Unavailable".into()));
-                        }
-                        command
                     })
                     .collect()
             },
@@ -3106,9 +3211,9 @@ impl WorkspaceManager {
         // review; both look up their own Workspace's server.
         self.open_created_core_worktree(window, cx);
         self.revalidate_machine_removal(window, cx);
-        // A Workspace Open Remote Directory is opening may be asked for now.
+        // A Remote Workspace New Remote Workspace is opening may be asked for now.
         self.continue_core_directory(window, cx);
-        // New Workspace chosen with no Workspace Window open waits for this reading.
+        // New Scratch Workspace chosen with no Workspace Window open waits for this reading.
         self.create_pending_workspace(key, window, cx);
         // A form presents its own Create's answer, so a failure reaches here only when no
         // surface that asked for it presents it.
@@ -5393,11 +5498,12 @@ impl WorkspaceManager {
             ),
         };
         let rows = self.sidebar_rows(cx);
-        let remote_machines = self.remote_creation_machines(cx);
+        // A Machine's connection can change while the chooser lists it.
+        self.refresh_machine_chooser(cx);
 
-        let rows_changed = self.sidebar.update(cx, |sidebar, cx| {
-            sidebar.set_rows(rows, remote_machines, cx)
-        });
+        let rows_changed = self
+            .sidebar
+            .update(cx, |sidebar, cx| sidebar.set_rows(rows, cx));
         // The New Worktree Command is available only where it can act, so its menu item disables
         // elsewhere.
         let actions = WorkspaceActions {
@@ -5475,6 +5581,7 @@ impl WorkspaceManager {
             .absolute()
             .inset_0()
             .children(self.pin_picker.iter().cloned())
+            .children(self.machine_chooser.iter().cloned())
             .children(self.active_directory_recovery(cx))
             .children(super::application_commands::overlay(window, cx));
         let presentation = ModalLayer::new(super::window_shell::render(content, window, cx))
@@ -5549,6 +5656,7 @@ impl WorkspaceManager {
                     .on_action(cx.listener(Self::on_choose_workspace))
                     .on_action(cx.listener(Self::on_new_scratch_workspace))
                     .on_action(cx.listener(Self::on_new_workspace))
+                    .on_action(cx.listener(Self::on_new_remote_workspace))
                     .on_action(cx.listener(Self::on_kill_workspace))
                     .on_action(cx.listener(Self::on_activate_workspace_1))
                     .on_action(cx.listener(Self::on_activate_workspace_2))
@@ -5977,50 +6085,6 @@ const fn close_target_workspace(target: CloseTarget) -> WorkspaceId {
         | CloseTarget::Pane { workspace_id, .. }
         | CloseTarget::Worktree { workspace_id, .. } => workspace_id,
     }
-}
-
-/// One creation row the Workspace Switcher offers.
-struct SwitcherCreationRow {
-    creation: WorkspaceCreation,
-    label: gpui::SharedString,
-    selector: String,
-    shortcut: Option<gpui::SharedString>,
-    starts_group: bool,
-    available: bool,
-}
-
-/// The Workspace Switcher's creation rows: the local ones, then New Workspace and Open Directory
-/// on each saved paired server.
-fn switcher_creation_rows(
-    machines: &[super::workspace_creation::RemoteCreationMachine],
-    presentation: &crate::desktop_profile::DesktopPresentation,
-) -> Vec<SwitcherCreationRow> {
-    let local = WorkspaceCreation::LOCAL
-        .into_iter()
-        .map(|creation| SwitcherCreationRow {
-            creation,
-            label: creation.label(None),
-            selector: creation.selector(0),
-            shortcut: creation.shortcut(presentation),
-            starts_group: false,
-            available: true,
-        });
-    let remote = machines.iter().enumerate().flat_map(|(position, core)| {
-        [
-            WorkspaceCreation::Remote(core.route),
-            WorkspaceCreation::OpenRemoteDirectory(core.route),
-        ]
-        .into_iter()
-        .map(move |creation| SwitcherCreationRow {
-            creation,
-            label: creation.label(Some(core.display_name().as_ref())),
-            selector: creation.selector(position),
-            shortcut: None,
-            starts_group: position == 0 && matches!(creation, WorkspaceCreation::Remote(_)),
-            available: core.available,
-        })
-    });
-    local.chain(remote).collect()
 }
 
 mod empty;

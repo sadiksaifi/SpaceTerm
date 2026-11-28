@@ -85,7 +85,7 @@ fn present(
 ) {
     cx.update(|_, cx| {
         sidebar.update(cx, |sidebar, cx| {
-            sidebar.set_rows(vec![workspace(worktrees)], Vec::new(), cx)
+            sidebar.set_rows(vec![workspace(worktrees)], cx)
         });
     });
     cx.run_until_parked();
@@ -256,7 +256,7 @@ fn an_expanded_workspace_leaving_with_a_selected_worktree_should_fade_as_it_drew
         ..workspace(vec![worktree(1, None), worktree(2, None)])
     };
     let rows = |rows: Vec<WorkspaceRowViewModel>, cx: &mut VisualTestContext| {
-        cx.update(|_, cx| sidebar.update(cx, |sidebar, cx| sidebar.set_rows(rows, Vec::new(), cx)));
+        cx.update(|_, cx| sidebar.update(cx, |sidebar, cx| sidebar.set_rows(rows, cx)));
         cx.run_until_parked();
     };
     rows(vec![leaving, other.clone()], cx);
@@ -348,7 +348,7 @@ fn activating_a_workspace_as_it_discloses_should_move_the_selection_whole_into_i
         ..workspace(Vec::new())
     };
     let rows = |rows: Vec<WorkspaceRowViewModel>, cx: &mut VisualTestContext| {
-        cx.update(|_, cx| sidebar.update(cx, |sidebar, cx| sidebar.set_rows(rows, Vec::new(), cx)));
+        cx.update(|_, cx| sidebar.update(cx, |sidebar, cx| sidebar.set_rows(rows, cx)));
         cx.run_until_parked();
     };
     rows(vec![other.clone(), collapsed], cx);
@@ -415,7 +415,7 @@ fn a_workspace_group_leaving_mid_motion_should_keep_its_rows_as_drawn(cx: &mut T
         ..workspace(Vec::new())
     };
     let rows = |rows: Vec<WorkspaceRowViewModel>, cx: &mut VisualTestContext| {
-        cx.update(|_, cx| sidebar.update(cx, |sidebar, cx| sidebar.set_rows(rows, Vec::new(), cx)));
+        cx.update(|_, cx| sidebar.update(cx, |sidebar, cx| sidebar.set_rows(rows, cx)));
         cx.run_until_parked();
     };
     rows(
@@ -489,7 +489,7 @@ fn a_workspace_group_leaving_as_a_worktree_place_closes_should_keep_the_place_as
         ..workspace(Vec::new())
     };
     let rows = |rows: Vec<WorkspaceRowViewModel>, cx: &mut VisualTestContext| {
-        cx.update(|_, cx| sidebar.update(cx, |sidebar, cx| sidebar.set_rows(rows, Vec::new(), cx)));
+        cx.update(|_, cx| sidebar.update(cx, |sidebar, cx| sidebar.set_rows(rows, cx)));
         cx.run_until_parked();
     };
     rows(

@@ -114,6 +114,7 @@ fn command_scopes_match_their_dispatch_contexts() {
         Command::ChooseWorkspace,
         Command::NewScratchWorkspace,
         Command::NewWorkspace,
+        Command::NewRemoteWorkspace,
         Command::NewWorktree,
         Command::KillWorkspace,
         Command::NewTab,

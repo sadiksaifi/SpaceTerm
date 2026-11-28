@@ -1092,6 +1092,7 @@ shortcut_rows! {
     ChooseWorkspace => "choose-workspace",
     NewScratchWorkspace => "new-scratch-workspace",
     NewWorkspace => "new-workspace",
+    NewRemoteWorkspace => "new-remote-workspace",
     NewWorktree => "new-worktree",
     NextWorktree => "next-worktree",
     PreviousWorktree => "previous-worktree",

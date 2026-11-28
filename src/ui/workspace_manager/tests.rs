@@ -1618,21 +1618,22 @@ fn sidebar_should_keep_creation_actions_at_the_bottom_without_a_header(cx: &mut 
     assert_eq!(button.top(), list.bottom());
     assert_eq!(button.bottom(), sidebar.bottom());
     let settings = cx.debug_bounds("open-settings-button").unwrap();
-    let create = cx.debug_bounds("new-workspace-button").unwrap();
+    let create = cx.debug_bounds("create-workspace-button").unwrap();
     assert_eq!(settings.center().y, create.center().y);
     assert!(create.right() <= button.right());
     // Settings is application scoped and the menu opposite it adds a Workspace, so the odd one
-    // out stands alone at the leading end and the creation menu sits at the other.
+    // out stands alone at the leading end and the Create Workspace menu sits at the other.
     assert!(settings.left() >= button.left());
     assert!(settings.right() < create.left());
     assert!(
         settings.right() - button.left() < create.left() - settings.right(),
-        "settings should stand apart from the creation menu, got {settings:?} beside {create:?}"
+        "settings should stand apart from the Create Workspace menu, got {settings:?} beside \
+         {create:?}"
     );
     // Both footer glyphs share one visual extent while their buttons keep the same hit target.
     for (icon_selector, target) in [
         ("open-settings-icon", settings),
-        ("new-workspace-icon", create),
+        ("create-workspace-icon", create),
     ] {
         let icon = cx.debug_bounds(icon_selector).unwrap();
         assert_eq!(icon.size, gpui::size(px(15.0), px(15.0)));
@@ -1697,8 +1698,8 @@ fn click(selector: &'static str, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
-fn click_new_workspace_menu(entry: &'static str, cx: &mut VisualTestContext) {
-    click("new-workspace-button", cx);
+fn click_create_workspace_menu(entry: &'static str, cx: &mut VisualTestContext) {
+    click("create-workspace-button", cx);
     click(entry, cx);
 }
 
@@ -3622,7 +3623,7 @@ fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_
 
     let panel = cx
         .debug_bounds("combo-box-panel")
-        .expect("the New Workspace ComboBox panel should render");
+        .expect("the Workspace Switcher panel should render");
     let workspace = cx
         .debug_bounds("workspace-manager")
         .expect("the Workspace root should render");
@@ -3630,10 +3631,10 @@ fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_
     assert!(panel.size.width > px(240.0) && panel.size.width <= px(420.0));
     let open_label = cx
         .debug_bounds("combo-box-row-2-label")
-        .expect("the Open Local Directory label should render");
+        .expect("the New Workspace label should render");
     let open_shortcut = cx
         .debug_bounds("combo-box-row-2-shortcut")
-        .expect("the Open Local Directory shortcut should render");
+        .expect("the New Workspace shortcut should render");
     assert!(open_shortcut.left() - open_label.right() >= px(24.0));
     let chooser = cx
         .debug_bounds("workspace-switcher")
@@ -3649,8 +3650,8 @@ fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_
     cx.simulate_keystrokes("f r e s h");
     cx.run_until_parked();
     for selector in [
-        "workspace-switcher-create-local",
-        "workspace-switcher-open-local-directory",
+        "workspace-switcher-new-scratch-workspace",
+        "workspace-switcher-new-workspace",
     ] {
         let row = cx
             .debug_bounds(selector)
@@ -4018,9 +4019,12 @@ fn collapsed_workspace_switcher_should_open_from_each_part_without_dragging(
             cx.update(|window, cx| window_combo_box_is_open(window, cx)),
             "click at {position:?} did not open chooser {chooser:?}"
         );
-        assert!(cx.debug_bounds("workspace-switcher-create-local").is_some());
         assert!(
-            cx.debug_bounds("workspace-switcher-open-local-directory")
+            cx.debug_bounds("workspace-switcher-new-scratch-workspace")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("workspace-switcher-new-workspace")
                 .is_some()
         );
         cx.simulate_keystrokes("escape");
@@ -4933,7 +4937,7 @@ fn overflowing_workspace_list_should_not_cover_the_creation_footer(cx: &mut Test
         .expect("the overflowing Workspace list was not rendered");
     let button = cx
         .debug_bounds("workspace-sidebar-footer")
-        .expect("the New Workspace button was not rendered");
+        .expect("the sidebar footer was not rendered");
     assert_eq!(
         (
             list.origin.y + list.size.height,
@@ -5851,12 +5855,12 @@ fn workspace_switcher_should_append_creation_actions_for_empty_and_matching_quer
         cx.simulate_keystrokes(query);
         cx.run_until_parked();
         let matched = cx.debug_bounds("workspace-switcher-result-1").unwrap();
-        let local = cx.debug_bounds("workspace-switcher-create-local").unwrap();
-        let open_local = cx
-            .debug_bounds("workspace-switcher-open-local-directory")
+        let local = cx
+            .debug_bounds("workspace-switcher-new-scratch-workspace")
             .unwrap();
+        let open_local = cx.debug_bounds("workspace-switcher-new-workspace").unwrap();
         let separator = cx
-            .debug_bounds("workspace-switcher-create-local-group-separator")
+            .debug_bounds("workspace-switcher-new-scratch-workspace-group-separator")
             .expect("the creation group must be separated from matching Workspaces");
         assert!(matched.bottom() <= separator.top());
         assert!(separator.bottom() <= local.top());
@@ -5973,7 +5977,7 @@ fn workspace_creation_and_switcher_buttons_should_show_hover_tooltips(cx: &mut T
     cx.run_until_parked();
     for (button, tooltip) in [
         ("toggle-sidebar-button", "toggle-sidebar-tooltip"),
-        ("new-workspace-button", "new-workspace-tooltip"),
+        ("create-workspace-button", "create-workspace-tooltip"),
         ("workspace-switcher", "workspace-switcher-tooltip"),
     ] {
         let center = cx.debug_bounds(button).unwrap().center();
@@ -6161,13 +6165,13 @@ fn hiding_sidebar_with_its_menu_open_should_restore_terminal_input(cx: &mut Test
 }
 
 #[gpui::test]
-fn hiding_sidebar_with_new_workspace_menu_open_should_restore_terminal_input(
+fn hiding_sidebar_with_create_workspace_menu_open_should_restore_terminal_input(
     cx: &mut TestAppContext,
 ) {
     let (manager, records, cx) = workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
-    click("new-workspace-button", cx);
+    click("create-workspace-button", cx);
     assert!(cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
 
     cx.simulate_keystrokes("cmd-b");
@@ -6636,7 +6640,7 @@ fn main_window_reading_order(cx: &mut VisualTestContext) -> Vec<String> {
         "Choose Workspace",
         "Workspaces",
         "Settings",
-        "New Workspace",
+        "Create Workspace",
         "Resize Workspace sidebar",
         "Tabs",
         "New Tab",
@@ -6711,7 +6715,7 @@ fn main_window_reads_in_presented_layout_order(cx: &mut TestAppContext) {
             "Choose Workspace",
             "Workspaces",
             "Settings",
-            "New Workspace",
+            "Create Workspace",
             "Resize Workspace sidebar",
             "Tabs",
             "New Tab",
@@ -8266,9 +8270,13 @@ fn routes_paired_separately_to_one_machine_should_stay_independent(cx: &mut Test
     });
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.create_workspace_on(
-                &crate::ui::MachineTarget::Direct(routes[1]),
+            let newer = manager
+                .machine_key(&crate::ui::MachineTarget::Direct(routes[1]))
+                .expect("the newer route is presented");
+            manager.open_core_directory(
+                newer,
                 String::new(),
+                std::path::PathBuf::from("/srv/new"),
                 window,
                 cx,
             );
@@ -8282,14 +8290,15 @@ fn routes_paired_separately_to_one_machine_should_stay_independent(cx: &mut Test
     );
     assert_eq!(
         owners(cx),
-        [Some(returned), Some(earlier)],
-        "the newer route's Workspace returns before the earlier route's, where the person put it"
+        [Some(returned), Some(earlier), Some(returned)],
+        "the newer route's Workspace returns before the earlier route's, where the person put it, \
+         and the Workspace it is creating joins at the end"
     );
     assert_eq!(
         returned_edits.submitted(),
         vec![Mutation::CreateWorkspace {
             name: String::new(),
-            directory: None,
+            directory: Some(std::path::PathBuf::from("/srv/new")),
             control: spaceterm_core::hierarchy::CreateControl::Creator,
         }]
     );
@@ -8306,12 +8315,7 @@ fn a_pending_creation_should_keep_the_place_it_was_moved_to(cx: &mut TestAppCont
     harness.publish(MachineKey::LOCAL, &harness.local, &[("A", 1), ("B", 2)], cx);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.create_workspace_on(
-                &crate::ui::MachineTarget::Local,
-                "C".to_owned(),
-                window,
-                cx,
-            );
+            manager.create_workspace("C".to_owned(), None, window, cx);
             manager.sync_workspaces(MachineKey::LOCAL, window, cx);
         });
     });
@@ -10730,9 +10734,9 @@ fn the_empty_view_action_should_open_the_switcher_with_the_detached_workspaces(
     let switcher_open = cx.update(|window, cx| window_combo_box_is_open(window, cx));
     // The switcher's creation commands share its option role, and how many of them render
     // depends on the platform's viewport, so only the remaining options are Workspaces.
-    let creations = WorkspaceCreation::LOCAL
+    let creations = WorkspaceCreation::ALL
         .into_iter()
-        .map(|creation| creation.label(None).to_string())
+        .map(|creation| creation.label().to_string())
         .collect::<Vec<_>>();
     let workspaces: Vec<(String, String)> = A11yTree::read(cx)
         .with_role("ListBoxOption")
@@ -10925,8 +10929,10 @@ fn a_stopped_core_offers_start_core_on_the_empty_view(cx: &mut TestAppContext) {
     );
 }
 
+/// The empty view offers New Workspace, which opens the Directory Picker on This Mac or This
+/// Computer rather than creating a Workspace at once.
 #[gpui::test]
-fn the_empty_view_should_draw_a_panes_rim_and_offer_local_creation(cx: &mut TestAppContext) {
+fn the_empty_view_should_draw_a_panes_rim_and_offer_new_workspace(cx: &mut TestAppContext) {
     let (harness, cx) = attachment_harness(cx);
     harness.detach(1, cx);
     harness.detach(2, cx);
@@ -10941,12 +10947,22 @@ fn the_empty_view_should_draw_a_panes_rim_and_offer_local_creation(cx: &mut Test
     );
     assert!(
         create.is_some(),
-        "the empty view offers New Local Workspace beside Choose Workspace"
+        "the empty view offers New Workspace beside Choose Workspace"
     );
     assert!(
         cx.debug_bounds("workspace-list-empty").is_some(),
         "the sidebar says its list is empty where the first row would be"
     );
+
+    click("empty-workspace-create", cx);
+
+    assert!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.pin_picker.is_some()),
+        "New Workspace opens the Directory Picker"
+    );
+    assert_eq!(harness.edits.submitted(), Vec::new());
 }
 
 #[gpui::test]
@@ -15699,110 +15715,120 @@ fn saved_machines(
     edits
 }
 
-/// The sidebar's New Workspace menu offers remote creation only on saved servers, one row each,
-/// and ends each list with Add Server, the one journey that adds a server.
+/// The New Remote Workspace this window is choosing a directory for: the Machine and name the
+/// Directory Picker on that Machine pins and creates with.
+fn remote_pin_target(
+    harness: &MultiMachineHarness,
+    cx: &mut VisualTestContext,
+) -> Option<(MachineKey, String)> {
+    harness.manager.read_with(cx, |manager, _| {
+        match manager.transient.pin_target.clone()? {
+            PinTarget::NewRemoteWorkspace { key, name } => Some((key, name)),
+            _ => None,
+        }
+    })
+}
+
+fn machine_chooser_open(harness: &MultiMachineHarness, cx: &mut VisualTestContext) -> bool {
+    harness.manager.read_with(cx, |manager, cx| {
+        manager
+            .machine_chooser
+            .as_ref()
+            .is_some_and(|chooser| chooser.read(cx).blocks_terminal_input())
+    })
+}
+
+/// The sidebar's Create Workspace menu offers the three creation Commands with their Shortcuts,
+/// and no Machine of its own: New Remote Workspace lists the saved Machines in the Machine
+/// chooser.
 #[gpui::test]
-fn sidebar_new_workspace_menu_should_offer_saved_machines_and_add_machine(cx: &mut TestAppContext) {
-    use spaceterm_core::hierarchy::Mutation;
+fn the_create_workspace_menu_should_offer_the_three_creation_commands(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
 
     let (harness, cx) = MultiMachineHarness::new(cx);
-    let edits = saved_machines(&harness, cx);
+    saved_machines(&harness, cx);
 
-    click("new-workspace-button", cx);
+    click("create-workspace-button", cx);
     let rows = [
-        "new-workspace-menu-create-local",
-        "new-workspace-menu-create-remote",
-        "new-workspace-menu-open-local-directory",
-        "new-workspace-menu-open-remote-directory",
+        "create-workspace-menu-new-scratch-workspace",
+        "create-workspace-menu-new-workspace",
+        "create-workspace-menu-new-remote-workspace",
     ]
     .map(|selector| {
         cx.debug_bounds(selector)
             .unwrap_or_else(|| panic!("missing creation row: {selector}"))
     });
     assert!(rows.is_sorted_by_key(|row| row.top()));
-    assert!(
-        rows[2].top() - rows[1].bottom() > rows[1].top() - rows[0].bottom(),
-        "a separator divides the New rows from the Open rows"
-    );
-
-    click("new-workspace-menu-create-remote", cx);
-    for selector in [
-        "new-workspace-menu-create-remote-0",
-        "new-workspace-menu-create-remote-1",
-        "new-workspace-menu-create-remote-add-server",
+    let tree = A11yTree::read(cx);
+    for label in [
+        "New Scratch Workspace",
+        "New Workspace\u{2026}",
+        "New Remote Workspace\u{2026}",
     ] {
-        assert!(cx.debug_bounds(selector).is_some(), "missing {selector}");
+        assert!(tree.find(label).is_some(), "the menu offers {label:?}");
     }
-    // studio isn't connected, so its row is disabled and keeps the menu open.
-    click("new-workspace-menu-create-remote-1", cx);
-    assert!(cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
-    assert_eq!(edits.submitted(), Vec::new());
+    assert!(tree.find("penguin").is_none(), "no Machine is a menu row");
 
-    click("new-workspace-menu-create-remote-0", cx);
-    assert_eq!(
-        edits.submitted(),
-        vec![Mutation::CreateWorkspace {
-            name: String::new(),
-            directory: None,
-            control: spaceterm_core::hierarchy::CreateControl::Creator,
-        }]
-    );
+    click("create-workspace-menu-new-remote-workspace", cx);
+    assert!(machine_chooser_open(&harness, cx));
+    let tree = A11yTree::read(cx);
+    let options: Vec<_> = tree
+        .with_role("ListBoxOption")
+        .iter()
+        .map(|option| option["aria"]["label"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(options, ["penguin", "studio"]);
     assert_eq!(harness.local.submitted(), Vec::new());
 }
 
-/// The Workspace Switcher offers New Workspace and Open Directory on each saved server, and its
-/// query names the Workspace it creates there.
+/// The Workspace Switcher offers the same three Commands. Its query names the Workspace New
+/// Remote Workspace creates on the Machine chosen next, and a Machine that isn't connected takes
+/// nothing.
 #[gpui::test]
-fn the_switcher_should_create_on_a_saved_machine_with_its_query_as_the_name(
+fn the_switcher_should_create_on_a_chosen_machine_with_its_query_as_the_name(
     cx: &mut TestAppContext,
 ) {
-    use spaceterm_core::hierarchy::Mutation;
-
     let (harness, cx) = MultiMachineHarness::new(cx);
-    let edits = saved_machines(&harness, cx);
+    let (direct, routes) = crate::direct_connections::tests::disconnected_routes_at(&[
+        ("penguin", "quic://192.168.1.2:9231"),
+        ("studio", "quic://192.168.1.3:9231"),
+    ]);
+    cx.update(|_, cx| crate::ui::direct_machines::install(direct, cx));
+    let (penguin, edits) = harness.present_direct("penguin", routes[0], &[], cx);
+    redraw(cx);
     open_workspace_switcher_for_creation(cx);
     let rows = [
-        "workspace-switcher-create-local",
-        "workspace-switcher-open-local-directory",
-        "workspace-switcher-create-remote-0",
-        "workspace-switcher-open-remote-directory-0",
-        "workspace-switcher-create-remote-1",
-        "workspace-switcher-open-remote-directory-1",
+        "workspace-switcher-new-scratch-workspace",
+        "workspace-switcher-new-workspace",
+        "workspace-switcher-new-remote-workspace",
     ]
     .map(|selector| {
         cx.debug_bounds(selector)
             .unwrap_or_else(|| panic!("missing switcher creation row: {selector}"))
     });
     assert!(rows.is_sorted_by_key(|row| row.top()));
-    assert!(
-        cx.debug_bounds("workspace-switcher-create-remote-0-group-separator")
-            .is_some(),
-        "the saved servers' rows start their own group"
-    );
 
-    click("workspace-switcher-create-remote-1", cx);
-    assert!(
-        cx.update(|window, cx| window_combo_box_is_open(window, cx)),
-        "a server that isn't connected takes nothing"
-    );
-    click("workspace-switcher-create-remote-0", cx);
+    click("workspace-switcher-new-remote-workspace", cx);
+    assert!(machine_chooser_open(&harness, cx));
+    // studio isn't connected, so the chooser starts on penguin and a click on studio takes
+    // nothing.
+    click("machine-chooser-machine-1", cx);
+    assert!(machine_chooser_open(&harness, cx));
+    press_return(cx);
 
+    assert!(!machine_chooser_open(&harness, cx));
     assert_eq!(
-        edits.submitted(),
-        vec![Mutation::CreateWorkspace {
-            name: "fresh workspace".to_owned(),
-            directory: None,
-            control: spaceterm_core::hierarchy::CreateControl::Creator,
-        }]
+        remote_pin_target(&harness, cx),
+        Some((penguin, "fresh workspace".to_owned()))
     );
+    assert_eq!(edits.submitted(), Vec::new());
     assert_eq!(harness.local.submitted(), Vec::new());
 }
 
-/// Two saved servers that give one name read apart by the address each route reaches, in the
-/// sidebar's submenus and in the Workspace Switcher, and each row reaches its own route.
+/// Two saved Machines that give one name read apart in the Machine chooser by the address each
+/// route reaches, and each row reaches its own route.
 #[gpui::test]
-fn same_named_saved_machines_should_read_apart_in_both_creation_surfaces(cx: &mut TestAppContext) {
-    use spaceterm_core::hierarchy::Mutation;
+fn same_named_saved_machines_should_read_apart_in_the_machine_chooser(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
 
     let (harness, cx) = MultiMachineHarness::new(cx);
@@ -15811,54 +15837,34 @@ fn same_named_saved_machines_should_read_apart_in_both_creation_surfaces(cx: &mu
         ("studio", "quic://192.168.1.2:9231"),
     ]);
     cx.update(|_, cx| crate::ui::direct_machines::install(direct, cx));
-    // Only the route at .3 is presented, so only its rows take a Workspace.
-    let (_, edits) = harness.present_direct("studio", routes[0], &[], cx);
+    // Only the route at .3 is presented, so only its row takes a Workspace.
+    let (key, _) = harness.present_direct("studio", routes[0], &[], cx);
     redraw(cx);
 
-    click("new-workspace-button", cx);
-    click("new-workspace-menu-create-remote", cx);
-    let tree = A11yTree::read(cx);
-    for label in ["studio (192.168.1.2:9231)", "studio (192.168.1.3:9231)"] {
-        assert!(tree.find(label).is_some(), "the submenu shows {label:?}");
-    }
-    // Rows follow the addresses, so the presented route at .3 is the second.
-    click("new-workspace-menu-create-remote-0", cx);
-    assert!(cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
-    click("new-workspace-menu-create-remote-1", cx);
-    assert_eq!(
-        edits.submitted(),
-        vec![Mutation::CreateWorkspace {
-            name: String::new(),
-            directory: None,
-            control: spaceterm_core::hierarchy::CreateControl::Creator,
-        }]
-    );
-
-    // The switcher renders only the rows in view, so its rows are read at the top and again after
-    // End reveals the last ones.
-    open_workspace_switcher(cx);
-    let top = A11yTree::read(cx);
-    cx.simulate_keystrokes("end");
+    cx.dispatch_action(crate::ui::NewRemoteWorkspace);
     cx.run_until_parked();
-    let end = A11yTree::read(cx);
-    for label in [
-        "New Workspace on studio (192.168.1.2:9231)",
-        "Open Directory on studio (192.168.1.2:9231)\u{2026}",
-        "New Workspace on studio (192.168.1.3:9231)",
-        "Open Directory on studio (192.168.1.3:9231)\u{2026}",
-    ] {
-        assert!(
-            top.find(label).or_else(|| end.find(label)).is_some(),
-            "the switcher shows {label:?}"
-        );
-    }
+    let options: Vec<_> = A11yTree::read(cx)
+        .with_role("ListBoxOption")
+        .iter()
+        .map(|option| option["aria"]["label"].as_str().unwrap().to_owned())
+        .collect();
+    // Rows follow the addresses, so the presented route at .3 is the second.
+    assert_eq!(
+        options,
+        ["studio (192.168.1.2:9231)", "studio (192.168.1.3:9231)"]
+    );
+    press_return(cx);
+
+    assert_eq!(remote_pin_target(&harness, cx), Some((key, String::new())));
     assert_eq!(harness.local.submitted(), Vec::new());
 }
 
-/// Without a saved server, both remote submenus offer only Add Server, which opens Settings' Add
-/// Server journey, and the switcher offers no remote rows, so nothing enters a host here.
+/// Without a saved Machine the Machine chooser says so, and its Add Machine button opens
+/// Settings' Add Machine journey, so nothing enters a host here.
 #[gpui::test]
-fn remote_creation_without_saved_machines_should_offer_only_add_machine(cx: &mut TestAppContext) {
+fn the_machine_chooser_without_saved_machines_should_offer_add_machine(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
     let (_, _, cx) = workspace_manager(cx);
     let requests = Rc::new(std::cell::Cell::new(0usize));
     cx.update(|_, cx| {
@@ -15869,51 +15875,44 @@ fn remote_creation_without_saved_machines_should_offer_only_add_machine(cx: &mut
             },
         );
     });
-    click("new-workspace-button", cx);
-    click("new-workspace-menu-open-remote-directory", cx);
-    assert!(
-        cx.debug_bounds("new-workspace-menu-open-remote-directory-0")
-            .is_none()
-    );
-    click("new-workspace-menu-open-remote-directory-add-server", cx);
-    assert_eq!(requests.get(), 1, "Add Server opens Settings' journey");
-    assert!(!cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
+    cx.dispatch_action(crate::ui::NewRemoteWorkspace);
+    cx.run_until_parked();
+    let tree = A11yTree::read(cx);
+    assert!(tree.find_text("No Machines").is_some());
+    assert!(tree.with_role("ListBoxOption").is_empty());
 
-    open_workspace_switcher_for_creation(cx);
-    assert!(cx.debug_bounds("workspace-switcher-create-local").is_some());
+    perform(cx, tree.node("Add Machine"), gpui::accesskit::Action::Click);
+
+    assert_eq!(requests.get(), 1, "Add Machine opens Settings' journey");
     assert!(
-        cx.debug_bounds("workspace-switcher-create-remote-0")
-            .is_none()
+        A11yTree::read(cx).find_text("No Machines").is_none(),
+        "the chooser closes"
     );
 }
 
-/// Open Remote Directory on a saved server opens the Directory Picker browsing that server.
+/// Choosing a saved Machine opens the Directory Picker browsing that Machine, its path led by the
+/// Machine's name.
 #[gpui::test]
-fn open_remote_directory_should_browse_the_chosen_machine(cx: &mut TestAppContext) {
+fn choosing_a_machine_should_browse_its_directories(cx: &mut TestAppContext) {
     // The picker reads penguin's directories over a channel whose worker answers from its own
     // thread.
     cx.executor().allow_parking();
     let (harness, cx) = MultiMachineHarness::new(cx);
-    let route = named_route("penguin");
-    harness.present_direct("penguin", route, &[], cx);
+    saved_machines(&harness, cx);
 
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.start_workspace_creation(
-                crate::ui::workspace_creation::WorkspaceCreation::OpenRemoteDirectory(route),
-                String::new(),
-                window,
-                cx,
-            );
+            manager.start_workspace_creation(WorkspaceCreation::Remote, String::new(), window, cx);
         })
     });
     cx.run_until_parked();
+    press_return(cx);
 
     assert!(
         harness
             .manager
             .read_with(cx, |manager, _| manager.pin_picker.is_some()),
-        "the picker opens on the saved server"
+        "the picker opens on the chosen Machine"
     );
     assert_eq!(
         spaceterm_ui::a11y_testing::A11yTree::read(cx).node("penguin:")["aria"]["role"],
@@ -15923,10 +15922,10 @@ fn open_remote_directory_should_browse_the_chosen_machine(cx: &mut TestAppContex
     assert_eq!(harness.local.submitted(), Vec::new());
 }
 
-/// Cancelling Open Remote Directory on a saved server asks that server for nothing and returns the
-/// keyboard to the Workspace's terminal.
+/// Escape cancels New Remote Workspace from either step. It asks no Machine for anything and
+/// returns the keyboard to the Workspace's terminal.
 #[gpui::test]
-fn cancelling_open_remote_directory_should_ask_nothing_and_restore_terminal_focus(
+fn cancelling_new_remote_workspace_should_ask_nothing_and_restore_terminal_focus(
     cx: &mut TestAppContext,
 ) {
     // The picker reads penguin's directories over a channel whose worker answers from its own
@@ -15955,9 +15954,17 @@ fn cancelling_open_remote_directory_should_ask_nothing_and_restore_terminal_focu
     };
     assert!(terminal_focused(cx));
 
-    click("new-workspace-button", cx);
-    click("new-workspace-menu-open-remote-directory", cx);
-    click("new-workspace-menu-open-remote-directory-0", cx);
+    click("create-workspace-button", cx);
+    click("create-workspace-menu-new-remote-workspace", cx);
+    assert!(machine_chooser_open(&harness, cx));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!machine_chooser_open(&harness, cx));
+    assert!(terminal_focused(cx), "Escape in the Machine chooser");
+
+    click("create-workspace-button", cx);
+    click("create-workspace-menu-new-remote-workspace", cx);
+    press_return(cx);
     assert!(
         harness
             .manager
@@ -15971,7 +15978,7 @@ fn cancelling_open_remote_directory_should_ask_nothing_and_restore_terminal_focu
             .manager
             .read_with(cx, |manager, _| manager.pin_picker.is_none())
     );
-    assert!(terminal_focused(cx));
+    assert!(terminal_focused(cx), "Escape in the Directory Picker");
     assert_eq!(edits.submitted(), Vec::new());
     assert_eq!(harness.local.submitted(), Vec::new());
 }
@@ -15979,7 +15986,7 @@ fn cancelling_open_remote_directory_should_ask_nothing_and_restore_terminal_focu
 /// A directory chosen on penguin's server is the new Workspace's pin there. Choosing a directory
 /// one of that server's Workspaces is already pinned to opens that Workspace instead.
 #[gpui::test]
-fn open_remote_directory_should_pin_on_its_machine_and_reuse_a_workspace_pinned_there(
+fn new_remote_workspace_should_pin_on_its_machine_and_reuse_a_workspace_pinned_there(
     cx: &mut TestAppContext,
 ) {
     use spaceterm_core::hierarchy::Mutation;
@@ -16301,7 +16308,7 @@ fn late_directory_answer_after(
 /// A server whose edits are still connecting holds the chosen directory until it reads its first
 /// inventory, then takes the Workspace.
 #[gpui::test]
-fn open_remote_directory_should_wait_for_the_machines_edits(cx: &mut TestAppContext) {
+fn new_remote_workspace_should_wait_for_the_machines_edits(cx: &mut TestAppContext) {
     use spaceterm_core::hierarchy::Mutation;
 
     let (harness, cx) = MultiMachineHarness::new(cx);
@@ -16354,7 +16361,7 @@ fn open_remote_directory_should_wait_for_the_machines_edits(cx: &mut TestAppCont
 /// A server withdrawn while a chosen directory waits for its edits ends that request and says the
 /// Workspace couldn't open, so a later connection never creates it unasked.
 #[gpui::test]
-fn open_remote_directory_should_end_when_its_machine_is_withdrawn(cx: &mut TestAppContext) {
+fn new_remote_workspace_should_end_when_its_machine_is_withdrawn(cx: &mut TestAppContext) {
     let (harness, cx) = MultiMachineHarness::new(cx);
     let edits = Rc::new(crate::ui::workspaces::testing::ScriptedEdits::new(None));
     edits.set_connected(false);

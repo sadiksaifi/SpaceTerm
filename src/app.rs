@@ -1506,12 +1506,14 @@ pub(crate) fn activate_default_window(cx: &mut App, token: Option<&str>) {
 
 fn install_headless_window_actions(cx: &mut App, host: Rc<HostComposition>) {
     cx.set_global(DefaultWorkspaceWindowHost(host.clone()));
-    cx.on_action(move |_: &NewScratchWorkspace, cx| new_workspace_without_window(cx, &host));
+    cx.on_action(move |_: &NewScratchWorkspace, cx| {
+        new_scratch_workspace_without_window(cx, &host)
+    });
 }
 
-/// New Workspace with no Workspace Window opens one that creates the Workspace, unlike opening
-/// SpaceTerm, which only presents this client's attached Workspaces.
-fn new_workspace_without_window(cx: &mut App, host: &HostComposition) {
+/// New Scratch Workspace with no Workspace Window opens one that creates the Workspace, unlike
+/// opening SpaceTerm, which only presents this client's attached Workspaces.
+fn new_scratch_workspace_without_window(cx: &mut App, host: &HostComposition) {
     if !workspace_windows(cx).is_empty() {
         return;
     }

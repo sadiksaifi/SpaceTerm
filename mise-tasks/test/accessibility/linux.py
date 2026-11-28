@@ -208,7 +208,7 @@ class Probe:
 
     def activate_control(self, name, root=None):
         control_id = {
-            "New Workspace": "new_workspace",
+            "Create Workspace": "create_workspace",
             "Choose Workspace": "choose_workspace",
             "New Scratch Workspace": "scratch_workspace",
             "Rename Workspace": "rename_workspace",

@@ -476,6 +476,9 @@
         "new_workspace": {
           "$ref": "#/$defs/shortcutOverride"
         },
+        "new_remote_workspace": {
+          "$ref": "#/$defs/shortcutOverride"
+        },
         "new_worktree": {
           "$ref": "#/$defs/shortcutOverride"
         },

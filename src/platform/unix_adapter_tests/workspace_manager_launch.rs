@@ -1,9 +1,7 @@
 use super::*;
 
 #[gpui::test]
-fn open_local_directory_alias_activates_the_workspace_and_keeps_its_spelling(
-    cx: &mut TestAppContext,
-) {
+fn new_workspace_alias_activates_the_workspace_and_keeps_its_spelling(cx: &mut TestAppContext) {
     let project = temporary_directory("launch-open-local-existing");
     std::fs::create_dir_all(&project).unwrap();
     let alias = project.with_extension("alias");

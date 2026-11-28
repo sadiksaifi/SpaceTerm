@@ -1,108 +1,71 @@
-//! Canonical Workspace creation rows shared by the sidebar footer menu and the Workspace Switcher.
+//! The three Workspace creation Commands, as the sidebar's Create Workspace menu, the Workspace
+//! Switcher and the File menu present them.
 //!
-//! Remote rows name one saved paired server each. Adding a server belongs to Settings > Servers >
-//! Add Server, so no creation row enters a host or installs anything.
+//! New Scratch Workspace opens an unpinned Local Workspace at once. New Workspace and New Remote
+//! Workspace open a chooser first, so their rows end in an ellipsis: the Directory Picker on This
+//! Mac or This Computer, or the Machine chooser and then the Directory Picker on that Machine.
 
 use gpui::{Action, SharedString};
 use spaceterm_ui::CustomIconName;
 
 use crate::desktop_profile::DesktopPresentation;
-use crate::direct_connections::DirectRouteId;
+use crate::keybindings::Command;
 
-/// One way to create a Workspace from the sidebar footer menu or the Workspace Switcher.
+/// One way to create a Workspace.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WorkspaceCreation {
-    /// A Workspace the account server owns, at the local home directory.
+    /// An unpinned Local Workspace at the local home directory.
     Scratch,
-    /// A Workspace the account server owns, pinned to a local directory chosen before creation.
+    /// A Local Workspace pinned to a directory chosen before creation.
     Local,
-    /// A Workspace on a saved paired server, at that server's home directory.
-    Remote(DirectRouteId),
-    /// A Workspace on a saved paired server, pinned to a directory chosen on that server.
-    OpenRemoteDirectory(DirectRouteId),
+    /// A Remote Workspace on a chosen paired Machine, pinned to a directory chosen there.
+    Remote,
 }
-
-/// A saved paired server the remote creation rows offer.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RemoteCreationMachine {
-    pub(crate) route: DirectRouteId,
-    pub(crate) name: SharedString,
-    /// The address the route reaches, kept only while another saved server shares the name.
-    pub(crate) address: Option<SharedString>,
-    /// Whether this window presents the server now, so it can take a new Workspace.
-    pub(crate) available: bool,
-}
-
-impl RemoteCreationMachine {
-    /// The name a creation row shows: the server's own, followed by its address when another
-    /// saved server shares that name, so the person sees which one each row reaches.
-    pub(crate) fn display_name(&self) -> SharedString {
-        match &self.address {
-            Some(address) => format!("{} ({address})", self.name).into(),
-            None => self.name.clone(),
-        }
-    }
-}
-
-/// The address an endpoint such as `quic://192.168.1.20:9231` reaches, as a person reads
-/// it: `192.168.1.20:9231`.
-pub(crate) fn endpoint_address(endpoint: &str) -> &str {
-    let rest = endpoint.strip_prefix("quic://").unwrap_or(endpoint);
-    rest.split('/').next().unwrap_or(rest)
-}
-
-/// Why a saved server's creation rows are disabled.
-pub(crate) const REMOTE_UNAVAILABLE: &str = "Not connected";
 
 impl WorkspaceCreation {
-    /// The local creation rows in presentation order. Remote rows follow per saved server.
-    pub(crate) const LOCAL: [Self; 2] = [Self::Scratch, Self::Local];
+    /// Every creation Command in presentation order.
+    pub(crate) const ALL: [Self; 3] = [Self::Scratch, Self::Local, Self::Remote];
 
-    /// The row label as the Workspace Switcher shows it, naming the server for a remote row.
-    /// Open rows end in an ellipsis because a chooser opens before creation.
-    pub(crate) fn label(self, core: Option<&str>) -> SharedString {
-        match (self, core) {
-            (Self::Scratch, _) => "New Scratch Workspace".into(),
-            (Self::Local, _) => "New Workspace\u{2026}".into(),
-            (Self::Remote(_), Some(core)) => format!("New Workspace on {core}").into(),
-            (Self::OpenRemoteDirectory(_), Some(core)) => {
-                format!("Open Directory on {core}\u{2026}").into()
-            }
-            (Self::Remote(_), None) => "Remote Workspace".into(),
-            (Self::OpenRemoteDirectory(_), None) => "Open Remote Directory\u{2026}".into(),
+    pub(crate) const fn command(self) -> Command {
+        match self {
+            Self::Scratch => Command::NewScratchWorkspace,
+            Self::Local => Command::NewWorkspace,
+            Self::Remote => Command::NewRemoteWorkspace,
+        }
+    }
+
+    /// The row label: the Command's label, with an ellipsis when a chooser opens first.
+    pub(crate) fn label(self) -> SharedString {
+        let label = self.command().label();
+        match self {
+            Self::Scratch => label.into(),
+            Self::Local | Self::Remote => format!("{label}\u{2026}").into(),
         }
     }
 
     pub(crate) const fn icon(self) -> CustomIconName {
         match self {
             Self::Scratch => CustomIconName::RectangleStackBadgePlus,
-            Self::Remote(_) => CustomIconName::GlobePlus,
             Self::Local => CustomIconName::FolderBadgePlus,
-            Self::OpenRemoteDirectory(_) => CustomIconName::FolderBadgeGlobe,
+            Self::Remote => CustomIconName::FolderBadgeGlobe,
         }
     }
 
-    /// The row's stable selector suffix, shared by both surfaces. Remote rows carry the server's
-    /// position among the saved servers.
-    pub(crate) fn selector(self, position: usize) -> String {
+    /// The row's stable selector suffix, shared by every surface.
+    pub(crate) const fn selector(self) -> &'static str {
         match self {
-            Self::Scratch => "create-local".to_owned(),
-            Self::Local => "open-local-directory".to_owned(),
-            Self::Remote(_) => format!("create-remote-{position}"),
-            Self::OpenRemoteDirectory(_) => format!("open-remote-directory-{position}"),
+            Self::Scratch => "new-scratch-workspace",
+            Self::Local => "new-workspace",
+            Self::Remote => "new-remote-workspace",
         }
     }
 
-    /// The row's Shortcut. Only the local rows are Commands.
+    /// The row's Shortcut.
     pub(crate) fn shortcut(self, presentation: &DesktopPresentation) -> Option<SharedString> {
-        presentation.shortcut(self.action()?.as_ref())
+        presentation.shortcut(self.action().as_ref())
     }
 
-    fn action(self) -> Option<Box<dyn Action>> {
-        match self {
-            Self::Scratch => Some(Box::new(super::NewScratchWorkspace)),
-            Self::Local => Some(Box::new(super::NewWorkspace)),
-            Self::Remote(_) | Self::OpenRemoteDirectory(_) => None,
-        }
+    fn action(self) -> Box<dyn Action> {
+        self.command().action()
     }
 }

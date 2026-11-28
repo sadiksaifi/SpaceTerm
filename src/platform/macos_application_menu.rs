@@ -60,6 +60,12 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
     MenuItemIcon {
         menu: "File",
         submenu: None,
+        item: "New Remote Workspace…",
+        symbol: "globe",
+    },
+    MenuItemIcon {
+        menu: "File",
+        submenu: None,
         item: "Add Machine…",
         symbol: "server.rack",
     },
@@ -1275,6 +1281,7 @@ mod tests {
             [
                 "New Scratch Workspace",
                 "New Workspace…",
+                "New Remote Workspace…",
                 "Add Machine…",
                 "Choose Workspace…",
                 "|",
@@ -1303,6 +1310,7 @@ mod tests {
             [
                 NewScratchWorkspace.name(),
                 crate::ui::NewWorkspace.name(),
+                crate::ui::NewRemoteWorkspace.name(),
                 crate::ui::settings_window::AddMachine.name(),
                 ChooseWorkspace.name(),
                 NewTab.name(),

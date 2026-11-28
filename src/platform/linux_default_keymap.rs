@@ -43,6 +43,10 @@ pub(super) fn profile(
             Command::NewWorkspace,
             Some(DefaultBinding::new("ctrl-shift-o", &[])),
         ),
+        (
+            Command::NewRemoteWorkspace,
+            Some(DefaultBinding::new("ctrl-alt-shift-o", &[])),
+        ),
         (Command::NewWorktree, None),
         (
             Command::NextWorktree,

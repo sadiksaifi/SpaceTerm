@@ -43,6 +43,10 @@ pub(crate) fn profile(
             Command::NewWorkspace,
             Some(DefaultBinding::new("cmd-o", &[])),
         ),
+        (
+            Command::NewRemoteWorkspace,
+            Some(DefaultBinding::new("cmd-shift-o", &[])),
+        ),
         (Command::NewWorktree, None),
         (
             Command::NextWorktree,
