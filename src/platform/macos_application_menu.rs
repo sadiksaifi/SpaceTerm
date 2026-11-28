@@ -6,8 +6,8 @@ use crate::ui::updates::CHECK_FOR_UPDATES_TITLE;
 use crate::ui::updates::whats_new::WHATS_NEW_TITLE;
 #[cfg(test)]
 use crate::ui::{
-    ChooseWorkspace, ClosePane, CloseTab, ExportTerminalDiagnostics, KillWorkspace, NewTab,
-    NewWorkspace,
+    ChooseWorkspace, ClosePane, CloseTab, ExportTerminalDiagnostics, KillWorkspace,
+    NewScratchWorkspace, NewTab,
 };
 use gpui::{App, Keymap, Menu, MenuItem, Modifiers, SharedString};
 
@@ -48,20 +48,26 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
     MenuItemIcon {
         menu: "File",
         submenu: None,
-        item: "New Workspace",
+        item: "New Scratch Workspace",
+        symbol: "rectangle.stack.badge.plus",
+    },
+    MenuItemIcon {
+        menu: "File",
+        submenu: None,
+        item: "New Workspace…",
         symbol: "folder.badge.plus",
+    },
+    MenuItemIcon {
+        menu: "File",
+        submenu: None,
+        item: "New Remote Workspace…",
+        symbol: "globe",
     },
     MenuItemIcon {
         menu: "File",
         submenu: None,
         item: "Add Machine…",
         symbol: "server.rack",
-    },
-    MenuItemIcon {
-        menu: "File",
-        submenu: None,
-        item: "Open Local Directory…",
-        symbol: "folder",
     },
     MenuItemIcon {
         menu: "File",
@@ -1273,9 +1279,10 @@ mod tests {
         assert_eq!(
             labels(file_menu().owned()),
             [
-                "New Workspace",
+                "New Scratch Workspace",
+                "New Workspace…",
+                "New Remote Workspace…",
                 "Add Machine…",
-                "Open Local Directory…",
                 "Choose Workspace…",
                 "|",
                 "New Tab",
@@ -1301,9 +1308,10 @@ mod tests {
         assert_eq!(
             actions,
             [
-                NewWorkspace.name(),
+                NewScratchWorkspace.name(),
+                crate::ui::NewWorkspace.name(),
+                crate::ui::NewRemoteWorkspace.name(),
                 crate::ui::settings_window::AddMachine.name(),
-                crate::ui::OpenLocalDirectory.name(),
                 ChooseWorkspace.name(),
                 NewTab.name(),
                 crate::ui::NewWorktree.name(),

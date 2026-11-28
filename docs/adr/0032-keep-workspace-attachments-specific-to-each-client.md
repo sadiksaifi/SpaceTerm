@@ -8,7 +8,7 @@ Offline Detach Workspace follows [ADR 0047](0047-keep-workspace-edits-unavailabl
 
 Each client's attachment choices persist across quitting and relaunching that client. A detached Workspace stays detached until the person explicitly attaches it again; launching the client does not attach every Workspace available from its Machines.
 
-A Workspace context menu offers Detach Workspace. The existing Workspace Switcher lists attached and detached Workspaces available from the client's connected Machines, using its existing filter and Workspace creation actions. Selecting an attached Workspace activates it; selecting a detached Workspace attaches and activates it, so attachment uses the same chooser as switching and creation.
+A Workspace context menu offers Detach Workspace. The existing Workspace Switcher lists attached and detached Workspaces available from the client's connected Machines, using its existing filter and the Workspace creation Commands. Selecting an attached Workspace activates it; selecting a detached Workspace attaches and activates it, so attachment uses the same chooser as switching and creation.
 
 The attached Workspace presents the Worktree information supplied by its owning SpaceTerm Core under [ADR 0031](0031-retain-workspace-organization-across-server-restarts.md); a sidebar entry does not transfer ownership of that information to the client.
 

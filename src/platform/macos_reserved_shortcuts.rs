@@ -78,7 +78,11 @@ mod tests {
         );
         let mut preferences = KeybindingPreferences::default();
         assert_eq!(
-            profile.assign(&mut preferences, Command::NewWorkspace, Some(settings)),
+            profile.assign(
+                &mut preferences,
+                Command::NewScratchWorkspace,
+                Some(settings)
+            ),
             Err(Reservation::System(SystemReservation::Settings))
         );
     }
@@ -152,22 +156,23 @@ mod tests {
                     format!("{prefix}-{key}"),
                     format!("shift-{prefix}-{physical}"),
                 ] {
-                    let mut preferences: KeybindingPreferences =
-                        serde_json::from_value(serde_json::json!({"new_workspace": source}))
-                            .unwrap();
+                    let mut preferences: KeybindingPreferences = serde_json::from_value(
+                        serde_json::json!({"new_scratch_workspace": source}),
+                    )
+                    .unwrap();
                     let resolved = profile.resolve(&preferences);
                     assert_eq!(
-                        resolved.shortcut(Command::NewWorkspace),
+                        resolved.shortcut(Command::NewScratchWorkspace),
                         Some(&Shortcut::parse("cmd-n").unwrap())
                     );
                     assert_eq!(
-                        resolved.inactive_override(Command::NewWorkspace),
+                        resolved.inactive_override(Command::NewScratchWorkspace),
                         Some(Reservation::System(reason))
                     );
                     assert_eq!(
                         profile.assign(
                             &mut preferences,
-                            Command::NewWorkspace,
+                            Command::NewScratchWorkspace,
                             Some(shortcut.clone())
                         ),
                         Err(Reservation::System(reason))
@@ -193,12 +198,12 @@ mod tests {
                 && native.should_match(&binding.keystrokes()[0])
         }));
         let mut preferences: KeybindingPreferences =
-            serde_json::from_str(r#"{"new_workspace":"shift-cmd-="}"#).unwrap();
+            serde_json::from_str(r#"{"new_scratch_workspace":"shift-cmd-="}"#).unwrap();
         assert_eq!(
             profile
                 .resolve(&preferences)
                 .owner(&Shortcut::from_keystroke(&native).unwrap()),
-            Some(Command::NewWorkspace)
+            Some(Command::NewScratchWorkspace)
         );
         profile
             .assign(
@@ -208,7 +213,7 @@ mod tests {
             )
             .unwrap();
         let resolved = profile.resolve(&preferences);
-        assert_eq!(resolved.shortcut(Command::NewWorkspace), None);
+        assert_eq!(resolved.shortcut(Command::NewScratchWorkspace), None);
         assert_eq!(
             resolved.owner(&Shortcut::parse("cmd-+").unwrap()),
             Some(Command::NewTab)
@@ -221,7 +226,7 @@ mod tests {
         }));
         assert!(
             serde_json::from_str::<KeybindingPreferences>(
-                r#"{"new_workspace":"shift-cmd-=","new_tab":"cmd-+"}"#
+                r#"{"new_scratch_workspace":"shift-cmd-=","new_tab":"cmd-+"}"#
             )
             .unwrap()
             .validate()

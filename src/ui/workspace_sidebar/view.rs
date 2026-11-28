@@ -1467,10 +1467,10 @@ impl WorkspaceSidebar {
         let scrollbar = self.scrollbar.clone();
         let menu_sidebar = sidebar.clone();
         let lifecycle_sidebar = sidebar.clone();
-        let new_workspace_menu = Menu::new(
-            "new-workspace-menu",
-            "New Workspace",
-            new_workspace_menu_entries(presentation, &self.remote_machines),
+        let create_workspace_menu = Menu::new(
+            "create-workspace-menu",
+            CREATE_WORKSPACE,
+            create_workspace_menu_entries(presentation),
         )
         .size(MenuSize::Wide)
         .placement(AnchoredPlacementConfig::new(
@@ -1479,12 +1479,12 @@ impl WorkspaceSidebar {
         ))
         .icon_trigger(move |foreground| {
             div()
-                .debug_selector(|| "new-workspace-icon".to_owned())
+                .debug_selector(|| "create-workspace-icon".to_owned())
                 .flex()
                 .child(Icon::new(IconName::Plus, footer_icon_size, foreground))
                 .into_any_element()
         })
-        .debug_selector("new-workspace-button")
+        .debug_selector("create-workspace-button")
         .on_lifecycle(move |event, cx| {
             let sidebar = lifecycle_sidebar.clone();
             let event = *event;
@@ -1492,21 +1492,17 @@ impl WorkspaceSidebar {
             // Resolve ownership after that delivery, as row menus do.
             cx.defer(move |cx| {
                 let _ = sidebar.update(cx, |sidebar, cx| {
-                    sidebar.handle_new_workspace_menu_lifecycle(event, cx);
+                    sidebar.handle_create_workspace_menu_lifecycle(event, cx);
                 });
             });
         })
         .on_activate(move |activation, window, cx| match *activation.action() {
-            NewWorkspaceItem::Create(WorkspaceCreation::Local) => {
+            WorkspaceCreation::Scratch => {
                 let _ = menu_sidebar.update(cx, |_, cx| {
-                    cx.emit(SidebarEvent::Create(WorkspaceCreation::Local));
+                    cx.emit(SidebarEvent::Create(WorkspaceCreation::Scratch));
                 });
             }
-            // Settings owns adding a server; the menu only opens that journey.
-            NewWorkspaceItem::AddMachine => {
-                window.dispatch_action(Box::new(crate::ui::settings_window::AddMachine), cx);
-            }
-            NewWorkspaceItem::Create(creation) => {
+            creation @ (WorkspaceCreation::Local | WorkspaceCreation::Remote) => {
                 let sidebar = menu_sidebar.clone();
                 let _ = menu_sidebar.update(cx, |sidebar, cx| {
                     sidebar.dismiss_editing(window, cx);
@@ -1520,9 +1516,9 @@ impl WorkspaceSidebar {
                 });
             }
         });
-        let new_workspace_menu = Tooltip::new("new-workspace-tooltip", "New Workspace")
-            .debug_selector("new-workspace-tooltip")
-            .attach(new_workspace_menu, TooltipTargetVisibility::Visible);
+        let create_workspace_menu = Tooltip::new("create-workspace-tooltip", CREATE_WORKSPACE)
+            .debug_selector("create-workspace-tooltip")
+            .attach(create_workspace_menu, TooltipTargetVisibility::Visible);
         let application_menu = (!presentation
             .has_feature(crate::desktop_profile::HostFeature::ApplicationMenuBar))
         .then(|| application_menu(presentation, footer_icon_size));
@@ -1559,7 +1555,7 @@ impl WorkspaceSidebar {
                     .debug_selector(|| "workspace-sidebar-footer".to_owned())
                     .relative()
                     .w_full()
-                    .h(appearance.spacing(NEW_WORKSPACE_BUTTON_HEIGHT))
+                    .h(appearance.spacing(SIDEBAR_FOOTER_HEIGHT))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
@@ -1593,7 +1589,7 @@ impl WorkspaceSidebar {
                     )
                     .children(application_menu)
                     .child(div().flex_1())
-                    .child(new_workspace_menu),
+                    .child(create_workspace_menu),
             )
             .child(scrollbar)
             // A sidebar that is hiding still draws as it slides out, but takes no input.
@@ -2290,104 +2286,28 @@ fn application_menu(
         .into_any_element()
 }
 
-/// What the sidebar's New Workspace menu offers.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum NewWorkspaceItem {
-    Create(WorkspaceCreation),
-    /// Opens Settings > Servers > Add Server, the one journey that adds a server.
-    AddMachine,
-}
+/// The name of the sidebar's footer menu, whose rows are the Workspace creation Commands.
+const CREATE_WORKSPACE: &str = "Create Workspace";
 
-fn creation_entry(
-    creation: WorkspaceCreation,
-    label: SharedString,
-    selector: String,
+/// The Create Workspace menu's rows: the creation Commands with their Shortcuts.
+fn create_workspace_menu_entries(
     presentation: &crate::desktop_profile::DesktopPresentation,
-) -> MenuEntry<NewWorkspaceItem> {
-    let entry = MenuEntry::action(label, NewWorkspaceItem::Create(creation));
-    let entry = match creation.shortcut(presentation) {
-        Some(shortcut) => entry.shortcut(shortcut),
-        None => entry,
-    };
-    entry
-        .icon(move |foreground, size| {
-            Icon::custom(creation.icon(), size, foreground).into_any_element()
+) -> Vec<MenuEntry<WorkspaceCreation>> {
+    WorkspaceCreation::ALL
+        .into_iter()
+        .map(|creation| {
+            let entry = MenuEntry::action(creation.label(), creation);
+            let entry = match creation.shortcut(presentation) {
+                Some(shortcut) => entry.shortcut(shortcut),
+                None => entry,
+            };
+            entry
+                .icon(move |foreground, size| {
+                    Icon::custom(creation.icon(), size, foreground).into_any_element()
+                })
+                .debug_selector(format!("create-workspace-menu-{}", creation.selector()))
         })
-        .debug_selector(format!("new-workspace-menu-{selector}"))
-}
-
-/// One saved server per row, then Add Server, so a person without the server they want reaches
-/// the journey that adds it.
-fn remote_submenu(
-    machines: &[crate::ui::workspace_creation::RemoteCreationMachine],
-    creation: fn(crate::direct_connections::DirectRouteId) -> WorkspaceCreation,
-    selector: &str,
-) -> Vec<MenuEntry<NewWorkspaceItem>> {
-    let mut entries: Vec<_> = machines
-        .iter()
-        .enumerate()
-        .map(|(position, core)| {
-            let creation = creation(core.route);
-            // A server this window doesn't present can't take a Workspace until it connects.
-            MenuEntry::action(core.display_name(), NewWorkspaceItem::Create(creation))
-                .disabled(!core.available)
-                .debug_selector(format!(
-                    "new-workspace-menu-{}",
-                    creation.selector(position)
-                ))
-        })
-        .collect();
-    if !entries.is_empty() {
-        entries.push(MenuEntry::separator());
-    }
-    entries.push(
-        MenuEntry::action("Add Machine\u{2026}", NewWorkspaceItem::AddMachine)
-            .debug_selector(format!("new-workspace-menu-{selector}-add-server")),
-    );
-    entries
-}
-
-fn new_workspace_menu_entries(
-    presentation: &crate::desktop_profile::DesktopPresentation,
-    machines: &[crate::ui::workspace_creation::RemoteCreationMachine],
-) -> Vec<MenuEntry<NewWorkspaceItem>> {
-    let [local, open_local] = WorkspaceCreation::LOCAL;
-    vec![
-        creation_entry(local, local.label(None), local.selector(0), presentation),
-        MenuEntry::submenu(
-            "Remote Workspace",
-            remote_submenu(machines, WorkspaceCreation::Remote, "create-remote"),
-        )
-        .icon(|foreground, size| {
-            Icon::custom(spaceterm_ui::CustomIconName::GlobePlus, size, foreground)
-                .into_any_element()
-        })
-        .debug_selector("new-workspace-menu-create-remote"),
-        MenuEntry::separator(),
-        creation_entry(
-            open_local,
-            open_local.label(None),
-            open_local.selector(0),
-            presentation,
-        ),
-        MenuEntry::submenu(
-            "Open Remote Directory",
-            remote_submenu(
-                machines,
-                WorkspaceCreation::OpenRemoteDirectory,
-                "open-remote-directory",
-            ),
-        )
-        .icon(|foreground, size| {
-            Icon::custom(
-                spaceterm_ui::CustomIconName::FolderBadgeGlobe,
-                size,
-                foreground,
-            )
-            .into_any_element()
-        })
-        .debug_selector("new-workspace-menu-open-remote-directory"),
-    ]
+        .collect()
 }
 
 /// Every Workspace command carries a symbol, so all labels share the icon column.

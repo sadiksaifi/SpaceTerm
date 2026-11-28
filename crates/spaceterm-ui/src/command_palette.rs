@@ -530,6 +530,16 @@ pub struct CommandPaletteReplacementFocus {
     restore_focus: Option<WeakFocusHandle>,
 }
 
+impl CommandPaletteReplacementFocus {
+    /// Returns focus to the owner the chain began with, for a chain that ends before its next
+    /// palette opens, such as when that palette's operation is refused.
+    pub fn restore(self, window: &mut Window, cx: &mut App) {
+        if let Some(focus) = self.restore_focus.and_then(|focus| focus.upgrade()) {
+            focus.focus(window, cx);
+        }
+    }
+}
+
 struct PendingCommandPaletteOpen {
     replacement: CommandPaletteReplacementFocus,
     transferred_focus: bool,
@@ -614,12 +624,14 @@ impl CommandPaletteAction {
 ///
 /// Activating it or one of its menu items emits [`CommandPaletteEvent::HeaderAction`] and leaves
 /// the palette open.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct CommandPalettePrimaryAction {
     id: SharedString,
     label: SharedString,
+    leading_icon: Option<IconBuilder>,
     shortcut: Option<SharedString>,
     disabled: bool,
+    button_only: bool,
     menu_items: Vec<(SharedString, SharedString)>,
     menu_disabled: bool,
     debug_selector: Option<String>,
@@ -631,12 +643,21 @@ impl CommandPalettePrimaryAction {
         Self {
             id: id.into(),
             label: label.into(),
+            leading_icon: None,
             shortcut: None,
             disabled: false,
+            button_only: false,
             menu_items: Vec::new(),
             menu_disabled: false,
             debug_selector: None,
         }
+    }
+
+    /// Renders a symbol before the label with the button's foreground, at the search line's
+    /// icon size.
+    pub fn leading_icon(mut self, build: impl Fn(Rgba, Pixels) -> AnyElement + 'static) -> Self {
+        self.leading_icon = Some(Rc::new(build));
+        self
     }
 
     /// Shows the displayed Shortcut of [`Confirm`], the key that activates the action, after
@@ -648,6 +669,13 @@ impl CommandPalettePrimaryAction {
 
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// Activates the action only through its button. Return and [`Confirm`] leave it alone, as
+    /// for a command that starts a separate journey rather than completing the search.
+    pub fn button_only(mut self) -> Self {
+        self.button_only = true;
         self
     }
 
@@ -2351,7 +2379,11 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         if self.open {
             self.wait_for_empty_status(cx);
         }
-        self.set_loading_state(false, cx);
+        // A caller that matches its own results answers each query anew, while the palette's own
+        // matching filters items the caller is still loading.
+        if self.matching == CommandPaletteMatching::Caller {
+            self.set_loading_state(false, cx);
+        }
         self.recompute_matches();
         self.emit_query(cx);
         cx.notify();
@@ -2376,10 +2408,12 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
     fn empty_explanation(&self) -> Option<SharedString> {
         if self.loading_presentation != LoadingPresentation::Settled
             || !self.matches.is_empty()
+            // Return activates an enabled primary action, so empty results need no explanation,
+            // unless the action is button-only.
             || self
                 .primary_action
                 .as_ref()
-                .is_some_and(|action| !action.disabled)
+                .is_some_and(|action| !action.disabled && !action.button_only)
         {
             return None;
         }
@@ -2730,12 +2764,13 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.activate_item(item_id, source, window, cx);
     }
 
-    /// Availability belongs to the action's disabled state, so pending results never block it.
+    /// Activates the primary action from the keyboard. Availability belongs to the action's
+    /// disabled state, so pending results never block it.
     fn activate_primary_action(&mut self, cx: &mut gpui::Context<Self>) {
         if let Some(action) = self
             .primary_action
             .as_ref()
-            .filter(|action| !action.disabled)
+            .filter(|action| !action.disabled && !action.button_only)
         {
             cx.emit(CommandPaletteEvent::HeaderAction(action.id.clone()));
         }
@@ -3480,6 +3515,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                     action,
                     self.primary_action_focus.clone(),
                     self.empty_explanation(),
+                    theme.metrics.input_icon_size,
                 ))
             })
             .into_any_element()
@@ -3697,6 +3733,7 @@ fn render_primary_action<I: Clone + Eq + 'static>(
     action: &CommandPalettePrimaryAction,
     focus_handle: gpui::FocusHandle,
     explanation: Option<SharedString>,
+    icon_size: Pixels,
 ) -> AnyElement {
     let id = action.id.clone();
     let menu_palette = palette.clone();
@@ -3715,6 +3752,9 @@ fn render_primary_action<I: Clone + Eq + 'static>(
     )
     .variant(ButtonVariant::Primary)
     .size(ButtonSize::Small)
+    .when_some(action.leading_icon.clone(), |button, build| {
+        button.leading(move |foreground| build(foreground, icon_size))
+    })
     .when_some(action.shortcut.clone(), |button, shortcut| {
         button.shortcut(shortcut)
     })

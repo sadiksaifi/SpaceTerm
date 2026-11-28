@@ -18,6 +18,7 @@ use crate::direct_connections::{
     DirectConnections, DirectRouteId, DirectRouteStatus, RefusalReason,
 };
 use crate::ui::MachineTarget;
+use crate::ui::machine_chooser::{MachineChoice, MachineChoices, endpoint_address};
 use crate::ui::workspaces::{
     DirectMachine, DirectRoutePanes, UnavailableEdits, WorkspacePaneOpener, WorkspacePaneSessions,
 };
@@ -126,7 +127,7 @@ impl WorkspaceManager {
                 self.present_direct_machine(direct, storage, core, window, cx);
             }
         }
-        // The creation menus show each saved route, which changes without a new binding.
+        // The Machine chooser lists each saved route, which changes without a new binding.
         cx.notify();
     }
 
@@ -342,53 +343,26 @@ impl WorkspaceManager {
         })
     }
 
-    /// Asks the server `target` names for a new Workspace named `name` unless blank, which it
-    /// presents to every connected client and this window activates once the server publishes
-    /// it.
-    pub(super) fn create_workspace_on(
-        &mut self,
-        target: &MachineTarget,
-        name: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        use crate::ui::workspaces::{WorkspaceRefusalReason, WorkspaceSubmission};
-
-        let Some(binding) = self
-            .machine_key(target)
-            .and_then(|key| self.binding.get_mut(key))
-        else {
-            WorkspaceManager::show_refusal(
-                "create a Workspace",
-                WorkspaceRefusalReason::Offline,
-                window,
-                cx,
-            );
-            return;
-        };
-        if let WorkspaceSubmission::Refused(reason) = binding.create_workspace(name, None) {
-            WorkspaceManager::show_refusal("create a Workspace", reason, window, cx);
-        }
-        cx.notify();
-    }
-
-    /// Every saved paired server the creation menus offer, by name. Only one this window
-    /// presents connected can take a new Workspace now.
-    pub(super) fn remote_creation_machines(
-        &self,
-        cx: &App,
-    ) -> Vec<crate::ui::workspace_creation::RemoteCreationMachine> {
-        use crate::ui::workspace_creation::{RemoteCreationMachine, endpoint_address};
-
+    /// What the Machine chooser lists: every saved paired Machine by name, once the registry has
+    /// read them. Only one this window presents connected can take a new Workspace now.
+    pub(super) fn machine_choices(&self, cx: &App) -> MachineChoices {
         let Some(direct) = crate::ui::direct_machines::installed(cx) else {
-            return Vec::new();
+            return MachineChoices::Read(Vec::new());
         };
+        if !direct.retained_inventory_loaded() {
+            // A read that failed never loads, and only a relaunch reads again.
+            return if direct.persistence_error() {
+                MachineChoices::Unavailable
+            } else {
+                MachineChoices::Loading
+            };
+        }
         let saved: Vec<_> = direct
             .routes()
             .into_iter()
             .filter_map(|(route, _)| direct.route(&route))
             .collect();
-        // Two saved servers may give one name, such as an earlier pairing and a newer one, so a
+        // Two saved Machines may give one name, such as an earlier pairing and a newer one, so a
         // shared name carries the address each route reaches.
         let shares_name = |name: &str| {
             saved
@@ -399,12 +373,12 @@ impl WorkspaceManager {
         };
         let mut machines: Vec<_> = saved
             .iter()
-            .map(|route| RemoteCreationMachine {
+            .map(|route| MachineChoice {
                 route: route.id,
                 name: route.label.clone().into(),
                 address: shares_name(&route.label)
                     .then(|| endpoint_address(&route.endpoint).to_owned().into()),
-                available: self.direct_route_connected(&route.id),
+                connected: self.direct_route_connected(&route.id),
             })
             .collect();
         machines.sort_by(|a, b| {
@@ -412,7 +386,7 @@ impl WorkspaceManager {
                 .then_with(|| a.address.cmp(&b.address))
                 .then_with(|| a.route.cmp(&b.route))
         });
-        machines
+        MachineChoices::Read(machines)
     }
 
     /// The binding presenting `target`'s server, if this window presents it.

@@ -1552,7 +1552,7 @@ fn resetting_everything_restores_defaults_and_empties_the_installed_catalog(
     document.terminal_themes =
         crate::appearance::translate_zed_family(IMPORTABLE_FAMILY).expect("fixture Zed family");
     document.keybindings = serde_json::from_value(serde_json::json!({
-        "new_workspace": "shift-cmd-y", "close_tab": null
+        "new_scratch_workspace": "shift-cmd-y", "close_tab": null
     }))
     .unwrap();
     let overrides = document.keybindings.clone();
@@ -4093,7 +4093,8 @@ fn importing_settings_replaces_everything_once_confirmed(cx: &mut TestAppContext
     before.updates.automatic_downloads = false;
     before.clipboard.allow_write = false;
     before.clipboard.allow_read = true;
-    before.keybindings = serde_json::from_str(r#"{"new_workspace":"cmd-shift-y"}"#).unwrap();
+    before.keybindings =
+        serde_json::from_str(r#"{"new_scratch_workspace":"cmd-shift-y"}"#).unwrap();
     let imported = exported_document_with_a_theme();
     let mut expected = crate::settings::parse_settings(&imported).unwrap();
     expected.revision = before.revision + 1;

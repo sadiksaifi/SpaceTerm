@@ -439,22 +439,22 @@ class AccessibilityTerminalDiscoveryTests(unittest.TestCase):
             predicate() or self.smoke.require(False, classification)
         )
         switch = Accessible("button", name="Choose Workspace")
-        local = Accessible("menu item", name="New Local Workspace")
+        scratch = Accessible("menu item", name="New Scratch Workspace")
         field = Accessible("entry", name="Workspace name")
         query = ""
         field.queryText.side_effect = lambda: SimpleNamespace(getText=lambda start, end: query)
         frame.append(switch)
-        switch.action = lambda: frame.extend([local, field])
+        switch.action = lambda: frame.extend([scratch, field])
 
         def create():
             self.assertEqual(query, owned.name, "the name must precede native creation")
-            frame.remove(local)
+            frame.remove(scratch)
             frame.remove(field)
             frame.remove(retained)
             tree[:] = [replacement, owned]
             frame.append(start)
 
-        local.action = create
+        scratch.action = create
 
         def start_fixture():
             self.assertTrue(self.probe.core_workspace_named)

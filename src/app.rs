@@ -23,7 +23,7 @@ use crate::ssh::host_config::HostConfigFilesystem;
 use crate::ssh::process::SshProcessAdapter;
 use crate::ssh::startup_environment::StartupSshEnvironment;
 use crate::terminal::{NativeServiceOrigin, NativeServiceStatus, SelectionCopy};
-use crate::ui::{ChooseWorkspace, NewWorkspace, WorkspaceManager};
+use crate::ui::{ChooseWorkspace, NewScratchWorkspace, WorkspaceManager};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum StartupDependenciesError {
@@ -1506,12 +1506,14 @@ pub(crate) fn activate_default_window(cx: &mut App, token: Option<&str>) {
 
 fn install_headless_window_actions(cx: &mut App, host: Rc<HostComposition>) {
     cx.set_global(DefaultWorkspaceWindowHost(host.clone()));
-    cx.on_action(move |_: &NewWorkspace, cx| new_workspace_without_window(cx, &host));
+    cx.on_action(move |_: &NewScratchWorkspace, cx| {
+        new_scratch_workspace_without_window(cx, &host)
+    });
 }
 
-/// New Workspace with no Workspace Window opens one that creates the Workspace, unlike opening
-/// SpaceTerm, which only presents this client's attached Workspaces.
-fn new_workspace_without_window(cx: &mut App, host: &HostComposition) {
+/// New Scratch Workspace with no Workspace Window opens one that creates the Workspace, unlike
+/// opening SpaceTerm, which only presents this client's attached Workspaces.
+fn new_scratch_workspace_without_window(cx: &mut App, host: &HostComposition) {
     if !workspace_windows(cx).is_empty() {
         return;
     }
@@ -3251,8 +3253,8 @@ mod runtime_tests {
         });
         cx.run_until_parked();
 
-        assert!(cx.update(|cx| cx.is_action_available(&NewWorkspace)));
-        cx.update(|cx| cx.dispatch_action(&NewWorkspace));
+        assert!(cx.update(|cx| cx.is_action_available(&NewScratchWorkspace)));
+        cx.update(|cx| cx.dispatch_action(&NewScratchWorkspace));
         cx.run_until_parked();
 
         // The restored window presents the server's Default Workspace and creates the one New
@@ -3874,7 +3876,7 @@ mod runtime_tests {
         assert!(cx.update(|cx| workspace_windows(cx).is_empty()));
 
         // Both paths that restore a Workspace must still fire.
-        cx.update(|cx| cx.dispatch_action(&NewWorkspace));
+        cx.update(|cx| cx.dispatch_action(&NewScratchWorkspace));
         cx.run_until_parked();
         assert_eq!(cx.update(|cx| workspace_windows(cx).len()), 1);
 

@@ -232,7 +232,14 @@ _Avoid_ in the interface: idle
 
 **Workspace Switcher**: The transient chooser for activating an existing Workspace or naming a new one.
 
-**Open Local Directory**: The Command opening a Local Workspace pinned to a selected directory.
+**New Scratch Workspace**: The Command creating an unpinned Local Workspace at the home directory.
+
+**New Workspace**: The Command creating a Local Workspace pinned to a directory selected in the Directory Picker.
+
+**New Remote Workspace**: The Command creating a Remote Workspace pinned to a directory selected in the Directory Picker on a Machine chosen in the Machine Chooser.
+_Avoid_: Open Local Directory, Open Remote Directory, Scratch Workspace as a kind of Workspace
+
+**Machine Chooser**: The chooser listing saved paired Machines for New Remote Workspace, with Add Machine.
 
 **Directory Picker**: The chooser browsing one Machine's directories to select a Pinned Directory.
 

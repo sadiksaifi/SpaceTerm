@@ -36,12 +36,16 @@ pub(super) fn profile(
             Some(DefaultBinding::new("ctrl-shift-k", &[])),
         ),
         (
-            Command::NewWorkspace,
+            Command::NewScratchWorkspace,
             Some(DefaultBinding::new("ctrl-shift-n", &[])),
         ),
         (
-            Command::OpenLocalDirectory,
+            Command::NewWorkspace,
             Some(DefaultBinding::new("ctrl-shift-o", &[])),
+        ),
+        (
+            Command::NewRemoteWorkspace,
+            Some(DefaultBinding::new("ctrl-alt-shift-o", &[])),
         ),
         (Command::NewWorktree, None),
         (
@@ -571,7 +575,10 @@ mod tests {
                             == gpui::Keystroke::parse(default).unwrap().unparse()
                 }));
             }
-            assert_eq!(resolved.inactive_override(Command::NewWorkspace), None);
+            assert_eq!(
+                resolved.inactive_override(Command::NewScratchWorkspace),
+                None
+            );
             // Resolution never rewrites the retained overrides.
             assert_eq!(serde_json::to_string(&preferences).unwrap(), retained);
         }

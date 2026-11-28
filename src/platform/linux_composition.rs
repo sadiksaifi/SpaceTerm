@@ -419,7 +419,7 @@ mod tests {
 
     #[gpui::test]
     fn desktop_profile_should_present_linux_shortcuts_and_wording(cx: &mut gpui::TestAppContext) {
-        use crate::ui::{ChooseWorkspace, ClosePane, CloseTab, NewTab, NewWorkspace};
+        use crate::ui::{ChooseWorkspace, ClosePane, CloseTab, NewScratchWorkspace, NewTab};
 
         cx.update(|cx| {
             crate::ui::initialize_controls(cx).unwrap();
@@ -438,7 +438,7 @@ mod tests {
             let presentation = DesktopPresentation::get(cx);
             for (shortcut, label) in [
                 (presentation.shortcut(&ChooseWorkspace), "Ctrl+Shift+K"),
-                (presentation.shortcut(&NewWorkspace), "Ctrl+Shift+N"),
+                (presentation.shortcut(&NewScratchWorkspace), "Ctrl+Shift+N"),
                 (presentation.shortcut(&NewTab), "Ctrl+Shift+T"),
                 (presentation.shortcut(&ClosePane), "Ctrl+Shift+W"),
                 (presentation.shortcut(&CloseTab), "Ctrl+Shift+Alt+W"),
@@ -646,9 +646,9 @@ mod tests {
                 .snapshot()
                 .committed
                 .keybindings
-                .get(Command::NewWorkspace)
+                .get(Command::NewScratchWorkspace)
                 .cloned();
-            click("settings-row-shortcut-new-workspace-control", cx);
+            click("settings-row-shortcut-new-scratch-workspace-control", cx);
             cx.simulate_keystrokes(chord);
             cx.run_until_parked();
             cx.executor()
@@ -659,7 +659,7 @@ mod tests {
                     .snapshot()
                     .committed
                     .keybindings
-                    .get(Command::NewWorkspace)
+                    .get(Command::NewScratchWorkspace)
                     .cloned(),
                 before
             );
@@ -674,7 +674,7 @@ mod tests {
                     .snapshot()
                     .committed
                     .keybindings
-                    .get(Command::NewWorkspace),
+                    .get(Command::NewScratchWorkspace),
                 Some(&Some(Shortcut::parse(replacement).unwrap()))
             );
             cx.simulate_keystrokes("escape");

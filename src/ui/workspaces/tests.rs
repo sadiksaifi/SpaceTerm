@@ -2732,9 +2732,7 @@ mod draft {
         cx: &mut VisualTestContext,
     ) {
         cx.update(|_, cx| {
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.set_rows(vec![row], Vec::new(), cx)
-            });
+            sidebar.update(cx, |sidebar, cx| sidebar.set_rows(vec![row], cx));
         });
         cx.run_until_parked();
     }
@@ -2763,11 +2761,7 @@ mod draft {
             .detach();
         });
         let set = |row: WorkspaceRowViewModel, cx: &mut VisualTestContext| {
-            cx.update(|_, cx| {
-                sidebar.update(cx, |sidebar, cx| {
-                    sidebar.set_rows(vec![row], Vec::new(), cx)
-                })
-            })
+            cx.update(|_, cx| sidebar.update(cx, |sidebar, cx| sidebar.set_rows(vec![row], cx)))
         };
 
         assert!(!set(row("Build", 0), cx));

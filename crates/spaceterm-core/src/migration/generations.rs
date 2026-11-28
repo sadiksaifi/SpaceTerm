@@ -20,7 +20,7 @@ pub const CORE_DATA: Generations = Generations { oldest: 1, current: 2 };
 pub const CLI_STATE: Generations = Generations { oldest: 1, current: 1 };
 /// The desktop's configuration root, which holds the Settings Document.
 #[rustfmt::skip]
-pub const DESKTOP_CONFIG: Generations = Generations { oldest: 1, current: 1 };
+pub const DESKTOP_CONFIG: Generations = Generations { oldest: 1, current: 2 };
 /// The desktop's state root: Saved Connections, Client View State, Workspace order, presentation
 /// context and update history.
 #[rustfmt::skip]

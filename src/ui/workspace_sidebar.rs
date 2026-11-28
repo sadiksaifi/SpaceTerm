@@ -10,7 +10,7 @@ use super::sidebar_motion::{Reveal, SidebarFrame, SidebarMotion};
 use super::workspace_chrome::{
     WorkspaceChromeIdentity, WorkspaceChromeLayout, WorkspaceChromeStatus,
 };
-use super::workspace_creation::{RemoteCreationMachine, WorkspaceCreation};
+use super::workspace_creation::WorkspaceCreation;
 use super::workspace_status::{WorkspaceStatusPaint, resolve as resolve_workspace_status};
 use super::{WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 use crate::appearance::ChromeColors;
@@ -87,7 +87,8 @@ pub(super) const SIDEBAR_ROW_LINE_GAP: f32 = 2.0;
 pub(super) const SIDEBAR_ROW_CHIP_PADDING: f32 = 6.0;
 /// The vertical inset of the chip that carries a row's selection.
 pub(super) const SIDEBAR_ROW_SELECTION_INSET_Y: f32 = 3.0;
-pub(super) const NEW_WORKSPACE_BUTTON_HEIGHT: f32 = 40.0;
+/// The footer's height, which holds Settings and the Create Workspace menu.
+pub(super) const SIDEBAR_FOOTER_HEIGHT: f32 = 40.0;
 pub(super) const SIDEBAR_MAXIMUM_WIDTH: f32 = 420.0;
 pub(super) const TERMINAL_CONTENT_MINIMUM_WIDTH: f32 = 240.0;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -597,8 +598,6 @@ pub(super) struct WorkspaceSidebar {
     /// The groups of Workspaces that left the list, which fade where they stood before their
     /// places close.
     departed_groups: std::collections::HashMap<WorkspaceId, DepartedGroup>,
-    /// The saved paired servers the creation menu offers.
-    remote_machines: Vec<RemoteCreationMachine>,
     layout: SidebarLayout,
     scroll_handle: ScrollHandle,
     /// Each row's top and bottom within its Workspace group, as last painted. A group is one
@@ -616,7 +615,7 @@ pub(super) struct WorkspaceSidebar {
     /// The row the keyboard stands on when it is not the derived selection: a Worktree with no
     /// Tabs yet, or a Workspace whose Active Worktree's row is disclosed.
     cursor: Option<SidebarRowKey>,
-    new_workspace_menu_open: bool,
+    create_workspace_menu_open: bool,
     rename: Option<WorkspaceRenameState>,
     resize_origin: Option<SidebarLayout>,
     suppress_pointer_until_release: bool,
@@ -679,7 +678,6 @@ impl WorkspaceSidebar {
         Self {
             rows: Vec::new(),
             departed_groups: std::collections::HashMap::new(),
-            remote_machines: Vec::new(),
             layout: SidebarLayout {
                 visible,
                 width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
@@ -692,7 +690,7 @@ impl WorkspaceSidebar {
             menu: None,
             menu_from_sidebar: false,
             cursor: None,
-            new_workspace_menu_open: false,
+            create_workspace_menu_open: false,
             rename: None,
             resize_origin: None,
             suppress_pointer_until_release: false,
@@ -855,18 +853,18 @@ impl WorkspaceSidebar {
         cx.notify();
     }
 
-    pub(super) fn handle_new_workspace_menu_lifecycle(
+    pub(super) fn handle_create_workspace_menu_lifecycle(
         &mut self,
         event: MenuLifecycleEvent,
         cx: &mut Context<Self>,
     ) {
         match event {
-            MenuLifecycleEvent::Opened => self.new_workspace_menu_open = true,
+            MenuLifecycleEvent::Opened => self.create_workspace_menu_open = true,
             MenuLifecycleEvent::Closed(_) => {
-                if !self.new_workspace_menu_open {
+                if !self.create_workspace_menu_open {
                     return;
                 }
-                self.new_workspace_menu_open = false;
+                self.create_workspace_menu_open = false;
             }
         }
         cx.emit(SidebarEvent::FocusChanged);
@@ -1088,12 +1086,11 @@ impl WorkspaceSidebar {
     pub(super) fn set_rows(
         &mut self,
         rows: Vec<WorkspaceRowViewModel>,
-        remote_machines: Vec<RemoteCreationMachine>,
         cx: &mut Context<Self>,
     ) -> bool {
         // The Workspace Manager sets the rows on every render, so only a change redraws the
         // sidebar.
-        if self.rows == rows && self.remote_machines == remote_machines {
+        if self.rows == rows {
             return false;
         }
         let selected = self.selected_key();
@@ -1131,7 +1128,6 @@ impl WorkspaceSidebar {
             );
         }
         self.rows = rows;
-        self.remote_machines = remote_machines;
         if self
             .cursor
             .is_some_and(|cursor| !self.visible_keys().iter().any(|(key, _)| *key == cursor))
@@ -1717,7 +1713,7 @@ impl WorkspaceSidebar {
         self.rename.is_some()
     }
     pub(super) fn menu_open(&self) -> bool {
-        self.menu.is_some() || self.new_workspace_menu_open
+        self.menu.is_some() || self.create_workspace_menu_open
     }
     pub(super) fn cancel_rename(&mut self, cx: &mut Context<Self>) {
         if self.rename.take().is_some() {
@@ -1794,7 +1790,7 @@ impl WorkspaceSidebar {
         let restore = self.is_focused(window) || self.rename_is_focused(window) || self.menu_open();
         if self.layout.visible && self.menu_open() {
             self.menu.take();
-            self.new_workspace_menu_open = false;
+            self.create_workspace_menu_open = false;
             dismiss_active_menu(window, cx);
         }
         self.cancel_rename(cx);

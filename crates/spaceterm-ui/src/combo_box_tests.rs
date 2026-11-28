@@ -1790,7 +1790,7 @@ fn disabled_selected_preview_paints_the_state_without_joining_keyboard_navigatio
 fn row_driven_width_should_fit_the_widest_label_inside_painted_row_borders(
     cx: &mut TestAppContext,
 ) {
-    let label = "Open Remote Directory on Another Host…";
+    let label = "New Remote Workspace in a Long Directory…";
     let items = vec![ComboBoxItem::new(1, label).shortcut("⌘O")];
     let (root, _, _, cx) = combo_box_window(cx, None, items, false);
     let color = rgba(0x101010ff);
@@ -2591,9 +2591,9 @@ fn a_command_that_starts_a_group_should_be_separated_from_the_commands_before_it
             vec![
                 ComboBoxCommand::new(100, "Local Workspace").debug_selector("local"),
                 ComboBoxCommand::new(101, "Remote Workspace").debug_selector("remote"),
-                ComboBoxCommand::new(102, "Open Local Directory")
+                ComboBoxCommand::new(102, "New Workspace…")
                     .starts_group()
-                    .debug_selector("open-local"),
+                    .debug_selector("new-workspace"),
             ]
         }));
         cx.notify();
@@ -2605,11 +2605,11 @@ fn a_command_that_starts_a_group_should_be_separated_from_the_commands_before_it
     assert!(cx.debug_bounds("remote-group-separator").is_none());
     let remote = cx.debug_bounds("remote").unwrap();
     let separator = cx
-        .debug_bounds("open-local-group-separator")
+        .debug_bounds("new-workspace-group-separator")
         .expect("a command that starts a group must draw a separator before it");
-    let open_local = cx.debug_bounds("open-local").unwrap();
+    let new_workspace = cx.debug_bounds("new-workspace").unwrap();
     assert!(remote.bottom() <= separator.top());
-    assert!(separator.bottom() <= open_local.top());
+    assert!(separator.bottom() <= new_workspace.top());
 }
 
 #[gpui::test]

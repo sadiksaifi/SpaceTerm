@@ -23,7 +23,7 @@ use super::{
     ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane, CloseTab,
     CloseTerminalFind, CopySelection, FindNext, FindPrevious, FocusNextPane, FocusPaneDown,
     FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane, KillWorkspace, MoveTabLeft,
-    MoveTabRight, NewTab, NewWorkspace, NextTab, OpenTerminalFind, PreviousTab,
+    MoveTabRight, NewScratchWorkspace, NewTab, NextTab, OpenTerminalFind, PreviousTab,
     ShowRepositoryStatus, SplitDown, SplitRight, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
 };
 
@@ -559,6 +559,17 @@ impl DirectoryPicker {
 
     pub(super) fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.open_with_replacement(None, window, cx)
+    }
+
+    /// Opens the picker as the next owner in a replacement chain, such as after the Machine
+    /// chooser, so closing it restores the focus owner that chain began with.
+    pub(super) fn open_replacing(
+        &mut self,
+        replacement: CommandPaletteReplacementFocus,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.open_with_replacement(Some(replacement), window, cx)
     }
 
     fn open_with_replacement(
@@ -1351,66 +1362,71 @@ impl PickerPathError {
     }
 }
 
-/// Keeps a hierarchy shortcut from mutating Workspaces, Tabs, or Panes behind the open picker. The
+/// Keeps a hierarchy shortcut from mutating Workspaces, Tabs, or Panes behind an open chooser. The
 /// application's hierarchy actions are registered above the Command Palette.
 fn block_parent_action<A: Action>(_: &A, _: &mut Window, cx: &mut App) {
     cx.stop_propagation();
 }
 
+/// Stops every hierarchy shortcut at `chooser`, a palette that holds the keyboard, such as the
+/// Directory Picker or the Machine chooser.
+pub(super) fn block_hierarchy_actions(chooser: gpui::Div) -> gpui::Div {
+    chooser
+        .capture_action(block_parent_action::<NewScratchWorkspace>)
+        .capture_action(block_parent_action::<super::NewWorkspace>)
+        .capture_action(block_parent_action::<super::NewRemoteWorkspace>)
+        .capture_action(block_parent_action::<super::NewWorktree>)
+        .capture_action(block_parent_action::<super::NextWorktree>)
+        .capture_action(block_parent_action::<super::PreviousWorktree>)
+        .capture_action(block_parent_action::<KillWorkspace>)
+        .capture_action(block_parent_action::<ActivateWorkspace1>)
+        .capture_action(block_parent_action::<ActivateWorkspace2>)
+        .capture_action(block_parent_action::<ActivateWorkspace3>)
+        .capture_action(block_parent_action::<ActivateWorkspace4>)
+        .capture_action(block_parent_action::<ActivateWorkspace5>)
+        .capture_action(block_parent_action::<ActivateWorkspace6>)
+        .capture_action(block_parent_action::<ActivateWorkspace7>)
+        .capture_action(block_parent_action::<ActivateWorkspace8>)
+        .capture_action(block_parent_action::<ActivateWorkspace9>)
+        .capture_action(block_parent_action::<ToggleSidebar>)
+        .capture_action(block_parent_action::<ToggleSidebarFocus>)
+        .capture_action(block_parent_action::<CopySelection>)
+        .capture_action(block_parent_action::<NewTab>)
+        .capture_action(block_parent_action::<ActivateTab1>)
+        .capture_action(block_parent_action::<ActivateTab2>)
+        .capture_action(block_parent_action::<ActivateTab3>)
+        .capture_action(block_parent_action::<ActivateTab4>)
+        .capture_action(block_parent_action::<ActivateTab5>)
+        .capture_action(block_parent_action::<ActivateTab6>)
+        .capture_action(block_parent_action::<ActivateTab7>)
+        .capture_action(block_parent_action::<ActivateTab8>)
+        .capture_action(block_parent_action::<ActivateTab9>)
+        .capture_action(block_parent_action::<NextTab>)
+        .capture_action(block_parent_action::<PreviousTab>)
+        .capture_action(block_parent_action::<MoveTabRight>)
+        .capture_action(block_parent_action::<MoveTabLeft>)
+        .capture_action(block_parent_action::<ClosePane>)
+        .capture_action(block_parent_action::<CloseTab>)
+        .capture_action(block_parent_action::<SplitRight>)
+        .capture_action(block_parent_action::<SplitDown>)
+        .capture_action(block_parent_action::<FocusPaneLeft>)
+        .capture_action(block_parent_action::<FocusPaneRight>)
+        .capture_action(block_parent_action::<FocusPaneUp>)
+        .capture_action(block_parent_action::<FocusPaneDown>)
+        .capture_action(block_parent_action::<FocusPreviousPane>)
+        .capture_action(block_parent_action::<FocusNextPane>)
+        .capture_action(block_parent_action::<TogglePaneZoom>)
+        .capture_action(block_parent_action::<ShowRepositoryStatus>)
+        .capture_action(block_parent_action::<OpenTerminalFind>)
+        .capture_action(block_parent_action::<FindNext>)
+        .capture_action(block_parent_action::<FindPrevious>)
+        .capture_action(block_parent_action::<CloseTerminalFind>)
+}
+
 impl Render for DirectoryPicker {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
-            .when(self.blocks_terminal_input(), |picker| {
-                picker
-                    .capture_action(block_parent_action::<NewWorkspace>)
-                    .capture_action(block_parent_action::<super::OpenLocalDirectory>)
-                    .capture_action(block_parent_action::<super::NewWorktree>)
-                    .capture_action(block_parent_action::<super::NextWorktree>)
-                    .capture_action(block_parent_action::<super::PreviousWorktree>)
-                    .capture_action(block_parent_action::<KillWorkspace>)
-                    .capture_action(block_parent_action::<ActivateWorkspace1>)
-                    .capture_action(block_parent_action::<ActivateWorkspace2>)
-                    .capture_action(block_parent_action::<ActivateWorkspace3>)
-                    .capture_action(block_parent_action::<ActivateWorkspace4>)
-                    .capture_action(block_parent_action::<ActivateWorkspace5>)
-                    .capture_action(block_parent_action::<ActivateWorkspace6>)
-                    .capture_action(block_parent_action::<ActivateWorkspace7>)
-                    .capture_action(block_parent_action::<ActivateWorkspace8>)
-                    .capture_action(block_parent_action::<ActivateWorkspace9>)
-                    .capture_action(block_parent_action::<ToggleSidebar>)
-                    .capture_action(block_parent_action::<ToggleSidebarFocus>)
-                    .capture_action(block_parent_action::<CopySelection>)
-                    .capture_action(block_parent_action::<NewTab>)
-                    .capture_action(block_parent_action::<ActivateTab1>)
-                    .capture_action(block_parent_action::<ActivateTab2>)
-                    .capture_action(block_parent_action::<ActivateTab3>)
-                    .capture_action(block_parent_action::<ActivateTab4>)
-                    .capture_action(block_parent_action::<ActivateTab5>)
-                    .capture_action(block_parent_action::<ActivateTab6>)
-                    .capture_action(block_parent_action::<ActivateTab7>)
-                    .capture_action(block_parent_action::<ActivateTab8>)
-                    .capture_action(block_parent_action::<ActivateTab9>)
-                    .capture_action(block_parent_action::<NextTab>)
-                    .capture_action(block_parent_action::<PreviousTab>)
-                    .capture_action(block_parent_action::<MoveTabRight>)
-                    .capture_action(block_parent_action::<MoveTabLeft>)
-                    .capture_action(block_parent_action::<ClosePane>)
-                    .capture_action(block_parent_action::<CloseTab>)
-                    .capture_action(block_parent_action::<SplitRight>)
-                    .capture_action(block_parent_action::<SplitDown>)
-                    .capture_action(block_parent_action::<FocusPaneLeft>)
-                    .capture_action(block_parent_action::<FocusPaneRight>)
-                    .capture_action(block_parent_action::<FocusPaneUp>)
-                    .capture_action(block_parent_action::<FocusPaneDown>)
-                    .capture_action(block_parent_action::<FocusPreviousPane>)
-                    .capture_action(block_parent_action::<FocusNextPane>)
-                    .capture_action(block_parent_action::<TogglePaneZoom>)
-                    .capture_action(block_parent_action::<ShowRepositoryStatus>)
-                    .capture_action(block_parent_action::<OpenTerminalFind>)
-                    .capture_action(block_parent_action::<FindNext>)
-                    .capture_action(block_parent_action::<FindPrevious>)
-                    .capture_action(block_parent_action::<CloseTerminalFind>)
-            })
+            .when(self.blocks_terminal_input(), block_hierarchy_actions)
             .child(self.palette.clone())
     }
 }
@@ -2576,7 +2592,7 @@ mod tests {
             );
             DirectoryPickerHarness {
                 picker: cx.new(|cx| {
-                    DirectoryPicker::new(Rc::new(source), "Open Remote Directory", window, cx)
+                    DirectoryPicker::new(Rc::new(source), "New Remote Workspace", window, cx)
                 }),
             }
         });
@@ -2642,7 +2658,7 @@ mod tests {
         }
     }
 
-    /// Open Remote Directory and Pin to Directory create a missing directory on the owning
+    /// New Remote Workspace and Pin to Directory create a missing directory on the owning
     /// server after the person confirms, through the production server source and the server's
     /// own directory handler, and pin the directory the server validated.
     #[gpui::test]
@@ -2671,7 +2687,7 @@ mod tests {
                 Rc::new(|| true),
             );
             let picker = cx.new(|cx| {
-                DirectoryPicker::new(Rc::new(source), "Open Remote Directory", window, cx)
+                DirectoryPicker::new(Rc::new(source), "New Remote Workspace", window, cx)
             });
             cx.subscribe(&picker, move |_, _, event: &DirectoryPickerEvent, _| {
                 recorded.borrow_mut().push(event.clone());
@@ -2918,7 +2934,7 @@ mod tests {
                 Rc::new(|| true),
             );
             let picker = cx.new(|cx| {
-                DirectoryPicker::new(Rc::new(source), "Open Remote Directory", window, cx)
+                DirectoryPicker::new(Rc::new(source), "New Remote Workspace", window, cx)
             });
             cx.subscribe(&picker, move |_, _, event: &DirectoryPickerEvent, _| {
                 recorded.borrow_mut().push(event.clone());

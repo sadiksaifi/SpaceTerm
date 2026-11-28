@@ -12,10 +12,10 @@ use crate::ui::updates::{CHECK_FOR_UPDATES_TITLE, CheckForUpdates};
 use crate::ui::{
     ChooseWorkspace, ClosePane, CloseTab, DecreaseTerminalFontSize, ExportTerminalDiagnostics,
     FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
-    IncreaseTerminalFontSize, KillWorkspace, MoveTabLeft, MoveTabRight, NewTab, NewWorkspace,
-    NextTab, NextWorktree, OpenTerminalFind, PreviousTab, PreviousWorktree, ResetTerminalFontSize,
-    ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, SplitDown, SplitRight,
-    TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
+    IncreaseTerminalFontSize, KillWorkspace, MoveTabLeft, MoveTabRight, NewScratchWorkspace,
+    NewTab, NextTab, NextWorktree, OpenTerminalFind, PreviousTab, PreviousWorktree,
+    ResetTerminalFontSize, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, SplitDown,
+    SplitRight, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
 };
 
 pub(crate) const TOGGLE_PANE_ZOOM_TITLE: &str = "Toggle Pane Zoom";
@@ -82,9 +82,10 @@ pub(crate) fn file_menu() -> Menu {
         disabled: false,
         name: "File".into(),
         items: vec![
-            MenuItem::action("New Workspace", NewWorkspace),
+            MenuItem::action("New Scratch Workspace", NewScratchWorkspace),
+            MenuItem::action("New Workspace…", crate::ui::NewWorkspace),
+            MenuItem::action("New Remote Workspace…", crate::ui::NewRemoteWorkspace),
             MenuItem::action("Add Machine…", crate::ui::settings_window::AddMachine),
-            MenuItem::action("Open Local Directory…", crate::ui::OpenLocalDirectory),
             MenuItem::action("Choose Workspace…", ChooseWorkspace),
             MenuItem::separator(),
             MenuItem::action("New Tab", NewTab),

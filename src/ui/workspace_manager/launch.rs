@@ -632,8 +632,8 @@ pub(super) struct LocalLaunchState {
     /// once per refusal, off the event thread; `false` until the read answers.
     /// Repaints a blocked screen when the Core's update facts or SpaceTerm's own update change.
     _blocked_updates: Vec<gpui::Subscription>,
-    /// New Workspace was chosen with no Workspace Window open. The window opened for it creates
-    /// the Workspace once this computer's server presents its Workspaces.
+    /// New Scratch Workspace was chosen with no Workspace Window open. The window opened for it
+    /// creates the Workspace once this computer's server presents its Workspaces.
     create_when_presented: bool,
     /// The failed connection attempts counted when the person last chose Try Again on the empty
     /// view, while that view still waits for this computer's server.
@@ -877,9 +877,9 @@ pub(crate) fn follow_local_core_runs(cx: &mut App) {
 }
 
 impl WorkspaceManager {
-    /// The application's New Workspace, chosen while no Workspace Window was open. This window
-    /// opened for it, so it creates a Workspace as soon as this computer's server presents its
-    /// Workspaces, even when this client has none attached.
+    /// The application's New Scratch Workspace, chosen while no Workspace Window was open. This
+    /// window opened for it, so it creates a Workspace as soon as this computer's server presents
+    /// its Workspaces, even when this client has none attached.
     pub(crate) fn create_workspace_when_presented(
         &mut self,
         window: &mut Window,
@@ -891,8 +891,8 @@ impl WorkspaceManager {
         self.create_pending_workspace(super::MachineKey::LOCAL, window, cx);
     }
 
-    /// Creates the Workspace New Workspace asked for before this computer's server presented
-    /// its Workspaces, once it has.
+    /// Creates the Workspace New Scratch Workspace asked for before this computer's server
+    /// presented its Workspaces, once it has.
     pub(super) fn create_pending_workspace(
         &mut self,
         key: super::MachineKey,
@@ -907,7 +907,7 @@ impl WorkspaceManager {
         }
         self.launch.create_when_presented = false;
         self.run_workspace_creation(
-            crate::ui::workspace_creation::WorkspaceCreation::Local,
+            crate::ui::workspace_creation::WorkspaceCreation::Scratch,
             window,
             cx,
         );
