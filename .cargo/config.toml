@@ -1,3 +1,6 @@
 [env]
 # Apply the application minimum to every macOS source build and native dependency.
 MACOSX_DEPLOYMENT_TARGET = { value = "26.0", force = true }
+# Name the checkout Cargo builds, so a target directory shared between checkouts reruns the
+# libghostty-vt-sys build script for each one instead of reusing another checkout's Ghostty.
+SPACETERM_CHECKOUT = { value = ".", relative = true, force = true }
