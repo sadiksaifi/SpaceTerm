@@ -787,13 +787,8 @@ impl WorkspaceManager {
         if window_modal_is_open(window, cx) {
             return;
         }
-        if let Some(picker) = self.pin_picker.take() {
-            picker.update(cx, |picker, cx| picker.cancel(window, cx));
-            self.transient.end_pin();
-        }
-        if let Some(chooser) = self.machine_chooser.take() {
-            chooser.update(cx, |chooser, cx| chooser.cancel(window, cx));
-        }
+        // An open Directory Picker or Machine chooser hands the switcher the focus owner it
+        // restores, so Escape there returns to the terminal; each ends as the switcher replaces it.
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.dismiss_editing(window, cx);
         });

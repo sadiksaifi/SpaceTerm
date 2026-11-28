@@ -15983,6 +15983,78 @@ fn cancelling_new_remote_workspace_should_ask_nothing_and_restore_terminal_focus
     assert_eq!(harness.local.submitted(), Vec::new());
 }
 
+/// Choose Workspace replaces an open Machine chooser or Directory Picker of New Remote
+/// Workspace and takes over the focus owner each would restore, so Escape in the switcher returns
+/// the keyboard to the Workspace's terminal.
+#[gpui::test]
+fn the_switcher_should_replace_new_remote_workspace_and_restore_terminal_focus(
+    cx: &mut TestAppContext,
+) {
+    // The picker reads penguin's directories over a channel whose worker answers from its own
+    // thread.
+    cx.executor().allow_parking();
+    let (harness, cx) = MultiMachineHarness::new(cx);
+    harness.publish(MachineKey::LOCAL, &harness.local, &[("Here", 1)], cx);
+    saved_machines(&harness, cx);
+    cx.update(|window, cx| {
+        harness
+            .manager
+            .update(cx, |manager, cx| manager.focus(window, cx))
+    });
+    cx.run_until_parked();
+    let terminal_focused = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            harness
+                .manager
+                .read(cx)
+                .workspaces
+                .active()
+                .payload()
+                .read(cx)
+                .focused_terminal_is_focused(window, cx)
+        })
+    };
+    let switcher_open =
+        |cx: &mut VisualTestContext| cx.update(|window, cx| window_combo_box_is_open(window, cx));
+    assert!(terminal_focused(cx));
+
+    cx.dispatch_action(crate::ui::NewRemoteWorkspace);
+    cx.run_until_parked();
+    assert!(machine_chooser_open(&harness, cx));
+    open_workspace_switcher(cx);
+    assert!(switcher_open(cx));
+    assert!(!machine_chooser_open(&harness, cx));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(
+        terminal_focused(cx),
+        "Escape after replacing the Machine chooser"
+    );
+
+    cx.dispatch_action(crate::ui::NewRemoteWorkspace);
+    cx.run_until_parked();
+    press_return(cx);
+    assert!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.pin_picker.is_some())
+    );
+    open_workspace_switcher(cx);
+    assert!(switcher_open(cx));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    assert!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.pin_picker.is_none())
+    );
+    assert!(
+        terminal_focused(cx),
+        "Escape after replacing the Directory Picker"
+    );
+}
+
 /// A directory chosen on penguin's server is the new Workspace's pin there. Choosing a directory
 /// one of that server's Workspaces is already pinned to opens that Workspace instead.
 #[gpui::test]
