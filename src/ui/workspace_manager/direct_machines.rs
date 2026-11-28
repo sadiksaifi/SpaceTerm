@@ -350,7 +350,12 @@ impl WorkspaceManager {
             return MachineChoices::Read(Vec::new());
         };
         if !direct.retained_inventory_loaded() {
-            return MachineChoices::Loading;
+            // A read that failed never loads, and only a relaunch reads again.
+            return if direct.persistence_error() {
+                MachineChoices::Unavailable
+            } else {
+                MachineChoices::Loading
+            };
         }
         let saved: Vec<_> = direct
             .routes()

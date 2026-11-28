@@ -156,3 +156,31 @@ fn escape_dismisses_without_a_choice(cx: &mut TestAppContext) {
 
     assert_eq!(*events.borrow(), [MachineChooserEvent::Dismissed]);
 }
+
+#[gpui::test]
+fn typing_while_the_saved_machines_load_keeps_the_loading_state(cx: &mut TestAppContext) {
+    let (_, events, cx) = open_chooser(MachineChoices::Loading, cx);
+
+    press("p e n", cx);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(500));
+    cx.run_until_parked();
+
+    // The loading state's bar is named by its text.
+    let tree = A11yTree::read(cx);
+    assert!(tree.find("Loading\u{2026}").is_some());
+    assert!(tree.find_text(NO_MACHINES_MATCH).is_none());
+    press("enter", cx);
+    assert!(events.borrow().is_empty());
+}
+
+#[gpui::test]
+fn saved_machines_that_cannot_be_read_say_so(cx: &mut TestAppContext) {
+    let (_, events, cx) = open_chooser(MachineChoices::Unavailable, cx);
+
+    let tree = A11yTree::read(cx);
+    assert!(tree.find_text(UNAVAILABLE).is_some());
+    assert!(tree.find_text(UNAVAILABLE_DESCRIPTION).is_some());
+    press("enter", cx);
+    assert!(events.borrow().is_empty());
+}

@@ -23,6 +23,8 @@ const NO_MACHINES: &str = "No Machines";
 const NO_MACHINES_DESCRIPTION: &str = "Add a Machine to create Remote Workspaces on it.";
 const NO_MACHINES_MATCH: &str = "No Machines match";
 const NONE_CONNECTED: &str = "No Machine is connected.";
+const UNAVAILABLE: &str = "Can\u{2019}t Read Saved Machines";
+const UNAVAILABLE_DESCRIPTION: &str = "Quit and reopen SpaceTerm to try again.";
 
 /// A saved paired Machine the chooser lists.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -60,6 +62,8 @@ pub(crate) enum MachineChoices {
     Loading,
     /// The saved Machines, in presentation order.
     Read(Vec<MachineChoice>),
+    /// The desktop couldn't read its saved Machines.
+    Unavailable,
 }
 
 /// How one chooser session ended.
@@ -148,6 +152,19 @@ impl MachineChooser {
         }
         self.palette.update(cx, |palette, cx| match &choices {
             MachineChoices::Loading => palette.set_loading(true, cx),
+            MachineChoices::Unavailable => {
+                palette.set_items(Vec::new(), cx);
+                palette.set_empty(
+                    CommandPaletteEmpty::new(UNAVAILABLE)
+                        .description(UNAVAILABLE_DESCRIPTION)
+                        .icon(|foreground, size| {
+                            Icon::new(IconName::TriangleAlert, size, foreground).into_any_element()
+                        }),
+                    cx,
+                );
+                palette.set_results_note(None, cx);
+                palette.set_loading(false, cx);
+            }
             MachineChoices::Read(machines) => {
                 palette.set_items(machines.iter().enumerate().map(machine_item).collect(), cx);
                 palette.set_empty(empty_state(machines), cx);
@@ -194,6 +211,14 @@ impl MachineChooser {
                     cx.emit(MachineChooserEvent::Dismissed);
                 }
                 cx.notify();
+            }
+            // An edited filter ends the palette's loading state, though the saved Machines are
+            // still being read.
+            CommandPaletteEvent::QueryChanged(_)
+                if self.choices == Some(MachineChoices::Loading) =>
+            {
+                self.palette
+                    .update(cx, |palette, cx| palette.set_loading(true, cx));
             }
             CommandPaletteEvent::Activated(activation) => {
                 let route = *activation.item_id();
