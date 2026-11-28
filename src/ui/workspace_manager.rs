@@ -1087,6 +1087,11 @@ impl WorkspaceManager {
             }
             PinTarget::NewRemoteWorkspace { key, .. } => {
                 let Some(source) = self.core_directory_source(*key, cx) else {
+                    // The Machine chooser already closed, so the keyboard returns to where it was
+                    // before the alert takes it.
+                    if let Some(replacement) = replacement {
+                        replacement.restore(window, cx);
+                    }
                     Self::show_refusal(
                         "create a Remote Workspace",
                         super::workspaces::WorkspaceRefusalReason::Offline,
@@ -1324,6 +1329,9 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         let Some(key) = self.machine_key(&super::MachineTarget::Direct(route)) else {
+            if let Some(replacement) = replacement {
+                replacement.restore(window, cx);
+            }
             Self::show_refusal(
                 "create a Remote Workspace",
                 super::workspaces::WorkspaceRefusalReason::Offline,
@@ -1620,6 +1628,9 @@ impl WorkspaceManager {
             return;
         }
         if self.transient.local_selection_pending {
+            if let Some(replacement) = replacement {
+                replacement.restore(window, cx);
+            }
             return;
         }
         // A Workspace's draft is fenced to the pin version the chooser opened on.
