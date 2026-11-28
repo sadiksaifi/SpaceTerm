@@ -1258,6 +1258,31 @@ fn the_confirm_key_should_activate_the_primary_action_while_results_load(cx: &mu
 }
 
 #[gpui::test]
+fn a_button_only_primary_action_should_leave_the_confirm_key_and_return_alone(
+    cx: &mut TestAppContext,
+) {
+    let (root, palette, events, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(
+            Some(CommandPalettePrimaryAction::new("add", "Add").button_only()),
+            cx,
+        );
+    });
+    open_palette(&root, &palette, cx);
+    cx.simulate_keystrokes("cmd-enter");
+    cx.run_until_parked();
+    show_empty_state(&root, &palette, CommandPaletteEmpty::new("No folders"), cx);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    assert!(
+        header_actions(&events).is_empty(),
+        "a key activated a button-only primary action"
+    );
+    assert!(palette.read_with(cx, |palette, _| palette.is_open()));
+}
+
+#[gpui::test]
 fn a_results_note_should_follow_the_last_result(cx: &mut TestAppContext) {
     let (root, palette, _, _, cx) = palette_window(cx);
     palette.update(cx, |palette, cx| {

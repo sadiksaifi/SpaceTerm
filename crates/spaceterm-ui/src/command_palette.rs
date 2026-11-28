@@ -621,6 +621,7 @@ pub struct CommandPalettePrimaryAction {
     leading_icon: Option<IconBuilder>,
     shortcut: Option<SharedString>,
     disabled: bool,
+    button_only: bool,
     menu_items: Vec<(SharedString, SharedString)>,
     menu_disabled: bool,
     debug_selector: Option<String>,
@@ -635,6 +636,7 @@ impl CommandPalettePrimaryAction {
             leading_icon: None,
             shortcut: None,
             disabled: false,
+            button_only: false,
             menu_items: Vec::new(),
             menu_disabled: false,
             debug_selector: None,
@@ -657,6 +659,13 @@ impl CommandPalettePrimaryAction {
 
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// Activates the action only through its button. Return and [`Confirm`] leave it alone, as
+    /// for a command that starts a separate journey rather than completing the search.
+    pub fn button_only(mut self) -> Self {
+        self.button_only = true;
         self
     }
 
@@ -2739,12 +2748,13 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
         self.activate_item(item_id, source, window, cx);
     }
 
-    /// Availability belongs to the action's disabled state, so pending results never block it.
+    /// Activates the primary action from the keyboard. Availability belongs to the action's
+    /// disabled state, so pending results never block it.
     fn activate_primary_action(&mut self, cx: &mut gpui::Context<Self>) {
         if let Some(action) = self
             .primary_action
             .as_ref()
-            .filter(|action| !action.disabled)
+            .filter(|action| !action.disabled && !action.button_only)
         {
             cx.emit(CommandPaletteEvent::HeaderAction(action.id.clone()));
         }

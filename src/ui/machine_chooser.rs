@@ -7,10 +7,9 @@
 use gpui::prelude::*;
 use gpui::{Context, Entity, EventEmitter, Render, SharedString, Window, div};
 use spaceterm_ui::{
-    CommandPalette, CommandPaletteAccessory, CommandPaletteActivationPolicy,
-    CommandPaletteCloseReason, CommandPaletteEmpty, CommandPaletteEvent, CommandPaletteItem,
-    CommandPaletteLifecycleEvent, CommandPalettePrimaryAction, CommandPaletteReplacementFocus,
-    Icon, IconName,
+    CommandPalette, CommandPaletteAccessory, CommandPaletteActivationPolicy, CommandPaletteEmpty,
+    CommandPaletteEvent, CommandPaletteItem, CommandPaletteLifecycleEvent,
+    CommandPalettePrimaryAction, CommandPaletteReplacementFocus, Icon, IconName,
 };
 
 use crate::direct_connections::DirectRouteId;
@@ -101,6 +100,8 @@ impl MachineChooser {
                         .leading_icon(|foreground, size| {
                             Icon::new(IconName::Plus, size, foreground).into_any_element()
                         })
+                        // Adding a Machine leaves the search, so no key reaches it.
+                        .button_only()
                         .debug_selector(ADD_MACHINE_ACTION),
                 ),
                 cx,
@@ -185,12 +186,11 @@ impl MachineChooser {
                 self.opening = false;
                 self.open = true;
             }
-            CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Closed(reason)) => {
+            // Another chooser replacing this one, such as the Workspace Switcher, also ends it.
+            CommandPaletteEvent::Lifecycle(CommandPaletteLifecycleEvent::Closed(_)) => {
                 self.opening = false;
                 self.open = false;
-                if !std::mem::replace(&mut self.ended, true)
-                    && *reason != CommandPaletteCloseReason::Replaced
-                {
+                if !std::mem::replace(&mut self.ended, true) {
                     cx.emit(MachineChooserEvent::Dismissed);
                 }
                 cx.notify();

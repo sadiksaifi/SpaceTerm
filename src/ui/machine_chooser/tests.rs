@@ -104,13 +104,22 @@ fn a_machine_that_is_not_connected_cannot_be_chosen(cx: &mut TestAppContext) {
 
     let tree = A11yTree::read(cx);
     perform(cx, tree.node("studio"), gpui::accesskit::Action::Click);
+    press("enter", cx);
 
-    assert!(
-        !events
-            .borrow()
-            .iter()
-            .any(|event| matches!(event, MachineChooserEvent::Chosen(_)))
-    );
+    assert!(events.borrow().is_empty(), "{:?}", events.borrow());
+}
+
+/// Only the Add Machine button adds a Machine: neither the Confirm key nor Return on a filter
+/// that matched nothing reaches it.
+#[gpui::test]
+fn no_key_reaches_add_machine(cx: &mut TestAppContext) {
+    let (_, events, cx) = open_chooser(MachineChoices::Read(vec![machine(2, "penguin", true)]), cx);
+
+    press("cmd-enter", cx);
+    press("z z z", cx);
+    press("enter", cx);
+
+    assert!(events.borrow().is_empty(), "{:?}", events.borrow());
 }
 
 #[gpui::test]
