@@ -281,6 +281,9 @@ pub(crate) struct WorkspaceManager {
     pin_picker: Option<Entity<DirectoryPicker>>,
     /// The Machine chooser New Remote Workspace opens before the Directory Picker.
     machine_chooser: Option<Entity<MachineChooser>>,
+    /// Choosers that closed because the window deactivated. Each palette returns the keyboard to
+    /// the owner it would restore once the window activates again, so they live until then.
+    closed_while_inactive: Vec<gpui::AnyEntity>,
     pin_operation: u64,
     /// Counts Workspace activations, so a deferred completion can tell that navigation happened
     /// since it began, even navigation that returned to the same Workspace.
@@ -413,6 +416,11 @@ impl WorkspaceManager {
         .detach();
         cx.observe_window_activation(window, |manager, window, cx| {
             manager.launch_window_activation(window.is_window_active(), window, cx);
+            if window.is_window_active() && !manager.closed_while_inactive.is_empty() {
+                // Each palette restores its focus owner in this same activation.
+                let closed = std::mem::take(&mut manager.closed_while_inactive);
+                cx.defer(move |_| drop(closed));
+            }
             if window.is_window_active()
                 && let Some(store) =
                     crate::ui::repository_status_store::InstalledRepositoryStatus::store(cx)
@@ -450,6 +458,7 @@ impl WorkspaceManager {
             directory_selection,
             pin_picker: None,
             machine_chooser: None,
+            closed_while_inactive: Vec::new(),
             pin_operation: 0,
             activation_epoch: 0,
             quiet_creation: None,
@@ -1189,7 +1198,9 @@ impl WorkspaceManager {
                         manager.choose_local_pin_directory(target.clone(), window, cx);
                     }
                     DirectoryPickerEvent::Dismissed => {
-                        manager.pin_picker = None;
+                        if let Some(picker) = manager.pin_picker.take() {
+                            manager.keep_until_activation(picker.into_any(), window);
+                        }
                         manager.transient.end_pin();
                     }
                     DirectoryPickerEvent::StateChanged => {}
@@ -1266,7 +1277,9 @@ impl WorkspaceManager {
                         window
                             .dispatch_action(Box::new(crate::ui::settings_window::AddMachine), cx);
                     }
-                    MachineChooserEvent::Dismissed => {}
+                    MachineChooserEvent::Dismissed => {
+                        manager.keep_until_activation(chooser.clone().into_any(), window);
+                    }
                 }
                 manager.sync_terminal_focus_blocker(window, cx);
                 cx.notify();
@@ -1281,6 +1294,14 @@ impl WorkspaceManager {
         self.machine_chooser = Some(chooser);
         self.sync_terminal_focus_blocker(window, cx);
         cx.notify();
+    }
+
+    /// Keeps `chooser`, which just closed, while the window is inactive, so its palette can return
+    /// the keyboard to the owner it restores when the window activates again.
+    fn keep_until_activation(&mut self, chooser: gpui::AnyEntity, window: &Window) {
+        if !window.is_window_active() {
+            self.closed_while_inactive.push(chooser);
+        }
     }
 
     /// Lists the saved Machines as they stand now in an open Machine chooser.
