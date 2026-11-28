@@ -489,9 +489,17 @@ fn pre_greenfield_settings_offer_reset_without_changing_files_and_become_writabl
         let settings = load();
         assert_eq!(settings.snapshot().status, Some(SettingsError::Invalid));
         assert!(settings.snapshot().status.unwrap().is_malformed());
-        // Declining and launching again repeats the recovery offer without effects.
+        // Declining and launching again repeats the recovery offer and leaves the person's
+        // files as they were. Marked data below the current generation also gains the
+        // migration's backup copy, which the refused migration leaves for the next attempt.
         assert_eq!(load().snapshot().status, Some(SettingsError::Invalid));
-        assert_eq!(files(&root), before);
+        let mut after = files(&root);
+        after.retain(|path, _| {
+            !path
+                .components()
+                .any(|part| part.as_os_str() == "migration-backup")
+        });
+        assert_eq!(after, before);
         settings.recover_by_reset().unwrap();
         assert_eq!(settings.snapshot().status, None);
         let generation = if marked { 1 } else { 0 };
@@ -649,6 +657,34 @@ fn every_desktop_config_migration_fixture_migrates_and_reads_strictly() {
         &fixtures::directory("desktop-config"),
         &[],
         |root| Box::new(config_store(native(), root.to_path_buf())),
+    );
+}
+
+/// Generation 1 named New Scratch Workspace `new_workspace` and New Workspace
+/// `open_local_directory`. Each saved Shortcut stays on the Command it was assigned to.
+#[test]
+fn generation_two_keeps_workspace_creation_shortcuts_on_their_commands() {
+    let generation_one: serde_json::Value = serde_json::from_slice(include_bytes!(
+        "../../fixtures/migrations/desktop-config/gen-1/settings.json"
+    ))
+    .unwrap();
+    let mut settings = generation_one;
+    settings["keybindings"] = serde_json::json!({
+        "new_workspace": "cmd-y",
+        "open_local_directory": null,
+        "close_tab": "cmd-shift-x",
+    });
+
+    let migrated = migration::migrate_document(&CONFIG, SETTINGS, settings).unwrap();
+
+    assert_eq!(migrated["schema_version"], 2);
+    assert_eq!(
+        migrated["keybindings"],
+        serde_json::json!({
+            "new_scratch_workspace": "cmd-y",
+            "new_workspace": null,
+            "close_tab": "cmd-shift-x",
+        })
     );
 }
 

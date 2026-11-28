@@ -330,7 +330,7 @@ impl WorkspaceManager {
                 .debug_selector("empty-workspace-create")
                 .on_activate(move |_, window, cx| {
                     let _ = manager.update(cx, |manager, cx| {
-                        manager.run_workspace_creation(WorkspaceCreation::Local, window, cx);
+                        manager.run_workspace_creation(WorkspaceCreation::Scratch, window, cx);
                     });
                 });
             crate::ui::empty_state::empty_state(title, cx)

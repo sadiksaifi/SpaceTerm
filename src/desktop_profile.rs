@@ -477,7 +477,7 @@ pub(crate) fn testing_profile(direction: spaceterm_ui::TextDirection) -> Desktop
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::{ChooseWorkspace, NewWorkspace};
+    use crate::ui::{ChooseWorkspace, NewScratchWorkspace};
     use gpui::KeyBinding;
 
     #[gpui::test]
@@ -610,19 +610,19 @@ mod tests {
         );
 
         let preferences: KeybindingPreferences =
-            serde_json::from_str(r#"{"new_workspace":"cmd-alt-a"}"#).unwrap();
+            serde_json::from_str(r#"{"new_scratch_workspace":"cmd-alt-a"}"#).unwrap();
         let resolved = profile.resolve(&preferences);
         assert_eq!(
-            resolved.inactive_override(Command::NewWorkspace),
+            resolved.inactive_override(Command::NewScratchWorkspace),
             Some(Reservation::System(SystemReservation::DeveloperWorkbench))
         );
         assert_eq!(
-            resolved.state(Command::NewWorkspace),
+            resolved.state(Command::NewScratchWorkspace),
             KeybindingState::Default
         );
         assert!(
             !resolved
-                .shortcuts(Command::NewWorkspace)
+                .shortcuts(Command::NewScratchWorkspace)
                 .contains(&workbench)
         );
     }
@@ -633,17 +633,21 @@ mod tests {
     ) {
         cx.update(|cx| {
             cx.bind_keys([
-                KeyBinding::new("ctrl-insert", NewWorkspace, Some("SpaceTermTextInput")),
+                KeyBinding::new(
+                    "ctrl-insert",
+                    NewScratchWorkspace,
+                    Some("SpaceTermTextInput"),
+                ),
                 KeyBinding::new(
                     "ctrl-shift-y",
-                    NewWorkspace,
+                    NewScratchWorkspace,
                     Some(crate::ui::TERMINAL_KEY_CONTEXT),
                 ),
             ]);
             let mut native = testing_presentation();
             native.refresh(cx);
             assert_eq!(
-                native.shortcut(&NewWorkspace).as_deref(),
+                native.shortcut(&NewScratchWorkspace).as_deref(),
                 Some("Ctrl+INSERT")
             );
             let mut terminal = DesktopPresentation::new(
@@ -655,7 +659,7 @@ mod tests {
             );
             terminal.refresh(cx);
             assert_eq!(
-                terminal.shortcut(&NewWorkspace).as_deref(),
+                terminal.shortcut(&NewScratchWorkspace).as_deref(),
                 Some("Ctrl+Shift+Y")
             );
         });
@@ -678,29 +682,41 @@ mod tests {
                 "Primary+Shift"
             );
             cx.bind_keys([
-                KeyBinding::new("cmd-y", NewWorkspace, Some(crate::ui::TERMINAL_KEY_CONTEXT)),
-                KeyBinding::new("cmd-u", NewWorkspace, None),
-                KeyBinding::new("cmd-i", NewWorkspace, None),
+                KeyBinding::new(
+                    "cmd-y",
+                    NewScratchWorkspace,
+                    Some(crate::ui::TERMINAL_KEY_CONTEXT),
+                ),
+                KeyBinding::new("cmd-u", NewScratchWorkspace, None),
+                KeyBinding::new("cmd-i", NewScratchWorkspace, None),
             ]);
             presentation.refresh(cx);
             assert_eq!(
-                presentation.shortcut(&NewWorkspace).as_deref(),
+                presentation.shortcut(&NewScratchWorkspace).as_deref(),
                 Some("Primary+U")
             );
             cx.clear_key_bindings();
             cx.bind_keys([
-                KeyBinding::new("cmd-y", NewWorkspace, Some(crate::ui::TERMINAL_KEY_CONTEXT)),
-                KeyBinding::new("cmd-u", NewWorkspace, Some(crate::ui::TERMINAL_KEY_CONTEXT)),
+                KeyBinding::new(
+                    "cmd-y",
+                    NewScratchWorkspace,
+                    Some(crate::ui::TERMINAL_KEY_CONTEXT),
+                ),
+                KeyBinding::new(
+                    "cmd-u",
+                    NewScratchWorkspace,
+                    Some(crate::ui::TERMINAL_KEY_CONTEXT),
+                ),
             ]);
             presentation.refresh(cx);
             assert_eq!(
-                presentation.shortcut(&NewWorkspace).as_deref(),
+                presentation.shortcut(&NewScratchWorkspace).as_deref(),
                 Some("Primary+Y")
             );
             assert_eq!(presentation.shortcut(&ChooseWorkspace), None);
             cx.clear_key_bindings();
             presentation.refresh(cx);
-            assert_eq!(presentation.shortcut(&NewWorkspace), None);
+            assert_eq!(presentation.shortcut(&NewScratchWorkspace), None);
         });
     }
 }

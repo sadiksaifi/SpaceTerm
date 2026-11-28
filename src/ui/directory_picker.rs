@@ -23,7 +23,7 @@ use super::{
     ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane, CloseTab,
     CloseTerminalFind, CopySelection, FindNext, FindPrevious, FocusNextPane, FocusPaneDown,
     FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane, KillWorkspace, MoveTabLeft,
-    MoveTabRight, NewTab, NewWorkspace, NextTab, OpenTerminalFind, PreviousTab,
+    MoveTabRight, NewScratchWorkspace, NewTab, NextTab, OpenTerminalFind, PreviousTab,
     ShowRepositoryStatus, SplitDown, SplitRight, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
 };
 
@@ -1362,8 +1362,8 @@ impl Render for DirectoryPicker {
         div()
             .when(self.blocks_terminal_input(), |picker| {
                 picker
-                    .capture_action(block_parent_action::<NewWorkspace>)
-                    .capture_action(block_parent_action::<super::OpenLocalDirectory>)
+                    .capture_action(block_parent_action::<NewScratchWorkspace>)
+                    .capture_action(block_parent_action::<super::NewWorkspace>)
                     .capture_action(block_parent_action::<super::NewWorktree>)
                     .capture_action(block_parent_action::<super::NextWorktree>)
                     .capture_action(block_parent_action::<super::PreviousWorktree>)

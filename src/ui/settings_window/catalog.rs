@@ -1090,8 +1090,8 @@ macro_rules! shortcut_rows {
 
 shortcut_rows! {
     ChooseWorkspace => "choose-workspace",
+    NewScratchWorkspace => "new-scratch-workspace",
     NewWorkspace => "new-workspace",
-    OpenLocalDirectory => "open-local-directory",
     NewWorktree => "new-worktree",
     NextWorktree => "next-worktree",
     PreviousWorktree => "previous-worktree",

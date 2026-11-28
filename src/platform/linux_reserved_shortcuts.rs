@@ -61,23 +61,24 @@ mod tests {
         ] {
             let shortcut = Shortcut::parse(source).unwrap();
             let preferences: KeybindingPreferences =
-                serde_json::from_value(serde_json::json!({"new_workspace": source})).unwrap();
+                serde_json::from_value(serde_json::json!({"new_scratch_workspace": source}))
+                    .unwrap();
             let resolved = profile.resolve(&preferences);
             assert_eq!(profile.check(&shortcut), Err(Reservation::System(reason)));
             assert_eq!(
-                resolved.inactive_override(Command::NewWorkspace),
+                resolved.inactive_override(Command::NewScratchWorkspace),
                 Some(Reservation::System(reason))
             );
             assert_eq!(
-                resolved.state(Command::NewWorkspace),
+                resolved.state(Command::NewScratchWorkspace),
                 KeybindingState::Default
             );
             assert_eq!(
-                resolved.shortcut(Command::NewWorkspace),
+                resolved.shortcut(Command::NewScratchWorkspace),
                 Some(&Shortcut::parse("ctrl-shift-n").unwrap())
             );
             assert_eq!(
-                preferences.get(Command::NewWorkspace),
+                preferences.get(Command::NewScratchWorkspace),
                 Some(&Some(shortcut))
             );
         }
@@ -90,12 +91,13 @@ mod tests {
         for source in ["ctrl-shift-alt-a", "ctrl-shift-alt-c"] {
             let shortcut = Shortcut::parse(source).unwrap();
             let preferences: KeybindingPreferences =
-                serde_json::from_value(serde_json::json!({"new_workspace": source})).unwrap();
+                serde_json::from_value(serde_json::json!({"new_scratch_workspace": source}))
+                    .unwrap();
             assert_eq!(profile.check(&shortcut), Ok(()));
             assert_eq!(
                 profile
                     .resolve(&preferences)
-                    .shortcut(Command::NewWorkspace),
+                    .shortcut(Command::NewScratchWorkspace),
                 Some(&shortcut)
             );
         }
@@ -127,7 +129,7 @@ mod tests {
             profile
                 .assign(
                     &mut preferences,
-                    Command::NewWorkspace,
+                    Command::NewScratchWorkspace,
                     Some(Shortcut::parse("ctrl-shift-q").unwrap())
                 )
                 .is_err()

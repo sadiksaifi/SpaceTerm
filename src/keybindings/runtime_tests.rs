@@ -62,7 +62,11 @@ fn assert_bindings_eq(actual: &[KeyBinding], expected: &[KeyBinding]) {
 #[gpui::test]
 fn replacement_preserves_untagged_positions_and_default_restoration(cx: &mut TestAppContext) {
     cx.update(|cx| {
-        cx.bind_keys([KeyBinding::new("cmd-y", crate::ui::NewWorkspace, None)]);
+        cx.bind_keys([KeyBinding::new(
+            "cmd-y",
+            crate::ui::NewScratchWorkspace,
+            None,
+        )]);
         crate::ui::init(cx).unwrap();
         // Controls can add bindings after the desktop profile, including the same chord.
         cx.bind_keys([KeyBinding::new(
@@ -299,11 +303,12 @@ fn layout_changes_refresh_dispatch_reservations_hints_and_menus_without_editing_
             .unwrap(),
     )));
     let preferences: KeybindingPreferences =
-        serde_json::from_str(r#"{"new_tab":"shift-cmd-7","new_workspace":"cmd-§"}"#).unwrap();
+        serde_json::from_str(r#"{"new_tab":"shift-cmd-7","new_scratch_workspace":"cmd-§"}"#)
+            .unwrap();
     let retained = serde_json::to_value(&preferences).unwrap();
     assert_eq!(
         retained,
-        serde_json::json!({"new_tab": "shift-cmd-7", "new_workspace": "cmd-§"})
+        serde_json::json!({"new_tab": "shift-cmd-7", "new_scratch_workspace": "cmd-§"})
     );
     let menu = Rc::new(RecordingApplicationMenuAdapter::default());
     let dispatches = Rc::new(Cell::new(0));
@@ -337,13 +342,13 @@ fn layout_changes_refresh_dispatch_reservations_hints_and_menus_without_editing_
         refresh_layout(cx);
         let resolved = InstalledKeymap::get(cx);
         assert_eq!(
-            resolved.inactive_override(Command::NewWorkspace),
+            resolved.inactive_override(Command::NewScratchWorkspace),
             Some(crate::keybindings::Reservation::System(
                 SystemReservation::Screenshot
             ))
         );
         assert_eq!(
-            resolved.state(Command::NewWorkspace),
+            resolved.state(Command::NewScratchWorkspace),
             KeybindingState::Default
         );
         assert_eq!(
@@ -379,7 +384,7 @@ fn layout_changes_refresh_dispatch_reservations_hints_and_menus_without_editing_
     cx.update(|_, cx| {
         refresh_layout(cx);
         assert_eq!(
-            InstalledKeymap::get(cx).state(Command::NewWorkspace),
+            InstalledKeymap::get(cx).state(Command::NewScratchWorkspace),
             KeybindingState::Overridden
         );
     });

@@ -572,7 +572,7 @@ fn a_creation_the_person_chose_replaces_the_one_a_cold_launch_owed(cx: &mut Test
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
             manager.run_workspace_creation(
-                crate::ui::workspace_creation::WorkspaceCreation::Local,
+                crate::ui::workspace_creation::WorkspaceCreation::Scratch,
                 window,
                 cx,
             );
@@ -936,7 +936,7 @@ fn workspace_controls_presented(cx: &mut VisualTestContext) -> Vec<&'static str>
 }
 
 fn creation_available(cx: &mut VisualTestContext) -> bool {
-    cx.update(|window, cx| window.is_action_available(&NewWorkspace, cx))
+    cx.update(|window, cx| window.is_action_available(&NewScratchWorkspace, cx))
 }
 
 /// Without usable server state the launch screen takes the whole window beneath its Window
@@ -1486,7 +1486,7 @@ fn new_workspace_presents_a_pending_creation_without_core_authority(cx: &mut Tes
     let (harness, cx) = launch_harness(vec![ready()], cx);
     cx.run_until_parked();
     sync(&harness, cx);
-    cx.dispatch_action(NewWorkspace);
+    cx.dispatch_action(NewScratchWorkspace);
     cx.run_until_parked();
 
     assert_eq!(
@@ -1565,7 +1565,7 @@ fn open_local_directory_creates_a_core_workspace_rooted_there(cx: &mut TestAppCo
     sync(&harness, cx);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.open_local_directory(String::new(), window, cx);
+            manager.choose_local_workspace_directory(String::new(), window, cx);
             manager.choose_local_pin_directory(
                 PinTarget::NewLocalWorkspace {
                     name: String::new(),
@@ -1987,7 +1987,7 @@ fn a_refused_first_workspace_creation_keeps_the_window_and_its_notice(cx: &mut T
     cx.run_until_parked();
     sync(&harness, cx);
     assert_eq!(harness.workspace_count(cx), 0);
-    cx.dispatch_action(crate::ui::NewWorkspace);
+    cx.dispatch_action(crate::ui::NewScratchWorkspace);
     cx.run_until_parked();
     assert_eq!(
         harness.workspace_count(cx),
@@ -2009,7 +2009,7 @@ fn a_refused_first_workspace_creation_keeps_the_window_and_its_notice(cx: &mut T
         .expect("the refusal remains readable");
     cx.simulate_click(action.center(), Modifiers::none());
     cx.run_until_parked();
-    cx.dispatch_action(crate::ui::NewWorkspace);
+    cx.dispatch_action(crate::ui::NewScratchWorkspace);
     cx.run_until_parked();
     assert_eq!(
         created_names(&harness).len(),

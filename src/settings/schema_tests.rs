@@ -193,7 +193,7 @@ fn published_schema_lists_keybinding_commands_in_settings_order() {
     let validator = validator();
     let mut settings = serde_json::to_value(super::SettingsDocument::default()).unwrap();
     settings["keybindings"] =
-        serde_json::json!({"close_tab": null, "new_workspace": "shift-cmd-t"});
+        serde_json::json!({"close_tab": null, "new_scratch_workspace": "shift-cmd-t"});
     assert!(validator.is_valid(&settings));
     settings["keybindings"]["unknown_command"] = serde_json::json!(null);
     assert!(!validator.is_valid(&settings));

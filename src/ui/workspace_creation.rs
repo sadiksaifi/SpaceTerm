@@ -13,9 +13,9 @@ use crate::direct_connections::DirectRouteId;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WorkspaceCreation {
     /// A Workspace the account server owns, at the local home directory.
-    Local,
+    Scratch,
     /// A Workspace the account server owns, pinned to a local directory chosen before creation.
-    OpenLocalDirectory,
+    Local,
     /// A Workspace on a saved paired server, at that server's home directory.
     Remote(DirectRouteId),
     /// A Workspace on a saved paired server, pinned to a directory chosen on that server.
@@ -56,14 +56,14 @@ pub(crate) const REMOTE_UNAVAILABLE: &str = "Not connected";
 
 impl WorkspaceCreation {
     /// The local creation rows in presentation order. Remote rows follow per saved server.
-    pub(crate) const LOCAL: [Self; 2] = [Self::Local, Self::OpenLocalDirectory];
+    pub(crate) const LOCAL: [Self; 2] = [Self::Scratch, Self::Local];
 
     /// The row label as the Workspace Switcher shows it, naming the server for a remote row.
     /// Open rows end in an ellipsis because a chooser opens before creation.
     pub(crate) fn label(self, core: Option<&str>) -> SharedString {
         match (self, core) {
-            (Self::Local, _) => "New Local Workspace".into(),
-            (Self::OpenLocalDirectory, _) => "Open Local Directory\u{2026}".into(),
+            (Self::Scratch, _) => "New Scratch Workspace".into(),
+            (Self::Local, _) => "New Workspace\u{2026}".into(),
             (Self::Remote(_), Some(core)) => format!("New Workspace on {core}").into(),
             (Self::OpenRemoteDirectory(_), Some(core)) => {
                 format!("Open Directory on {core}\u{2026}").into()
@@ -75,9 +75,9 @@ impl WorkspaceCreation {
 
     pub(crate) const fn icon(self) -> CustomIconName {
         match self {
-            Self::Local => CustomIconName::RectangleStackBadgePlus,
+            Self::Scratch => CustomIconName::RectangleStackBadgePlus,
             Self::Remote(_) => CustomIconName::GlobePlus,
-            Self::OpenLocalDirectory => CustomIconName::FolderBadgePlus,
+            Self::Local => CustomIconName::FolderBadgePlus,
             Self::OpenRemoteDirectory(_) => CustomIconName::FolderBadgeGlobe,
         }
     }
@@ -86,8 +86,8 @@ impl WorkspaceCreation {
     /// position among the saved servers.
     pub(crate) fn selector(self, position: usize) -> String {
         match self {
-            Self::Local => "create-local".to_owned(),
-            Self::OpenLocalDirectory => "open-local-directory".to_owned(),
+            Self::Scratch => "create-local".to_owned(),
+            Self::Local => "open-local-directory".to_owned(),
             Self::Remote(_) => format!("create-remote-{position}"),
             Self::OpenRemoteDirectory(_) => format!("open-remote-directory-{position}"),
         }
@@ -100,8 +100,8 @@ impl WorkspaceCreation {
 
     fn action(self) -> Option<Box<dyn Action>> {
         match self {
+            Self::Scratch => Some(Box::new(super::NewScratchWorkspace)),
             Self::Local => Some(Box::new(super::NewWorkspace)),
-            Self::OpenLocalDirectory => Some(Box::new(super::OpenLocalDirectory)),
             Self::Remote(_) | Self::OpenRemoteDirectory(_) => None,
         }
     }

@@ -9,9 +9,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::platform::app_directories::AppDirectories;
+use serde_json::Value;
 use spaceterm_core::migration::{
     self, Admission, ArtifactRule, DataKind, DirectoryStore, FileRule, Mount, Outcome, Refusal,
-    Registry, generations,
+    Registry, Step, Unmigratable, generations,
 };
 use spaceterm_core::native_client::migration::StoreCredentials;
 
@@ -38,9 +39,31 @@ pub(crate) const CONFIG: Registry = Registry {
         }],
     },
     generations: generations::DESKTOP_CONFIG,
-    steps: &[],
+    steps: &[&[Step::File {
+        name: SETTINGS,
+        apply: rename_workspace_creation_shortcuts,
+    }]],
     files: &[CONFIG_RULES],
 };
+
+/// Generation 2 renamed two Workspace creation Commands. A saved `new_workspace` override
+/// belongs to New Scratch Workspace, and `open_local_directory` to New Workspace. The first
+/// move frees `new_workspace` for the second, so every Shortcut stays on its Command.
+fn rename_workspace_creation_shortcuts(settings: &mut Value) -> Result<(), Unmigratable> {
+    let Some(keybindings) = settings
+        .get_mut("keybindings")
+        .and_then(Value::as_object_mut)
+    else {
+        return Ok(());
+    };
+    if let Some(scratch) = keybindings.remove("new_workspace") {
+        keybindings.insert("new_scratch_workspace".to_owned(), scratch);
+    }
+    if let Some(local) = keybindings.remove("open_local_directory") {
+        keybindings.insert("new_workspace".to_owned(), local);
+    }
+    Ok(())
+}
 
 const STATE_RULES: &[FileRule] = &[
     FileRule {

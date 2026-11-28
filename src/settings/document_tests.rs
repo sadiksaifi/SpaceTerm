@@ -206,7 +206,7 @@ fn resetting_the_whole_document_empties_the_catalog_and_keeps_its_identity() {
     let mut document = reset_fixture();
     document.keybindings = serde_json::from_value(serde_json::json!({
         "close_tab": null,
-        "new_workspace": "shift-cmd-t"
+        "new_scratch_workspace": "shift-cmd-t"
     }))
     .unwrap();
     document.revision = 17;
@@ -449,7 +449,7 @@ fn invalid_keybinding_overrides_are_rejected_by_the_settings_document() {
     let mut value = serde_json::to_value(SettingsDocument::default()).unwrap();
     value["keybindings"] = serde_json::json!({
         "close_tab": "shift-cmd-t",
-        "new_workspace": "shift-cmd-t"
+        "new_scratch_workspace": "shift-cmd-t"
     });
     let bytes = serde_json::to_vec(&value).unwrap();
     assert_eq!(
@@ -487,7 +487,7 @@ fn every_settings_section_round_trips_replaces_and_resets_without_changing_ident
         check_interval: CheckInterval::Hourly,
     };
     source.keybindings = serde_json::from_value(serde_json::json!({
-        "close_tab": null, "new_workspace": "shift-cmd-t"
+        "close_tab": null, "new_scratch_workspace": "shift-cmd-t"
     }))
     .unwrap();
     source.clipboard.allow_write = false;
@@ -502,7 +502,7 @@ fn every_settings_section_round_trips_replaces_and_resets_without_changing_ident
     assert_eq!(
         value["keybindings"],
         serde_json::json!({
-            "close_tab": null, "new_workspace": "shift-cmd-t"
+            "close_tab": null, "new_scratch_workspace": "shift-cmd-t"
         })
     );
     assert_eq!(value["sidebar"]["default_state"], "collapsed");

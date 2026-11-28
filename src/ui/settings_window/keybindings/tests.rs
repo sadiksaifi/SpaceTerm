@@ -181,12 +181,12 @@ fn every_command_has_a_row_in_the_keybindings_section(cx: &mut TestAppContext) {
     });
     assert_eq!(rows.len(), Command::ALL.len());
     assert!(
-        cx.debug_bounds("settings-row-shortcut-new-workspace-control")
+        cx.debug_bounds("settings-row-shortcut-new-scratch-workspace-control")
             .is_some()
     );
     // Defaults offer nothing to reset.
     assert!(
-        cx.debug_bounds("settings-row-shortcut-new-workspace-reset")
+        cx.debug_bounds("settings-row-shortcut-new-scratch-workspace-reset")
             .is_none()
     );
 }
@@ -194,17 +194,17 @@ fn every_command_has_a_row_in_the_keybindings_section(cx: &mut TestAppContext) {
 #[gpui::test]
 fn clicking_a_shortcut_records_the_next_chord_into_the_draft(cx: &mut TestAppContext) {
     let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
-    click("settings-row-shortcut-new-workspace-control", cx);
+    click("settings-row-shortcut-new-scratch-workspace-control", cx);
     cx.simulate_keystrokes("cmd-shift-y");
     cx.run_until_parked();
 
     assert_eq!(
-        retained(&window, Command::NewWorkspace, cx),
+        retained(&window, Command::NewScratchWorkspace, cx),
         Some(Some(shortcut("cmd-shift-y")))
     );
-    assert_eq!(description(&window, Command::NewWorkspace, cx), None);
+    assert_eq!(description(&window, Command::NewScratchWorkspace, cx), None);
     assert!(
-        cx.debug_bounds("settings-row-shortcut-new-workspace-reset")
+        cx.debug_bounds("settings-row-shortcut-new-scratch-workspace-reset")
             .is_some()
     );
 }
@@ -212,15 +212,15 @@ fn clicking_a_shortcut_records_the_next_chord_into_the_draft(cx: &mut TestAppCon
 #[gpui::test]
 fn recording_another_commands_shortcut_reassigns_it(cx: &mut TestAppContext) {
     let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
-    record(&window, Command::NewWorkspace, "cmd-shift-w", cx);
+    record(&window, Command::NewScratchWorkspace, "cmd-shift-w", cx);
 
     assert_eq!(
-        retained(&window, Command::NewWorkspace, cx),
+        retained(&window, Command::NewScratchWorkspace, cx),
         Some(Some(shortcut("cmd-shift-w")))
     );
     assert_eq!(retained(&window, Command::CloseTab, cx), Some(None));
     assert_eq!(
-        description(&window, Command::NewWorkspace, cx),
+        description(&window, Command::NewScratchWorkspace, cx),
         Some(ShortcutDescription {
             text: "Removed from Close Tab.".into(),
             tone: CaptionTone::Warning,
@@ -229,7 +229,7 @@ fn recording_another_commands_shortcut_reassigns_it(cx: &mut TestAppContext) {
     assert_eq!(
         description(&window, Command::CloseTab, cx),
         Some(ShortcutDescription {
-            text: "Shortcut assigned to New Workspace.".into(),
+            text: "Shortcut assigned to New Scratch Workspace.".into(),
             tone: CaptionTone::Warning,
         })
     );
@@ -238,11 +238,11 @@ fn recording_another_commands_shortcut_reassigns_it(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_terminal_reserved_chord_is_refused_and_recording_continues(cx: &mut TestAppContext) {
     let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
-    record(&window, Command::NewWorkspace, "ctrl-c", cx);
+    record(&window, Command::NewScratchWorkspace, "ctrl-c", cx);
 
-    assert_eq!(retained(&window, Command::NewWorkspace, cx), None);
+    assert_eq!(retained(&window, Command::NewScratchWorkspace, cx), None);
     assert_eq!(
-        description(&window, Command::NewWorkspace, cx),
+        description(&window, Command::NewScratchWorkspace, cx),
         Some(ShortcutDescription {
             text: "Ctrl+C is reserved for terminal programs.".into(),
             tone: CaptionTone::Error,
@@ -252,7 +252,7 @@ fn a_terminal_reserved_chord_is_refused_and_recording_continues(cx: &mut TestApp
     cx.simulate_keystrokes("k");
     cx.run_until_parked();
     assert_eq!(
-        description(&window, Command::NewWorkspace, cx),
+        description(&window, Command::NewScratchWorkspace, cx),
         Some(ShortcutDescription {
             text: "Add Primary to use K as a shortcut.".into(),
             tone: CaptionTone::Error,
@@ -263,14 +263,14 @@ fn a_terminal_reserved_chord_is_refused_and_recording_continues(cx: &mut TestApp
     cx.simulate_keystrokes("f5");
     cx.run_until_parked();
     assert_eq!(
-        description(&window, Command::NewWorkspace, cx).map(|description| description.text),
+        description(&window, Command::NewScratchWorkspace, cx).map(|description| description.text),
         Some("Add Primary to use F5 as a shortcut.".into())
     );
 
     // Escape ends the recording, and the refusal goes with it.
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
-    assert_eq!(description(&window, Command::NewWorkspace, cx), None);
+    assert_eq!(description(&window, Command::NewScratchWorkspace, cx), None);
 }
 
 /// Replaces the key bindings with a Keymap Profile on US English that follows the Control-Shift
@@ -391,12 +391,12 @@ fn a_system_reserved_chord_is_refused_without_being_performed(cx: &mut TestAppCo
     cx.run_until_parked();
     assert_eq!(quits.get(), 1, "outside a recording the chord quits");
 
-    record(&window, Command::NewWorkspace, "cmd-q", cx);
+    record(&window, Command::NewScratchWorkspace, "cmd-q", cx);
 
     assert_eq!(quits.get(), 1, "the refused chord is not performed");
-    assert_eq!(retained(&window, Command::NewWorkspace, cx), None);
+    assert_eq!(retained(&window, Command::NewScratchWorkspace, cx), None);
     assert_eq!(
-        description(&window, Command::NewWorkspace, cx),
+        description(&window, Command::NewScratchWorkspace, cx),
         Some(ShortcutDescription {
             text: "Primary+Q is reserved for Quit.".into(),
             tone: CaptionTone::Error,
@@ -418,11 +418,11 @@ fn develop_menu_chords_are_refused_so_they_never_shadow_a_command(cx: &mut TestA
             "Primary+Alt+C is reserved for Toggle Appearance.".to_owned(),
         ),
     ] {
-        record(&window, Command::NewWorkspace, chord, cx);
+        record(&window, Command::NewScratchWorkspace, chord, cx);
 
-        assert_eq!(retained(&window, Command::NewWorkspace, cx), None);
+        assert_eq!(retained(&window, Command::NewScratchWorkspace, cx), None);
         assert_eq!(
-            description(&window, Command::NewWorkspace, cx),
+            description(&window, Command::NewScratchWorkspace, cx),
             Some(ShortcutDescription {
                 text: text.into(),
                 tone: CaptionTone::Error,
@@ -434,11 +434,11 @@ fn develop_menu_chords_are_refused_so_they_never_shadow_a_command(cx: &mut TestA
 #[gpui::test]
 fn a_bound_chord_while_recording_is_recorded_instead_of_closing_settings(cx: &mut TestAppContext) {
     let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
-    record(&window, Command::NewWorkspace, "cmd-w", cx);
+    record(&window, Command::NewScratchWorkspace, "cmd-w", cx);
 
     assert!(cx.debug_bounds("settings-window-surface").is_some());
     assert_eq!(
-        retained(&window, Command::NewWorkspace, cx),
+        retained(&window, Command::NewScratchWorkspace, cx),
         Some(Some(shortcut("cmd-w")))
     );
     assert_eq!(retained(&window, Command::ClosePane, cx), Some(None));
@@ -453,26 +453,29 @@ fn escape_while_recording_keeps_the_settings_search(cx: &mut TestAppContext) {
         });
     });
     cx.run_until_parked();
-    record(&window, Command::NewWorkspace, "escape", cx);
+    record(&window, Command::NewScratchWorkspace, "escape", cx);
 
     assert_eq!(
         window.read_with(cx, |settings, _| settings.query.clone()),
         "workspace"
     );
-    assert_eq!(retained(&window, Command::NewWorkspace, cx), None);
+    assert_eq!(retained(&window, Command::NewScratchWorkspace, cx), None);
 }
 
 #[gpui::test]
 fn delete_unassigns_and_the_row_reset_restores_the_default(cx: &mut TestAppContext) {
     let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
-    record(&window, Command::NewWorkspace, "backspace", cx);
-    assert_eq!(retained(&window, Command::NewWorkspace, cx), Some(None));
+    record(&window, Command::NewScratchWorkspace, "backspace", cx);
+    assert_eq!(
+        retained(&window, Command::NewScratchWorkspace, cx),
+        Some(None)
+    );
 
-    click("settings-row-shortcut-new-workspace-reset", cx);
+    click("settings-row-shortcut-new-scratch-workspace-reset", cx);
 
-    assert_eq!(retained(&window, Command::NewWorkspace, cx), None);
+    assert_eq!(retained(&window, Command::NewScratchWorkspace, cx), None);
     assert!(
-        cx.debug_bounds("settings-row-shortcut-new-workspace-reset")
+        cx.debug_bounds("settings-row-shortcut-new-scratch-workspace-reset")
             .is_none()
     );
 }
@@ -527,17 +530,17 @@ fn a_displaced_default_is_explained_and_its_reset_reclaims_it(cx: &mut TestAppCo
     let (window, cx) = open_keybindings(with_keybindings(r#"{"new_worktree":"cmd-n"}"#), cx);
 
     assert_eq!(
-        description(&window, Command::NewWorkspace, cx),
+        description(&window, Command::NewScratchWorkspace, cx),
         Some(ShortcutDescription {
             text: "Default shortcut assigned to New Worktree.".into(),
             tone: CaptionTone::Warning,
         })
     );
-    click("settings-row-shortcut-new-workspace-reset", cx);
+    click("settings-row-shortcut-new-scratch-workspace-reset", cx);
 
-    assert_eq!(retained(&window, Command::NewWorkspace, cx), None);
+    assert_eq!(retained(&window, Command::NewScratchWorkspace, cx), None);
     assert_eq!(retained(&window, Command::NewWorktree, cx), None);
-    assert_eq!(description(&window, Command::NewWorkspace, cx), None);
+    assert_eq!(description(&window, Command::NewScratchWorkspace, cx), None);
 }
 
 #[gpui::test]
@@ -769,7 +772,7 @@ fn a_reassignment_caption_leaves_when_reload_replaces_the_keybindings(cx: &mut T
     let storage = MemoryStorage::with_document(&SettingsDocument::default());
     let (window, cx) = open_keybindings_with(Arc::clone(&storage), cx);
     storage.fail_writes(Some(StorageError::Conflict));
-    record(&window, Command::NewWorkspace, "cmd-shift-w", cx);
+    record(&window, Command::NewScratchWorkspace, "cmd-shift-w", cx);
     assert!(description(&window, Command::CloseTab, cx).is_some());
 
     storage.fail_writes(None);
@@ -779,7 +782,7 @@ fn a_reassignment_caption_leaves_when_reload_replaces_the_keybindings(cx: &mut T
 
     assert_eq!(retained(&window, Command::CloseTab, cx), None);
     assert_eq!(description(&window, Command::CloseTab, cx), None);
-    assert_eq!(description(&window, Command::NewWorkspace, cx), None);
+    assert_eq!(description(&window, Command::NewScratchWorkspace, cx), None);
 }
 
 #[gpui::test]
@@ -847,7 +850,7 @@ fn leaving_the_section_stops_searching_by_shortcut(cx: &mut TestAppContext) {
 fn clicking_away_while_recording_cancels_without_a_change(cx: &mut TestAppContext) {
     let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
     let recorder = window.read_with(cx, |settings, _| {
-        settings.shortcuts.recorders[&Command::NewWorkspace].clone()
+        settings.shortcuts.recorders[&Command::NewScratchWorkspace].clone()
     });
     recorder.update_in(cx, |recorder, window, cx| {
         recorder.start_recording(window, cx);
@@ -856,10 +859,10 @@ fn clicking_away_while_recording_cancels_without_a_change(cx: &mut TestAppContex
 
     click("settings-keybindings-search-frame", cx);
 
-    assert_eq!(retained(&window, Command::NewWorkspace, cx), None);
+    assert_eq!(retained(&window, Command::NewScratchWorkspace, cx), None);
     // The keys that follow go where focus went, not to the recorder.
     cx.simulate_input("tab");
     cx.run_until_parked();
     assert_eq!(search_value(&window, cx), "tab");
-    assert_eq!(retained(&window, Command::NewWorkspace, cx), None);
+    assert_eq!(retained(&window, Command::NewScratchWorkspace, cx), None);
 }

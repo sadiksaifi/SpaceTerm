@@ -32,11 +32,10 @@ use super::{
     ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ChooseWorkspace, ClosePane,
     CloseTab, CloseTerminalFind, CopySelection, FindNext, FindPrevious, FocusNextPane,
     FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane, KillWorkspace,
-    MoveTabLeft, MoveTabRight, NewTab, NewWorkspace, NewWorktree, NextTab, NextWorktree,
-    OpenLocalDirectory, OpenTerminalFind, PreviousTab, PreviousWorktree, ScrollPageDown,
-    ScrollPageUp, ScrollToBottom, ScrollToTop, ShowRepositoryStatus, SplitDown, SplitRight,
-    TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom, ToggleSidebar,
-    ToggleSidebarFocus,
+    MoveTabLeft, MoveTabRight, NewScratchWorkspace, NewTab, NewWorkspace, NewWorktree, NextTab,
+    NextWorktree, OpenTerminalFind, PreviousTab, PreviousWorktree, ScrollPageDown, ScrollPageUp,
+    ScrollToBottom, ScrollToTop, ShowRepositoryStatus, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT,
+    TabManager, TabManagerEvent, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
 };
 use crate::appearance::Color;
 use crate::close_confirmation::{CloseConfirmation, CloseTarget};
@@ -1039,7 +1038,7 @@ impl WorkspaceManager {
         let placeholder = match &target {
             PinTarget::Workspace(_) => "Pin to Directory",
             PinTarget::NewLocalWorkspace { .. } => {
-                crate::keybindings::Command::OpenLocalDirectory.label()
+                crate::keybindings::Command::NewWorkspace.label()
             }
             PinTarget::NewCoreWorkspace { .. } => "Open Remote Directory",
         };
@@ -1473,8 +1472,14 @@ impl WorkspaceManager {
         None
     }
 
-    /// Opens Open Local Directory, which creates a Local Workspace named `name` unless blank.
-    fn open_local_directory(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens the Directory Picker on This Mac or This Computer for New Workspace, which creates a
+    /// Local Workspace pinned to the chosen directory, named `name` unless blank.
+    fn choose_local_workspace_directory(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.choose_directory(PinTarget::NewLocalWorkspace { name }, window, cx);
     }
 
@@ -2076,8 +2081,13 @@ impl WorkspaceManager {
         self.open_workspace_switcher(window, cx);
     }
 
-    fn on_new_workspace(&mut self, _: &NewWorkspace, window: &mut Window, cx: &mut Context<Self>) {
-        self.run_workspace_creation(WorkspaceCreation::Local, window, cx);
+    fn on_new_scratch_workspace(
+        &mut self,
+        _: &NewScratchWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_workspace_creation(WorkspaceCreation::Scratch, window, cx);
     }
 
     fn on_new_worktree(&mut self, _: &NewWorktree, window: &mut Window, cx: &mut Context<Self>) {
@@ -2099,13 +2109,8 @@ impl WorkspaceManager {
         self.step_worktree(false, window, cx);
     }
 
-    fn on_open_local_directory(
-        &mut self,
-        _: &OpenLocalDirectory,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.run_workspace_creation(WorkspaceCreation::OpenLocalDirectory, window, cx);
+    fn on_new_workspace(&mut self, _: &NewWorkspace, window: &mut Window, cx: &mut Context<Self>) {
+        self.run_workspace_creation(WorkspaceCreation::Local, window, cx);
     }
 
     /// Runs a creation Command. An open Workspace Switcher runs it with its query as the name.
@@ -2119,7 +2124,7 @@ impl WorkspaceManager {
             self.workspace_switcher.run_command(&creation, window, cx);
             return;
         }
-        if creation != WorkspaceCreation::Local {
+        if creation != WorkspaceCreation::Scratch {
             self.sidebar.update(cx, |sidebar, cx| {
                 sidebar.dismiss_editing(window, cx);
             });
@@ -2139,10 +2144,10 @@ impl WorkspaceManager {
         self.launch.finish_landing();
         match creation {
             // The account server owns local work, so a new local Workspace is the server's.
-            WorkspaceCreation::Local => {
+            WorkspaceCreation::Scratch => {
                 self.create_workspace(name, None, window, cx);
             }
-            WorkspaceCreation::OpenLocalDirectory => self.open_local_directory(name, window, cx),
+            WorkspaceCreation::Local => self.choose_local_workspace_directory(name, window, cx),
             WorkspaceCreation::Remote(route) => {
                 self.create_workspace_on(&super::MachineTarget::Direct(route), name, window, cx)
             }
@@ -5542,8 +5547,8 @@ impl WorkspaceManager {
             .when(actions.workspaces, |scope| {
                 scope
                     .on_action(cx.listener(Self::on_choose_workspace))
+                    .on_action(cx.listener(Self::on_new_scratch_workspace))
                     .on_action(cx.listener(Self::on_new_workspace))
-                    .on_action(cx.listener(Self::on_open_local_directory))
                     .on_action(cx.listener(Self::on_kill_workspace))
                     .on_action(cx.listener(Self::on_activate_workspace_1))
                     .on_action(cx.listener(Self::on_activate_workspace_2))

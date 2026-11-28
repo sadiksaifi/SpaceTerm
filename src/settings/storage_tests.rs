@@ -226,7 +226,7 @@ mod native {
                     .paths
                     .directories()
                     .config
-                    .join("reset/gen-1/settings.json")
+                    .join(current_reset("settings.json"))
             )
             .unwrap(),
             bytes
@@ -353,7 +353,7 @@ fn oversized_settings_are_recoverable_and_reset_preserves_all_bytes() {
     let backup = files
         .values
         .iter()
-        .find(|(path, _)| path.ends_with("reset/gen-1/settings.json"))
+        .find(|(path, _)| path.ends_with(current_reset("settings.json")))
         .unwrap();
     assert_eq!(backup.1.0, bytes);
     assert_eq!(settings.snapshot().status, None);
@@ -484,7 +484,7 @@ fn recovery_requires_reload_after_a_successor_replaces_its_publication() {
         files
             .values
             .iter()
-            .find(|(path, _)| path.ends_with("reset/gen-1/settings.json"))
+            .find(|(path, _)| path.ends_with(current_reset("settings.json")))
             .unwrap()
             .1
             .0,
@@ -493,6 +493,14 @@ fn recovery_requires_reload_after_a_successor_replaces_its_publication() {
 }
 
 /// Marks the desktop config root of the document `storage` wrote with `generation`.
+/// The desktop config root's current generation, which a reset of current data archives under.
+const CURRENT: u32 = spaceterm_core::migration::generations::DESKTOP_CONFIG.current;
+
+/// Where a reset of current desktop config archives `file`.
+fn current_reset(file: &str) -> String {
+    format!("reset/gen-{CURRENT}/{file}")
+}
+
 fn mark_generation(filesystem: &RecordingFilesystem, generation: u32) {
     let mut files = filesystem.files.lock().unwrap();
     let document = files
@@ -559,7 +567,7 @@ fn settings_older_than_any_migrated_generation_reset_only_through_recovery() {
     assert_eq!(path("reset/gen-0/settings.json"), Some(document));
     assert_eq!(
         path("generation.json"),
-        Some(br#"{"generation":1}"#.to_vec())
+        Some(format!(r#"{{"generation":{CURRENT}}}"#).into_bytes())
     );
     assert!(path("settings.json.bak").is_none());
     assert!(path("reset/pending.json").is_none());

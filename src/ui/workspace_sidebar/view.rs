@@ -1497,9 +1497,9 @@ impl WorkspaceSidebar {
             });
         })
         .on_activate(move |activation, window, cx| match *activation.action() {
-            NewWorkspaceItem::Create(WorkspaceCreation::Local) => {
+            NewWorkspaceItem::Create(WorkspaceCreation::Scratch) => {
                 let _ = menu_sidebar.update(cx, |_, cx| {
-                    cx.emit(SidebarEvent::Create(WorkspaceCreation::Local));
+                    cx.emit(SidebarEvent::Create(WorkspaceCreation::Scratch));
                 });
             }
             // Settings owns adding a server; the menu only opens that journey.

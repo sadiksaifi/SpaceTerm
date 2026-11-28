@@ -907,7 +907,7 @@ impl WorkspaceManager {
         }
         self.launch.create_when_presented = false;
         self.run_workspace_creation(
-            crate::ui::workspace_creation::WorkspaceCreation::Local,
+            crate::ui::workspace_creation::WorkspaceCreation::Scratch,
             window,
             cx,
         );

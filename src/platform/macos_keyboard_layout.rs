@@ -219,11 +219,12 @@ pub(crate) mod tests {
             .unwrap();
         for source in ["shift-cmd-3", "cmd-§"] {
             let preferences: KeybindingPreferences =
-                serde_json::from_value(serde_json::json!({"new_workspace": source})).unwrap();
+                serde_json::from_value(serde_json::json!({"new_scratch_workspace": source}))
+                    .unwrap();
             assert_eq!(
                 profile
                     .resolve(&preferences)
-                    .inactive_override(Command::NewWorkspace),
+                    .inactive_override(Command::NewScratchWorkspace),
                 Some(crate::keybindings::Reservation::System(
                     SystemReservation::Screenshot
                 ))
@@ -264,7 +265,8 @@ pub(crate) mod tests {
                 .refresh_layout(&crate::platform::keyboard_layout::testing::UnknownLayout)
                 .unwrap();
             let preferences: KeybindingPreferences =
-                serde_json::from_value(serde_json::json!({"new_workspace": source})).unwrap();
+                serde_json::from_value(serde_json::json!({"new_scratch_workspace": source}))
+                    .unwrap();
             let native = gpui::Keystroke {
                 modifiers,
                 key: key.into(),
@@ -278,7 +280,7 @@ pub(crate) mod tests {
                     .any(|binding| {
                         binding
                             .action()
-                            .partial_eq(Command::NewWorkspace.action().as_ref())
+                            .partial_eq(Command::NewScratchWorkspace.action().as_ref())
                             && native.should_match(&binding.keystrokes()[0])
                     }),
                 "{id}"

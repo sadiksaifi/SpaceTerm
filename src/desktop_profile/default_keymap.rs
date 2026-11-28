@@ -36,11 +36,11 @@ pub(crate) fn profile(
             Some(DefaultBinding::new("cmd-shift-k", &[])),
         ),
         (
-            Command::NewWorkspace,
+            Command::NewScratchWorkspace,
             Some(DefaultBinding::new("cmd-n", &[])),
         ),
         (
-            Command::OpenLocalDirectory,
+            Command::NewWorkspace,
             Some(DefaultBinding::new("cmd-o", &[])),
         ),
         (Command::NewWorktree, None),

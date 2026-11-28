@@ -70,8 +70,8 @@ macro_rules! commands {
 
 commands! {
     ChooseWorkspace => ("choose_workspace", "Choose Workspace", Workspace, Application, crate::ui::ChooseWorkspace),
+    NewScratchWorkspace => ("new_scratch_workspace", "New Scratch Workspace", Workspace, Application, crate::ui::NewScratchWorkspace),
     NewWorkspace => ("new_workspace", "New Workspace", Workspace, Application, crate::ui::NewWorkspace),
-    OpenLocalDirectory => ("open_local_directory", "Open Local Directory", Workspace, Application, crate::ui::OpenLocalDirectory),
     NewWorktree => ("new_worktree", "New Worktree", Workspace, Application, crate::ui::NewWorktree),
     NextWorktree => ("next_worktree", "Next Worktree", Workspace, Workspace, crate::ui::NextWorktree),
     PreviousWorktree => ("previous_worktree", "Previous Worktree", Workspace, Workspace, crate::ui::PreviousWorktree),

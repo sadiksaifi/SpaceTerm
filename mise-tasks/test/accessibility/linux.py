@@ -210,7 +210,7 @@ class Probe:
         control_id = {
             "New Workspace": "new_workspace",
             "Choose Workspace": "choose_workspace",
-            "New Local Workspace": "local_workspace",
+            "New Scratch Workspace": "scratch_workspace",
             "Rename Workspace": "rename_workspace",
             "Kill Workspace": "kill_workspace",
         }[name]
@@ -325,7 +325,7 @@ class Probe:
             "core_workspace_query_not_published",
         )
         self.core_workspace_before = rows
-        self.activate_control("New Local Workspace")
+        self.activate_control("New Scratch Workspace")
         self.core_workspace_row = self.wait(
             self.created_workspace_row, "core_workspace_created_row_missing"
         )

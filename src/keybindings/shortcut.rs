@@ -228,7 +228,7 @@ mod tests {
             assert_eq!(shortcut, Shortcut::from_keystroke(&native).unwrap());
             assert_eq!(shortcut.to_string(), format!("cmd-{symbol}"));
             let binding =
-                gpui::KeyBinding::new(&shortcut.to_string(), crate::ui::NewWorkspace, None);
+                gpui::KeyBinding::new(&shortcut.to_string(), crate::ui::NewScratchWorkspace, None);
             assert!(native.should_match(&binding.keystrokes()[0]));
             assert_eq!(
                 serde_json::from_str::<Shortcut>(
